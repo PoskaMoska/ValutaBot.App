@@ -63,8 +63,12 @@ public partial class TelegramBotService : BackgroundService
             return;
         }
 
-        _webAppUrl = Environment.GetEnvironmentVariable("WEBAPP_URL") 
-            ?? "https://chowder-dreamland-spotlight.ngrok-free.dev";
+        try {
+            var config = MiniAppController.Services?.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration)) as Microsoft.Extensions.Configuration.IConfiguration;
+            _webAppUrl = config?["WebAppUrl"] ?? Environment.GetEnvironmentVariable("WEBAPP_URL") ?? "https://chowder-dreamland-spotlight.ngrok-free.dev";
+        } catch {
+            _webAppUrl = Environment.GetEnvironmentVariable("WEBAPP_URL") ?? "https://chowder-dreamland-spotlight.ngrok-free.dev";
+        }
 
         Console.WriteLine($"[TG Bot] Service started. WebApp URL: {_webAppUrl}");
 
