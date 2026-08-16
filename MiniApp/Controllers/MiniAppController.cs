@@ -87,7 +87,7 @@ public static partial class MiniAppController
                 .WithHeaders("X-Telegram-Init-Data", "Content-Type", "Accept"));
         });
         builder.Services.AddHostedService<TelegramBotService>();
-        builder.Services.AddHostedService<ValutaBot.MiniApp.Services.LiveCandleAggregator>();
+
         builder.Services.AddHttpClient("Binance").AddStandardResilienceHandler(options =>
         {
             options.Retry.MaxRetryAttempts = botSettings.MaxHttpRetries;
@@ -142,9 +142,11 @@ public static partial class MiniAppController
         });
 
         bool isWeekend = DateTime.UtcNow.DayOfWeek == DayOfWeek.Saturday || DateTime.UtcNow.DayOfWeek == DayOfWeek.Sunday;
-        if (isWeekend)
+        if (!isWeekend)
         {
-            // Removed Binance WebSocket Stream
+            // Launch Real-Time WebSocket stream for major CME proxy forex streams (0ms latency)
+            string[] topStreamSymbols = { "EURUSDT", "GBPUSDT", "AUDUSDT" };
+            BinanceWebSocketStream.StartStream(topStreamSymbols, "1m");
         }
 
         // Init Telegram notifier from config or env (set in Railway dashboard)

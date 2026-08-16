@@ -29,12 +29,18 @@ public class MarketClosedException : Exception
 }
 
 /// <summary>
-/// Service for fetching historical candle data.
-/// Now exclusively reads from the Redis LiveCandleAggregator.
+/// Service for fetching historical candle data with fallback, and sub-minute interpolation.
+/// Fully stateless. Relies on WebSocket for fast path caching.
 /// </summary>
 public class MarketDataFetcher
 {
     public static MarketDataFetcher Instance { get; set; } = new MarketDataFetcher();
+    
+    // Rate limit protection cache for HTTP fallback
+    private static readonly ConcurrentDictionary<string, (DateTime Expiration, MiniAppController.OhlcCandle[] Data)> _klinesCache = new();
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _fetchLocks = new();
+
+    /* removed pipeline */ 
 
     public string IntervalMap(string tf) => tf.ToLower() switch
     {
@@ -73,55 +79,115 @@ public class MarketDataFetcher
         "d1" => "h4", _ => null
     };
 
+    public async Task<MiniAppController.OhlcCandle[]> FetchBinanceOhlcCandlesAsync(string symbol, string interval, int limit = 50)
+    {
+        // Try Websocket fast path first
+        if (BinanceWebSocketStream.TryGetLiveCandles(symbol, interval, out var wsOpens, out var wsHighs, out var wsLows, out var wsPrices, out var wsVolumes, out int count))
+        {
+            try
+            {
+                if (count >= limit)
+                {
+                    var resultFast = new MiniAppController.OhlcCandle[limit];
+                    int startIdx = count - limit;
+                    for (int i = 0; i < limit; i++)
+                    {
+                        resultFast[i] = new MiniAppController.OhlcCandle(wsOpens[startIdx + i], wsHighs[startIdx + i], wsLows[startIdx + i], wsPrices[startIdx + i], wsVolumes[startIdx + i], DateTime.UtcNow.AddSeconds(i - limit));
+                    }
+                    return resultFast;
+                }
+            }
+            finally
+            {
+                // FIX: always return rented arrays вЂ” even if count < limit (previously leaked)
+                System.Buffers.ArrayPool<double>.Shared.Return(wsOpens);
+                System.Buffers.ArrayPool<double>.Shared.Return(wsHighs);
+                System.Buffers.ArrayPool<double>.Shared.Return(wsLows);
+                System.Buffers.ArrayPool<double>.Shared.Return(wsPrices);
+                System.Buffers.ArrayPool<double>.Shared.Return(wsVolumes);
+            }
+        }
+
+        return await FetchBinanceKlinsAsync(symbol, interval, limit) ?? Array.Empty<MiniAppController.OhlcCandle>();
+    }
+
     public virtual async Task<MiniAppController.OhlcCandle[]> FetchOhlcWithFallbackAsync(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         string interval = IntervalMap(rawInterval);
         
-        string cleanAsset = AssetSanitizer.Sanitize(originalAsset ?? symbol ?? "EURUSDT");
-        string finalSymbol = symbol ?? (cleanAsset switch
+        // Forex weekday policy: if symbol is null, try TwelveData first
+        if (symbol == null && originalAsset != null)
         {
-            "EURUSD" or "EURUSDT" => "EURUSD_otc",
-            "GBPUSD" or "GBPUSDT" => "GBPUSD_otc",
-            "AUDUSD" or "AUDUSDT" => "AUDUSD_otc",
-            _ => cleanAsset.EndsWith("_otc") ? cleanAsset : cleanAsset + "_otc"
-        });
+            var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
+            if (tdResult != null)
+                return tdResult.Value.candles;
+        }
 
-        // Normalize to uppercase to match LiveCandleAggregator storage
-        finalSymbol = finalSymbol.ToUpper();
-        
-        var aggregator = Services.LiveCandleAggregator.Instance;
-        if (aggregator == null)
+        string cleanAsset = AssetSanitizer.Sanitize(originalAsset ?? symbol ?? "EURUSDT");
+        string binanceSymbol = symbol ?? (cleanAsset switch
         {
-            BotLogger.Warn($"[MarketDataFetcher] LiveCandleAggregator is not initialized.");
+            "EURUSD" or "EURUSDT" => "EURUSDT",
+            "GBPUSD" or "GBPUSDT" => "GBPUSDT",
+            "AUDUSD" or "AUDUSDT" => "AUDUSDT",
+            _ => cleanAsset.EndsWith("USDT") ? cleanAsset : cleanAsset + "USDT"
+        });
+        
+        try
+        {
+            return await FetchBinanceOhlcCandlesAsync(binanceSymbol, interval, limit);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[MarketDataFetcher] Fallback OHLC fetch failed for {binanceSymbol}: {ex.Message}");
             return Array.Empty<MiniAppController.OhlcCandle>();
         }
-
-        var candles = aggregator.GetCandles(finalSymbol, interval, limit);
-        
-        // Fallback: try without _OTC suffix if not found
-        if (candles.Length == 0 && finalSymbol.EndsWith("_OTC"))
-        {
-            string noOtc = finalSymbol[..^4]; // remove "_OTC"
-            candles = aggregator.GetCandles(noOtc, interval, limit);
-            if (candles.Length > 0)
-                BotLogger.Info($"[MarketDataFetcher] Fallback: found candles for {noOtc} instead of {finalSymbol}");
-        }
-
-        if (candles.Length == 0)
-        {
-            BotLogger.Warn($"[MarketDataFetcher] No candles available yet in Redis for {finalSymbol} ({interval}).");
-        }
-        else
-        {
-            BotLogger.Info($"[MarketDataFetcher] Served {candles.Length} candles from Redis aggregator for {finalSymbol} ({interval}).");
-        }
-
-        return candles;
     }
 
-    public virtual async Task<(double[] prices, double[] volumes)> FetchBinanceWithFallback(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
+    private static async Task<MiniAppController.OhlcCandle[]?> FetchBinanceKlinsAsync(string symbol, string interval, int limit)
     {
-        var ohlc = await FetchOhlcWithFallbackAsync(symbol, rawInterval, originalAsset, limit);
+        string cacheKey = $"{symbol}_{interval}_{limit}";
+        if (_klinesCache.TryGetValue(cacheKey, out var cached) && DateTime.UtcNow < cached.Expiration)
+        {
+            return cached.Data;
+        }
+
+        var semaphore = _fetchLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync();
+        try
+        {
+            // Double check lock
+            if (_klinesCache.TryGetValue(cacheKey, out cached) && DateTime.UtcNow < cached.Expiration)
+            {
+                return cached.Data;
+            }
+
+            string url = $"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}";
+            
+            var httpFactory = MiniAppController.HttpFactory
+                ?? throw new InvalidOperationException("[MarketDataFetcher] HttpFactory РЅРµ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅ. РЎРµСЂРІРµСЂ РµС‰С‘ Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ, РїРѕРІС‚РѕСЂРёС‚Рµ Р·Р°РїСЂРѕСЃ.");
+            var arr = await System.Net.Http.Json.HttpClientJsonExtensions.GetFromJsonAsync<double[][]>(httpFactory.CreateClient("Binance"), new Uri(url), ValutaBotJsonContext.Default.DoubleArrayArray);
+            
+            if (arr == null || arr.Length == 0) return Array.Empty<MiniAppController.OhlcCandle>();
+
+            var result = new MiniAppController.OhlcCandle[arr.Length];
+            for (int i = 0; i < arr.Length; i++)
+            {
+                var k = arr[i];
+                result[i] = new MiniAppController.OhlcCandle(k[1], k[2], k[3], k[4], k[5], DateTimeOffset.FromUnixTimeMilliseconds((long)k[0]).UtcDateTime);
+            }
+            
+            _klinesCache[cacheKey] = (DateTime.UtcNow.AddSeconds(2), result);
+            return result;
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    public async Task<(double[] prices, double[] volumes)> FetchBinanceCandles(string symbol, string interval, int limit = 50)
+    {
+        var ohlc = await FetchBinanceOhlcCandlesAsync(symbol, interval, limit);
         if (ohlc.Length == 0) return (Array.Empty<double>(), Array.Empty<double>());
 
         var prices = new double[ohlc.Length];
@@ -136,9 +202,110 @@ public class MarketDataFetcher
         return (prices, volumes);
     }
 
+    public virtual async Task<(double[] prices, double[] volumes)> FetchBinanceWithFallback(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
+    {
+        string interval = IntervalMap(rawInterval);
+        string cacheSym = originalAsset ?? symbol ?? "UNKNOWN";
+
+        // Forex-only policy: if the symbol is a crypto asset, skip Binance entirely
+        // and go directly to TwelveData. Crypto is not supported.
+        string cleanForCheck = AssetSanitizer.Sanitize(originalAsset ?? symbol ?? "");
+        bool isCrypto = !AssetSanitizer.IsForexAsset(cleanForCheck);
+        if (isCrypto)
+        {
+            BotLogger.Warn($"[MarketDataFetcher] Crypto symbol detected ({cleanForCheck}). Skipping to TwelveData (forex-only policy).");
+            if (originalAsset != null)
+            {
+                var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
+                if (tdResult != null)
+                    return (tdResult.Value.prices, tdResult.Value.volumes);
+            }
+            throw new ExchangeUnavailableException($"Crypto not supported: {cleanForCheck}", "Р вЂР С•РЎвЂљ РЎР‚Р В°Р В±Р С•РЎвЂљР В°Р ВµРЎвЂљ РЎвЂљР С•Р В»РЎРЉР С”Р С• РЎРѓ РЎвЂћР С•РЎР‚Р ВµР С”РЎРѓ-Р С—Р В°РЎР‚Р В°Р СР С‘.");
+        }
+
+        if (symbol != null)
+        {
+            if (BinanceWebSocketStream.TryGetLiveCandles(symbol, interval, out var wsOpens, out var wsHighs, out var wsLows, out var wsPrices, out var wsVolumes, out int count))
+            {
+                try
+                {
+                    if (count >= 15)
+                    {
+                        double[] exactPrices = new double[count];
+                        double[] exactVolumes = new double[count];
+                        Array.Copy(wsPrices, exactPrices, count);
+                        Array.Copy(wsVolumes, exactVolumes, count);
+                        
+                        BotLogger.Info($"[MarketDataFetcher] Served live WebSocket candles for {symbol} ({interval}) in 0ms.");
+
+                        return (exactPrices, exactVolumes);
+                    }
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<double>.Shared.Return(wsOpens);
+                System.Buffers.ArrayPool<double>.Shared.Return(wsHighs);
+                System.Buffers.ArrayPool<double>.Shared.Return(wsLows);
+                System.Buffers.ArrayPool<double>.Shared.Return(wsPrices);
+                    System.Buffers.ArrayPool<double>.Shared.Return(wsVolumes);
+                }
+            }
+        }
+
+        if (symbol == null)
+        {
+            if (originalAsset != null)
+            {
+                var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
+                if (tdResult != null)
+                    return (tdResult.Value.prices, tdResult.Value.volumes);
+            }
+
+            string cleanAsset = AssetSanitizer.Sanitize(originalAsset ?? "EURUSDT");
+            symbol = cleanAsset switch
+            {
+                "EURUSD" or "EURUSDT" => "EURUSDT",
+                "GBPUSD" or "GBPUSDT" => "GBPUSDT",
+                "AUDUSD" or "AUDUSDT" => "AUDUSDT",
+                _ => cleanAsset.EndsWith("USDT") ? cleanAsset : cleanAsset + "USDT"
+            };
+        }
+
+        try
+        {
+            var res = await FetchBinanceCandles(symbol, interval, limit);
+            return res;
+        }
+        catch
+        {
+            if (originalAsset != null)
+            {
+                var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
+                if (tdResult != null)
+                {
+                    return (tdResult.Value.prices, tdResult.Value.volumes);
+                }
+            }
+
+            throw new ExchangeUnavailableException($"Fallback blocked for {originalAsset ?? symbol}", "Р вЂР С‘РЎР‚Р В¶Р В° Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р Р…Р В°.");
+        }
+    }
+
+    
     public async Task<double?> FetchHistoricalPriceAsync(string symbol, long endTimeMs)
     {
-        // Not supported with pure Redis ticks, returning null so caller can ignore or fail gracefully
+        string url = $"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&endTime={endTimeMs}&limit=1";
+        var httpFactory = MiniAppController.HttpFactory
+            ?? throw new InvalidOperationException("[MarketDataFetcher] HttpFactory РЅРµ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅ.");
+        var arr = await System.Net.Http.Json.HttpClientJsonExtensions.GetFromJsonAsync(httpFactory.CreateClient("Binance"), new Uri(url), ValutaBotJsonContext.Default.DoubleArrayArray);
+        if (arr != null && arr.Length > 0 && arr[0].Length >= 5)
+        {
+            return arr[0][4];
+        }
         return null;
     }
 }
+
+
+
+

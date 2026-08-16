@@ -258,30 +258,87 @@ public static class SignalTracker
 
     private static async Task<double?> FetchExitPriceAsync(PredictionRecord record)
     {
-        string sym = record.Asset;
-        
-        var aggregator = Services.LiveCandleAggregator.Instance;
-        if (aggregator == null) return null;
+        string sym = record.BinanceSymbol;
 
-        // Fetch recent 1m candles
-        var candles = aggregator.GetCandles(sym, "1m", 10);
-        
-        if (candles.Length > 0)
+        // Fast path: Web Socket live prices (no allocations)
+        // B1-FIX: Always return rented arrays to ArrayPool even when count==0.
+        // Previously: `TryGet(...) && count > 0` вЂ” short-circuit skipped Return() when count==0 в†’ ArrayPool leak в†’ OOM.
+        if (BinanceWebSocketStream.TryGetLiveCandles(sym, "1m", out double[] wsOpens, out double[] wsHighs, out double[] wsLows, out double[] wsPrices, out double[] wsVolumes, out int count))
         {
-            var targetTime = record.VerifyAt;
-            // Candles are sorted oldest to newest.
-            // We want the closest candle whose timestamp (start time) + 1 minute is <= targetTime
-            for (int i = candles.Length - 1; i >= 0; i--)
+            try
             {
-                var c = candles[i];
-                if (c.Timestamp.AddMinutes(1) <= targetTime)
+                if (count > 0) return wsPrices[count - 1];
+            }
+            finally
+            {
+                if (wsPrices != null) 
                 {
-                    return c.Close;
+                    System.Buffers.ArrayPool<double>.Shared.Return(wsOpens);
+                    System.Buffers.ArrayPool<double>.Shared.Return(wsHighs);
+                    System.Buffers.ArrayPool<double>.Shared.Return(wsLows);
+                    System.Buffers.ArrayPool<double>.Shared.Return(wsPrices);
+                }
+                if (wsVolumes != null) 
+                {
+                    System.Buffers.ArrayPool<double>.Shared.Return(wsVolumes);
                 }
             }
-            // Fallback to the previous candle if exact match not found
-            if (candles.Length >= 2) return candles[^2].Close;
-            return candles[^1].Close;
+        }
+
+        // Fallback: Binance REST API (Historical Kline)
+        if (!record.IsForex)
+        {
+            try
+            {
+                long endTime = new DateTimeOffset(record.VerifyAt).ToUnixTimeMilliseconds();
+                double? binancePrice = await MarketDataFetcher.Instance.FetchHistoricalPriceAsync(sym, endTime);
+                if (binancePrice.HasValue) return binancePrice;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Tracker] Binance historical kline fetch failed for {sym}: {ex.Message}");
+            }
+        }
+
+        // 2. TwelveData REST API (Forex)
+        if (record.IsForex)
+        {
+            if (string.IsNullOrEmpty(TwelveDataService.GetApiKey())) return -1;
+            string symbol = TwelveDataService.ConvertToTwelveSymbol(record.Asset) ?? "";
+            if (string.IsNullOrEmpty(symbol)) return -1;
+
+            if (DateTime.UtcNow.DayOfWeek == DayOfWeek.Saturday || DateTime.UtcNow.DayOfWeek == DayOfWeek.Sunday)
+            {
+                Console.WriteLine($"[Tracker] Weekend detected. Skipping TwelveData fetch for {record.Asset} to avoid stale Friday prices.");
+                return null;
+            }
+
+            try
+            {
+                // РО (Pocket Option) Concept Fix: Do NOT use FetchCurrentPriceAsync (live price slippage).
+                // Fetch the last few candles and find the exact one that closed BEFORE VerifyAt.
+                var data = await TwelveDataService.FetchCandlesAsync(record.Asset, "1min", limit: 3, cacheTtlSeconds: 0);
+                if (data != null && data.Value.candles != null)
+                {
+                    var targetTime = record.VerifyAt;
+                    // Candles are sorted oldest to newest (newest at ^1)
+                    // We want the closest candle whose timestamp (start time) + 1 minute is <= targetTime
+                    for (int i = data.Value.candles.Length - 1; i >= 0; i--)
+                    {
+                        var c = data.Value.candles[i];
+                        if (c.Timestamp.AddMinutes(1) <= targetTime)
+                        {
+                            return c.Close;
+                        }
+                    }
+                    // Fallback to the previous candle if exact match not found
+                    if (data.Value.candles.Length >= 2) return data.Value.candles[^2].Close;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Tracker] TwelveData fetch failed for {record.Asset}: {ex.Message}");
+            }
         }
 
         return null;
