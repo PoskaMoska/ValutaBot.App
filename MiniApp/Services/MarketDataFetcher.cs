@@ -115,14 +115,20 @@ public class MarketDataFetcher
     {
         string interval = IntervalMap(rawInterval);
         
-        // Forex weekday policy: if symbol is null, try TwelveData first
-        if (symbol == null && originalAsset != null)
+        var dayOfWeek = DateTime.UtcNow.DayOfWeek;
+        bool isWeekend = dayOfWeek == DayOfWeek.Saturday || dayOfWeek == DayOfWeek.Sunday;
+
+        // WEEKDAY POLICY: Use TwelveData (real Forex) first
+        if (!isWeekend && originalAsset != null)
         {
             var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
             if (tdResult != null)
                 return tdResult.Value.candles;
+                
+            BotLogger.Warn($"[MarketDataFetcher] TwelveData unavailable on a weekday for {originalAsset}, falling back to Binance OTC.");
         }
 
+        // WEEKEND POLICY (or fallback): Use Binance OTC
         string cleanAsset = AssetSanitizer.Sanitize(originalAsset ?? symbol ?? "EURUSDT");
         string binanceSymbol = symbol ?? (cleanAsset switch
         {
@@ -223,6 +229,22 @@ public class MarketDataFetcher
             throw new ExchangeUnavailableException($"Crypto not supported: {cleanForCheck}", "Р вЂР С•РЎвЂљ РЎР‚Р В°Р В±Р С•РЎвЂљР В°Р ВµРЎвЂљ РЎвЂљР С•Р В»РЎРЉР С”Р С• РЎРѓ РЎвЂћР С•РЎР‚Р ВµР С”РЎРѓ-Р С—Р В°РЎР‚Р В°Р СР С‘.");
         }
 
+        var dayOfWeek = DateTime.UtcNow.DayOfWeek;
+        bool isWeekend = dayOfWeek == DayOfWeek.Saturday || dayOfWeek == DayOfWeek.Sunday;
+
+        // WEEKDAY POLICY: Use TwelveData (real Forex) first
+        if (!isWeekend && originalAsset != null)
+        {
+            var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
+            if (tdResult != null)
+            {
+                BotLogger.Info($"[MarketDataFetcher] Weekday policy: Served TwelveData for {originalAsset}");
+                return (tdResult.Value.prices, tdResult.Value.volumes);
+            }
+            BotLogger.Warn($"[MarketDataFetcher] TwelveData unavailable on a weekday for {originalAsset}, falling back to Binance OTC.");
+        }
+
+        // WEEKEND POLICY (or fallback): Use Binance WebSocket
         if (symbol != null)
         {
             if (BinanceWebSocketStream.TryGetLiveCandles(symbol, interval, out var wsOpens, out var wsHighs, out var wsLows, out var wsPrices, out var wsVolumes, out int count))

@@ -95,6 +95,7 @@ public static partial class MiniAppController
             options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(3);
             options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(5);
         });
+        builder.Services.AddHttpClient("TwelveData").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("MLPythonService").AddStandardResilienceHandler(options =>
         {

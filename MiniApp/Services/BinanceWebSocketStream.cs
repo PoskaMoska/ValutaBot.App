@@ -116,7 +116,7 @@ public static class BinanceWebSocketStream
         string key = $"{symbol.ToUpper()}_{interval.ToLower()}";
         if (_liveCandles.TryGetValue(key, out var buffer))
         {
-            if ((DateTime.UtcNow - buffer.UpdatedAt).TotalSeconds < 5)
+            if ((DateTime.UtcNow - buffer.UpdatedAt).TotalSeconds < 30)
             {
                 (opens, highs, lows, prices, volumes, count) = buffer.GetOrderedSnapshotRented();
                 return true;
@@ -387,8 +387,6 @@ else if (reader.ValueTextEquals("c"u8))
 
                         var buffer = _liveCandles.GetOrAdd(key, CreateBuffer);
                         buffer.Update(openPrice, highPrice, lowPrice, closePrice, volume, startTime);
-var cleanSymbol = ValutaBot.MiniApp.AssetSanitizer.Sanitize(symbol);
-
                     }
                 }
             }
