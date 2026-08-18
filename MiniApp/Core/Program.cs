@@ -22,6 +22,12 @@ internal static class Program
             return;
         }
 
+        if (args.Length >= 1 && args[0] == "--diag")
+        {
+            DiagRunner.RunAsync().GetAwaiter().GetResult();
+            return;
+        }
+
         try { Console.Title = "TradeBE Smart Terminal Core"; } catch { /* not a TTY (Docker/Linux) */ }
 
         var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5000;
