@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -76,9 +77,10 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
                 if (File.Exists(mainScript))
                 {
                     BotLogger.Info("[MLPython] Auto-starting Python LightGBM microservice...");
+                    bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
                     var psi = new System.Diagnostics.ProcessStartInfo
                     {
-                        FileName = "py",
+                        FileName = isWindows ? "py" : "python3",
                         Arguments = $"\"{mainScript}\"",
                         WorkingDirectory = mlDir,
                         UseShellExecute = false,
@@ -224,6 +226,65 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Forces global batch training on the provided historical candles via /train/sync.
+    /// </summary>
+    public static async Task<bool> ForceTrainGlobalAsync(
+        string asset,
+        string interval,
+        MiniAppController.OhlcCandle[] history,
+        bool isForex = false)
+    {
+        if (string.IsNullOrWhiteSpace(_baseUrl)) return false;
+
+        try
+        {
+            var binanceSymbol = MapSymbol(asset, isForex);
+            var candleList = history.Select(c => new
+            {
+                openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
+                open = c.Open,
+                high = c.High,
+                low = c.Low,
+                close = c.Close,
+                volume = c.Volume
+            }).ToArray();
+
+            var payload = new
+            {
+                symbol = binanceSymbol,
+                interval = interval,
+                candles = candleList,
+                is_forex = isForex
+            };
+
+            var json = JsonSerializer.Serialize(payload);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            // Increase timeout for massive global training
+            var client = MiniAppController.HttpFactory!.CreateClient("MLPythonService");
+            client.Timeout = TimeSpan.FromMinutes(10);
+            
+            var response = await client.PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                BotLogger.Info($"[MLPython] Global Batch Retraining completed for {asset}/{interval} on {history.Length} candles.");
+                return true;
+            }
+            else
+            {
+                BotLogger.Warn($"[MLPython] Global Batch Retraining failed: {(int)response.StatusCode}");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[MLPython] Global Batch Retraining error: {ex.Message}");
+            return false;
+        }
+    }
 
     /// <summary>
     /// Map ValutaBot internal symbol to Binance-style uppercase symbol.

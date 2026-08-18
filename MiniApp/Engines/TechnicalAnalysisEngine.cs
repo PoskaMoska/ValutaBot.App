@@ -57,45 +57,57 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         double score = 0;
         double confidence = 60.0;
 
+        // ── Dynamic Thresholds (Adaptive Bands) ──
+        double rsiOverbought = 70.0;
+        double rsiOversold = 30.0;
+        
+        if (adxVal > 30.0) {
+            // In strong trends, we need EXTREME exhaustion to fade, or we just follow trend
+            rsiOverbought = 80.0; 
+            rsiOversold = 20.0;
+        } else if (adxVal < 20.0) {
+            // In quiet ranges, smaller deviations are valid reversion points
+            rsiOverbought = 65.0; 
+            rsiOversold = 35.0;
+        }
+
         // Adaptive Regime-Switching Weights (Level 3 Fix)
         double hmaWeight = 0.15;
 
         if (adxVal < 20.0)
         {
-            // Ranging Market: Boost Mean-Reversion (INVERTED RSI)
+            // Ranging Market: Extreme Mean-Reversion ONLY (Dynamic Thresholds)
             hmaWeight = 0.0;
-            // Стандартный RSI > 50 = отрицательный скор (продажа от потолка диапазона)
-            score -= ((rsi - 50.0) / 40.0) * 2.0;
+            if (rsi > rsiOverbought) score -= 0.8;
+            else if (rsi < rsiOversold) score += 0.8;
         }
         else if (adxVal > 25.0)
         {
-            // Trending Market: Boost Trend-Following
-            hmaWeight = 0.30;
-            score += ((rsi - 50.0) / 40.0) * 0.5;
+            // Trending Market: Boost Trend-Following (PDI/MDI alignment)
+            hmaWeight = 0.40;
+            if (pdiVal > mdiVal) score += 0.6; // Up trend
+            if (mdiVal > pdiVal) score -= 0.6; // Down trend
         }
         else 
         {
-            // Neutral zone
-            score += ((rsi - 50.0) / 40.0) * 1.0;
+            // Neutral zone (Transition)
+            if (rsi > 75.0) score -= 0.4;
+            else if (rsi < 25.0) score += 0.4;
         }
 
-        // ConnorsRSI как подтверждающий сигнал (вес 0.2 — не доминирует, только подтверждает).
-        // Нормализован в [-0.15, +0.15] чтобы не перебивать основной RSI сигнал.
+        // ConnorsRSI как подтверждающий сигнал.
         double connorsSignal = (connorsRsi - 50.0) / 50.0;
         if (adxVal > 25.0)
-            score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15); // тренд: подтверждение направления
+            score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15); 
         else if (adxVal < 20.0)
-            score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10); // флэт: лёгкий mean-reversion
+            score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10); 
 
         if (lastPrice > hma) score += hmaWeight;
         else if (lastPrice < hma) score -= hmaWeight;
 
         if (adxVal > 25.0)
         {
-            // ADX bonus: up to +20 confidence points
             confidence += Math.Min((adxVal - 25.0) * 0.8, 20.0);
-            if (pdiVal > mdiVal && pdiVal > 0) score += 0.25;
-            else if (mdiVal > pdiVal && mdiVal > 0) score -= 0.25;
         }
 
         // Исправление: volStrength считается по rolling CVD (5 свечей) вместо разницы одного тика.

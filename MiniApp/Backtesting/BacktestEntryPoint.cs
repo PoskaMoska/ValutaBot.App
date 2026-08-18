@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using ValutaBot.App.MiniApp.Backtesting;
 
@@ -22,6 +22,14 @@ namespace ValutaBot.App.MiniApp.Backtesting
             Console.WriteLine("║   Self-Learning Validation — EUR/USD OTC          ║");
             Console.WriteLine("╚═══════════════════════════════════════════════════╝");
             Console.WriteLine();
+
+            // Init HTTP and ML
+            var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+            services.AddHttpClient();
+            var sp = services.BuildServiceProvider();
+            ValutaBot.MiniApp.MiniAppController.HttpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+            ValutaBot.MiniApp.MLPythonService.Init("http://127.0.0.1:8765");
+            System.Threading.Thread.Sleep(3000); // give it time to start
 
             // ── Парсинг аргументов ─────────────────────────────────────────
             string timeframe   = "m1";

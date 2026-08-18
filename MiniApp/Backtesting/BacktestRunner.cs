@@ -45,6 +45,10 @@ namespace ValutaBot.App.MiniApp.Backtesting
             var metricsOn  = new BacktestMetrics();
             var metricsOff = new BacktestMetrics();
 
+            // ── Глобальное переобучение ML перед тестом ──────────────────────
+            Console.WriteLine($"[BacktestRunner] Запуск глобального переобучения на {total} свечах...");
+            await MLPythonService.ForceTrainGlobalAsync(Asset, timeframe, candles, isForex: true);
+
             // ── Walk-forward цикл ─────────────────────────────────────────────
             int processed = 0;
 
@@ -80,35 +84,57 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 var stateResult = ContinuousStateEngine.EvaluateContinuousState(
                     closePrices.AsSpan(), Asset, timeframe);
 
-                // ── ML (LightGBM) — пробуем, фолбэк NEUTRAL ─────────────────
+                // ── ML (LightGBM) ─────────────────
                 var mlDir  = "NEUTRAL";
                 var mlConf = 0.5;
-                // ML вызов здесь намеренно пропущен в бектест-режиме:
-                // LightGBM требует живого Python-процесса и 50ms/вызов × 100k = неприемлемо.
-                // Для M1 бектеста ML=NEUTRAL — честная baseline без ML-шума.
-
-                // ── Определяем направление сигнала ──────────────────────────
-                // Используем TA-score как первичный сигнал (>0 = BUY, <0 = PUT)
-                string direction = "NEUTRAL";
-                double confidence = 0;
-
-                if (Math.Abs(taScore) > 0.3 && taConf > MinConfidence)
+                var mlPred = await MLPythonService.PredictAsync(Asset, timeframe, ohlcSpan.ToArray(), isForex: true);
+                if (mlPred != null)
                 {
-                    direction  = taScore > 0 ? "BUY" : "PUT";
-                    confidence = taConf;
-                }
-                else if (ofResult.ScoreContribution > 0.4)
-                {
-                    direction  = ofResult.OrderFlowState.Contains("BULLISH") ? "BUY" : "PUT";
-                    confidence = 0.58;
+                    mlDir = mlPred.Direction;
+                    mlConf = mlPred.Confidence;
                 }
 
-                if (direction == "NEUTRAL") continue; // нет сигнала
-
-                // ── Детектируем режим рынка ──────────────────────────────────
+                // ── Детектируем режим рынка и Веса (Adaptive Ensemble) ──────────────
                 double volRatio = taEngine.CalculateVolatilityRatio(closePrices.AsSpan());
                 var regime = calibOn.DetectMarketRegime(20, volRatio, rsiVal, closePrices.AsSpan());
                 string regimeName = regime.ToString();
+
+                double wTA   = calibOn.GetCalibratedRegimeWeight("TechAnalysis", Asset, timeframe, regime);
+                double wOF   = calibOn.GetCalibratedRegimeWeight("OrderFlow",    Asset, timeframe, regime);
+                double wLGBM = calibOn.GetCalibratedRegimeWeight("LIGHTGBM",     Asset, timeframe, regime);
+                double wSMC  = calibOn.GetCalibratedRegimeWeight("SMC",          Asset, timeframe, regime);
+                double wSkender = calibOn.GetCalibratedRegimeWeight("SKENDER_MATH", Asset, timeframe, regime);
+
+                // ── Определяем направление сигнала через Ансамбль (Ensemble) ──
+                double ensembleScore = 0;
+                
+                // 1. Math TA (score is typically -1.0 to 1.0)
+                ensembleScore += (taScore * wTA);
+                
+                // 2. OrderFlow
+                if (ofResult.ScoreContribution > 0.4) {
+                    ensembleScore += ofResult.OrderFlowState.Contains("BULLISH") ? (0.5 * wOF) : (-0.5 * wOF);
+                }
+
+                // 3. ML LightGBM
+                if (mlDir == "BUY") ensembleScore += (0.8 * wLGBM);
+                else if (mlDir == "PUT") ensembleScore -= (0.8 * wLGBM);
+
+                string direction = "NEUTRAL";
+                double confidence = 0;
+
+                // Dynamically adaptive threshold
+                double triggerThreshold = regime == AutoCalibrationEngine.MarketRegime.HighVolatilityChaos ? 0.7 : 0.4;
+
+                if (ensembleScore > triggerThreshold) {
+                    direction = "BUY";
+                    confidence = 65.0 + Math.Min(ensembleScore * 10, 25.0);
+                } else if (ensembleScore < -triggerThreshold) {
+                    direction = "PUT";
+                    confidence = 65.0 + Math.Min(Math.Abs(ensembleScore) * 10, 25.0);
+                }
+
+                if (direction == "NEUTRAL") continue; // нет сигнала
 
                 // Walk-Forward guard (CalibON)
                 var wfResultOn = wfOn.ValidateWalkForward(Asset, timeframe);
@@ -117,14 +143,6 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 // Walk-Forward guard (CalibOFF)
                 var wfResultOff = wfOff.ValidateWalkForward(Asset, timeframe);
                 bool cooloffOff = wfResultOff.IsCooloffActive;
-
-                // ── Читаем откалиброванные веса (CalibON) ────────────────────
-                double wTA      = calibOn.GetCalibratedRegimeWeight("TechAnalysis", Asset, timeframe, regime);
-                double wSMC     = calibOn.GetCalibratedRegimeWeight("SMC",          Asset, timeframe, regime);
-                double wOF      = calibOn.GetCalibratedRegimeWeight("OrderFlow",    Asset, timeframe, regime);
-                double wLGBM    = calibOn.GetCalibratedRegimeWeight("LIGHTGBM",     Asset, timeframe, regime);
-                double wSkender = calibOn.GetCalibratedRegimeWeight("SKENDER_MATH", Asset, timeframe, regime);
-
                 // ── Верификация исхода через горизонт ─────────────────────────
                 double exitPrice  = candles[i + horizon].Close;
                 bool   isWin      = direction == "BUY"
@@ -141,6 +159,9 @@ namespace ValutaBot.App.MiniApp.Backtesting
                         ofResult.OrderFlowState.Contains("BULLISH") == (exitPrice > currentPrice));
                     calibOn.RecordSourceOutcome("SMC",          Asset, timeframe,
                         smcState.BosDirection == direction);
+                        
+                    // ONLINE REINFORCEMENT LEARNING FOR ML (Скармливаем исход нейросети)
+                    await MLPythonService.RecordOnlineTradeOutcomeAsync(Asset, timeframe, currentPrice, exitPrice, direction, isWin, true);
 
                     wfOn.RecordTradeOutcome(Asset, timeframe, isWin);
 

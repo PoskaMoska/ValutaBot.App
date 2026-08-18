@@ -1,0 +1,8 @@
+bin/
+obj/
+Logs/
+scratch/
+.git/
+node_modules/
+ml_service/__pycache__/
+ml_service/data/
