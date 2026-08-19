@@ -175,7 +175,7 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
     feats['channel_pos'] = (c - low20) / range20
 
     # ── Time / Session (sinusoidal encoding so hour=23 is close to hour=0) ──
-    if 'openTime' in df.columns:
+    if 'opentime' in df.columns:
         def get_hour(ts):
             if pd.isna(ts) or ts == 0: return 0.0
             # convert from milliseconds if necessary
@@ -183,7 +183,7 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             return dt.hour + dt.minute / 60.0
         
-        hours = df['openTime'].apply(get_hour)
+        hours = df['opentime'].apply(get_hour)
         feats['hour_sin'] = np.sin(2 * np.pi * hours / 24.0)
         feats['hour_cos'] = np.cos(2 * np.pi * hours / 24.0)
     else:
