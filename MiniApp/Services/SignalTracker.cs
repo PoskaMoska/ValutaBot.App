@@ -61,6 +61,19 @@ public static class SignalTracker
                 return lastSignalAt;
             });
 
+        // BUG-2 FIX: Evict expired entries to prevent unbounded memory growth.
+        // Without this, _cooldowns accumulates keys forever (1 per asset/timeframe pair seen).
+        // Over weeks on Railway this causes slow OOM and silent container restarts.
+        if (_cooldowns.Count > 30)
+        {
+            var expired = _cooldowns
+                .Where(kv => (now - kv.Value).TotalSeconds > 120)
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var key in expired)
+                _cooldowns.TryRemove(key, out _);
+        }
+
         if (isOnCooldown)
         {
             BotLogger.Warn($"[Tracker] Cooldown active for {cooldownKey}. Skipping duplicate signal recording.");
@@ -209,7 +222,7 @@ public static class SignalTracker
     public static double CalculateSignalWeight(System.Collections.Generic.IEnumerable<(string signalName, int verified, int correct)> votes, string signalName, double baseWeight = 1.0)
     {
         var v = System.Linq.Enumerable.FirstOrDefault(votes, x => x.signalName == signalName);
-        if (v.verified < 5) return baseWeight;
+        if (v.verified <= 0) return baseWeight; // BUG-3 FIX: verified=0 → division by zero
         double agreeRate = (double)v.correct / v.verified;
         double adjustment = agreeRate / 0.5;
         return System.Math.Clamp(baseWeight * adjustment, 0.2, 2.0);

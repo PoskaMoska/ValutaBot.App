@@ -71,7 +71,9 @@ public class MonteCarloEngine : IMonteCarloEngine
         for (int i = 0; i < iterations; i++)
         {
             // Box-Muller transform for standard normal Gaussian random numbers
-            double u1 = 1.0 - rand.NextDouble();
+            // BUG-1 FIX: rand.NextDouble() can return exactly 1.0 → 1.0-1.0 = 0.0 → Math.Log(0) = -Infinity → NaN
+            // Clamp to 1e-10 minimum to guarantee Log input is always positive.
+            double u1 = Math.Max(1e-10, 1.0 - rand.NextDouble());
             double u2 = 1.0 - rand.NextDouble();
             double randNormal = Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Sin(2.0 * Math.PI * u2);
 
@@ -79,7 +81,7 @@ public class MonteCarloEngine : IMonteCarloEngine
             double jumpReturn = 0;
             if (rand.NextDouble() < _expectedJumps) 
             {
-                double j1 = 1.0 - rand.NextDouble();
+                double j1 = Math.Max(1e-10, 1.0 - rand.NextDouble()); // same NaN guard
                 double j2 = 1.0 - rand.NextDouble();
                 double jumpNormal = Math.Sqrt(-2.0 * Math.Log(j1)) * Math.Sin(2.0 * Math.PI * j2);
                 
