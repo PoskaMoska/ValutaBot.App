@@ -120,6 +120,27 @@ def _interpolate_subminute(m1_candles: List[Dict], interval: str) -> List[Dict]:
     return interpolated
 
 def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
+    # Try to fetch from PostgreSQL SubminuteCandles
+    try:
+        db_url = os.getenv("DATABASE_URL")
+        if db_url:
+            import psycopg2
+            conn = psycopg2.connect(db_url)
+            query = '''
+                SELECT open_time as "openTime", open_price as "open", high_price as "high", low_price as "low", close_price as "close", volume as "volume"
+                FROM subminute_candles 
+                WHERE asset = %s AND interval = %s 
+                ORDER BY open_time DESC 
+                LIMIT %s
+            '''
+            df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
+            conn.close()
+            if not df.empty:
+                return df.iloc[::-1].to_dict(orient='records')
+    except Exception as e:
+        print(f"  [WARN] PostgreSQL subminute fetch failed: {e}")
+
+    # Fallback to SQLite
     db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
     if not os.path.exists(db_path):
         return []

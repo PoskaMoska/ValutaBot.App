@@ -114,6 +114,20 @@ namespace ValutaBot.App.MiniApp.Data
                     created_at TEXT NOT NULL
                 );
 
+                
+                CREATE TABLE IF NOT EXISTS subminute_candles (
+                    id SERIAL PRIMARY KEY,
+                    asset TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    open_time TEXT NOT NULL,
+                    open_price DOUBLE PRECISION NOT NULL,
+                    high_price DOUBLE PRECISION NOT NULL,
+                    low_price DOUBLE PRECISION NOT NULL,
+                    close_price DOUBLE PRECISION NOT NULL,
+                    volume DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    UNIQUE(asset, interval, open_time)
+                );
+
                 CREATE TABLE IF NOT EXISTS user_settings (
                     chat_id BIGINT PRIMARY KEY,
                     enable_ml BOOLEAN DEFAULT false,
@@ -129,6 +143,7 @@ namespace ValutaBot.App.MiniApp.Data
 
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();
+            RealtimeTickCollector.Initialize();
         }
     }
 }

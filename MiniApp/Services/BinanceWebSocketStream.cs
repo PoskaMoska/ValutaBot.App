@@ -383,6 +383,8 @@ else if (reader.ValueTextEquals("c"u8))
                 {
                     if (!string.IsNullOrEmpty(symbol) && closePrice > 0)
                     {
+                        RealtimeTickCollector.OnPriceUpdate(symbol, closePrice);
+
                         string key = $"{ValutaBot.MiniApp.AssetSanitizer.Sanitize(symbol)}_{interval.ToLower()}";
 
                         var buffer = _liveCandles.GetOrAdd(key, CreateBuffer);
