@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -14,11 +14,17 @@ public static class SignalTracker
 {
     // Cooldown map to prevent duplicate signals spam (fine to stay in memory)
     private static readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
+    private static readonly ConcurrentDictionary<string, double> _livePrices = new();
+
+    public static void UpdateLivePrice(string asset, double price)
+    {
+        _livePrices[asset] = price;
+    }
 
     // B2-FIX: Semaphore prevents concurrent VerifyPendingAsync runs
     private static readonly SemaphoreSlim _verifySemaphore = new(1, 1);
 
-    // L1-FIX: 30-СЃРµРєСѓРЅРґРЅС‹Р№ РєСЌС€ signal_votes вЂ” СѓР±РёСЂР°РµС‚ 3 SELECT РЅР° РєР°Р¶РґС‹Р№ С‚РёРє
+    // L1-FIX: 30-РЎРѓР ВµР С”РЎС“Р Р…Р Т‘Р Р…РЎвЂ№Р в„– Р С”РЎРЊРЎв‚¬ signal_votes РІР‚вЂќ РЎС“Р В±Р С‘РЎР‚Р В°Р ВµРЎвЂљ 3 SELECT Р Р…Р В° Р С”Р В°Р В¶Р Т‘РЎвЂ№Р в„– РЎвЂљР С‘Р С”
     private static List<(string signalName, int verified, int correct)>? _signalVotesCache;
     private static DateTime _signalVotesCacheExpiry = DateTime.MinValue;
     private static readonly SemaphoreSlim _signalVotesCacheLock = new(1, 1);
@@ -31,7 +37,7 @@ public static class SignalTracker
         _verifyTimer = new Timer(
             _ => Task.Run(async () =>
             {
-                // B2-FIX: WaitAsync(0) вЂ” non-blocking try-acquire. If already running, skip this tick.
+                // B2-FIX: WaitAsync(0) РІР‚вЂќ non-blocking try-acquire. If already running, skip this tick.
                 if (!await _verifySemaphore.WaitAsync(0)) return;
                 try { await VerifyPendingAsync(); }
                 catch (Exception ex) { Console.WriteLine($"[Tracker] Verify error: {ex.Message}"); }
@@ -43,10 +49,10 @@ public static class SignalTracker
         );
     }
 
-    // в”Ђв”Ђ Public Write API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // РІвЂќР‚РІвЂќР‚ Public Write API РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
     /// <summary>
-    /// Record a new prediction. Will be verified automatically after expiryCandles Г— timeframeSecs seconds.
+    /// Record a new prediction. Will be verified automatically after expiryCandles Р“вЂ” timeframeSecs seconds.
     /// </summary>
     public static async Task RecordPredictionAsync(
         string direction,
@@ -99,12 +105,69 @@ public static class SignalTracker
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(verifyDelaySecs));
+                double? exitPrice = null;
+                
+                if (_livePrices.TryGetValue(asset, out double memPrice))
+                {
+                    exitPrice = memPrice;
+                }
+                else if (!isForex)
+                {
+                    if (BinanceWebSocketStream.TryGetLiveCandles(sym, "1m", out _, out _, out _, out double[] wsPrices, out _, out int count) && count > 0)
+                    {
+                        exitPrice = wsPrices[count - 1];
+                    }
+                }
+                
+                if (exitPrice.HasValue && exitPrice.Value > 0)
+                {
+                    double priceDiff = (exitPrice.Value - price) / price;
+                    if (Math.Abs(priceDiff) < 1e-8)
+                    {
+                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
+                    }
+                    else
+                    {
+                        bool isCorrect = (direction == "BUY" && exitPrice.Value > price) || (direction == "PUT" && exitPrice.Value < price);
+                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.ResolvePendingTradeAsync(record.Id, exitPrice.Value, isCorrect);
+                        
+                        foreach (var kvp in record.SourceDirections)
+                        {
+                            if (kvp.Value == "NEUTRAL") continue;
+                            bool isSourceCorrect = (kvp.Value == "BUY" && exitPrice.Value > price) || (kvp.Value == "PUT" && exitPrice.Value < price);
+                            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kvp.Key, isSourceCorrect);
+                        }
+                        
+                        if (TradeOutcomeTracker.WfEngine != null) {
+                            TradeOutcomeTracker.WfEngine.ProcessOutcome(record.Asset, record.Timeframe, isCorrect);
+                        }
+                        if (TradeOutcomeTracker.CalibrationEngine != null) {
+                            TradeOutcomeTracker.CalibrationEngine.RecordOutcome(record.Asset, record.Timeframe, isCorrect);
+                        }
+                        InvalidateSignalVotesCache();
+                    }
+                }
+                else 
+                {
+                    await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
+                }
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[InMemoryVerify] Failed: {ex.Message}");
+            }
+        });
 
         Console.WriteLine($"[Tracker] Recorded {direction} {asset}/{timeframe} @ {price:F5} " +
-                          $"вЂ” verify in {verifyDelaySecs}s");
+                          $"РІР‚вЂќ verify in {verifyDelaySecs}s");
     }
 
-    // в”Ђв”Ђ Public Read API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // РІвЂќР‚РІвЂќР‚ Public Read API РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
     public static async Task<AccuracyStats> GetOverallStatsAsync()
     {
@@ -152,13 +215,13 @@ public static class SignalTracker
 
     public static async Task<double> GetSignalWeightAsync(string signalName, double baseWeight = 1.0)
     {
-        // L1-FIX: РСЃРїРѕР»СЊР·СѓРµРј РєСЌС€ 30 СЃРµРє вЂ” СѓР±РёСЂР°РµРј SELECT РЅР° РєР°Р¶РґС‹Р№ С‚РёРє
+        // L1-FIX: Р ВРЎРѓР С—Р С•Р В»РЎРЉР В·РЎС“Р ВµР С Р С”РЎРЊРЎв‚¬ 30 РЎРѓР ВµР С” РІР‚вЂќ РЎС“Р В±Р С‘РЎР‚Р В°Р ВµР С SELECT Р Р…Р В° Р С”Р В°Р В¶Р Т‘РЎвЂ№Р в„– РЎвЂљР С‘Р С”
         if (_signalVotesCache == null || DateTime.UtcNow > _signalVotesCacheExpiry)
         {
             await _signalVotesCacheLock.WaitAsync();
             try
             {
-                // Double-check РїРѕСЃР»Рµ РїРѕР»СѓС‡РµРЅРёСЏ Р±Р»РѕРєРёСЂРѕРІРєРё
+                // Double-check Р С—Р С•РЎРѓР В»Р Вµ Р С—Р С•Р В»РЎС“РЎвЂЎР ВµР Р…Р С‘РЎРЏ Р В±Р В»Р С•Р С”Р С‘РЎР‚Р С•Р Р†Р С”Р С‘
                 if (_signalVotesCache == null || DateTime.UtcNow > _signalVotesCacheExpiry)
                 {
                     _signalVotesCache = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetAllSignalVotesAsync();
@@ -173,7 +236,7 @@ public static class SignalTracker
         return CalculateSignalWeight(_signalVotesCache, signalName, baseWeight);
     }
 
-    // в”Ђв”Ђ Background Verification в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // РІвЂќР‚РІвЂќР‚ Background Verification РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
     public static async Task VerifyPendingAsync()
     {
@@ -198,7 +261,7 @@ public static class SignalTracker
             {
                 // Unverifiable (e.g. missing API key, or invalid OTC pair). Delete it.
                 await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
-                Console.WriteLine($"[Tracker] ~ {record.Asset}/{record.Timeframe} — unverifiable, discarded");
+                Console.WriteLine($"[Tracker] ~ {record.Asset}/{record.Timeframe} вЂ” unverifiable, discarded");
                 continue;
             }
             if (exitPrice == null || exitPrice <= 0)
@@ -206,13 +269,13 @@ public static class SignalTracker
 
             double priceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
 
-            // РО (Pocket Option) Concept Fix: Binary Options pay out even for a 1-pip difference. 
+            // Р Рћ (Pocket Option) Concept Fix: Binary Options pay out even for a 1-pip difference. 
             // We must not treat small movements as 'flat market'. Only exact Ties (epsilon 1e-8) are Refunds.
             double minMove = 1e-8;
             if (Math.Abs(priceDiff) < minMove)
             {
                 await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
-                Console.WriteLine($"[Tracker] ~ {record.Asset}/{record.Timeframe} вЂ” flat market, discarded");
+                Console.WriteLine($"[Tracker] ~ {record.Asset}/{record.Timeframe} РІР‚вЂќ flat market, discarded");
                 continue;
             }
 
@@ -248,7 +311,7 @@ public static class SignalTracker
 
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
 
-            string icon = correct ? "вњ…" : "вќЊ";
+            string icon = correct ? "РІСљвЂ¦" : "РІСњРЉ";
             Console.WriteLine(
                 $"[Tracker] {icon} {record.Asset}/{record.Timeframe} {record.Direction} " +
                 $"entry={record.EntryPrice:F5} exit={exitPrice:F5} " +
@@ -262,7 +325,7 @@ public static class SignalTracker
 
         // Fast path: Web Socket live prices (no allocations)
         // B1-FIX: Always return rented arrays to ArrayPool even when count==0.
-        // Previously: `TryGet(...) && count > 0` вЂ” short-circuit skipped Return() when count==0 в†’ ArrayPool leak в†’ OOM.
+        // Previously: `TryGet(...) && count > 0` РІР‚вЂќ short-circuit skipped Return() when count==0 РІвЂ вЂ™ ArrayPool leak РІвЂ вЂ™ OOM.
         if (BinanceWebSocketStream.TryGetLiveCandles(sym, "1m", out double[] wsOpens, out double[] wsHighs, out double[] wsLows, out double[] wsPrices, out double[] wsVolumes, out int count))
         {
             try
@@ -315,7 +378,7 @@ public static class SignalTracker
 
             try
             {
-                // РО (Pocket Option) Concept Fix: Do NOT use FetchCurrentPriceAsync (live price slippage).
+                // Р Рћ (Pocket Option) Concept Fix: Do NOT use FetchCurrentPriceAsync (live price slippage).
                 // Fetch the last few candles and find the exact one that closed BEFORE VerifyAt.
                 var data = await TwelveDataService.FetchCandlesAsync(record.Asset, "1min", limit: 3, cacheTtlSeconds: 0);
                 if (data != null && data.Value.candles != null)
@@ -344,7 +407,7 @@ public static class SignalTracker
         return null;
     }
 
-    // в”Ђв”Ђ Helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // РІвЂќР‚РІвЂќР‚ Helpers РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
     private static string MapToBinanceSymbol(string asset) =>
         asset.ToUpper()
@@ -364,7 +427,7 @@ public static class SignalTracker
             var s => s
         };
 
-    // в”Ђв”Ђ Data Types в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // РІвЂќР‚РІвЂќР‚ Data Types РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
     public class PredictionRecord
     {
@@ -410,5 +473,7 @@ public static class SignalTracker
             : 1.0;
     }
 }
+
+
 
 

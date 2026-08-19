@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -54,7 +54,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private double? _lgbmAccuracy = null;
     private MLPythonService.MLPythonPrediction? _prediction;
     private ContinuousStateResult? _continuousState;
-    // llmReport больше не хранится как поле — генерируется inline в BuildFinalConsensusAsync.
+    // llmReport Р±РѕР»СЊС€Рµ РЅРµ С…СЂР°РЅРёС‚СЃСЏ РєР°Рє РїРѕР»Рµ вЂ” РіРµРЅРµСЂРёСЂСѓРµС‚СЃСЏ inline РІ BuildFinalConsensusAsync.
     
     private double _mainAdx, _mainPdi, _mainMdi, _mainAtr;
     private (double score, double confidence, double rsiVal, double emaVal, double volStrengthVal, double atrVal) _mainResult;
@@ -120,23 +120,23 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _timeframe = timeframe;
         _userSettings = userSettings;
 
-        // ── Profiling: замер времени каждого этапа пайплайна ──────────────────
+        // в”Ђв”Ђ Profiling: Р·Р°РјРµСЂ РІСЂРµРјРµРЅРё РєР°Р¶РґРѕРіРѕ СЌС‚Р°РїР° РїР°Р№РїР»Р°Р№РЅР° в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         var swTotal = System.Diagnostics.Stopwatch.StartNew();
         var swStage = System.Diagnostics.Stopwatch.StartNew();
 
         try
         {
-            // T0 → T1: получение рыночных данных
+            // T0 в†’ T1: РїРѕР»СѓС‡РµРЅРёРµ СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С…
             await InitializeDataAsync();
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T1 DataFetch: {swStage.ElapsedMilliseconds}ms");
             swStage.Restart();
 
             if (_mainPrices == null || _mainPrices.Length == 0)
             {
-                throw new Exception("Недостаточно данных для анализа. Биржа или провайдер вернули пустой результат.");
+                throw new Exception("РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… РґР»СЏ Р°РЅР°Р»РёР·Р°. Р‘РёСЂР¶Р° РёР»Рё РїСЂРѕРІР°Р№РґРµСЂ РІРµСЂРЅСѓР»Рё РїСѓСЃС‚РѕР№ СЂРµР·СѓР»СЊС‚Р°С‚.");
             }
 
-            // T1 → T2: Gatekeeper + ContinuousState
+            // T1 в†’ T2: Gatekeeper + ContinuousState
             var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(_asset, _timeframe, _mainPrices, _ohlcCandles);
             if (!gatekeeper.IsTradeable)
             {
@@ -148,7 +148,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T2 Gatekeeper+State: {swStage.ElapsedMilliseconds}ms");
             swStage.Restart();
 
-            // T2 → T3: параллельный блок (Mechanics + TA + ML)
+            // T2 в†’ T3: РїР°СЂР°Р»Р»РµР»СЊРЅС‹Р№ Р±Р»РѕРє (Mechanics + TA + ML)
             var mechanicsTask = AnalyzeCoreMechanicsAsync();
             var techTask = EvaluateTechnicalIndicatorsAsync();
             var mlTask = FetchMachineLearningAsync();
@@ -157,8 +157,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T3 Parallel(Mechanics+TA+ML): {swStage.ElapsedMilliseconds}ms");
             swStage.Restart();
 
-            // T3 → T4: финальный консенсус + DB (GenerateLlmReport убран как отдельный этап —
-            // это была чистая строковая конкатенация, не LLM-вызов, встроена в BuildFinalConsensusAsync)
+            // T3 в†’ T4: С„РёРЅР°Р»СЊРЅС‹Р№ РєРѕРЅСЃРµРЅСЃСѓСЃ + DB (GenerateLlmReport СѓР±СЂР°РЅ РєР°Рє РѕС‚РґРµР»СЊРЅС‹Р№ СЌС‚Р°Рї вЂ”
+            // СЌС‚Рѕ Р±С‹Р»Р° С‡РёСЃС‚Р°СЏ СЃС‚СЂРѕРєРѕРІР°СЏ РєРѕРЅРєР°С‚РµРЅР°С†РёСЏ, РЅРµ LLM-РІС‹Р·РѕРІ, РІСЃС‚СЂРѕРµРЅР° РІ BuildFinalConsensusAsync)
             var result = await BuildFinalConsensusAsync();
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T4 Consensus+DB: {swStage.ElapsedMilliseconds}ms");
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | TOTAL: {swTotal.ElapsedMilliseconds}ms");
@@ -167,14 +167,14 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         catch (ExchangeUnavailableException exEx)
         {
-            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms — ExchangeUnavailable");
+            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms вЂ” ExchangeUnavailable");
             MiniAppController.LastExceptionMessage = exEx.ToString();
             BotLogger.Warn($"[Analysis] Exchange unavailable for asset {_asset}: {exEx.Message}");
             throw;
         }
         catch (Exception ex)
         {
-            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms — {ex.GetType().Name}");
+            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms вЂ” {ex.GetType().Name}");
             MiniAppController.LastExceptionMessage = ex.ToString();
             BotLogger.Error($"[Analysis] Analysis failed for asset {_asset} on {_timeframe}", ex);
             throw;
@@ -210,13 +210,13 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _ohlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _timeframe, _asset, _limit);
         if (_ohlcCandles == null || _ohlcCandles.Length == 0)
         {
-            // OTC candles not yet accumulated — use main prices as synthetic OHLC
-            BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_timeframe}) — using synthetic OHLC from main prices.");
+            // OTC candles not yet accumulated вЂ” use main prices as synthetic OHLC
+            BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_timeframe}) вЂ” using synthetic OHLC from main prices.");
             _ohlcCandles = _mainPrices.Select(p => new MiniAppController.OhlcCandle(p, p, p, p, 0)).ToArray();
         }
         else if (_ohlcCandles.Length < 2)
         {
-            BotLogger.Warn($"[Orchestrator] Only {_ohlcCandles.Length} candle(s) for {_asset} ({_timeframe}) — analysis may be limited.");
+            BotLogger.Warn($"[Orchestrator] Only {_ohlcCandles.Length} candle(s) for {_asset} ({_timeframe}) вЂ” analysis may be limited.");
         }
 
         var higherTask = _higherTf != null ? SafeFetch(_higherTf) : Task.FromResult<(double[] prices, double[] volumes)?>(null);
@@ -312,7 +312,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     _lgbmModelVersion = _prediction.ModelVersion;
                     _lgbmAccuracy = _prediction.Accuracy;
 
-                    // ── ML Telemetry: Global Retraining ──
+                    // в”Ђв”Ђ ML Telemetry: Global Retraining в”Ђв”Ђ
                     if (!string.IsNullOrEmpty(_prediction.ModelVersion))
                     {
                         string oldVer = System.Threading.Interlocked.Exchange(ref _lastSeenModelVersion, _prediction.ModelVersion);
@@ -329,12 +329,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                                         string accStr = _prediction.Accuracy.HasValue ? $"{_prediction.Accuracy.Value * 100:F1}%" : "N/A";
                                         string aucStr = _prediction.Auc.HasValue ? $"{_prediction.Auc.Value:F3}" : "N/A";
 
-                                        string report = $"[🧠 ML Global Retrain Detected]\n" +
+                                        string report = $"[рџ§  ML Global Retrain Detected]\n" +
                                                         $"Asset: {_asset}\n" +
                                                         $"New Model: <code>{_prediction.ModelVersion}</code>\n" +
                                                         $"Previous: <code>{oldVer}</code>\n\n" +
-                                                        $"🔹 Cross-Validation Accuracy: {accStr}\n" +
-                                                        $"🔹 AUC-ROC Score: {aucStr}";
+                                                        $"рџ”№ Cross-Validation Accuracy: {accStr}\n" +
+                                                        $"рџ”№ AUC-ROC Score: {aucStr}";
 
                                         await TelegramBotService.SendMessageToAdmins(report);
 
@@ -359,18 +359,18 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             catch (Exception ex) 
             { 
                 Console.WriteLine($"[Python ML Warning] {ex.GetType().Name}: {ex.Message}");
-                // _llmReport удалён — отчёт генерируется inline в BuildLlmSummary
+                // _llmReport СѓРґР°Р»С‘РЅ вЂ” РѕС‚С‡С‘С‚ РіРµРЅРµСЂРёСЂСѓРµС‚СЃСЏ inline РІ BuildLlmSummary
             }
         }
     }
 
-    // GenerateLlmReport удалён как отдельный pipeline-этап T4.
-    // Был переименован в BuildLlmSummary и встроен в BuildFinalConsensusAsync.
-    // LlmReportingService — чистая строковая конкатенация, не LLM-вызов.
+    // GenerateLlmReport СѓРґР°Р»С‘РЅ РєР°Рє РѕС‚РґРµР»СЊРЅС‹Р№ pipeline-СЌС‚Р°Рї T4.
+    // Р‘С‹Р» РїРµСЂРµРёРјРµРЅРѕРІР°РЅ РІ BuildLlmSummary Рё РІСЃС‚СЂРѕРµРЅ РІ BuildFinalConsensusAsync.
+    // LlmReportingService вЂ” С‡РёСЃС‚Р°СЏ СЃС‚СЂРѕРєРѕРІР°СЏ РєРѕРЅРєР°С‚РµРЅР°С†РёСЏ, РЅРµ LLM-РІС‹Р·РѕРІ.
     private string BuildLlmSummary()
     {
         if (_ohlcCandles == null || _ohlcCandles.Length < 60)
-            return "⚠️ Недостаточно данных для отчёта.";
+            return "вљ пёЏ РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… РґР»СЏ РѕС‚С‡С‘С‚Р°.";
         try
         {
             var llmService = new ValutaBot.App.MiniApp.Services.LlmReportingService();
@@ -382,7 +382,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         catch (Exception ex)
         {
-            return $"⚠️ Ошибка генерации отчёта: {ex.Message}";
+            return $"вљ пёЏ РћС€РёР±РєР° РіРµРЅРµСЂР°С†РёРё РѕС‚С‡С‘С‚Р°: {ex.Message}";
         }
     }
 
@@ -433,7 +433,15 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         
         // Construct Signals for the Confluence Matrix
         var taSignal = new TaSignal(_mainResult.score, _mainResult.confidence, _mainResult.rsiVal, _mainResult.emaVal, _mainResult.volStrengthVal, _mainAtr, _mainAdx);
-        var smcSignal = new SmcSignal(_smcResult.BosDirection, _smcResult.SweepDirection, _smcResult.OrderBlockType, _smcResult.FvgType, "SMC Analyzed");
+        
+        var smcParts = new List<string>();
+        if (_smcResult.HasLiquiditySweep && !string.IsNullOrEmpty(_smcResult.SweepDirection)) smcParts.Add($"Sweep: {_smcResult.SweepDirection}");
+        if (_smcResult.HasBos && !string.IsNullOrEmpty(_smcResult.BosDirection)) smcParts.Add($"BOS: {_smcResult.BosDirection}");
+        if (_smcResult.HasFvg && !string.IsNullOrEmpty(_smcResult.FvgType)) smcParts.Add($"FVG: {_smcResult.FvgType}");
+        if (_smcResult.HasOrderBlock && !string.IsNullOrEmpty(_smcResult.OrderBlockType)) smcParts.Add($"OB: {_smcResult.OrderBlockType}");
+        string smcReasoning = smcParts.Count > 0 ? string.Join(", ", smcParts) : "No clear structure";
+
+        var smcSignal = new SmcSignal(_smcResult.BosDirection, _smcResult.SweepDirection, _smcResult.OrderBlockType, _smcResult.FvgType, smcReasoning);
         var ofSignal = new OrderflowSignal(_orderFlowResult.ScoreContribution, _orderFlowResult.Description);
         var mlSignal = new MlSignal(_lgbmDirection, _lgbmConfidence, _lgbmAccuracy, _lgbmModelVersion);
         
@@ -465,8 +473,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 "\u041f\u043e\u0434\u043e\u0436\u0434\u0438\u0442\u0435 \u0438\u043b\u0438 \u0441\u043c\u0435\u043d\u0438\u0442\u0435 \u0430\u043a\u0442\u0438\u0432, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c \u0430\u043d\u0430\u043b\u0438\u0437.");
         }
 
-        // Замена Monte Carlo (O(1000)) на три закрытые формулы (O(1)).
-        // Результат математически идентичен при бинарной структуре выплат.
+        // Р—Р°РјРµРЅР° Monte Carlo (O(1000)) РЅР° С‚СЂРё Р·Р°РєСЂС‹С‚С‹Рµ С„РѕСЂРјСѓР»С‹ (O(1)).
+        // Р РµР·СѓР»СЊС‚Р°С‚ РјР°С‚РµРјР°С‚РёС‡РµСЃРєРё РёРґРµРЅС‚РёС‡РµРЅ РїСЂРё Р±РёРЅР°СЂРЅРѕР№ СЃС‚СЂСѓРєС‚СѓСЂРµ РІС‹РїР»Р°С‚.
         MonteCarloResult mcResult;
         if (finalDirection == "NEUTRAL")
         {
@@ -474,20 +482,20 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         else
         {
-            const double Payout = 0.80; // Стандартный коэффициент выплаты Pocket Option (80%)
+            const double Payout = 0.80; // РЎС‚Р°РЅРґР°СЂС‚РЅС‹Р№ РєРѕСЌС„С„РёС†РёРµРЅС‚ РІС‹РїР»Р°С‚С‹ Pocket Option (80%)
             double p = Math.Clamp(finalProbability / 100.0, 0.35, 0.95);
             double q = 1.0 - p;
 
-            // 1. Expected Value: EV = p × Payout − q × 1.0
+            // 1. Expected Value: EV = p Г— Payout в€’ q Г— 1.0
             double evRatio   = (p * Payout) - (q * 1.0);
             double evPct     = Math.Round(evRatio * 100.0, 1);
 
-            // 2. Fractional Kelly Criterion (25% Kelly для консервативного управления капиталом)
+            // 2. Fractional Kelly Criterion (25% Kelly РґР»СЏ РєРѕРЅСЃРµСЂРІР°С‚РёРІРЅРѕРіРѕ СѓРїСЂР°РІР»РµРЅРёСЏ РєР°РїРёС‚Р°Р»РѕРј)
             double fullKelly      = (p * Payout - q) / Payout;
             double fractionalKelly = Math.Clamp(fullKelly * 0.25, 0.0, 0.05);
             double kellyRiskPct   = Math.Round(fractionalKelly * 100.0, 1);
 
-            // 3. Success rate = напрямую из вероятности (без симуляции)
+            // 3. Success rate = РЅР°РїСЂСЏРјСѓСЋ РёР· РІРµСЂРѕСЏС‚РЅРѕСЃС‚Рё (Р±РµР· СЃРёРјСѓР»СЏС†РёРё)
             int syntheticIterations  = 1000;
             int syntheticSuccessCount = (int)Math.Round(p * syntheticIterations);
 
@@ -525,8 +533,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             }
         );
 
-        // Параллельный запуск трёх независимых DB-запросов вместо последовательного.
-        // Экономия: ~2–3x latency при каждом вызове (устраняет sequential await chain).
+        // РџР°СЂР°Р»Р»РµР»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє С‚СЂС‘С… РЅРµР·Р°РІРёСЃРёРјС‹С… DB-Р·Р°РїСЂРѕСЃРѕРІ РІРјРµСЃС‚Рѕ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕРіРѕ.
+        // Р­РєРѕРЅРѕРјРёСЏ: ~2вЂ“3x latency РїСЂРё РєР°Р¶РґРѕРј РІС‹Р·РѕРІРµ (СѓСЃС‚СЂР°РЅСЏРµС‚ sequential await chain).
         var overallStatsTask    = SignalTracker.GetOverallStatsAsync();
         var assetStatsTask      = SignalTracker.GetStatsAsync(_asset, _timeframe);
         var pendingCountTask    = SignalTracker.GetPendingCountAsync();
@@ -573,7 +581,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             kellyLabel = mcResult.KellyLabel,
             monteCarloSummary = mcResult.SummaryReasoning,
             wfIsCooloffActive = _wfResult.IsCooloffActive,
-            llmReport = BuildLlmSummary()  // Inline: больше не отдельный T4 этап пайплайна
+            llmReport = BuildLlmSummary()  // Inline: Р±РѕР»СЊС€Рµ РЅРµ РѕС‚РґРµР»СЊРЅС‹Р№ T4 СЌС‚Р°Рї РїР°Р№РїР»Р°Р№РЅР°
         };
     }
 }
+
