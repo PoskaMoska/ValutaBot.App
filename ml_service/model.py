@@ -415,17 +415,24 @@ class ForexPredictor:
                 if len(candles) >= 1500:
                     log.info(f"[Train] Loaded {len(candles)} candles from HistoricalCandles (Global Strategist mode)")
                 else:
-                    # Priority 2: Subminute SQLite ticks
+                    # Priority 2: Subminute SQLite ticks (real recorded ticks from live trading)
                     if self.interval.startswith("s"):
                         candles = _fetch_local_sqlite(self.symbol, self.interval, 1500)
                         if len(candles) < 150:
-                            log.warning(f"[Train] Not enough SQLite ticks for {self._key} (found {len(candles)}). Falling back to interpolation.")
-                            limit = 750
-                            candles = self._fetch_twelvedata(limit)
+                            # FIXED: Never use synthetic interpolation — it produces fake ~78% accuracy
+                            # by learning the sine-wave generator pattern instead of real market dynamics.
+                            # Instead, train on 5000 REAL 1-minute candles as a proxy.
+                            # A model trained on genuine price action is FAR more honest (expect ~52-56% accuracy)
+                            # and will generalize to real sub-minute patterns much better.
+                            log.warning(
+                                f"[Train] Not enough real ticks for {self._key} (found {len(candles)}). "
+                                f"Using real 1m candles as proxy (no synthetic interpolation)."
+                            )
+                            candles = self._fetch_twelvedata(5000)  # Real 1m data, no interpolation
                             if len(candles) > 0:
-                                candles = _interpolate_subminute(candles, self.interval)
-                                if len(candles) > 1500:
-                                    candles = candles[-1500:]
+                                log.info(f"[Train] Proxy-1m training for {self._key} on {len(candles)} real candles.")
+                            else:
+                                log.error(f"[Train] Could not fetch real 1m data for {self._key}. Skipping.")
                     else:
                         # Priority 3: TwelveData API (forex only)
                         limit = 5000
@@ -526,7 +533,7 @@ class ForexPredictor:
                 m.fit(
                     X_tr, y_tr,
                     sample_weight=sample_weights[train_idx],
-                    eval_set=[(X_val, y_val)],
+                    eval_X=X_val, eval_y=y_val,
                     callbacks=[lgb.early_stopping(50, verbose=False),
                                lgb.log_evaluation(period=-1)]
                 )

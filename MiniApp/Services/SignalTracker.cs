@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -134,22 +134,47 @@ public static class SignalTracker
                     else
                     {
                         bool isCorrect = (direction == "BUY" && exitPrice.Value > price) || (direction == "PUT" && exitPrice.Value < price);
-                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.ResolvePendingTradeAsync(record.Id, exitPrice.Value, isCorrect);
-                        
+
+                        // Save verified outcome and remove from pending
+                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(
+                            new ValutaBot.App.MiniApp.Data.Repositories.TradeOutcomeRecord
+                            {
+                                Id = record.Id,
+                                Direction = direction,
+                                Asset = asset,
+                                Timeframe = timeframe,
+                                EntryPrice = price,
+                                ExitPrice = exitPrice.Value,
+                                PnlBps = Math.Round((exitPrice.Value - price) / price * 10000, 2),
+                                WasWin = isCorrect,
+                                CreatedAt = record.CreatedAt.ToString("O"),
+                                VerifiedAt = DateTime.UtcNow.ToString("O")
+                            });
+                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
+
+                        // Record per-source signal votes
                         foreach (var kvp in record.SourceDirections)
                         {
                             if (kvp.Value == "NEUTRAL") continue;
                             bool isSourceCorrect = (kvp.Value == "BUY" && exitPrice.Value > price) || (kvp.Value == "PUT" && exitPrice.Value < price);
                             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kvp.Key, isSourceCorrect);
                         }
-                        
-                        if (TradeOutcomeTracker.WfEngine != null) {
-                            TradeOutcomeTracker.WfEngine.ProcessOutcome(record.Asset, record.Timeframe, isCorrect);
-                        }
-                        if (TradeOutcomeTracker.CalibrationEngine != null) {
-                            TradeOutcomeTracker.CalibrationEngine.RecordOutcome(record.Asset, record.Timeframe, isCorrect);
-                        }
-                        InvalidateSignalVotesCache();
+
+                        // Update WalkForward engine
+                        if (TradeOutcomeTracker.WfEngine != null)
+                            TradeOutcomeTracker.WfEngine.RecordTradeOutcome(asset, timeframe, isCorrect);
+
+                        // Update AutoCalibration engine
+                        if (TradeOutcomeTracker.CalibrationEngine != null)
+                            TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", asset, timeframe, isCorrect);
+
+                        // Complete SGD online learning feedback chain
+                        _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
+                            asset, timeframe, price, exitPrice.Value, direction,
+                            wasWin: isCorrect, isForex: record.IsForex));
+
+                        // Invalidate signal votes cache so UI refreshes
+                        _signalVotesCacheExpiry = DateTime.MinValue;
                     }
                 }
                 else 
