@@ -22,7 +22,7 @@ public static class SignalTracker
     }
 
     private static List<(string signalName, int verified, int correct)>? _signalVotesCache;
-    public static DateTime _signalVotesCacheExpiry = DateTime.MinValue;
+    private static DateTime _signalVotesCacheExpiry = DateTime.MinValue;
     private static readonly SemaphoreSlim _signalVotesCacheLock = new(1, 1);
     // Legacy background verification timer removed.
 
