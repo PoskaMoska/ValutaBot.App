@@ -39,12 +39,16 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             }
             else
             {
-                // Unrecognized command or state, could do default behavior here if needed
-                // Currently, default welcome logic handles unrecognized if it's just plain text,
-                // But SubmitIdStateCommand expects /start to be handled first.
-                // Wait, if NO command matches, we should probably do the Catch-All logic from the old file.
                 bool isAllowedUser = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsUserAllowedAsync(chatId);
 
+                // FIX: If the user typed an unknown slash command, just say so instead of resending the full welcome menu
+                if (cleanText.StartsWith("/"))
+                {
+                    await TelegramBotService.SendMessage(token, chatId, "❓ <b>Неизвестная команда.</b>\nВоспользуйтесь кнопками меню или введите /start.");
+                    return;
+                }
+
+                // For unrecognized plain text, we resend the appropriate menu
                 if (isAdmin)
                 {
                     await TelegramBotService.SendAdminWelcome(token, chatId, webAppUrl);

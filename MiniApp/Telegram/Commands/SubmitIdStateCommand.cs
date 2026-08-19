@@ -18,12 +18,18 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
 
         public async Task ExecuteAsync(long chatId, string command, string cleanText, bool isAdmin, string token, string webAppUrl)
         {
+            // RACE CONDITION FIX: Atomically claim the state. If two Tasks run concurrently
+            // (e.g. user double-taps), only the first one succeeds. The second sees None and exits.
+            bool claimed = TelegramBotService.UserStates.TryUpdate(chatId,
+                newValue: TelegramBotService.UserState.None,
+                comparisonValue: TelegramBotService.UserState.AwaitingId);
+            if (!claimed) return;
             var match = Regex.Match(cleanText, @"\d{7,10}");
             if (match.Success)
             {
                 string pocketId = match.Value;
                 TelegramBotService.UserSubmittedIds[chatId] = pocketId;
-                TelegramBotService.UserStates[chatId] = TelegramBotService.UserState.None;
+                // State already reset atomically at entry — no need to reset again
 
                 var reg = await RegistrationRepository.GetPocketRegistrationAsync(pocketId);
                 bool foundReg = reg != null && reg.HasRegistered;

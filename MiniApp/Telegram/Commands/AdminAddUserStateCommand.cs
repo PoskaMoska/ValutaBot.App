@@ -14,7 +14,11 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
         public async Task ExecuteAsync(long chatId, string command, string cleanText, bool isAdmin, string token, string webAppUrl)
         {
             if (!isAdmin) return;
-            TelegramBotService.UserStates[chatId] = TelegramBotService.UserState.None;
+            // RACE CONDITION FIX: Atomically claim the state
+            bool claimed = TelegramBotService.UserStates.TryUpdate(chatId,
+                newValue: TelegramBotService.UserState.None,
+                comparisonValue: TelegramBotService.UserState.AwaitingAddAdminId);
+            if (!claimed) return;
             if (long.TryParse(cleanText.Trim(), out long targetChatId))
             {
                 await UserRepository.AddAdminAsync(targetChatId);
