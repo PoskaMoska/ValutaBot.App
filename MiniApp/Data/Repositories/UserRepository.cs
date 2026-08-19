@@ -149,7 +149,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
 
     public class UserSettings
     {
-        public bool EnableMl { get; set; } = false;
+        public bool EnableMl { get; set; } = true;
         public bool EnableSmc { get; set; } = true;
         public bool EnableOf { get; set; } = true;
     }
