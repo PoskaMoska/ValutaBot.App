@@ -329,16 +329,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                                         string accStr    = _prediction.Accuracy.HasValue ? $"{_prediction.Accuracy.Value * 100:F1}%" : "N/A";
                                         string aucStr    = _prediction.Auc.HasValue ? $"{_prediction.Auc.Value:F3}" : "N/A";
                                         string nTrainStr = _prediction.NTrain.HasValue ? $"{_prediction.NTrain.Value:N0}" : "N/A";
-                                        string quality   = _prediction.Accuracy.HasValue
-                                            ? (_prediction.Accuracy.Value >= 0.57 ? "🟢 Отличная" : _prediction.Accuracy.Value >= 0.54 ? "🟡 Хорошая" : "🔴 Слабая")
-                                            : "";
+                                        string icon      = _prediction.Accuracy.HasValue
+                                            ? (_prediction.Accuracy.Value >= 0.57 ? "🟢" : _prediction.Accuracy.Value >= 0.54 ? "🟡" : "🔴")
+                                            : "⚪";
 
-                                        string report = $"🧠 <b>ML Модель переобучена</b>\n" +
-                                                        $"Актив: <b>{_asset}</b>\n\n" +
-                                                        $"📊 <b>Результаты обучения:</b>\n" +
-                                                        $"• Точность: <b>{accStr}</b> {quality}\n" +
-                                                        $"• AUC-ROC: <b>{aucStr}</b>\n" +
-                                                        $"• Свечей в обучении: <b>{nTrainStr}</b>";
+                                        string report = $"🔄 <b>Суточное переобучение</b>\n" +
+                                                        $"{icon} <b>{_asset}</b> ({_timeframe}): Точность <b>{accStr}</b> | AUC <b>{aucStr}</b> | {nTrainStr} свечей";
 
                                         await TelegramBotService.SendMessageToAdmins(report);
 
