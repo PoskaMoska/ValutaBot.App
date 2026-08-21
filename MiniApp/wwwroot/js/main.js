@@ -24,7 +24,7 @@ export let currentTf = 'm1';
 
 const assetsData = {
     fiat: {
-        otc: ['EUR/USD OTC']
+        otc: ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC']
     },
     commodities: {
         otc: []
@@ -48,7 +48,7 @@ function getTopAssets() {
 
 function renderAssets(arr) {
     const top = getTopAssets();
-    const majors = ['EUR/USD OTC'];
+    const majors = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC'];
     return arr.map(function(a) {
         var star = top.indexOf(a) !== -1 ? '<span class="top-star">★</span>' : '';
         var cls = majors.indexOf(a) !== -1 ? 'asset-item major' : 'asset-item';
