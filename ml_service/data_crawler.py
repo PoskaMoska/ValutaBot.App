@@ -35,7 +35,7 @@ TD_INTERVAL_MAP = {
 
 FOREX_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD"]
 MAX_PER_REQUEST = 5000
-RATE_LIMIT_DELAY = 8.0  # seconds between requests (stay under 8 req/min)
+RATE_LIMIT_DELAY = 16.0  # seconds between requests (4 req/min to leave room for bot)
 
 
 def to_twelvedata_symbol(symbol: str) -> str:
