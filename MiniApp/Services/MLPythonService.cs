@@ -22,7 +22,8 @@ public static class MLPythonService
         double Confidence,      // 0.0 – 1.0
         string ModelVersion,    // e.g. "lgbm-v1-BTCUSDT_1m-1720000000"
         double? Accuracy,       // CV accuracy (null if model not yet trained)
-        double? Auc             // CV AUC-ROC
+        double? Auc,            // CV AUC-ROC
+        int? NTrain             // number of candles used for training
     );
 
     // ── Init ───────────────────────────────────────────────────────────────
@@ -161,7 +162,8 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
                 Confidence:   result.Confidence,
                 ModelVersion: result.ModelVersion ?? "unknown",
                 Accuracy:     result.Accuracy,
-                Auc:          result.Auc
+                Auc:          result.Auc,
+                NTrain:       result.NTrain
             );
         }
         catch (Polly.CircuitBreaker.BrokenCircuitException)
@@ -324,6 +326,7 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
         [JsonPropertyName("model_version")]public string?  ModelVersion { get; set; }
         [JsonPropertyName("accuracy")]     public double?  Accuracy     { get; set; }
         [JsonPropertyName("auc")]          public double?  Auc          { get; set; }
+        [JsonPropertyName("n_train")]      public int?     NTrain       { get; set; }
     }
 }
 

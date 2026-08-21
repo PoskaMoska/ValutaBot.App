@@ -326,15 +326,21 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                                 {
                                     try
                                     {
-                                        string accStr = _prediction.Accuracy.HasValue ? $"{_prediction.Accuracy.Value * 100:F1}%" : "N/A";
-                                        string aucStr = _prediction.Auc.HasValue ? $"{_prediction.Auc.Value:F3}" : "N/A";
+                                        string accStr    = _prediction.Accuracy.HasValue ? $"{_prediction.Accuracy.Value * 100:F1}%" : "N/A";
+                                        string aucStr    = _prediction.Auc.HasValue ? $"{_prediction.Auc.Value:F3}" : "N/A";
+                                        string nTrainStr = _prediction.NTrain.HasValue ? $"{_prediction.NTrain.Value:N0}" : "N/A";
+                                        string quality   = _prediction.Accuracy.HasValue
+                                            ? (_prediction.Accuracy.Value >= 0.57 ? "🟢 Отличная" : _prediction.Accuracy.Value >= 0.54 ? "🟡 Хорошая" : "🔴 Слабая")
+                                            : "";
 
-                                        string report = $"[рџ§  ML Global Retrain Detected]\n" +
-                                                        $"Asset: {_asset}\n" +
-                                                        $"New Model: <code>{_prediction.ModelVersion}</code>\n" +
-                                                        $"Previous: <code>{oldVer}</code>\n\n" +
-                                                        $"рџ”№ Cross-Validation Accuracy: {accStr}\n" +
-                                                        $"рџ”№ AUC-ROC Score: {aucStr}";
+                                        string report = $"🧠 <b>ML Модель переобучена</b>\n" +
+                                                        $"Актив: <b>{_asset}</b>\n\n" +
+                                                        $"📊 <b>Результаты обучения:</b>\n" +
+                                                        $"• Точность: <b>{accStr}</b> {quality}\n" +
+                                                        $"• AUC-ROC: <b>{aucStr}</b>\n" +
+                                                        $"• Свечей в обучении: <b>{nTrainStr}</b>\n\n" +
+                                                        $"🔄 <b>Версия модели:</b>\n" +
+                                                        $"<code>{_prediction.ModelVersion}</code>";
 
                                         await TelegramBotService.SendMessageToAdmins(report);
 
@@ -343,8 +349,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                                         string logFile = System.IO.Path.Combine(logDir, "ml_global_retrain.csv");
                                         bool writeHeader = !System.IO.File.Exists(logFile);
                                         using var writer = new System.IO.StreamWriter(logFile, append: true);
-                                        if (writeHeader) await writer.WriteLineAsync("Timestamp,Asset,OldVersion,NewVersion,Accuracy,Auc");
-                                        await writer.WriteLineAsync($"{DateTime.UtcNow:O},{_asset},{oldVer},{_prediction.ModelVersion},{_prediction.Accuracy},{_prediction.Auc}");
+                                        if (writeHeader) await writer.WriteLineAsync("Timestamp,Asset,OldVersion,NewVersion,Accuracy,Auc,NTrain");
+                                        await writer.WriteLineAsync($"{DateTime.UtcNow:O},{_asset},{oldVer},{_prediction.ModelVersion},{_prediction.Accuracy},{_prediction.Auc},{_prediction.NTrain}");
                                     }
                                     catch (Exception tEx)
                                     {
