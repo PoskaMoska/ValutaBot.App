@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -338,9 +338,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                                                         $"📊 <b>Результаты обучения:</b>\n" +
                                                         $"• Точность: <b>{accStr}</b> {quality}\n" +
                                                         $"• AUC-ROC: <b>{aucStr}</b>\n" +
-                                                        $"• Свечей в обучении: <b>{nTrainStr}</b>\n\n" +
-                                                        $"🔄 <b>Версия модели:</b>\n" +
-                                                        $"<code>{_prediction.ModelVersion}</code>";
+                                                        $"• Свечей в обучении: <b>{nTrainStr}</b>";
 
                                         await TelegramBotService.SendMessageToAdmins(report);
 
