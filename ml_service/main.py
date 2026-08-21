@@ -33,7 +33,7 @@ log = logging.getLogger("ml-service")
 
 from contextlib import asynccontextmanager
 
-_DEFAULT_SYMBOLS = os.getenv("PRETRAIN_SYMBOLS", "EURUSD,GBPUSD,USDJPY").split(",")
+_DEFAULT_SYMBOLS = os.getenv("PRETRAIN_SYMBOLS", "EURUSD,GBPUSD,USDJPY,EURUSD_OTC,GBPUSD_OTC,AUDUSD_OTC").split(",")
 _DEFAULT_INTERVALS = os.getenv("PRETRAIN_INTERVALS", "s5,s15,s30,1m,5m,15m").split(",")
 
 
