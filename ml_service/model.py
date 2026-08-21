@@ -141,7 +141,7 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
         print(f"  [WARN] PostgreSQL subminute fetch failed: {e}")
 
     # Fallback to SQLite
-    db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
+    db_path = os.path.join(os.path.dirname(__file__), "data", "models", "ValutaTicks.db")
     if not os.path.exists(db_path):
         return []
     try:
@@ -195,7 +195,7 @@ def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Di
             log.warning(f"[HistoricalCandles] PostgreSQL fetch failed: {e}")
 
     # Priority 2: SQLite fallback (local dev)
-    db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
+    db_path = os.path.join(os.path.dirname(__file__), "data", "models", "ValutaTicks.db")
     if not os.path.exists(db_path):
         return []
     try:
@@ -221,7 +221,7 @@ def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Di
 
 
 def _fetch_rl_feedback(symbol: str, interval: str) -> List[Dict]:
-    db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
+    db_path = os.path.join(os.path.dirname(__file__), "data", "models", "ValutaTicks.db")
     if not os.path.exists(db_path):
         return []
     try:
@@ -441,10 +441,16 @@ class ForexPredictor:
         log.info(f"[Train] Starting training for {self._key}")
         try:
             if candles is None:
+                # Calculate adaptive limit: max(100k / interval_minutes, 20k)
+                interval_minutes = 1
+                if self.interval == "5m": interval_minutes = 5
+                elif self.interval == "15m": interval_minutes = 15
+                target_candles = max(MAX_HISTORICAL_CANDLES // interval_minutes, 20000)
+
                 # Priority 1: Large historical dataset from data_crawler (Global Strategist)
-                candles = _fetch_historical_candles(self.symbol, self.interval, MAX_HISTORICAL_CANDLES)
+                candles = _fetch_historical_candles(self.symbol, self.interval, target_candles)
                 if len(candles) >= 1500:
-                    log.info(f"[Train] Loaded {len(candles)} candles from HistoricalCandles (Global Strategist mode)")
+                    log.info(f"[Train] Loaded {len(candles)} candles from HistoricalCandles (Adaptive: {target_candles})")
                 else:
                     # Priority 2: Subminute SQLite ticks (real recorded ticks from live trading)
                     if self.interval.startswith("s"):

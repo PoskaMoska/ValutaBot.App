@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 TWELVE_DATA_BASE = "https://api.twelvedata.com"
 TWELVE_DATA_API_KEY = os.getenv("TwelveDataApiKey") or os.getenv("TWELVE_DATA_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ValutaTicks.db")
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "models", "ValutaTicks.db")
 
 TD_INTERVAL_MAP = {
     "s5": "1min", "s15": "1min", "s30": "1min",
