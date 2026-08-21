@@ -297,8 +297,15 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
         if (isForex)
         {
             // For forex, use EURUSD-style (Python service uses it as a key for model storage)
-            return asset.Replace("/", "").Replace(" ", "").Replace("OTC", "")
+            var clean = asset.Replace("/", "").Replace(" ", "").Replace("OTC", "")
                         .Replace("otc", "").Trim().ToUpperInvariant();
+            
+            // If it's a weekend OTC pair, train a separate independent model
+            if (asset.Contains("OTC", StringComparison.OrdinalIgnoreCase))
+            {
+                return clean + "_OTC";
+            }
+            return clean;
         }
 
         return asset.ToUpperInvariant() switch
