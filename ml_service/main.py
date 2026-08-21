@@ -70,7 +70,99 @@ async def _train_all():
 async def lifespan(app: FastAPI):
     log.info("[Startup] Launching background pre-training for all timeframes...")
     asyncio.create_task(_train_all())
+    asyncio.create_task(_weekly_global_retrain_loop())
     yield
+
+
+# ── Weekly Global Retrain ───────────────────────────────────────────────────
+
+WEEKLY_RETRAIN_INTERVAL_H = int(os.getenv("WEEKLY_RETRAIN_INTERVAL_H", "168"))  # 7 days
+_BOT_BASE_URL = os.getenv("BOT_BASE_URL", "")   # e.g. https://valutatbot.railway.app
+
+# Only retrain the main 1m models weekly (s5/s15/s30 use proxy anyway)
+_WEEKLY_INTERVALS = ["1m", "5m", "15m"]
+
+
+async def _weekly_global_retrain_loop():
+    """
+    Background loop that forces a full retrain on all pairs every 7 days.
+    Uses 100k candles from PostgreSQL historical_candles table.
+    Sends a summary Telegram notification via the C# bot's internal webhook.
+    """
+    # Wait 1 hour after startup before first check (let daily retrain finish first)
+    await asyncio.sleep(3600)
+
+    while True:
+        now = time.time()
+        results = []
+
+        for sym in _DEFAULT_SYMBOLS:
+            sym = sym.strip().upper()
+            if not sym:
+                continue
+            for tf in _WEEKLY_INTERVALS:
+                predictor = _get_predictor(sym, tf)
+                age_h = (now - predictor._meta.trained_at) / 3600 if predictor._meta else 9999
+
+                if age_h >= WEEKLY_RETRAIN_INTERVAL_H:
+                    log.info(f"[WeeklyRetrain] Forcing retrain: {sym} ({tf}), age={age_h:.0f}h")
+                    try:
+                        # Force retrain by clearing meta age
+                        predictor._meta = None
+                        predictor._train_model(candles=None)
+                        if predictor._meta:
+                            results.append({
+                                "symbol": sym,
+                                "interval": tf,
+                                "accuracy": predictor._meta.accuracy,
+                                "auc": predictor._meta.auc,
+                                "n_train": predictor._meta.n_train,
+                            })
+                    except Exception as e:
+                        log.error(f"[WeeklyRetrain] Error retraining {sym}/{tf}: {e}")
+                        results.append({"symbol": sym, "interval": tf, "error": str(e)})
+
+                    await asyncio.sleep(15)  # rate limit between pairs
+
+        if results:
+            _send_weekly_summary(results)
+
+        # Sleep 1 hour then check again (so we catch the right week boundary)
+        await asyncio.sleep(3600)
+
+
+def _send_weekly_summary(results: list):
+    """Send weekly retrain summary to C# bot's admin notification endpoint."""
+    import requests as req_lib
+
+    lines = ["\U0001f4c5 <b>Еженедельное глобальное переобучение</b>\n"]
+    for r in results:
+        sym = r.get("symbol", "?")
+        tf  = r.get("interval", "?")
+        if "error" in r:
+            lines.append(f"❌ {sym} ({tf}): {r['error']}")
+        else:
+            acc  = f"{r['accuracy']*100:.1f}%"
+            auc  = f"{r['auc']:.3f}"
+            n    = f"{r['n_train']:,}"
+            qual = "\U0001f7e2" if r['accuracy'] >= 0.57 else "\U0001f7e1" if r['accuracy'] >= 0.54 else "\U0001f534"
+            lines.append(f"{qual} <b>{sym}</b> ({tf}): Точность <b>{acc}</b> | AUC <b>{auc}</b> | {n} свечей")
+
+    message = "\n".join(lines)
+    log.info(f"[WeeklyRetrain] Summary:\n{message}")
+
+    # Try to notify via C# bot webhook if configured
+    if _BOT_BASE_URL:
+        try:
+            resp = req_lib.post(
+                f"{_BOT_BASE_URL}/internal/notify-admins",
+                json={"message": message, "parse_mode": "HTML"},
+                timeout=10
+            )
+            log.info(f"[WeeklyRetrain] Notification sent: {resp.status_code}")
+        except Exception as e:
+            log.warning(f"[WeeklyRetrain] Could not send notification: {e}")
+
 
 # ── App ────────────────────────────────────────────────────────────────────
 app = FastAPI(

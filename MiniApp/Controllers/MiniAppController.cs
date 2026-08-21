@@ -23,6 +23,7 @@ public static partial class MiniAppController
     public static string? LastExceptionMessage { get; set; }
 
     public record OhlcCandle(double Open, double High, double Low, double Close, double Volume, DateTime Timestamp = default);
+    public record NotifyAdminsRequest(string Message, string ParseMode = "HTML");
 
     public static System.Net.Http.IHttpClientFactory? HttpFactory { get; set; }
     public static IServiceProvider? Services { get; set; }
@@ -271,6 +272,36 @@ public static partial class MiniAppController
 
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
+
+        // ── Internal endpoint for ML service → Telegram admin notifications ──
+        app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
+        {
+            // Only allow calls from localhost or Railway internal network
+            var remoteIp = context.Connection.RemoteIpAddress?.ToString() ?? "";
+            bool isInternal = remoteIp.StartsWith("127.") || remoteIp.StartsWith("::1")
+                           || remoteIp.StartsWith("10.") || remoteIp.StartsWith("172.")
+                           || remoteIp.StartsWith("::ffff:127.");
+            if (!isInternal)
+                return Results.Json(new { error = "Forbidden" }, statusCode: 403);
+
+            try
+            {
+                var body = await System.Text.Json.JsonSerializer.DeserializeAsync<NotifyAdminsRequest>(
+                    context.Request.Body,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+                );
+                if (body == null || string.IsNullOrWhiteSpace(body.Message))
+                    return Results.Json(new { error = "empty message" }, statusCode: 400);
+
+                await TelegramBotService.SendMessageToAdmins(body.Message);
+                return Results.Json(new { ok = true });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Error("[InternalNotify] Error", ex);
+                return Results.Json(new { error = ex.Message }, statusCode: 500);
+            }
+        });
 
         app.MapGet("/api/fear-greed", async Task<IResult> (HttpContext context) =>
         {
