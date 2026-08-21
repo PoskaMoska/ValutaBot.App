@@ -333,7 +333,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                                             ? (_prediction.Accuracy.Value >= 0.57 ? "🟢" : _prediction.Accuracy.Value >= 0.54 ? "🟡" : "🔴")
                                             : "⚪";
 
-                                        string report = $"🔄 <b>Суточное переобучение</b>\n" +
+                                        string report = $"🔄 <b>Переобучение модели</b>\n" +
                                                         $"{icon} <b>{_asset}</b> ({_timeframe}): Точность <b>{accStr}</b> | AUC <b>{aucStr}</b> | {nTrainStr} свечей";
 
                                         await TelegramBotService.SendMessageToAdmins(report);

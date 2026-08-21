@@ -36,7 +36,7 @@ log = logging.getLogger("predictor")
 
 MODEL_DIR = Path(os.getenv("MODEL_DIR", str(Path(__file__).parent / "data" / "models")))
 SGD_MODEL_DIR = MODEL_DIR / "sgd"
-RETRAIN_INTERVAL_H = int(os.getenv("RETRAIN_INTERVAL_H", "24"))
+RETRAIN_INTERVAL_H = int(os.getenv("RETRAIN_INTERVAL_H", "168"))  # Weekly global retrain only
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "100000"))  # Global Strategist window
 # Bug2 fix: configurable target horizon (default=5 candles, aligned with typical TradeTimeout 15*0.6≈9 → 5–10)
 TARGET_HORIZON_CANDLES = int(os.getenv("TARGET_HORIZON_CANDLES", "5"))
