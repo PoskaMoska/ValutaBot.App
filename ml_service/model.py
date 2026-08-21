@@ -165,49 +165,59 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
 
 def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Dict]:
     """
-    Fetch large historical dataset from HistoricalCandles table (populated by data_crawler.py).
-    Used by LightGBM Global Strategist to train on up to 100k candles.
-    Falls back to empty list if table doesn't exist yet.
+    Fetch large historical dataset for LightGBM Global Strategist training.
+    Priority 1: PostgreSQL historical_candles table (Railway cloud).
+    Priority 2: Local SQLite HistoricalCandles table (local dev fallback).
     """
+    interval_aliases = {"m1": "1m", "m5": "5m", "m15": "15m", "m30": "30m", "h1": "1h", "h4": "4h"}
+    norm_interval = interval_aliases.get(interval.lower(), interval.lower())
+
+    # Priority 1: PostgreSQL (Railway)
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url)
+            query = """
+                SELECT open_time as "openTime", open as "open", high as "high",
+                       low as "low", close as "close", volume as "volume"
+                FROM historical_candles
+                WHERE asset = %s AND interval = %s
+                ORDER BY open_time DESC
+                LIMIT %s
+            """
+            df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
+            conn.close()
+            if not df.empty:
+                log.info(f"[HistoricalCandles] Loaded {len(df)} rows from PostgreSQL for {symbol} {norm_interval}")
+                return df.iloc[::-1].to_dict(orient='records')
+        except Exception as e:
+            log.warning(f"[HistoricalCandles] PostgreSQL fetch failed: {e}")
+
+    # Priority 2: SQLite fallback (local dev)
     db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
     if not os.path.exists(db_path):
         return []
     try:
         conn = sqlite3.connect(db_path, timeout=30.0)
-        # Check table exists
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
         if not cursor.fetchone():
             conn.close()
             return []
-
-        td_interval = interval.lower()
-        # Normalize interval alias (m1 → 1m, etc.)
-        interval_aliases = {
-            "m1": "1m", "m5": "5m", "m15": "15m", "m30": "30m",
-            "h1": "1h", "h4": "4h",
-        }
-        td_interval = interval_aliases.get(td_interval, td_interval)
-
-        query = '''
+        query = """
             SELECT OpenTime as openTime, Open as open, High as high, Low as low, Close as close, Volume as volume
-            FROM HistoricalCandles
-            WHERE Asset = ? AND Interval = ?
-            ORDER BY OpenTime DESC
-            LIMIT ?
-        '''
-        df = pd.read_sql_query(query, conn, params=(symbol, td_interval, limit))
+            FROM HistoricalCandles WHERE Asset = ? AND Interval = ? ORDER BY OpenTime DESC LIMIT ?
+        """
+        df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
         conn.close()
-
         if df.empty:
             return []
-
-        # Reverse to ascending time order (oldest first)
+        log.info(f"[HistoricalCandles] Loaded {len(df)} rows from SQLite for {symbol} {norm_interval}")
         return df.iloc[::-1].to_dict(orient='records')
     except Exception as e:
-        log.error(f"[HistoricalCandles] Fetch error: {e}")
+        log.error(f"[HistoricalCandles] SQLite fetch error: {e}")
         return []
-
 
 
 def _fetch_rl_feedback(symbol: str, interval: str) -> List[Dict]:

@@ -139,6 +139,22 @@ namespace ValutaBot.App.MiniApp.Data
 
                 UPDATE user_settings SET enable_ml = true, enable_smc = true, enable_of = true;
 
+                CREATE TABLE IF NOT EXISTS historical_candles (
+                    id        SERIAL PRIMARY KEY,
+                    asset     TEXT   NOT NULL,
+                    interval  TEXT   NOT NULL,
+                    open_time TEXT   NOT NULL,
+                    open      DOUBLE PRECISION NOT NULL,
+                    high      DOUBLE PRECISION NOT NULL,
+                    low       DOUBLE PRECISION NOT NULL,
+                    close     DOUBLE PRECISION NOT NULL,
+                    volume    DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    UNIQUE(asset, interval, open_time)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hist_candles_asset
+                    ON historical_candles(asset, interval, open_time);
+
                 ALTER TABLE allowed_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';
                 ALTER TABLE all_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';
             ");
