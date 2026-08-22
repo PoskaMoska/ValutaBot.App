@@ -316,24 +316,32 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             try
             {
                 _prediction = await MLPythonService.PredictAsync(_asset, _timeframe, _ohlcCandles, _isForex);
-                if (_prediction != null && _prediction.Direction != "NEUTRAL")
+                if (_prediction != null)
                 {
-                    _lgbmDirection = _prediction.Direction;
-                    _lgbmConfidence = (float)(_prediction.Confidence * _wfResult.WeightMultiplier);
-                    _lgbmConfidence = Math.Clamp(_lgbmConfidence, 0f, 1f);
+                    _lgbmModelVersion = string.IsNullOrEmpty(_prediction.ModelVersion) ? "unknown" : _prediction.ModelVersion;
+                    _lgbmAccuracy = _prediction.Accuracy;
 
-                    if (_lgbmConfidence < 0.51f)
+                    if (_prediction.Direction != "NEUTRAL")
                     {
-                        BotLogger.Info($"[ML Override] WalkForward suppressed ML confidence to {_lgbmConfidence:F2}. Reverting to pure Math.");
-                        _lgbmDirection = "NEUTRAL";
+                        _lgbmDirection = _prediction.Direction;
+                        _lgbmConfidence = (float)(_prediction.Confidence * _wfResult.WeightMultiplier);
+                        _lgbmConfidence = Math.Clamp(_lgbmConfidence, 0f, 1f);
+
+                        if (_lgbmConfidence < 0.51f)
+                        {
+                            BotLogger.Info($"[ML Override] WalkForward suppressed ML confidence to {_lgbmConfidence:F2}. Reverting to pure Math.");
+                            _lgbmDirection = "NEUTRAL";
+                        }
+                        else
+                        {
+                            BotLogger.Info($"[ML Override] ML confident ({_lgbmConfidence:F2}). Passing vector to Confluence Matrix.");
+                        }
                     }
                     else
                     {
-                        BotLogger.Info($"[ML Override] ML confident ({_lgbmConfidence:F2}). Passing vector to Confluence Matrix.");
+                        _lgbmDirection = "NEUTRAL";
+                        _lgbmConfidence = 0.5;
                     }
-
-                    _lgbmModelVersion = _prediction.ModelVersion;
-                    _lgbmAccuracy = _prediction.Accuracy;
 
                     // в”Ђв”Ђ ML Telemetry: Global Retraining в”Ђв”Ђ
                     if (!string.IsNullOrEmpty(_prediction.ModelVersion))
