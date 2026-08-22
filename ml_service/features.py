@@ -179,11 +179,14 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
         def get_hour(ts):
             if pd.isna(ts) or ts == 0: return 0.0
             if isinstance(ts, str):
-                try:
-                    dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    dt = pd.to_datetime(ts)
-                return dt.hour + dt.minute / 60.0
+                if ts.isdigit():
+                    ts = int(ts)
+                else:
+                    try:
+                        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        dt = pd.to_datetime(ts)
+                    return dt.hour + dt.minute / 60.0
                 
             # convert from milliseconds if necessary
             if ts > 1e11: ts = ts / 1000.0
