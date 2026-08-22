@@ -465,16 +465,22 @@ class ForexPredictor:
                                 f"[Train] Not enough real ticks for {self._key} (found {len(candles)}). "
                                 f"Using real 1m candles as proxy (no synthetic interpolation)."
                             )
-                            candles = self._fetch_twelvedata(5000)  # Real 1m data, no interpolation
+                            candles = _fetch_historical_candles(self.symbol, "1m", 5000)
+                            if len(candles) < 150 and is_forex_symbol(self.symbol):
+                                candles = self._fetch_twelvedata(5000)  # Real 1m data API fallback
                             if len(candles) > 0:
                                 log.info(f"[Train] Proxy-1m training for {self._key} on {len(candles)} real candles.")
                             else:
                                 log.error(f"[Train] Could not fetch real 1m data for {self._key}. Skipping.")
                     else:
                         # Priority 3: TwelveData API (forex only)
-                        limit = 5000
-                        candles = self._fetch_twelvedata(limit)
-                        log.info(f"[Train] API fallback: fetched {len(candles)} candles for {self._key}")
+                        if is_forex_symbol(self.symbol):
+                            limit = 5000
+                            candles = self._fetch_twelvedata(limit)
+                            log.info(f"[Train] API fallback: fetched {len(candles)} candles for {self._key}")
+                        else:
+                            log.error(f"[Train] No local data for {self._key} and OTC cannot use TwelveData fallback.")
+                            candles = []
 
 
             if len(candles) < 150:
