@@ -102,14 +102,21 @@ async def _weekly_global_retrain_loop():
                 continue
             for tf in _WEEKLY_INTERVALS:
                 predictor = _get_predictor(sym, tf)
-                age_h = (now - predictor._meta.trained_at) / 3600 if predictor._meta else 9999
+                
+                # FIX W-15: read predictor._meta safely under lock
+                with predictor._lock:
+                    meta = predictor._meta
+                
+                age_h = (now - meta.trained_at) / 3600 if meta else 9999
 
                 if age_h >= WEEKLY_RETRAIN_INTERVAL_H:
                     log.info(f"[WeeklyRetrain] Forcing retrain: {sym} ({tf}), age={age_h:.0f}h")
                     try:
-                        # Force retrain by clearing meta age
-                        predictor._meta = None
-                        predictor._train_model(candles=None)
+                        # FIX C-08: _meta = None was written without the lock — a concurrent
+                        # /predict or /feedback reading _meta.trained_at could crash with AttributeError.
+                        with predictor._lock:
+                            predictor._meta = None
+                        predictor.train(candles=None)
                         if predictor._meta:
                             results.append({
                                 "symbol": sym,
@@ -220,6 +227,7 @@ class PredictResponse(BaseModel):
     model_version: str
     accuracy: Optional[float] = None
     auc: Optional[float] = None
+    n_train: Optional[int] = None
 
 
 class TrainRequest(BaseModel):
@@ -291,10 +299,62 @@ def _fetch_local_sqlite_main(symbol: str, interval: str, limit: int) -> list:
         return []
 
 
+def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, limit: int = 200) -> list:
+    """
+    FIX #5: Читает свечи из SQLite строго ДО момента входа в сделку (entry_timestamp).
+    Это устраняет SGD Look-Ahead Bias: раньше брались свечи из _live_candles_cache,
+    которые могли быть уже перезаписаны новыми predict-запросами (момент выхода из сделки).
+    Теперь SGD обучается на состоянии рынка в момент принятия решения о входе.
+    """
+    import sqlite3 as _sqlite3
+    import pandas as _pd
+    db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
+    if not os.path.exists(db_path):
+        return _fetch_local_sqlite_main(symbol, interval, limit)
+    try:
+        # Парсим ISO timestamp и конвертируем в Unix seconds для сравнения с OpenTime
+        from datetime import datetime, timezone as _tz
+        entry_dt = datetime.fromisoformat(entry_timestamp.replace("Z", "+00:00"))
+        entry_unix = int(entry_dt.timestamp())
+
+        conn = _sqlite3.connect(db_path, timeout=10.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
+        norm = _normalize_interval(interval)
+        if cursor.fetchone():
+            df = _pd.read_sql_query(
+                "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
+                "FROM HistoricalCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
+                "ORDER BY OpenTime DESC LIMIT ?",
+                conn, params=(symbol, norm, entry_unix, limit)
+            )
+        else:
+            df = _pd.read_sql_query(
+                "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
+                "FROM SubminuteCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
+                "ORDER BY OpenTime DESC LIMIT ?",
+                conn, params=(symbol, interval, entry_unix, limit)
+            )
+        conn.close()
+
+        if df.empty:
+            # Fallback: если нет данных до entry (например, нет истории в БД) — берём последние
+            log.warning(f"[SGD] No candles before entry for {symbol}/{interval}. Fallback to recent.")
+            return _fetch_local_sqlite_main(symbol, interval, limit)
+
+        return df.iloc[::-1].to_dict(orient="records")
+    except Exception as e:
+        log.warning(f"[SGD] _fetch_candles_at_entry failed: {e}. Fallback to recent.")
+        return _fetch_local_sqlite_main(symbol, interval, limit)
+
+
 
 
 def _candles_to_dicts(items: List[CandleItem]) -> List[dict]:
-    return [{"open": c.open, "high": c.high, "low": c.low,
+    # FIX C-10: openTime was missing → features.py had no 'opentime' column →
+    # hour_sin/hour_cos were always 0.0 at inference (but real values during training).
+    # This caused a permanent input space shift between train and inference.
+    return [{"openTime": c.openTime, "open": c.open, "high": c.high, "low": c.low,
              "close": c.close, "volume": c.volume} for c in items]
 
 
@@ -367,6 +427,8 @@ def predict(req: PredictRequest):
         model_version=version,
         accuracy=round(meta.accuracy, 4) if meta else None,
         auc=round(meta.auc, 4) if meta else None,
+        n_train=meta.n_train if meta else None,
+
     )
 
 
@@ -450,20 +512,16 @@ def feedback(req: TrainFeedback):
         # Tier 2 (Local Tactician): instant SGD update — no heavy retrain
         norm_interval = _normalize_interval(req.timeframe)
         predictor = _get_predictor(req.asset, norm_interval)
-        
-        with _cache_lock:
-            cached_live_candles = _live_candles_cache.get((req.asset, norm_interval))
-            
-        recent_candles = []
-        if cached_live_candles:
-            recent_candles = _candles_to_dicts(cached_live_candles)
-        else:
-            recent_candles = _fetch_local_sqlite_main(req.asset, req.timeframe, 200)
+
+        # FIX #5: Берём свечи строго ДО момента входа (req.timestamp), а не из _live_candles_cache.
+        # Кэш перезаписывается при каждом /predict — к моменту /feedback там уже свечи
+        # момента выхода из сделки. SGD учился бы на будущем состоянии рынка.
+        recent_candles = _fetch_candles_at_entry(req.asset, norm_interval, req.timestamp, limit=200)
 
         if len(recent_candles) >= 60:
             ok = predictor.partial_fit_online(recent_candles, req.was_win, req.direction)
             if ok:
-                log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | win={req.was_win} | truthful_data={bool(cached_live_candles)}")
+                log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | win={req.was_win} | candles_at_entry={len(recent_candles)}")
             
         return {"status": "ok", "message": "Feedback saved. Local Tactician (SGD) updated instantly."}
 
