@@ -269,6 +269,29 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         {
             _orderFlowResult = new OrderFlowEngine.OrderFlowResult();
         }
+
+        // FIX Race Condition: MTF SMC выравнивание перенесено сюда из EvaluateTechnicalIndicatorsAsync.
+        // Ранее ValidateMtfSmcAlignment читал _smcResult из параллельного Task (Task.WhenAll),
+        // без гарантии порядка — _smcResult мог быть ещё не записан → гонка данных.
+        // Теперь выравнивание выполняется строго ПОСЛЕ записи _smcResult в этом же методе.
+        if (_higherResultData != null && _higherTf != null)
+        {
+            try
+            {
+                var higherOhlcForSmc = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset);
+                if (higherOhlcForSmc != null && _higherResultData.Value.prices.Length > 0)
+                {
+                    var htfSmcResult = SmcEngine.AnalyzeSmcStructure(_asset, _higherTf, higherOhlcForSmc, _higherResultData.Value.prices[^1]);
+                    var mtfValidation = SmcEngine.ValidateMtfSmcAlignment(_smcResult, htfSmcResult);
+                    _conflictPenalty *= mtfValidation.ConfluenceMultiplier;
+                    BotLogger.Info($"[MTF SMC Validation] Alignment: {mtfValidation.AlignmentStatus} | Multiplier={mtfValidation.ConfluenceMultiplier:F2}x");
+                }
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[MTF SMC] Failed to fetch higher TF OHLC for SMC alignment: {ex.Message}");
+            }
+        }
     }
 
     private async Task FetchMachineLearningAsync()
@@ -396,33 +419,32 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         if (_higherResultData != null)
         {
-            var higherOhlcKey = _higherTf != null ? (_symbol != null ? $"{_symbol}_{_fetcher.IntervalMap(_higherTf)}" : $"{_clean}_{_fetcher.IntervalMap(_higherTf)}") : null;
-            
             MiniAppController.OhlcCandle[]? higherOhlc = null;
             if (_higherTf != null)
             {
                 try
                 {
                     higherOhlc = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset);
+                    if (higherOhlc == null || higherOhlc.Length == 0)
+                    {
+                        BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_higherTf}) — using synthetic OHLC from higher prices.");
+                        higherOhlc = _higherResultData.Value.prices.Select(p => new MiniAppController.OhlcCandle(p, p, p, p, 0)).ToArray();
+                    }
                 }
                 catch (Exception ex)
                 {
                     BotLogger.Warn($"[Analysis] Failed to fetch higher TF OHLC candles: {ex.Message}");
+                    higherOhlc = _higherResultData.Value.prices.Select(p => new MiniAppController.OhlcCandle(p, p, p, p, 0)).ToArray();
                 }
             }
-            
-            if (_higherResultData.HasValue && higherOhlc != null)
-            {
-                var htfSmcResult = SmcEngine.AnalyzeSmcStructure(_asset, _higherTf ?? "", higherOhlc, _higherResultData.Value.prices.Length > 0 ? _higherResultData.Value.prices[^1] : 0.0);
-                var mtfValidation = SmcEngine.ValidateMtfSmcAlignment(_smcResult, htfSmcResult);
-                _conflictPenalty *= mtfValidation.ConfluenceMultiplier;
-                BotLogger.Info($"[MTF SMC Validation] Alignment: {mtfValidation.AlignmentStatus} | Multiplier={mtfValidation.ConfluenceMultiplier:F2}x");
-            }
+
+            // NOTE: MTF SMC ValidateMtfSmcAlignment был перенесён в AnalyzeCoreMechanicsAsync
+            // чтобы устранить гонку данных по _smcResult (Task.WhenAll race condition fix).
 
             var (hAdx, hPdi, hMdi) = higherOhlc != null ? _mathEngine.ComputeTrueAdx(_asset, _higherTf ?? "", higherOhlc) : (20.0, 0.0, 0.0);
             double hAtr = higherOhlc != null ? _mathEngine.ComputeAtr(_asset, _higherTf ?? "", higherOhlc) : 0;
             var higherResult = _marketAnalyzer.ScoreTimeframe(_asset, _higherTf ?? "", _higherResultData.Value.prices, _higherResultData.Value.volumes ?? Array.Empty<double>(), candles: higherOhlc, adxOverride: hAdx, atrOverride: hAtr, isForex: _isForex);
-            
+
             _conflictPenalty *= MfConflictPenalty(_mainResult, higherResult);
         }
     }
