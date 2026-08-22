@@ -75,7 +75,7 @@ def crawl_binance(target_asset, binance_symbol, interval="1m", target_candles=10
     cursor.execute("SELECT MIN(OpenTime) FROM HistoricalCandles WHERE Asset = ? AND Interval = ?", (target_asset, interval))
     oldest_ts = cursor.fetchone()[0]
     
-    end_time = oldest_ts * 1000 - 1 if oldest_ts else None # Binance expects ms
+    end_time = int(oldest_ts) * 1000 - 1 if oldest_ts else None # Binance expects ms
 
     total_inserted = 0
     batches_needed = (need // 1000) + 1
