@@ -34,6 +34,12 @@ from features import build_features
 
 log = logging.getLogger("predictor")
 
+# FIX W-27: previously model.py used "data/models/ValutaTicks.db" and main.py used
+# "data/ValutaTicks.db" — ticks were written to one path and read from another,
+# so _fetch_candles_at_entry / _fetch_local_sqlite in model.py always returned empty results.
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TICKS_DB_PATH = os.path.join(_BASE_DIR, "data", "ValutaTicks.db")
+
 MODEL_DIR = Path(os.getenv("MODEL_DIR", str(Path(__file__).parent / "data" / "models")))
 SGD_MODEL_DIR = MODEL_DIR / "sgd"
 RETRAIN_INTERVAL_H = int(os.getenv("RETRAIN_INTERVAL_H", "168"))  # Weekly global retrain only
@@ -54,7 +60,9 @@ TD_INTERVAL_MAP = {
 }
 
 def is_forex_symbol(symbol: str) -> bool:
-    sym = symbol.upper()
+    # FIX W-23: "EURUSD_OTC" has length 10 → old check (len==6) returned False →
+    # OTC pairs were treated as crypto and always returned NEUTRAL prediction.
+    sym = symbol.upper().replace("_OTC", "")  # strip OTC suffix before length check
     if sym in ["GOLD", "SILVER", "BRENT", "OIL", "XAUUSD", "XAGUSD"]:
         return True
     # Most Forex assets are 6 letters (EURUSD, USDJPY) and do not end with USDT
@@ -141,7 +149,7 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
         print(f"  [WARN] PostgreSQL subminute fetch failed: {e}")
 
     # Fallback to SQLite
-    db_path = os.path.join(os.path.dirname(__file__), "data", "models", "ValutaTicks.db")
+    db_path = TICKS_DB_PATH
     if not os.path.exists(db_path):
         return []
     try:
@@ -195,7 +203,7 @@ def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Di
             log.warning(f"[HistoricalCandles] PostgreSQL fetch failed: {e}")
 
     # Priority 2: SQLite fallback (local dev)
-    db_path = os.path.join(os.path.dirname(__file__), "data", "models", "ValutaTicks.db")
+    db_path = TICKS_DB_PATH
     if not os.path.exists(db_path):
         return []
     try:
@@ -221,7 +229,7 @@ def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Di
 
 
 def _fetch_rl_feedback(symbol: str, interval: str) -> List[Dict]:
-    db_path = os.path.join(os.path.dirname(__file__), "data", "models", "ValutaTicks.db")
+    db_path = TICKS_DB_PATH
     if not os.path.exists(db_path):
         return []
     try:
@@ -265,8 +273,16 @@ LGBM_PARAMS = {
     "bagging_freq": 5,
     "lambda_l1": 0.5,
     "lambda_l2": 1.0,
+    # FIX: Prevent directional bias from class imbalance.
+    # When training data covers a trending period (e.g. 70% of candles go DOWN),
+    # without this the model learns to always predict PUT and gets high accuracy
+    # without any real pattern recognition. is_unbalance forces it to learn
+    # patterns from BOTH directions equally.
+    "is_unbalance": True,
+    "min_split_gain": 0.01,
     "verbose": -1,
 }
+
 
 
 class ModelMeta:
@@ -412,9 +428,16 @@ class ForexPredictor:
                 online_model = self._online_model
                 sgd_count = self._sgd_update_count
 
-            # Persist SGD + update count to disk (Bug3 fix: save dict instead of raw model)
-            sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
-            joblib.dump({"model": online_model, "count": sgd_count}, sgd_path)
+                # FIX Race Condition: сохранение ВНУТРИ лока через атомарную запись.
+                # Раньше joblib.dump был вне with-блока → параллельные /feedback
+                # могли одновременно писать в один .pkl → Corrupted Pickle.
+                # Паттерн: сначала во временный файл, затем os.replace (атомарно).
+                sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
+                SGD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+                tmp_path = sgd_path.with_suffix(".tmp")
+                joblib.dump({"model": online_model, "count": sgd_count}, tmp_path)
+                os.replace(tmp_path, sgd_path)
+
             log.info(f"[SGD] partial_fit done for {self._key} | dir={direction} win={was_win} | label={y[0]} | total_updates={sgd_count}")
             return True
 
@@ -506,6 +529,12 @@ class ForexPredictor:
             X = feats.values.astype(np.float32)
             y = target_aligned.copy()  # copy so RL can modify labels safely
 
+            # Log class balance to help diagnose trend bias in Railway logs
+            if len(y) > 0:
+                buy_pct = (np.sum(y) / len(y)) * 100.0
+                put_pct = 100.0 - buy_pct
+                log.info(f"[{self._key}] Training on {len(y)} candles. Class balance: BUY {buy_pct:.1f}% | PUT {put_pct:.1f}%")
+
             # --- Bug1 fix: Online RL Integration — match by timestamp (not price) ---
             sample_weights = np.ones(len(y), dtype=np.float32)
             rl_feedbacks = _fetch_rl_feedback(self.symbol, self.interval)
@@ -548,8 +577,13 @@ class ForexPredictor:
                             if diff < best_diff:
                                 best_diff, best_fb = diff, fb
 
-                        # Match within ±5 minute window
-                        if best_fb and best_diff < 300:
+                        # FIX W-12: Match window was hardcoded to ±300s (5 mins).
+                        # For s5 TF, this matched one trade to 60 candles (massive noise).
+                        # Now dynamic: ±1.5 candles
+                        tf_seconds = {"s5": 5, "s15": 15, "s30": 30, "1m": 60, "5m": 300, "15m": 900}.get(self.interval, 60)
+                        max_diff = max(30, tf_seconds * 1.5)
+                        
+                        if best_fb and best_diff < max_diff:
                             match_count += 1
                             sample_weights[i] = 5.0  # x5 weight (reduced from x10 to avoid over-correction)
                             win, dir_ = best_fb["win"], best_fb["dir"]
@@ -576,7 +610,8 @@ class ForexPredictor:
                 m.fit(
                     X_tr, y_tr,
                     sample_weight=sample_weights[train_idx],
-                    eval_X=X_val, eval_y=y_val,
+                    eval_set=[(X_val, y_val)],
+                    eval_sample_weight=[sample_weights[val_idx]],
                     callbacks=[lgb.early_stopping(50, verbose=False),
                                lgb.log_evaluation(period=-1)]
                 )
@@ -658,7 +693,13 @@ class ForexPredictor:
         return MODEL_DIR / f"{self._key}.pkl"
 
     def _save(self, model, meta: ModelMeta):
-        joblib.dump({"model": model, "meta": meta}, self._model_path())
+        # FIX C-09: write atomically via tmp + os.replace, same pattern as SGD.
+        # Old code wrote directly to the target file — a crash during joblib.dump
+        # would leave a corrupted pkl that permanently breaks model loading.
+        p = self._model_path()
+        tmp = p.with_suffix(".tmp")
+        joblib.dump({"model": model, "meta": meta}, tmp)
+        os.replace(tmp, p)
 
     def _try_load(self):
         # Load LightGBM (Tier 1)
@@ -671,7 +712,13 @@ class ForexPredictor:
                     self._meta = data["meta"]
                 log.info(f"[Load] Loaded LightGBM from {p}")
             except Exception as e:
-                log.warning(f"[Load] Failed to load LightGBM {p}: {e}")
+                # FIX W-10: corrupted pkl was silently ignored on every restart.
+                # Delete it so next retrain produces a clean file.
+                log.warning(f"[Load] Failed to load LightGBM {p}: {e}. Deleting corrupt file.")
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         # Load SGD (Tier 2) — Bug3 fix: restore update count from dict format
         sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
