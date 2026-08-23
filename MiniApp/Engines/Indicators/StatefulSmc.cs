@@ -74,10 +74,19 @@ public class StatefulSmc
             // Live mitigation on current open candle
             MitigateZones(candles[^1]);
 
-            // Очистка устаревших зон: FVG и OB старше 50 свечей удаляются.
-            // Без этого: списки растут бесконечно, GetNearestFvg/Ob замедляются.
+            // W-05 FIX: Instead of hardcoded -50 minutes (which breaks higher TFs),
+            // estimate timeframe from the last two candles and prune 50 candles back.
             if (_lastProcessedTime != default)
-                PruneStaleZones(_lastProcessedTime.AddMinutes(-50));
+            {
+                TimeSpan tf = candles.Length > 1 
+                    ? candles[^1].Timestamp - candles[^2].Timestamp 
+                    : TimeSpan.FromMinutes(1);
+                
+                // Fallback to sane limits if timestamps are exactly the same
+                if (tf.TotalSeconds < 1) tf = TimeSpan.FromMinutes(1);
+                
+                PruneStaleZones(_lastProcessedTime.Subtract(tf * 50));
+            }
         }
     }
 

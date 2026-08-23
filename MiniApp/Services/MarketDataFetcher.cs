@@ -90,9 +90,20 @@ public class MarketDataFetcher
                 {
                     var resultFast = new MiniAppController.OhlcCandle[limit];
                     int startIdx = count - limit;
+                    
+                    // FIX W-01: Parse interval properly so timestamps match the timeframe
+                    TimeSpan step = TimeSpan.FromMinutes(1);
+                    if (interval == "5m") step = TimeSpan.FromMinutes(5);
+                    else if (interval == "15m") step = TimeSpan.FromMinutes(15);
+                    else if (interval == "1h") step = TimeSpan.FromHours(1);
+                    else if (interval == "4h") step = TimeSpan.FromHours(4);
+                    else if (interval == "1d") step = TimeSpan.FromDays(1);
+                    else if (interval.StartsWith("s")) step = TimeSpan.FromSeconds(int.Parse(interval[1..]));
+                    
                     for (int i = 0; i < limit; i++)
                     {
-                        resultFast[i] = new MiniAppController.OhlcCandle(wsOpens[startIdx + i], wsHighs[startIdx + i], wsLows[startIdx + i], wsPrices[startIdx + i], wsVolumes[startIdx + i], DateTime.UtcNow.AddSeconds(i - limit));
+                        var ts = DateTime.UtcNow.Subtract(step * (limit - i - 1));
+                        resultFast[i] = new MiniAppController.OhlcCandle(wsOpens[startIdx + i], wsHighs[startIdx + i], wsLows[startIdx + i], wsPrices[startIdx + i], wsVolumes[startIdx + i], ts);
                     }
                     return resultFast;
                 }
@@ -115,8 +126,13 @@ public class MarketDataFetcher
     {
         string interval = IntervalMap(rawInterval);
         
-        var dayOfWeek = DateTime.UtcNow.DayOfWeek;
-        bool isWeekend = dayOfWeek == DayOfWeek.Saturday || dayOfWeek == DayOfWeek.Sunday;
+        var utcNow = DateTime.UtcNow;
+        var dayOfWeek = utcNow.DayOfWeek;
+        
+        // FIX W-02: Forex market is closed from Friday 22:00 UTC to Sunday 22:00 UTC
+        bool isWeekend = (dayOfWeek == DayOfWeek.Friday && utcNow.Hour >= 22) ||
+                         (dayOfWeek == DayOfWeek.Saturday) ||
+                         (dayOfWeek == DayOfWeek.Sunday && utcNow.Hour < 22);
 
         // WEEKDAY POLICY: Use TwelveData (real Forex) first
         if (!isWeekend && originalAsset != null)

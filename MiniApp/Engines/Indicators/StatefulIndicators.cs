@@ -124,10 +124,11 @@ public sealed class StatefulHma
 
     public StatefulHma(int period = 9)
     {
-        _period      = period;
-        _halfPeriod  = period / 2;
-        _sqrtPeriod  = (int)Math.Sqrt(period);
-        _priceHistory = new double[period];
+        // FIX W-03: HMA math requires at least period >= 4 to produce meaningful half-period/sqrt-period.
+        _period      = Math.Max(4, period);
+        _halfPeriod  = _period / 2;
+        _sqrtPeriod  = (int)Math.Sqrt(_period);
+        _priceHistory = new double[_period];
         _diffHistory  = new double[_sqrtPeriod];
     }
 
@@ -336,8 +337,13 @@ public sealed class StatefulTrueAdx
             _adx = (_adx * (_period - 1) + dx) / _period;
         }
 
+        // FIX C-04: previously LastAdx was assigned AFTER _count++.
+        // At the exact tick where _count just became period*2+1, the check
+        // `_count <= _period*2` evaluated false → first real ADX discarded (returned 20.0).
+        // Fix: lock in isWarm BEFORE the increment.
+        bool isWarm = _count >= _period * 2;
         _count++;
-        LastAdx = _count <= _period * 2 ? 20.0 : _adx;
+        LastAdx = isWarm ? _adx : 20.0;
         return LastAdx;
     }
 

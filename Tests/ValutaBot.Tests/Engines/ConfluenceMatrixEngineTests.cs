@@ -12,7 +12,7 @@ namespace ValutaBot.Tests.Engines
 
         public ConfluenceMatrixEngineTests()
         {
-            _engine = new ConfluenceMatrixEngine(null, null, new AutoCalibrationEngine());
+            _engine = new ConfluenceMatrixEngine(null, null, null);
         }
 
         [Fact]

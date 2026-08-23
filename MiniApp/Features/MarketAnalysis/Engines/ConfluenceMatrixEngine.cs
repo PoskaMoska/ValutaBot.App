@@ -205,38 +205,36 @@ public class ConfluenceMatrixEngine(
         // 2. Velocity / Continuous State (Leading вЂ” РјРёРєСЂРѕ-СѓСЃРєРѕСЂРµРЅРёРµ С†РµРЅС‹, РїРѕРІС‹С€РµРЅ РґРѕ 2.0)
         double stateWeight  = await SignalTracker.GetSignalWeightAsync("VelocityState", 2.0);
         totalScore         += stateSignal.MomentumContribution * stateWeight;
-        totalConfidence    += 60.0 * stateWeight;
+        totalConfidence    += 55.0 * stateWeight;
         totalWeight        += stateWeight;
 
-        // 3. Smart Money Concepts (SMC) - Adaptive Regime Switching (Level 3 Fix)
-        double smcTrendScore = 0.0;
+        // 3. SMC (Smart Money Concepts) — adaptive weights based on ADX regime
+        double smcTrendScore     = 0.0;
         double smcReversionScore = 0.0;
 
-        // Reversion / Range boundaries
+        if (smcSignal.BosDirection == "BULLISH")  smcTrendScore     += 2.0;
+        if (smcSignal.BosDirection == "BEARISH")  smcTrendScore     -= 2.0;
+        // FIX: "NONE" is not an empty string — guard against it explicitly
+        if (!string.IsNullOrEmpty(smcSignal.OrderBlockType) && smcSignal.OrderBlockType != "NONE")
+            smcTrendScore += smcSignal.OrderBlockType.Contains("BULL") ? 1.0 : -1.0;
+        if (!string.IsNullOrEmpty(smcSignal.FvgType) && smcSignal.FvgType != "NONE")
+            smcTrendScore += smcSignal.FvgType.Contains("BULL") ? 1.0 : -1.0;
         if (smcSignal.SweepDirection == "BULLISH_SWEEP") smcReversionScore += 2.0;
-        else if (smcSignal.SweepDirection == "BEARISH_SWEEP") smcReversionScore -= 2.0;
+        if (smcSignal.SweepDirection == "BEARISH_SWEEP") smcReversionScore -= 2.0;
 
-        // Trend / Breakouts
-        if (smcSignal.BosDirection == "BULLISH_BOS") smcTrendScore += 2.0;
-        else if (smcSignal.BosDirection == "BEARISH_BOS") smcTrendScore -= 2.0;
-        if (smcSignal.OrderBlockType == "BULLISH_OB") smcTrendScore += 1.0;
-        else if (smcSignal.OrderBlockType == "BEARISH_OB") smcTrendScore -= 1.0;
-        if (smcSignal.FvgType == "BULLISH_FVG") smcTrendScore += 1.0;
-        else if (smcSignal.FvgType == "BEARISH_FVG") smcTrendScore -= 1.0;
-
-        double trendWeight = 1.0;
+        double trendWeight     = 1.0;
         double reversionWeight = 1.0;
 
         if (taSignal.Adx < 20.0)
         {
             // Choppy / Flat Market: Nerf BOS, Boost Sweeps
-            trendWeight = 0.0;
+            trendWeight     = 0.0;
             reversionWeight = 2.0;
         }
         else if (taSignal.Adx > 25.0)
         {
             // Trending Market: Boost BOS, Nerf Sweeps
-            trendWeight = 1.5;
+            trendWeight     = 1.5;
             reversionWeight = 0.5;
         }
 
@@ -244,10 +242,14 @@ public class ConfluenceMatrixEngine(
 
         if (Math.Abs(finalSmcScore) > 0.1)
         {
-            double smcWeight  = await SignalTracker.GetSignalWeightAsync("SMC", 1.5);
-            totalScore       += (finalSmcScore / 6.0) * smcWeight;
-            totalConfidence  += 60.0 * smcWeight;
-            totalWeight      += smcWeight;
+            // FIX W-20: dynamic normalization — max score depends on active weights
+            double maxPossibleSmc = (trendWeight * 4.0) + (reversionWeight * 2.0);
+            double normSmcScore   = maxPossibleSmc > 0 ? finalSmcScore / maxPossibleSmc : 0;
+
+            double smcWeight   = await SignalTracker.GetSignalWeightAsync("SMC", 1.5);
+            totalScore        += normSmcScore * smcWeight;
+            totalConfidence   += 60.0 * smcWeight;
+            totalWeight       += smcWeight;
         }
 
         // Normalize internal base scores
@@ -261,24 +263,38 @@ public class ConfluenceMatrixEngine(
         totalScore *= conflictPenalty;
 
         // 4. ML / Mathematical Consensus Matrix Layer (META-LABELING OVERRIDE)
-        double scoreMath = Math.Clamp(totalScore, -2.5, 2.5) / 2.5; // Normalized to [-1.0, 1.0]
-        
-        bool isMlActive = (mlSignal.Direction == "BUY" || mlSignal.Direction == "PUT");
-        double finalConfidenceScore = scoreMath;
-        string candidateDir = "NEUTRAL";
+        // FIX C-13: totalScore is already normalized to [-1, 1] after /totalWeight.
+        // Old code was Clamp(-2.5, 2.5)/2.5 — Clamp never triggered (dead code),
+        // and dividing by 2.5 made math weight effectively ~23% instead of 40%.
+        double scoreMath = Math.Clamp(totalScore, -1.0, 1.0);
+
+        bool   isMlActive           = (mlSignal.Direction == "BUY" || mlSignal.Direction == "PUT");
+        double finalConfidenceScore  = scoreMath;
+        string candidateDir          = "NEUTRAL";
 
         if (isMlActive)
         {
-            // True Ensemble: Blend Machine Learning (60% weight) with Pure Math (40% weight)
+            // True Ensemble: both scoreMath and mlScore are now in [-1, 1]
+            // so the declared mlWeight/mathWeight ratio is actually honoured.
             double normLgbm = Math.Max(0, (mlSignal.Confidence - 0.5) * 2.0);
-            double mlScore = mlSignal.Direction == "BUY" ? normLgbm : -normLgbm;
-            
-            double mlWeight = options?.Value.MlWeight ?? 0.5;
+            double mlScore  = mlSignal.Direction == "BUY" ? normLgbm : -normLgbm;
+
+            double mlWeight   = options?.Value.MlWeight   ?? 0.5;
             double mathWeight = options?.Value.MathWeight ?? 0.5;
+
+            // FIX C-12: if ML and Math clearly contradict, reduce ML dominance
+            if (Math.Sign(mlScore) != Math.Sign(scoreMath) && Math.Abs(scoreMath) > 0.3)
+            {
+                mlWeight   *= 0.6;
+                mathWeight *= 1.4;
+            }
+
             finalConfidenceScore = (mlScore * mlWeight) + (scoreMath * mathWeight);
         }
-        
-        candidateDir = finalConfidenceScore > 0.0001 ? "BUY" : finalConfidenceScore < -0.0001 ? "PUT" : "NEUTRAL";
+
+        // FIX W-21: wider neutral dead-zone (was ±0.0001 → ±0.05)
+        // ±0.0001 treated almost any non-zero value as a signal, generating noise.
+        candidateDir = finalConfidenceScore > 0.05 ? "BUY" : finalConfidenceScore < -0.05 ? "PUT" : "NEUTRAL";
 
         // 5. Final Decision
         double absWeightedScore = Math.Abs(finalConfidenceScore);
@@ -286,13 +302,11 @@ public class ConfluenceMatrixEngine(
             ? Math.Clamp(50 + (int)Math.Round(absWeightedScore * 40), 50, 91)
             : Math.Clamp(50 + (int)Math.Round(absWeightedScore * 45), 50, 95);
 
-        // MTF Golden Boost вЂ” only apply when 4D dominant direction MATCHES candidateDir.
-        // FIX: Previously boosted unconditionally, inflating probability even when MTF
-        //      was pointing in the OPPOSITE direction to the final candidate signal.
+        // MTF Golden Boost — only when 4D dominant direction EXPLICITLY matches candidateDir.
+        // FIX W-16: removed || "NEUTRAL" condition — neutral MTF must not boost confidence.
         if (candidateDir != "NEUTRAL"
             && mtfResult.ProbabilityBoost > 0
-            && (mtfResult.DominantDirection == candidateDir
-                || mtfResult.DominantDirection == "NEUTRAL"))
+            && mtfResult.DominantDirection == candidateDir)
         {
             probability = Math.Clamp(probability + mtfResult.ProbabilityBoost, 55, 95);
         }
@@ -312,7 +326,7 @@ public class ConfluenceMatrixEngine(
 
         string lgbmText = !string.IsNullOrEmpty(mlSignal.Direction) && mlSignal.Direction != "NEUTRAL"
             ? $"\u2022 \u26a1 Нейросеть (LightGBM): {(mlSignal.Direction == "BUY" ? "ВВЕРХ \u2b06" : "ВНИЗ \u2b07")} ({Math.Round(mlSignal.Confidence * 100)}% уверенности){modelAccText}"
-            : (mlSignal.ModelVersion == "disabled" 
+            : (mlSignal.ModelVersion == "disabled"
                 ? $"\u2022 \u26a1 Нейросеть (LightGBM): Отключена пользователем"
                 : $"\u2022 \u26a1 Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
 

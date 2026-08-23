@@ -50,10 +50,13 @@ public class MonteCarloEngine : IMonteCarloEngine
         double prob = Math.Clamp(winProbability, 0.35, 0.95);
         bool isBuy = direction.Equals("BUY", StringComparison.OrdinalIgnoreCase);
 
-        // Normalize volatility per second
-        double volPerSec = (atr / currentPrice) / Math.Sqrt(60.0);
+        // FIX W-19: old code always divided by sqrt(60), as if every candle were 1 minute.
+        // For a 5m ATR the correct divisor is sqrt(300); for s3 it's sqrt(3).
+        // timeInSeconds already carries the actual TF duration — use it to derive correct vol.
+        double secondsPerCandle = Math.Max(1.0, timeInSeconds);
+        double volPerSec   = (atr / currentPrice) / Math.Sqrt(secondsPerCandle);
         double totalTimeStep = Math.Max(10, timeInSeconds);
-        double totalVol = volPerSec * Math.Sqrt(totalTimeStep);
+        double totalVol    = volPerSec * Math.Sqrt(totalTimeStep);
 
         // Ito's drift correction for Geometric Brownian Motion
         double itoDrift = -0.5 * totalVol * totalVol;

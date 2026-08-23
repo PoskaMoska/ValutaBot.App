@@ -54,26 +54,28 @@ internal sealed class IndicatorCache
     // Maintain last tick for OrderFlow cache validation
     private static readonly ConcurrentDictionary<string, long> _orderFlowLastTicks = new();
 
+    // FIX C-03: three non-atomic ConcurrentDictionary operations had no single lock →
+    // a concurrent request could see the reset state before GetOrAdd reinserts the new object.
+    private static readonly object _orderFlowLock = new();
+
     public static Indicators.StatefulOrderFlow GetOrderFlow(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles)
     {
         if (_orderFlowCache.Count > 1000) PruneOrderFlowCache();
         string key = $"{asset}_{timeframe}";
-        
-        long lastTick = _orderFlowLastTicks.GetValueOrDefault(key, 0);
-        int unseen = CountUnseen(candles, lastTick);
-        
-        if (unseen > 50 || IsTimestampRewind(candles, lastTick))
-        {
-            // Reset the cache
-            _orderFlowCache[key] = new Indicators.StatefulOrderFlow();
-        }
-        
-        if (candles.Length > 0)
-        {
-            _orderFlowLastTicks[key] = candles[^1].Timestamp.Ticks;
-        }
 
-        return _orderFlowCache.GetOrAdd(key, _ => new Indicators.StatefulOrderFlow());
+        lock (_orderFlowLock)
+        {
+            long lastTick = _orderFlowLastTicks.GetValueOrDefault(key, 0);
+            int unseen    = CountUnseen(candles, lastTick);
+
+            if (unseen > 50 || IsTimestampRewind(candles, lastTick))
+                _orderFlowCache[key] = new Indicators.StatefulOrderFlow();
+
+            if (candles.Length > 0)
+                _orderFlowLastTicks[key] = candles[^1].Timestamp.Ticks;
+
+            return _orderFlowCache.GetOrAdd(key, _ => new Indicators.StatefulOrderFlow());
+        }
     }
 
     // ── RSI ──────────────────────────────────────────────────────────────────
@@ -266,7 +268,9 @@ internal sealed class IndicatorCache
         lock (s)
         {
             int unseen = CountUnseen(candles, s.SmcLastTick);
-            if (s.Smc is null || unseen > 500 || IsTimestampRewind(candles, s.SmcLastTick))
+            // W-04 FIX: Reset threshold was 500, allowing stale FVG/OB zones to linger for hours
+            // if bot was paused. Changed to 50 to match technical indicators.
+            if (s.Smc is null || unseen > 50 || IsTimestampRewind(candles, s.SmcLastTick))
             {
                 s.Smc = new StatefulSmc();
                 s.Smc.Update(candles, currentPrice);

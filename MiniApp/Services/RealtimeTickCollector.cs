@@ -50,14 +50,23 @@ namespace ValutaBot.MiniApp
         {
             DateTime now = DateTime.UtcNow;
             
+            // W-24 FIX: async void lambdas in Timer crash the process on exception. Wrapped in safe task runner.
+            Action<ConcurrentDictionary<string, CandleAccumulator>, string> safeFlush = (dict, interval) =>
+            {
+                _ = Task.Run(async () => {
+                    try { await FlushAsync(dict, interval); }
+                    catch (Exception ex) { Console.WriteLine($"[TickCollector] Flush error {interval}: {ex.Message}"); }
+                });
+            };
+
             int msToNext5s = 5000 - (now.Millisecond + (now.Second % 5) * 1000);
-            _s5Timer = new Timer(async _ => await FlushAsync(_s5, "s5"), null, msToNext5s, 5000);
+            _s5Timer = new Timer(_ => safeFlush(_s5, "s5"), null, msToNext5s, 5000);
             
             int msToNext15s = 15000 - (now.Millisecond + (now.Second % 15) * 1000);
-            _s15Timer = new Timer(async _ => await FlushAsync(_s15, "s15"), null, msToNext15s, 15000);
+            _s15Timer = new Timer(_ => safeFlush(_s15, "s15"), null, msToNext15s, 15000);
             
             int msToNext30s = 30000 - (now.Millisecond + (now.Second % 30) * 1000);
-            _s30Timer = new Timer(async _ => await FlushAsync(_s30, "s30"), null, msToNext30s, 30000);
+            _s30Timer = new Timer(_ => safeFlush(_s30, "s30"), null, msToNext30s, 30000);
             
             _pruneTimer = new Timer(async _ => await TickRepository.PruneOldCandlesAsync(14), null, TimeSpan.FromMinutes(1), TimeSpan.FromHours(12));
             BotLogger.Info("[TickCollector] Initialized real-time subminute candle accumulation.");
@@ -65,9 +74,12 @@ namespace ValutaBot.MiniApp
 
         public static void OnPriceUpdate(string asset, double price)
         {
-            string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "");
-            if (cleanAsset.Contains("OTC")) return;
-            
+            // FIX W-25: OTC ticks were silently dropped here, so no subminute candles were built
+            // for EURUSD_OTC, GBPUSD_OTC etc. → SGD /feedback for OTC pairs always had empty candles.
+            // Fix: strip _OTC suffix so ticks are accumulated under the base symbol key (EURUSD etc.)
+            // which aligns with the model key used in training and feedback.
+            string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+
             UpdateAccumulator(_s5, cleanAsset, price);
             UpdateAccumulator(_s15, cleanAsset, price);
             UpdateAccumulator(_s30, cleanAsset, price);

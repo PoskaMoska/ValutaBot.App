@@ -129,11 +129,13 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             {
                 // Rolling CVD: накопленное давление покупателей/продавцов за 5 свечей вместо 1 тика
                 double rollingCvd = 0;
-                int cvdLookback = Math.Min(5, prices.Length - 1);
+                // FIX C-05: cvdLookback must also be capped by volumes.Length to avoid index confusion.
+                // Old: `i <= volumes.Length` → at i==volumes.Length, volumes[^i]=volumes[0] (oldest, wrong).
+                int cvdLookback = Math.Min(5, Math.Min(prices.Length - 1, volumes.Length - 1));
                 for (int i = 1; i <= cvdLookback; i++)
                 {
                     double pc = prices[^i] - prices[^(i + 1)];
-                    double v  = i <= volumes.Length ? volumes[^i] : 0;
+                    double v  = volumes[^i]; // safe: cvdLookback guarantees i < volumes.Length
                     rollingCvd += pc >= 0 ? v : -v;
                 }
 

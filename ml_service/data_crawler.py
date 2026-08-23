@@ -299,8 +299,13 @@ def crawl(symbol: str, interval: str, target_candles: int):
 
         oldest_in_batch = values[-1]["datetime"]
         try:
-            dt       = datetime.strptime(oldest_in_batch, "%Y-%m-%d %H:%M:%S")
-            end_date = (dt - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+            dt = datetime.strptime(oldest_in_batch, "%Y-%m-%d %H:%M:%S")
+            # FIX W-13: timedelta(minutes=1) was hardcoded for ALL timeframes.
+            # For 5m TF this left a 4-minute gap between batches; for 15m a 14-minute gap.
+            # Derive step from the actual interval being crawled (passed via td_interval).
+            _tf_minutes = {"1min": 1, "5min": 5, "15min": 15, "30min": 30, "1h": 60, "4h": 240, "1day": 1440}
+            step_min = _tf_minutes.get(td_interval, 1)
+            end_date = (dt - timedelta(minutes=step_min)).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             break
 

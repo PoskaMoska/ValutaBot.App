@@ -150,7 +150,10 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
     # ── Volume & Order Flow & SMC ──
     vol_ma = _volume_ma(v, 20)
     feats['vol_ratio']     = v / (vol_ma + 1e-10)
-    feats['vol_ma']        = vol_ma / (vol_ma.mean() + 1e-10)
+    # FIX: была Look-Ahead Bias — vol_ma.mean() считал глобальное среднее по всему датасету,
+    # включая будущие свечи. Теперь нормализация идёт по rolling среднему (только прошлое).
+    rolling_vol_mean = pd.Series(vol_ma).rolling(20, min_periods=1).mean().values
+    feats['vol_ma']        = vol_ma / (rolling_vol_mean + 1e-10)
     
     buy_vol, sell_vol, delta_ratio, block_trade = _order_flow_features(o, h, lo, c, v, vol_ma)
     feats['of_buy_vol_norm'] = buy_vol / (vol_ma + 1e-10)

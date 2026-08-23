@@ -48,12 +48,22 @@ def fetch_binance_klines(symbol, interval, limit=1000, end_time=None):
     if end_time:
         params["endTime"] = end_time
 
-    response = requests.get(url, params=params, timeout=10.0)
-    if response.status_code != 200:
-        print(f"  [ERR] Binance error: {response.text}")
+    # FIX W-09: no backoff on 429 — a single rate-limit killed the whole crawl.
+    # Added exponential backoff: up to 3 retries with 5s → 10s → 20s waits.
+    for attempt in range(3):
+        response = requests.get(url, params=params, timeout=10.0)
+        if response.status_code == 200:
+            return response.json()
+        if response.status_code == 429:
+            wait = 5 * (2 ** attempt)
+            print(f"  [WARN] 429 rate-limit from Binance (attempt {attempt+1}/3). Waiting {wait}s...")
+            time.sleep(wait)
+            continue
+        print(f"  [ERR] Binance error {response.status_code}: {response.text}")
         return []
-    
-    return response.json()
+
+    print(f"  [ERR] Binance 429 after 3 retries. Giving up on this batch.")
+    return []
 
 def crawl_binance(target_asset, binance_symbol, interval="1m", target_candles=100000):
     conn = sq_connect()
@@ -104,8 +114,12 @@ def crawl_binance(target_asset, binance_symbol, interval="1m", target_candles=10
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', rows)
             conn.commit()
-            total_inserted += len(rows)
-            print(f" Inserted: {len(rows)} | Total new: {total_inserted}")
+            # FIX C-11: len(rows) counted ALL rows including silent INSERT OR IGNORE duplicates.
+            # This made total_inserted reach the target too early, stopping the crawler
+            # before actually downloading enough unique candles.
+            actual_new = cursor.rowcount  # only counts rows actually inserted
+            total_inserted += actual_new
+            print(f" Inserted: {actual_new}/{len(rows)} new | Total new: {total_inserted}")
         except Exception as e:
             print(f" DB Error: {e}")
             break
@@ -118,11 +132,24 @@ def crawl_binance(target_asset, binance_symbol, interval="1m", target_candles=10
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download Binance history for weekend OTC models.")
-    parser.add_argument("--interval", type=str, default="1m")
-    parser.add_argument("--candles", type=int, default=100000)
+    parser.add_argument("--interval", type=str, default="all", help="Specific interval (e.g. 1m) or 'all' for dynamic limits")
+    parser.add_argument("--candles", type=int, default=0, help="Override candle count (0 = use dynamic limits)")
     args = parser.parse_args()
 
+    # Dynamic limits for Time-Constant Window
+    dynamic_limits = {
+        "1m": 100000,
+        "5m": 25000,
+        "15m": 20000
+    }
+
     for asset, binance_sym in BINANCE_PAIRS.items():
-        crawl_binance(asset, binance_sym, args.interval, args.candles)
+        if args.interval.lower() == "all":
+            for interval, limit in dynamic_limits.items():
+                target = args.candles if args.candles > 0 else limit
+                crawl_binance(asset, binance_sym, interval=interval, target_candles=target)
+        else:
+            target = args.candles if args.candles > 0 else dynamic_limits.get(args.interval, 100000)
+            crawl_binance(asset, binance_sym, interval=args.interval, target_candles=target)
     
     print("[BinanceCrawler] All done.")

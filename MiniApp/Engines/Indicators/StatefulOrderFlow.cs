@@ -7,9 +7,8 @@ public class StatefulOrderFlow
 {
     private double _cumulativeVolumeDelta = 0;
     
-    // Noise thresholds based on SMA of volume
-    private double _volSum = 0;
-    private int _volCount = 0;
+    // FIX W-06: replaced fake rolling avg (_volSum/_volCount) with proper sliding window Queue
+    private readonly Queue<double> _volWindow = new(20);
     private double _avgVolume = 1.0;
 
     private DateTime _lastProcessedTime;
@@ -113,14 +112,12 @@ public class StatefulOrderFlow
         
         if (isPermanent)
         {
-            _volSum += totalVol;
-            _volCount++;
-            if (_volCount > 20)
-            {
-                _volSum -= (_volSum / _volCount);
-                _volCount = 20;
-            }
-            _avgVolume = _volSum / _volCount;
+            // FIX W-06: old code subtracted the current mean instead of the oldest value,
+            // giving ~5-10% systematic error in avgVolume → wrong blockTradeThreshold.
+            // Proper fix: use a Queue as a real sliding window of last 20 candles.
+            _volWindow.Enqueue(totalVol);
+            if (_volWindow.Count > 20) _volWindow.Dequeue();
+            _avgVolume = _volWindow.Average();
         }
 
         double noiseThreshold = _avgVolume * 0.60;

@@ -14,7 +14,8 @@ public static class SignalTracker
 {
     // Cooldown map to prevent duplicate signals spam (fine to stay in memory)
     private static readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
-    private static readonly ConcurrentDictionary<string, double> _livePrices = new();
+    // FIX #6: internal чтобы PendingTradeVerificationService мог читать цены без дублирования кода
+    internal static readonly ConcurrentDictionary<string, double> _livePrices = new();
 
     public static void UpdateLivePrice(string asset, double price)
     {
@@ -158,10 +159,9 @@ public static class SignalTracker
                         if (TradeOutcomeTracker.CalibrationEngine != null)
                             TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", asset, timeframe, isCorrect);
 
-                        // Complete SGD online learning feedback chain
-                        _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
-                            asset, timeframe, price, exitPrice.Value, direction,
-                            wasWin: isCorrect, isForex: record.IsForex));
+                        // SGD online learning feedback is handled EXCLUSIVELY by PendingTradeVerificationService
+                        // (reads from PostgreSQL after trade is saved). Calling it here too caused double-training.
+                        // FIX C-16: removed duplicate MLPythonService.RecordOnlineTradeOutcomeAsync call.
 
                         // Invalidate signal votes cache so UI refreshes
                         _signalVotesCacheExpiry = DateTime.MinValue;

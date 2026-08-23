@@ -36,10 +36,14 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         bool isDeadMarket = atr > 0 && normalizedAtr < 0.0005; // < 0.05% of price = frozen market
         bool isZeroAtr = atr <= 0; // completely missing ATR data
         
-        if (isDeadMarket || volRatio < 0.3)
+        // FIX W-18: isZeroAtr was declared but never included in the condition below.
+        // ATR=0 means no volatility data at all — should get the shortest timeout (max caution).
+        if (isZeroAtr || isDeadMarket || volRatio < 0.3)
         {
             baseCandles = 5;
-            dynamicReason = "Dead market detected (VolRatio < 0.3 or zero ATR). Extreme fast timeout applied (5 candles).";
+            dynamicReason = isZeroAtr
+                ? "ATR=0: no volatility data. Minimum timeout applied (5 candles)."
+                : "Dead market detected (VolRatio < 0.3 or frozen ATR). Extreme fast timeout applied (5 candles).";
         }
         else if (volRatio > 1.5)
         {

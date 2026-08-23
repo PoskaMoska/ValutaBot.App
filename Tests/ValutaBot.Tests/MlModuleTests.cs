@@ -26,8 +26,7 @@ namespace ValutaBot.Tests
                 Confidence: 0.90,
                 ModelVersion: "lgbm-v1-BTC",
                 Accuracy: 0.85,
-                Auc: 0.88
-            );
+                Auc: 0.88, NTrain: 1000);
 
             // Act
             string report = llmService.GenerateMarketSummary(
@@ -47,3 +46,4 @@ namespace ValutaBot.Tests
         }
     }
 }
+

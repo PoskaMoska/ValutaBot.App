@@ -88,6 +88,8 @@ public static partial class MiniAppController
                 .WithHeaders("X-Telegram-Init-Data", "Content-Type", "Accept"));
         });
         builder.Services.AddHostedService<TelegramBotService>();
+        // FIX #6: Верифицирует зависшие pending_trades при рестарте и каждые 60 сек.
+        builder.Services.AddHostedService<PendingTradeVerificationService>();
 
         builder.Services.AddHttpClient("Binance").AddStandardResilienceHandler(options =>
         {
@@ -113,6 +115,14 @@ public static partial class MiniAppController
         builder.Services.AddHttpClient("Telegram", client => 
         {
             client.Timeout = TimeSpan.FromSeconds(60); // Must be longer than getUpdates timeout=30
+        });
+
+        // FIX C-15: dedicated long-running client for /train/sync WITHOUT Polly.
+        // The regular "MLPythonService" client has Polly AttemptTimeout ~5-10s which always
+        // killed global retraining (30-300s). This client bypasses Polly entirely.
+        builder.Services.AddHttpClient("MLPythonLongRunning", client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(12);
         });
 
         builder.Services.AddRateLimiter(options =>

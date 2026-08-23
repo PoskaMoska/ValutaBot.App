@@ -204,7 +204,9 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
                 exit_price = exitPrice,
                 direction,
                 was_win = wasWin,
-                timestamp = DateTime.UtcNow.ToString("o")
+                // FIX W-22: format "o" generates 7 fractional digits (e.g. .1234567Z).
+                // Python 3.10 fromisoformat() only supports max 6 → ValueError → SGD skipped.
+                timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
             };
 
             var json = JsonSerializer.Serialize(payload);
@@ -264,10 +266,12 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            // Increase timeout for massive global training
-            var client = MiniAppController.HttpFactory!.CreateClient("MLPythonService");
-            client.Timeout = TimeSpan.FromMinutes(10);
-            
+            // FIX C-15: client.Timeout on a Polly-backed IHttpClientFactory client is ignored —
+            // Polly's AttemptTimeout (~5-10s) fires first, killing every /train/sync request.
+            // Solution: use a dedicated "MLPythonLongRunning" client registered WITHOUT Polly.
+            // This client has a 12-minute timeout, safe for global retraining (typ. 30-300s).
+            var client = MiniAppController.HttpFactory!.CreateClient("MLPythonLongRunning");
+
             var response = await client.PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
             
             if (response.IsSuccessStatusCode)
