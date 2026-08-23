@@ -9,7 +9,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 
 public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 {
-    private static string _lastSeenModelVersion = "";
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
     
     private readonly MarketDataFetcher _fetcher;
     private readonly IRiskGatekeeper _riskGatekeeper;
@@ -343,15 +343,27 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                         _lgbmConfidence = 0.5;
                     }
 
-                    // в”Ђв”Ђ ML Telemetry: Global Retraining в”Ђв”Ђ
+                    // ✨ ML Telemetry: Global Retraining ✨
                     if (!string.IsNullOrEmpty(_prediction.ModelVersion))
                     {
-                        string oldVer = System.Threading.Interlocked.Exchange(ref _lastSeenModelVersion, _prediction.ModelVersion);
-                        if (oldVer != _prediction.ModelVersion)
+                        string cacheKey = $"{_asset}_{_timeframe}";
+                        string currentVer = _prediction.ModelVersion;
+                        string oldVer = "";
+                        bool versionChanged = false;
+                        
+                        if (_lastSeenModelVersions.TryGetValue(cacheKey, out oldVer))
                         {
+                            if (oldVer != currentVer)
+                            {
+                                versionChanged = true;
+                            }
+                        }
+                        
+                        _lastSeenModelVersions[cacheKey] = currentVer;
 
+                        if (versionChanged && !string.IsNullOrEmpty(oldVer))
+                        {
                             // Skip the very first startup assignment spam, only alert on actual changes during runtime
-                            if (!string.IsNullOrEmpty(oldVer))
                             {
                                 _ = Task.Run(async () =>
                                 {
