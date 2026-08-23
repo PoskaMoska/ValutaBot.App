@@ -33,7 +33,7 @@ public static partial class TwelveDataService
         return _apiKey;
     }
 
-    public static async Task<(double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles)?> FetchCandlesAsync(string rawAsset, string interval, int limit = 100, int cacheTtlSeconds = 10)
+    public static async Task<(double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles)?> FetchCandlesAsync(string rawAsset, string interval, int limit = 100, int cacheTtlSeconds = 45)
     {
         string key = $"TWELVE_DATA_{AssetSanitizer.Sanitize(rawAsset)}_{interval.ToLower()}";
 
@@ -233,6 +233,21 @@ public static partial class TwelveDataService
         string symbol = ConvertToTwelveSymbol(rawAsset) ?? "";
         if (string.IsNullOrEmpty(symbol)) return null;
 
+        // Cache current price for 30s to avoid burning rate limit on rapid requests
+        string cacheKey = $"TWELVE_PRICE_{AssetSanitizer.Sanitize(rawAsset)}";
+        if (_memoryCache.TryGetValue(cacheKey, out double cachedPrice))
+        {
+            BotLogger.Info($"[TwelveData] Using cached price for {rawAsset}: {cachedPrice}");
+            return cachedPrice;
+        }
+
+        using var lease = _rateLimiter.AttemptAcquire();
+        if (!lease.IsAcquired)
+        {
+            BotLogger.Warn($"[TwelveData] Rate limit hit on FetchCurrentPriceAsync for {rawAsset}");
+            return null;
+        }
+
         string url = $"https://api.twelvedata.com/price?symbol={Uri.EscapeDataString(symbol)}&apikey={apiKey}";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         using var response = await MiniAppController.HttpFactory!.CreateClient("TwelveData").SendAsync(request);
@@ -241,6 +256,7 @@ public static partial class TwelveDataService
         
         if (doc != null && double.TryParse(doc.Price, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double price))
         {
+            _memoryCache.Set(cacheKey, price, TimeSpan.FromSeconds(30));
             return price;
         }
         return null;
