@@ -82,48 +82,14 @@ public static class LatencyProbe
     /// Выполняет единичный замер RTT до Binance API.
     /// Использует среднее из 3 последовательных запросов для стабилизации результата.
     /// </summary>
-    public static async Task MeasureAsync(IHttpClientFactory? factory)
+        public static async Task MeasureAsync(IHttpClientFactory? factory)
     {
-        try
-        {
-            var client = factory != null
-                ? factory.CreateClient("LatencyProbe")
-                : new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-
-            double totalMs = 0;
-            int successCount = 0;
-
-            for (int i = 0; i < 3; i++)
-            {
-                var sw = Stopwatch.StartNew();
-                try
-                {
-                    using var resp = await client.GetAsync(PingUrl);
-                    sw.Stop();
-                    if (resp.IsSuccessStatusCode)
-                    {
-                        totalMs += sw.Elapsed.TotalMilliseconds;
-                        successCount++;
-                    }
-                }
-                catch
-                {
-                    sw.Stop();
-                }
-                if (i < 2) await Task.Delay(50); // Небольшая пауза между замерами
-            }
-
-            if (successCount == 0) return;
-
-            double avgRtt = totalMs / successCount;
-            AddSample(avgRtt);
-
-            BotLogger.Info($"[LatencyProbe] RTT={avgRtt:F1}ms | EMA={LastRttMs:F1}ms | Offset={SendAtOffsetMs}ms");
-        }
-        catch (Exception ex)
-        {
-            BotLogger.Warn($"[LatencyProbe] Ping failed: {ex.Message}");
-        }
+        // --- BINANCE DISABLED GLOBALLY ---
+        // As per user request, Binance is disabled everywhere.
+        // We will just simulate a fixed fake ping to keep math stable, 
+        // without actually sending HTTP requests to Binance.
+        await Task.Delay(1); // minimal async footprint
+        AddSample(200.0);    // simulate 200ms RTT
     }
 
     /// <summary>
@@ -144,3 +110,4 @@ public static class LatencyProbe
         }
     }
 }
+
