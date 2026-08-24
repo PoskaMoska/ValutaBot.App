@@ -32,11 +32,12 @@ def verify_data():
     print(f"✅ Найдено {len(df_counts)} таблиц(пар).")
     
     for _, row in df_counts.iterrows():
-        asset = row['Asset']
-        interval = row['Interval']
-        count = row['Count']
-        oldest = row['Oldest']
-        newest = row['Newest']
+        # Postgres returns lowercased column names for unquoted aliases
+        asset = row.get('Asset', row.get('asset'))
+        interval = row.get('Interval', row.get('interval'))
+        count = row.get('Count', row.get('count'))
+        oldest = row.get('Oldest', row.get('oldest'))
+        newest = row.get('Newest', row.get('newest'))
         
         if str(oldest).isdigit():
             oldest = datetime.utcfromtimestamp(int(oldest)).strftime('%Y-%m-%d %H:%M:%S')
