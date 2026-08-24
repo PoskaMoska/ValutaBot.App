@@ -42,10 +42,10 @@ public class MarketDataFetcher
 
     /* removed pipeline */ 
 
-    public string IntervalMap(string tf) => tf.ToLower() switch
+        public string IntervalMap(string tf) => tf.ToLower() switch
     {
         "s3" or "s5" or "s10" or "s15" or "s30" => "1m",
-        "m1" => "1m", "m2" => "1m", "m3" => "3m",
+        "m1" => "1m", "m2" => "1m", "m3" => "5m",
         "m5" => "5m", "m15" => "15m", "m30" => "30m",
         "h1" => "1h", "h4" => "4h",
         "d1" => "1d", _ => "1m"
@@ -265,6 +265,7 @@ public class MarketDataFetcher
         return null;
     }
 }
+
 
 
 
