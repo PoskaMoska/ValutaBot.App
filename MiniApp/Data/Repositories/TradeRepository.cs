@@ -137,16 +137,17 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             return rows.Select(r => new SignalTracker.PredictionRecord
             {
                 Id = r.Id,
-                Direction = r.Direction,
-                Asset = r.Asset,
-                Timeframe = r.Timeframe,
-                BinanceSymbol = r.BinanceSymbol,
+                Direction = r.Direction ?? "",
+                Asset = r.Asset ?? "",
+                Timeframe = r.Timeframe ?? "",
+                BinanceSymbol = r.BinanceSymbol ?? "",
                 EntryPrice = r.EntryPrice != null ? Convert.ToDouble(r.EntryPrice) : 0.0,
-                CreatedAt = DateTime.Parse(r.CreatedAtStr).ToUniversalTime(),
-                VerifyAt = DateTime.Parse(r.VerifyAtStr).ToUniversalTime(),
+                CreatedAt = string.IsNullOrEmpty(r.CreatedAtStr) ? DateTime.MinValue : DateTime.Parse(r.CreatedAtStr).ToUniversalTime(),
+                VerifyAt = string.IsNullOrEmpty(r.VerifyAtStr) ? DateTime.MinValue : DateTime.Parse(r.VerifyAtStr).ToUniversalTime(),
                 IsForex = r.IsForex != null ? Convert.ToBoolean(r.IsForex) : false,
-                SourceDirections = System.Text.Json.JsonSerializer.Deserialize(r.SourceDirectionsStr, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>()
-            }).ToList();
+                SourceDirections = string.IsNullOrEmpty(r.SourceDirectionsStr) ? new Dictionary<string, string>() : 
+                    System.Text.Json.JsonSerializer.Deserialize(r.SourceDirectionsStr, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>()
+            }).Where(r => r.CreatedAt != DateTime.MinValue).ToList();
         }
 
         public static async Task DeletePendingTradeAsync(string id)
