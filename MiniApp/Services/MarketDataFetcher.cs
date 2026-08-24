@@ -227,105 +227,18 @@ public class MarketDataFetcher
     public virtual async Task<(double[] prices, double[] volumes)> FetchBinanceWithFallback(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         string interval = IntervalMap(rawInterval);
-        string cacheSym = originalAsset ?? symbol ?? "UNKNOWN";
-
-        // Forex-only policy: if the symbol is a crypto asset, skip Binance entirely
-        // and go directly to TwelveData. Crypto is not supported.
-        string cleanForCheck = AssetSanitizer.Sanitize(originalAsset ?? symbol ?? "");
-        bool isCrypto = !AssetSanitizer.IsForexAsset(cleanForCheck);
-        if (isCrypto)
-        {
-            BotLogger.Warn($"[MarketDataFetcher] Crypto symbol detected ({cleanForCheck}). Skipping to TwelveData (forex-only policy).");
-            if (originalAsset != null)
-            {
-                var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
-                if (tdResult != null)
-                    return (tdResult.Value.prices, tdResult.Value.volumes);
-            }
-            throw new ExchangeUnavailableException($"Crypto not supported: {cleanForCheck}", "Р вЂР С•РЎвЂљ РЎР‚Р В°Р В±Р С•РЎвЂљР В°Р ВµРЎвЂљ РЎвЂљР С•Р В»РЎРЉР С”Р С• РЎРѓ РЎвЂћР С•РЎР‚Р ВµР С”РЎРѓ-Р С—Р В°РЎР‚Р В°Р СР С‘.");
-        }
-
-        var dayOfWeek = DateTime.UtcNow.DayOfWeek;
-        bool isWeekend = dayOfWeek == DayOfWeek.Saturday || dayOfWeek == DayOfWeek.Sunday;
-
-        // WEEKDAY POLICY: Use TwelveData (real Forex) first
-        if (!isWeekend && originalAsset != null)
+        
+        // --- BINANCE DISABLED GLOBALLY ---
+        // As per user request, Binance OTC logic is completely disabled.
+        // We solely rely on TwelveData (Real Forex).
+        if (originalAsset != null)
         {
             var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
             if (tdResult != null)
             {
-                BotLogger.Info($"[MarketDataFetcher] Weekday policy: Served TwelveData for {originalAsset}");
+                BotLogger.Info($"[MarketDataFetcher] Binance globally disabled. Served TwelveData for {originalAsset}");
                 return (tdResult.Value.prices, tdResult.Value.volumes);
             }
-            BotLogger.Warn($"[MarketDataFetcher] TwelveData unavailable on a weekday for {originalAsset}, falling back to Binance OTC.");
-        }
-
-        // WEEKEND POLICY (or fallback): Use Binance WebSocket
-        if (symbol != null)
-        {
-            if (BinanceWebSocketStream.TryGetLiveCandles(symbol, interval, out var wsOpens, out var wsHighs, out var wsLows, out var wsPrices, out var wsVolumes, out int count))
-            {
-                try
-                {
-                    if (count >= 15)
-                    {
-                        double[] exactPrices = new double[count];
-                        double[] exactVolumes = new double[count];
-                        Array.Copy(wsPrices, exactPrices, count);
-                        Array.Copy(wsVolumes, exactVolumes, count);
-                        
-                        BotLogger.Info($"[MarketDataFetcher] Served live WebSocket candles for {symbol} ({interval}) in 0ms.");
-
-                        return (exactPrices, exactVolumes);
-                    }
-                }
-                finally
-                {
-                    System.Buffers.ArrayPool<double>.Shared.Return(wsOpens);
-                System.Buffers.ArrayPool<double>.Shared.Return(wsHighs);
-                System.Buffers.ArrayPool<double>.Shared.Return(wsLows);
-                System.Buffers.ArrayPool<double>.Shared.Return(wsPrices);
-                    System.Buffers.ArrayPool<double>.Shared.Return(wsVolumes);
-                }
-            }
-        }
-
-        if (symbol == null)
-        {
-            if (originalAsset != null)
-            {
-                var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
-                if (tdResult != null)
-                    return (tdResult.Value.prices, tdResult.Value.volumes);
-            }
-
-            string cleanAsset = AssetSanitizer.Sanitize(originalAsset ?? "EURUSDT");
-            symbol = cleanAsset switch
-            {
-                "EURUSD" or "EURUSDT" => "EURUSDT",
-                "GBPUSD" or "GBPUSDT" => "GBPUSDT",
-                "AUDUSD" or "AUDUSDT" => "AUDUSDT",
-                _ => cleanAsset.EndsWith("USDT") ? cleanAsset : cleanAsset + "USDT"
-            };
-        }
-
-        try
-        {
-            var res = await FetchBinanceCandles(symbol, interval, limit);
-            return res;
-        }
-        catch
-        {
-            if (originalAsset != null)
-            {
-                var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
-                if (tdResult != null)
-                {
-                    return (tdResult.Value.prices, tdResult.Value.volumes);
-                }
-            }
-
-            throw new ExchangeUnavailableException($"Fallback blocked for {originalAsset ?? symbol}", "Р вЂР С‘РЎР‚Р В¶Р В° Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р Р…Р В°.");
         }
     }
 
