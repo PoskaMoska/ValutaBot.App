@@ -294,7 +294,7 @@ public class ConfluenceMatrixEngine(
 
         // FIX W-21: wider neutral dead-zone (was ±0.0001 → ±0.05)
         // ±0.0001 treated almost any non-zero value as a signal, generating noise.
-        candidateDir = finalConfidenceScore > 0.05 ? "BUY" : finalConfidenceScore < -0.05 ? "PUT" : "NEUTRAL";
+        candidateDir = finalConfidenceScore > 0.01 ? "BUY" : finalConfidenceScore < -0.01 ? "PUT" : "NEUTRAL";
 
         // 5. Final Decision
         double absWeightedScore = Math.Abs(finalConfidenceScore);
@@ -336,3 +336,4 @@ public class ConfluenceMatrixEngine(
     }
 
 }
+
