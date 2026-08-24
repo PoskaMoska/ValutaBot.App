@@ -240,6 +240,8 @@ public class MarketDataFetcher
                 return (tdResult.Value.prices, tdResult.Value.volumes);
             }
         }
+        
+        throw new ExchangeUnavailableException("Binance is disabled", "Биржа отключена или недоступна на выходных.");
     }
 
     
