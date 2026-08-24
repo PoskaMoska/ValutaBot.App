@@ -224,13 +224,20 @@ public class MarketDataFetcher
         return (prices, volumes);
     }
 
-    public virtual async Task<(double[] prices, double[] volumes)> FetchBinanceWithFallback(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
+        public virtual async Task<(double[] prices, double[] volumes)> FetchBinanceWithFallback(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         string interval = IntervalMap(rawInterval);
-        
+        var dayOfWeek = DateTime.UtcNow.DayOfWeek;
+        bool isWeekend = dayOfWeek == DayOfWeek.Saturday || dayOfWeek == DayOfWeek.Sunday;
+
+        if (isWeekend)
+        {
+            throw new ExchangeUnavailableException("Weekend Market Closed", "Рынок Форекс закрыт на выходные. Торги возобновятся в понедельник.");
+        }
+
         // --- BINANCE DISABLED GLOBALLY ---
         // As per user request, Binance OTC logic is completely disabled.
-        // We solely rely on TwelveData (Real Forex).
+        // We solely rely on TwelveData (Real Forex) on weekdays.
         if (originalAsset != null)
         {
             var tdResult = await TwelveDataService.FetchCandlesAsync(originalAsset, interval, limit);
@@ -241,7 +248,7 @@ public class MarketDataFetcher
             }
         }
         
-        throw new ExchangeUnavailableException("Binance is disabled", "Р‘РёСЂР¶Р° РѕС‚РєР»СЋС‡РµРЅР° РёР»Рё РЅРµРґРѕСЃС‚СѓРїРЅР° РЅР° РІС‹С…РѕРґРЅС‹С….");
+        throw new ExchangeUnavailableException("Data Unavailable", "Не удалось получить котировки от поставщика (TwelveData). Попробуйте позже.");
     }
 
     
@@ -258,6 +265,7 @@ public class MarketDataFetcher
         return null;
     }
 }
+
 
 
 
