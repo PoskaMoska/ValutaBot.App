@@ -46,7 +46,7 @@ RETRAIN_INTERVAL_H = int(os.getenv("RETRAIN_INTERVAL_H", "168"))  # Weekly globa
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "100000"))  # Global Strategist window
 # Bug2 fix: configurable target horizon (default=5 candles, aligned with typical TradeTimeout 15*0.6≈9 → 5–10)
 TARGET_HORIZON_CANDLES = int(os.getenv("TARGET_HORIZON_CANDLES", "5"))
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.60"))  # below → NEUTRAL
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.52"))  # below → NEUTRAL
 BINANCE_BASE = "https://api.binance.com"
 
 # ── TwelveData Config ──
@@ -366,7 +366,7 @@ class ForexPredictor:
             if online_model is not None:
                 try:
                     prob_sgd = float(online_model.predict_proba(X_arr)[0, 1])
-                    sgd_weight = min(0.30, sgd_count / 100.0)  # 0% at 0 trades → 30% at 100+
+                    sgd_weight = min(0.05, sgd_count / 200.0)  # max 5%, grows very slowly
                     lgbm_weight = 1.0 - sgd_weight
                     prob = lgbm_weight * prob_lgbm + sgd_weight * prob_sgd
                     log.debug(f"[Predict] {self._key} lgbm={prob_lgbm:.3f} sgd={prob_sgd:.3f} sgd_w={sgd_weight:.2f} blended={prob:.3f}")
