@@ -216,7 +216,9 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
             
             if (response.IsSuccessStatusCode)
             {
-                BotLogger.Info($"[MLPython] Online RL feedback registered for {asset}/{timeframe} → {(wasWin ? "WIN" : "LOSS")}");
+                var responseBody = await response.Content.ReadAsStringAsync();
+                string winStr = wasWin ? "WIN" : "LOSS";
+                BotLogger.Info($"[AI Feedback Detector] Feedback sent for {asset}/{timeframe} -> {winStr}. Python Response: {responseBody}");
             }
         }
         catch (Polly.CircuitBreaker.BrokenCircuitException)
