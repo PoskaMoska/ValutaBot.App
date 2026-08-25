@@ -1,4 +1,4 @@
-"""
+﻿"""
 Feature engineering for Forex/Crypto LightGBM predictor.
 Takes OHLCV candle arrays and returns a feature DataFrame.
 """
@@ -97,7 +97,7 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
 
     feats = {}
 
-    # ── Trend / Momentum (Using ta library) ──
+    # в”Ђв”Ђ Trend / Momentum (Using ta library) в”Ђв”Ђ
     df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
     df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -120,7 +120,7 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
     feats['linreg_slope'] = _linreg_slope(c, 20)
     feats['hurst']        = _hurst_approx(c, 16)
 
-    # ── Oscillators (Using ta library) ──
+    # в”Ђв”Ђ Oscillators (Using ta library) в”Ђв”Ђ
     feats['rsi14'] = ta.momentum.rsi(df['close'], window=14).values / 100.0 - 0.5
     feats['rsi7']  = ta.momentum.rsi(df['close'], window=7).values / 100.0 - 0.5
     
@@ -129,29 +129,29 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
     bb_std = pd.Series(c).rolling(20).std().values
     feats['bb_z']  = ((c - bb_mavg) / (bb_std + 1e-10))
 
-    # ── Volatility ──
+    # в”Ђв”Ђ Volatility в”Ђв”Ђ
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14).values
     feats['atr_norm']     = atr / (c + 1e-10)
     feats['rolling_std']  = _rolling_std(c, 10) / (c + 1e-10)
 
-    # ── Price Returns ──
+    # в”Ђв”Ђ Price Returns в”Ђв”Ђ
     for lag in [1, 2, 3, 5, 10]:
         ret = np.zeros(len(c))
         ret[lag:] = (c[lag:] - c[:-lag]) / (c[:-lag] + 1e-10)
         feats[f'ret{lag}'] = ret
 
-    # ── Candle Structure ──
+    # в”Ђв”Ђ Candle Structure в”Ђв”Ђ
     candle_range = (h - lo) + 1e-10
     feats['body_ratio']    = np.abs(c - o) / candle_range
     feats['upper_wick']    = (h - np.maximum(o, c)) / candle_range
     feats['lower_wick']    = (np.minimum(o, c) - lo) / candle_range
     feats['candle_dir']    = np.sign(c - o)
 
-    # ── Volume & Order Flow & SMC ──
+    # в”Ђв”Ђ Volume & Order Flow & SMC в”Ђв”Ђ
     vol_ma = _volume_ma(v, 20)
     feats['vol_ratio']     = v / (vol_ma + 1e-10)
-    # FIX: была Look-Ahead Bias — vol_ma.mean() считал глобальное среднее по всему датасету,
-    # включая будущие свечи. Теперь нормализация идёт по rolling среднему (только прошлое).
+    # FIX: Р±С‹Р»Р° Look-Ahead Bias вЂ” vol_ma.mean() СЃС‡РёС‚Р°Р» РіР»РѕР±Р°Р»СЊРЅРѕРµ СЃСЂРµРґРЅРµРµ РїРѕ РІСЃРµРјСѓ РґР°С‚Р°СЃРµС‚Сѓ,
+    # РІРєР»СЋС‡Р°СЏ Р±СѓРґСѓС‰РёРµ СЃРІРµС‡Рё. РўРµРїРµСЂСЊ РЅРѕСЂРјР°Р»РёР·Р°С†РёСЏ РёРґС‘С‚ РїРѕ rolling СЃСЂРµРґРЅРµРјСѓ (С‚РѕР»СЊРєРѕ РїСЂРѕС€Р»РѕРµ).
     rolling_vol_mean = pd.Series(vol_ma).rolling(20, min_periods=1).mean().values
     feats['vol_ma']        = vol_ma / (rolling_vol_mean + 1e-10)
     
@@ -171,13 +171,13 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
     feats['smc_fvg_bullish'] = fvg_bull / (c + 1e-10)
     feats['smc_fvg_bearish'] = fvg_bear / (c + 1e-10)
 
-    # ── High/Low channel position ──
+    # в”Ђв”Ђ High/Low channel position в”Ђв”Ђ
     high20 = pd.Series(h).rolling(20).max().values
     low20  = pd.Series(lo).rolling(20).min().values
     range20 = high20 - low20 + 1e-10
     feats['channel_pos'] = (c - low20) / range20
 
-    # ── Time / Session (sinusoidal encoding so hour=23 is close to hour=0) ──
+    # в”Ђв”Ђ Time / Session (sinusoidal encoding so hour=23 is close to hour=0) в”Ђв”Ђ
     if 'opentime' in df.columns:
         def get_hour(ts):
             if pd.isna(ts) or ts == 0: return 0.0
@@ -203,9 +203,14 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
         feats['hour_sin'] = np.zeros(len(c))
         feats['hour_cos'] = np.zeros(len(c))
 
+    # Remove raw unscaled prices (lethal for SGD gradient descent)
+    for k in ['ema9', 'ema21', 'ema50']:
+        if k in feats: feats.pop(k)
+
     result = pd.DataFrame(feats, index=df.index)
 
     # Slice off initial rolling warmup window (first 25 rows) and safely fill any residual NaNs with 0.0
     result = result.iloc[25:].fillna(0.0)
 
     return result
+
