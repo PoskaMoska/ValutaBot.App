@@ -46,7 +46,7 @@ RETRAIN_INTERVAL_H = int(os.getenv("RETRAIN_INTERVAL_H", "168"))  # Weekly globa
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "100000"))  # Global Strategist window
 # Bug2 fix: configurable target horizon (default=5 candles, aligned with typical TradeTimeout 15*0.6в‰€9 в†’ 5вЂ“10)
 TARGET_HORIZON_CANDLES = int(os.getenv("TARGET_HORIZON_CANDLES", "5"))
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.505"))  # below в†’ NEUTRAL
+MIN_CONFIDENCE = 0.50  # below в†’ NEUTRAL
 BINANCE_BASE = "https://api.binance.com"
 
 # в”Ђв”Ђ TwelveData Config в”Ђв”Ђ
@@ -803,5 +803,6 @@ class ForexPredictor:
         ]
         log.info(f"[TwelveData] Successfully fetched {len(candles)} candles for {td_symbol}")
         return candles
+
 
 
