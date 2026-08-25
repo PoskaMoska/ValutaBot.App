@@ -153,7 +153,8 @@ else
                         exitPriceVal,
                         record.Direction,
                         wasCorrect,
-                        AssetSanitizer.IsForexAsset(record.Asset)
+                        AssetSanitizer.IsForexAsset(record.Asset),
+                        record.CreatedAt
                     );
                 }
                 catch (Exception mlEx)

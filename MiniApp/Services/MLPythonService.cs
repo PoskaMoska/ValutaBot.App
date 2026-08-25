@@ -189,7 +189,8 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
         double exitPrice,
         string direction,
         bool wasWin,
-        bool isForex = false)
+        bool isForex = false,
+        DateTime? entryTime = null)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl)) return;
 
@@ -198,15 +199,16 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
             var binanceSymbol = MapSymbol(asset, isForex);
             var payload = new
             {
-                asset = binanceSymbol, // FIX: Pass the mapped symbol so Python updates the correct model
+                asset = binanceSymbol,
                 timeframe,
                 entry_price = entryPrice,
                 exit_price = exitPrice,
                 direction,
                 was_win = wasWin,
+                is_forex = isForex,
                 // FIX W-22: format "o" generates 7 fractional digits (e.g. .1234567Z).
                 // Python 3.10 fromisoformat() only supports max 6 → ValueError → SGD skipped.
-                timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+                timestamp = (entryTime ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
             };
 
             var json = JsonSerializer.Serialize(payload);
