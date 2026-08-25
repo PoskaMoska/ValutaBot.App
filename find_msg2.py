@@ -1,0 +1,1 @@
+import os; [print(f'Found in {r}/{f}') for r, d, files in os.walk('.') for f in files if f.endswith(('.cs', '.js', '.py')) and ('истекл'.encode('utf-8') in open(os.path.join(r, f), 'rb').read() or 'истекл'.encode('cp1251') in open(os.path.join(r, f), 'rb').read())]

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -31,7 +31,7 @@ public static partial class MiniAppController
     public static void Start(string[] args, int port = 5000)
     {
         Console.WriteLine("=====================================================");
-        Console.WriteLine("[Live Core] TradeBE_bot — MiniApp Server");
+        Console.WriteLine("[Live Core] TradeBE_bot вЂ” MiniApp Server");
 
         string? envPort = Environment.GetEnvironmentVariable("PORT");
         if (!string.IsNullOrEmpty(envPort) && int.TryParse(envPort, out int parsedPort))
@@ -88,8 +88,9 @@ public static partial class MiniAppController
                 .WithHeaders("X-Telegram-Init-Data", "Content-Type", "Accept"));
         });
         builder.Services.AddHostedService<TelegramBotService>();
-        // FIX #6: Верифицирует зависшие pending_trades при рестарте и каждые 60 сек.
+        // FIX #6: Р’РµСЂРёС„РёС†РёСЂСѓРµС‚ Р·Р°РІРёСЃС€РёРµ pending_trades РїСЂРё СЂРµСЃС‚Р°СЂС‚Рµ Рё РєР°Р¶РґС‹Рµ 60 СЃРµРє.
         builder.Services.AddHostedService<PendingTradeVerificationService>();
+        builder.Services.AddHostedService<ModelVersionMonitorService>();
 
         builder.Services.AddHttpClient("Binance").AddStandardResilienceHandler(options =>
         {
@@ -105,11 +106,11 @@ public static partial class MiniAppController
             options.Retry.MaxRetryAttempts = 1;
             options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(botSettings.FastFailTimeoutSeconds);
             options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(botSettings.FastFailTimeoutSeconds + 1);
-            // Circuit Breaker: открывается после 3 отказов подряд, закрывается через 30 секунд.
-            // До этого фикса: дефолтный порог = 10 отказов, что при 10 пользователях = 10 секунд ожидания.
+            // Circuit Breaker: РѕС‚РєСЂС‹РІР°РµС‚СЃСЏ РїРѕСЃР»Рµ 3 РѕС‚РєР°Р·РѕРІ РїРѕРґСЂСЏРґ, Р·Р°РєСЂС‹РІР°РµС‚СЃСЏ С‡РµСЂРµР· 30 СЃРµРєСѓРЅРґ.
+            // Р”Рѕ СЌС‚РѕРіРѕ С„РёРєСЃР°: РґРµС„РѕР»С‚РЅС‹Р№ РїРѕСЂРѕРі = 10 РѕС‚РєР°Р·РѕРІ, С‡С‚Рѕ РїСЂРё 10 РїРѕР»СЊР·РѕРІР°С‚РµР»СЏС… = 10 СЃРµРєСѓРЅРґ РѕР¶РёРґР°РЅРёСЏ.
             options.CircuitBreaker.SamplingDuration          = TimeSpan.FromSeconds(15);
             options.CircuitBreaker.MinimumThroughput         = 3;
-            options.CircuitBreaker.FailureRatio              = 0.5;  // 50% отказов в окне = открыть
+            options.CircuitBreaker.FailureRatio              = 0.5;  // 50% РѕС‚РєР°Р·РѕРІ РІ РѕРєРЅРµ = РѕС‚РєСЂС‹С‚СЊ
             options.CircuitBreaker.BreakDuration             = TimeSpan.FromSeconds(30);
         });
         builder.Services.AddHttpClient("Telegram", client => 
@@ -131,7 +132,7 @@ public static partial class MiniAppController
             options.OnRejected = async (context, token) =>
             {
                 context.HttpContext.Response.ContentType = "application/json; charset=utf-8";
-                await context.HttpContext.Response.WriteAsync("{\"error\":\"РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ Р·Р°РїСЂРѕСЃРѕРІ. РџРѕРґРѕР¶РґРёС‚Рµ РЅРµСЃРєРѕР»СЊРєРѕ СЃРµРєСѓРЅРґ.\"}");
+                await context.HttpContext.Response.WriteAsync("{\"error\":\"Р РЋР В»Р С‘РЎв‚¬Р С”Р С•Р С Р СР Р…Р С•Р С–Р С• Р В·Р В°Р С—РЎР‚Р С•РЎРѓР С•Р Р†. Р СџР С•Р Т‘Р С•Р В¶Р Т‘Р С‘РЎвЂљР Вµ Р Р…Р ВµРЎРѓР С”Р С•Р В»РЎРЉР С”Р С• РЎРѓР ВµР С”РЎС“Р Р…Р Т‘.\"}");
             };
 
             options.AddPolicy("Global", context =>
@@ -176,7 +177,7 @@ public static partial class MiniAppController
         HttpFactory = app.Services.GetRequiredService<System.Net.Http.IHttpClientFactory>();
         Services    = app.Services;
 
-        // Запускаем фоновый зонд измерения RTT до Binance для динамической компенсации задержки
+        // Р—Р°РїСѓСЃРєР°РµРј С„РѕРЅРѕРІС‹Р№ Р·РѕРЅРґ РёР·РјРµСЂРµРЅРёСЏ RTT РґРѕ Binance РґР»СЏ РґРёРЅР°РјРёС‡РµСЃРєРѕР№ РєРѕРјРїРµРЅСЃР°С†РёРё Р·Р°РґРµСЂР¶РєРё
         LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
         app.UseStaticFiles();
         app.UseCors("AllowMiniApp");
@@ -210,7 +211,7 @@ public static partial class MiniAppController
                         xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
                         xhr.onreadystatechange = function () { if (xhr.readyState === 4) { var url = new URL(window.location.href); url.searchParams.set('ngrok_passed', '1'); window.location.href = url.toString(); } };
                         xhr.send();
-                    </script></head><body style='background:#0d0e1e; display:flex; justify-content:center; align-items:center; height:100vh; color:#8a4bfb; font-family:sans-serif;'>Р—Р°РіСЂСѓР·РєР° С‚РµСЂРјРёРЅР°Р»Р°...</body></html>";
+                    </script></head><body style='background:#0d0e1e; display:flex; justify-content:center; align-items:center; height:100vh; color:#8a4bfb; font-family:sans-serif;'>Р вЂ”Р В°Р С–РЎР‚РЎС“Р В·Р С”Р В° РЎвЂљР ВµРЎР‚Р СР С‘Р Р…Р В°Р В»Р В°...</body></html>";
                 await context.Response.WriteAsync(bypassScript);
                 return;
             }
@@ -257,8 +258,8 @@ public static partial class MiniAppController
                         of = userSettings.EnableOf
                     },
                     // Pre-execution latency compensation:
-                    // Фронтенд использует эти значения для таймера упреждения.
-                    // Формула: открыть сделку за send_at_offset_ms до закрытия свечи.
+                    // Р¤СЂРѕРЅС‚РµРЅРґ РёСЃРїРѕР»СЊР·СѓРµС‚ СЌС‚Рё Р·РЅР°С‡РµРЅРёСЏ РґР»СЏ С‚Р°Р№РјРµСЂР° СѓРїСЂРµР¶РґРµРЅРёСЏ.
+                    // Р¤РѕСЂРјСѓР»Р°: РѕС‚РєСЂС‹С‚СЊ СЃРґРµР»РєСѓ Р·Р° send_at_offset_ms РґРѕ Р·Р°РєСЂС‹С‚РёСЏ СЃРІРµС‡Рё.
                     latency_ms = (int)Math.Round(LatencyProbe.LastRttMs),
                     send_at_offset_ms = LatencyProbe.SendAtOffsetMs
                 };
@@ -283,7 +284,7 @@ public static partial class MiniAppController
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
 
-        // ── Internal endpoint for ML service → Telegram admin notifications ──
+        // в”Ђв”Ђ Internal endpoint for ML service в†’ Telegram admin notifications в”Ђв”Ђ
         app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
         {
             // Only allow calls from localhost or Railway internal network
@@ -324,7 +325,7 @@ public static partial class MiniAppController
             return Results.Json(fng);
         });
 
-        /* в”Ђв”Ђв”Ђ Postback Endpoint в”Ђв”Ђв”Ђ */
+        /* РІвЂќР‚РІвЂќР‚РІвЂќР‚ Postback Endpoint РІвЂќР‚РІвЂќР‚РІвЂќР‚ */
         app.MapGet("/api/postback", async Task<IResult> (HttpContext context) =>
         {
             var query = context.Request.Query;
@@ -359,7 +360,7 @@ public static partial class MiniAppController
                 return Results.BadRequest(new { success = false, error = "pocketId is required" });
             }
 
-            BotLogger.Info($"[Postback рџ”’] Verified Postback: pocketId={pocketId}, chatId={chatId}, status={status}, deposit={deposit}");
+            BotLogger.Info($"[Postback СЂСџвЂќвЂ™] Verified Postback: pocketId={pocketId}, chatId={chatId}, status={status}, deposit={deposit}");
 
             await TelegramBotService.ProcessPostback(chatId, pocketId, status, deposit);
 
@@ -384,8 +385,8 @@ public static partial class MiniAppController
 
 
 
-    /* в”Ђв”Ђв”Ђ Indicators в”Ђв”Ђв”Ђ */
-    /* в”Ђв”Ђв”Ђ Fear & Greed Index в”Ђв”Ђв”Ђ */
+    /* РІвЂќР‚РІвЂќР‚РІвЂќР‚ Indicators РІвЂќР‚РІвЂќР‚РІвЂќР‚ */
+    /* РІвЂќР‚РІвЂќР‚РІвЂќР‚ Fear & Greed Index РІвЂќР‚РІвЂќР‚РІвЂќР‚ */
 
     
 
@@ -414,6 +415,7 @@ public static partial class MiniAppController
         }
     }
 }
+
 
 
 

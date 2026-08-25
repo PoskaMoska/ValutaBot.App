@@ -1,0 +1,1 @@
+import os; [print(os.path.join(r, f)) for r, d, files in os.walk('.') for f in files if f.endswith(('.cs', '.py', '.js', '.json', '.txt', '.md')) and 'Куки' in open(os.path.join(r, f), encoding='utf-8', errors='ignore').read()]
