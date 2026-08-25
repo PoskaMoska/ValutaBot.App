@@ -8,7 +8,7 @@ def retrain():
         for interval in intervals:
             print(f"Triggering global retrain for {pair} {interval}...")
             try:
-                res = requests.post("http://localhost:8000/train/sync", json={"asset": pair, "interval": interval}, timeout=300)
+                res = requests.post("http://localhost:8765/train/sync", json={"asset": pair, "interval": interval}, timeout=300)
                 if res.status_code == 200:
                     print(f"SUCCESS: {res.json()}")
                 else:
@@ -18,3 +18,4 @@ def retrain():
 
 if __name__ == '__main__':
     retrain()
+
