@@ -379,7 +379,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                                         string report = $"🔄 <b>Переобучение модели</b>\n" +
                                                         $"{icon} <b>{_asset}</b> ({_timeframe}): Точность <b>{accStr}</b> | AUC <b>{aucStr}</b> | {nTrainStr} свечей";
 
-                                        await TelegramBotService.SendMessageToAdmins(report);
+                                        // await TelegramBotService.SendMessageToAdmins(report); // Disabled per user request
 
                                         string logDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
                                         System.IO.Directory.CreateDirectory(logDir);
@@ -627,5 +627,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
     }
 }
+
 
 
