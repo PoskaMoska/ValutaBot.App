@@ -1,21 +1,17 @@
-﻿import requests
-import os
+﻿import os
+from model import ForexPredictor
 
 def retrain():
     pairs = ["EURUSD", "GBPUSD", "USDJPY", "EURUSD_OTC"]
     intervals = ["1m", "5m", "15m"]
     
-    port = os.getenv("PORT", "8765")
-    
     for pair in pairs:
         for interval in intervals:
-            print(f"Triggering global retrain for {pair} {interval} on port {port}...")
+            print(f"--- Training {pair} {interval} ---")
             try:
-                res = requests.post(f"http://localhost:{port}/train/sync", json={"asset": pair, "interval": interval}, timeout=300)
-                if res.status_code == 200:
-                    print(f"SUCCESS: {res.json()}")
-                else:
-                    print(f"FAILED: {res.status_code} - {res.text}")
+                predictor = ForexPredictor(pair, interval)
+                result = predictor.train(candles=None)
+                print(f"RESULT: {result}")
             except Exception as e:
                 print(f"ERROR: {e}")
 
