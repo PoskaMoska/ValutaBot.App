@@ -1,7 +1,7 @@
-"""
+﻿"""
 Two-Tier Forex Predictor.
-  Tier 1 (Global Strategist):  LightGBM — retrained every 24h on up to 100k candles.
-  Tier 2 (Local Tactician):    SGDClassifier — updated via partial_fit after every trade (<1ms).
+  Tier 1 (Global Strategist):  LightGBM вЂ” retrained every 24h on up to 100k candles.
+  Tier 2 (Local Tactician):    SGDClassifier вЂ” updated via partial_fit after every trade (<1ms).
 Final signal = 0.70 * LightGBM_prob + 0.30 * SGD_prob.
 """
 
@@ -35,7 +35,7 @@ from features import build_features
 log = logging.getLogger("predictor")
 
 # FIX W-27: previously model.py used "data/models/ValutaTicks.db" and main.py used
-# "data/ValutaTicks.db" — ticks were written to one path and read from another,
+# "data/ValutaTicks.db" вЂ” ticks were written to one path and read from another,
 # so _fetch_candles_at_entry / _fetch_local_sqlite in model.py always returned empty results.
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TICKS_DB_PATH = os.path.join(_BASE_DIR, "data", "ValutaTicks.db")
@@ -44,12 +44,12 @@ MODEL_DIR = Path(os.getenv("MODEL_DIR", str(Path(__file__).parent / "data" / "mo
 SGD_MODEL_DIR = MODEL_DIR / "sgd"
 RETRAIN_INTERVAL_H = int(os.getenv("RETRAIN_INTERVAL_H", "168"))  # Weekly global retrain only
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "100000"))  # Global Strategist window
-# Bug2 fix: configurable target horizon (default=5 candles, aligned with typical TradeTimeout 15*0.6≈9 → 5–10)
+# Bug2 fix: configurable target horizon (default=5 candles, aligned with typical TradeTimeout 15*0.6в‰€9 в†’ 5вЂ“10)
 TARGET_HORIZON_CANDLES = int(os.getenv("TARGET_HORIZON_CANDLES", "5"))
-MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.52"))  # below → NEUTRAL
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.505"))  # below в†’ NEUTRAL
 BINANCE_BASE = "https://api.binance.com"
 
-# ── TwelveData Config ──
+# в”Ђв”Ђ TwelveData Config в”Ђв”Ђ
 TWELVE_DATA_BASE = "https://api.twelvedata.com"
 TWELVE_DATA_API_KEY = os.getenv("TwelveDataApiKey") or os.getenv("TWELVE_DATA_API_KEY")
 
@@ -60,7 +60,7 @@ TD_INTERVAL_MAP = {
 }
 
 def is_forex_symbol(symbol: str) -> bool:
-    # FIX W-23: "EURUSD_OTC" has length 10 → old check (len==6) returned False →
+    # FIX W-23: "EURUSD_OTC" has length 10 в†’ old check (len==6) returned False в†’
     # OTC pairs were treated as crypto and always returned NEUTRAL prediction.
     sym = symbol.upper().replace("_OTC", "")  # strip OTC suffix before length check
     if sym in ["GOLD", "SILVER", "BRENT", "OIL", "XAUUSD", "XAGUSD"]:
@@ -252,7 +252,7 @@ def _fetch_rl_feedback(symbol: str, interval: str) -> List[Dict]:
         log.error(f"SQLite RL Fetch Error: {e}")
         return []
 
-# ── Timeframe → Binance interval string ──
+# в”Ђв”Ђ Timeframe в†’ Binance interval string в”Ђв”Ђ
 TF_MAP = {
     "s3": "1m", "s5": "1m", "s10": "1m", "s15": "1m", "s30": "1m",
     "m1": "1m", "m2": "1m", "m3": "3m", "m5": "5m", "m10": "5m",
@@ -320,14 +320,14 @@ class ForexPredictor:
         SGD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 
-    # ── Public API ──────────────────────────────────────────────────────────
+    # в”Ђв”Ђ Public API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
     def predict(self, candles: List[Dict]) -> Tuple[str, float, str]:
         """
         Predict next candle direction from supplied candle list.
         Returns (direction, confidence, model_version).
         direction: "BUY" | "PUT" | "NEUTRAL"
-        confidence: 0.0 – 1.0
+        confidence: 0.0 вЂ“ 1.0
         """
         if not HAS_LGBM:
             return "NEUTRAL", 0.5, "no-lgbm"
@@ -358,8 +358,8 @@ class ForexPredictor:
             # Tier 1: LightGBM (Global Strategist)
             prob_lgbm = float(model.predict_proba(X_arr)[0, 1])
 
-            # Tier 2: SGD (Local Tactician) — blend if available
-            # Bug3 fix: dynamic weight 0%→30% based on real trade count (prevents noise at low sample count)
+            # Tier 2: SGD (Local Tactician) вЂ” blend if available
+            # Bug3 fix: dynamic weight 0%в†’30% based on real trade count (prevents noise at low sample count)
             with self._online_lock:
                 online_model = self._online_model
                 sgd_count = self._sgd_update_count
@@ -405,10 +405,10 @@ class ForexPredictor:
             X_last = feats.iloc[[-1]].values.astype(np.float32)
 
             # Derive label from real outcome
-            # WIN + BUY  → price went up   → label 1
-            # WIN + PUT  → price went down  → label 0
-            # LOSS + BUY → price went down  → label 0
-            # LOSS + PUT → price went up    → label 1
+            # WIN + BUY  в†’ price went up   в†’ label 1
+            # WIN + PUT  в†’ price went down  в†’ label 0
+            # LOSS + BUY в†’ price went down  в†’ label 0
+            # LOSS + PUT в†’ price went up    в†’ label 1
             if direction.upper() == "BUY":
                 y = np.array([1 if was_win else 0])
             else:
@@ -428,10 +428,10 @@ class ForexPredictor:
                 online_model = self._online_model
                 sgd_count = self._sgd_update_count
 
-                # FIX Race Condition: сохранение ВНУТРИ лока через атомарную запись.
-                # Раньше joblib.dump был вне with-блока → параллельные /feedback
-                # могли одновременно писать в один .pkl → Corrupted Pickle.
-                # Паттерн: сначала во временный файл, затем os.replace (атомарно).
+                # FIX Race Condition: СЃРѕС…СЂР°РЅРµРЅРёРµ Р’РќРЈРўР Р Р»РѕРєР° С‡РµСЂРµР· Р°С‚РѕРјР°СЂРЅСѓСЋ Р·Р°РїРёСЃСЊ.
+                # Р Р°РЅСЊС€Рµ joblib.dump Р±С‹Р» РІРЅРµ with-Р±Р»РѕРєР° в†’ РїР°СЂР°Р»Р»РµР»СЊРЅС‹Рµ /feedback
+                # РјРѕРіР»Рё РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ РїРёСЃР°С‚СЊ РІ РѕРґРёРЅ .pkl в†’ Corrupted Pickle.
+                # РџР°С‚С‚РµСЂРЅ: СЃРЅР°С‡Р°Р»Р° РІРѕ РІСЂРµРјРµРЅРЅС‹Р№ С„Р°Р№Р», Р·Р°С‚РµРј os.replace (Р°С‚РѕРјР°СЂРЅРѕ).
                 sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
                 SGD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
                 tmp_path = sgd_path.with_suffix(".tmp")
@@ -479,7 +479,7 @@ class ForexPredictor:
                     if self.interval.startswith("s"):
                         candles = _fetch_local_sqlite(self.symbol, self.interval, 1500)
                         if len(candles) < 150:
-                            # FIXED: Never use synthetic interpolation — it produces fake ~78% accuracy
+                            # FIXED: Never use synthetic interpolation вЂ” it produces fake ~78% accuracy
                             # by learning the sine-wave generator pattern instead of real market dynamics.
                             # Instead, train on 5000 REAL 1-minute candles as a proxy.
                             # A model trained on genuine price action is FAR more honest (expect ~52-56% accuracy)
@@ -521,7 +521,7 @@ class ForexPredictor:
 
             # Align features (feature matrix is shorter due to rolling-window NaN drop)
             feat_indices = feats.index.values
-            valid_mask = feat_indices < (len(closes) - H)  # drop last H rows — no valid future target
+            valid_mask = feat_indices < (len(closes) - H)  # drop last H rows вЂ” no valid future target
             feat_indices_valid = feat_indices[valid_mask]
             feats = feats.loc[feat_indices_valid]
             target_aligned = target_raw[feat_indices_valid]
@@ -535,7 +535,7 @@ class ForexPredictor:
                 put_pct = 100.0 - buy_pct
                 log.info(f"[{self._key}] Training on {len(y)} candles. Class balance: BUY {buy_pct:.1f}% | PUT {put_pct:.1f}%")
 
-            # --- Bug1 fix: Online RL Integration — match by timestamp (not price) ---
+            # --- Bug1 fix: Online RL Integration вЂ” match by timestamp (not price) ---
             sample_weights = np.ones(len(y), dtype=np.float32)
             rl_feedbacks = _fetch_rl_feedback(self.symbol, self.interval)
 
@@ -577,9 +577,9 @@ class ForexPredictor:
                             if diff < best_diff:
                                 best_diff, best_fb = diff, fb
 
-                        # FIX W-12: Match window was hardcoded to ±300s (5 mins).
+                        # FIX W-12: Match window was hardcoded to В±300s (5 mins).
                         # For s5 TF, this matched one trade to 60 candles (massive noise).
-                        # Now dynamic: ±1.5 candles
+                        # Now dynamic: В±1.5 candles
                         tf_seconds = {"s5": 5, "s15": 15, "s30": 30, "1m": 60, "5m": 300, "15m": 900}.get(self.interval, 60)
                         max_diff = max(30, tf_seconds * 1.5)
                         
@@ -593,7 +593,7 @@ class ForexPredictor:
                                 y[i] = 1 if dir_ == "BUY" else 0
 
                     if match_count > 0:
-                        log.info(f"[Online RL] {self._key}: matched {match_count} feedback samples by timestamp (±5 min window) with x5 weight.")
+                        log.info(f"[Online RL] {self._key}: matched {match_count} feedback samples by timestamp (В±5 min window) with x5 weight.")
                     else:
                         log.debug(f"[Online RL] {self._key}: {len(parsed_feedbacks)} feedbacks parsed but 0 matched to candles (time mismatch >5 min).")
             # -----------------------------------------------------------------------
@@ -687,14 +687,14 @@ class ForexPredictor:
             "age_hours": round((time.time() - meta.trained_at) / 3600, 1),
         }
 
-    # ── Internal helpers ────────────────────────────────────────────────────
+    # в”Ђв”Ђ Internal helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
     def _model_path(self) -> Path:
         return MODEL_DIR / f"{self._key}.pkl"
 
     def _save(self, model, meta: ModelMeta):
         # FIX C-09: write atomically via tmp + os.replace, same pattern as SGD.
-        # Old code wrote directly to the target file — a crash during joblib.dump
+        # Old code wrote directly to the target file вЂ” a crash during joblib.dump
         # would leave a corrupted pkl that permanently breaks model loading.
         p = self._model_path()
         tmp = p.with_suffix(".tmp")
@@ -720,7 +720,7 @@ class ForexPredictor:
                 except Exception:
                     pass
 
-        # Load SGD (Tier 2) — Bug3 fix: restore update count from dict format
+        # Load SGD (Tier 2) вЂ” Bug3 fix: restore update count from dict format
         sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
         if sgd_path.exists():
             try:
@@ -803,4 +803,5 @@ class ForexPredictor:
         ]
         log.info(f"[TwelveData] Successfully fetched {len(candles)} candles for {td_symbol}")
         return candles
+
 
