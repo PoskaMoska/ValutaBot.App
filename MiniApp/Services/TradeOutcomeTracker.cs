@@ -12,6 +12,13 @@ public static class TradeOutcomeTracker
     private static volatile bool _initialized = false;
     private static readonly SemaphoreSlim _initSemaphore = new(1, 1);
     private static readonly SemaphoreSlim _csvSemaphore = new(1, 1); // B5-FIX: Concurrent CSV write lock
+private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _consecutiveLosses = new();
+
+public static int GetConsecutiveLosses(string asset, string timeframe)
+{
+    string key = $"{asset}_{timeframe}";
+    return _consecutiveLosses.TryGetValue(key, out int count) ? count : 0;
+}
     private static int _eurusdTradeCounter = 0;
 
     public static async Task InitializeAsync()
@@ -79,7 +86,17 @@ public static class TradeOutcomeTracker
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord);
 
             bool wasCorrect = record.WasCorrect ?? false;
-            double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
+double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
+
+string lossKey = $"{record.Asset}_{record.Timeframe}";
+if (wasCorrect)
+{
+    _consecutiveLosses[lossKey] = 0;
+}
+else
+{
+    _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
+}
 
             // РО (Pocket Option) Fix: The old secondary 'noise threshold' filter (0.00005 = 5 pips) was completely removed here.
             // On Pocket Option, over 60% of 1-minute trades close within a 1-4 pip margin.
@@ -201,3 +218,7 @@ public static class TradeOutcomeTracker
         }
     }
 }
+
+
+
+

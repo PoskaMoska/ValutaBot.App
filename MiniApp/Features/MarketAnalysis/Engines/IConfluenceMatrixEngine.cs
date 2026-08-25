@@ -29,8 +29,7 @@ public interface IConfluenceMatrixEngine
         OrderflowSignal ofSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
-        ConfluenceMatrixResult mtfResult
-    );
+        ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0);
 }
 
 // Replaces ConsensusEngine.DecisionResult
@@ -42,4 +41,5 @@ public record ConsensusDecision(
     double FinalTotalScore,
     string RecommendedExpiryText = ""
 );
+
 

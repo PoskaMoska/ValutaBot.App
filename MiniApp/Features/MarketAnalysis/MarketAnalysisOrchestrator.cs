@@ -491,16 +491,16 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(_asset, _timeframe, _isForex, _symbol);
 
+                int consecutiveLosses = TradeOutcomeTracker.GetConsecutiveLosses(_asset, _timeframe);
+        double volRatio = _marketAnalyzer.CalculateVolatilityRatio(_mainPrices);
         var consensus = await _cmEngine.EvaluateMatrixAsync(
             _asset, _timeframe, isSubMinute, _conflictPenalty, 
-            taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult
-        );
+            taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio);
 
         string finalDirection = consensus.FinalDirection;
         int finalProbability = consensus.Probability;
         
         int timeframeSec = _fetcher.TimeframeSeconds(_timeframe);
-        double volRatio = _marketAnalyzer.CalculateVolatilityRatio(_mainPrices);
         var timeoutResult = _timeoutEngine.CalculateTimeout(_asset, _timeframe, _mainAtr, volRatio, _smcResult, _mainPrices[^1]);
         
         // --- PRODUCTION KILL SWITCH (Pre-Simulation) ---
@@ -627,4 +627,5 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
     }
 }
+
 

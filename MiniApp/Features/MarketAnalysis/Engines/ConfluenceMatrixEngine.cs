@@ -184,7 +184,7 @@ public class ConfluenceMatrixEngine(
         OrderflowSignal ofSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
-        ConfluenceMatrixResult mtfResult)
+        ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0)
     {
         double totalScore      = 0.0;
         double totalConfidence = 0.0;
@@ -236,6 +236,25 @@ public class ConfluenceMatrixEngine(
             // Trending Market: Boost BOS, Nerf Sweeps
             trendWeight     = 1.5;
             reversionWeight = 0.5;
+        }
+
+                if (consecutiveLosses >= 2)
+        {
+            BotLogger.Warn($"[Regime Switch] {asset}/{timeframe} Hit {consecutiveLosses} losses in a row. Activating Dynamic Penalty.");
+            if (volRatio < 1.0)
+            {
+                BotLogger.Info("[Regime Switch] Low Volume detected. Switching to Counter-Trend (Reversion) Mode.");
+                trendWeight = 0.0;
+                reversionWeight = 3.0; 
+                taWeight *= 0.1; 
+            }
+            else
+            {
+                BotLogger.Info("[Regime Switch] High Volume detected. Switching to Trend-Following Mode.");
+                trendWeight = 3.0;
+                reversionWeight = 0.0; 
+                taWeight *= 2.0; 
+            }
         }
 
         double finalSmcScore = (smcTrendScore * trendWeight) + (smcReversionScore * reversionWeight);
@@ -336,4 +355,7 @@ public class ConfluenceMatrixEngine(
     }
 
 }
+
+
+
 
