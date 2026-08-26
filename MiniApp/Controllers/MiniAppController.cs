@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -158,8 +158,8 @@ public static partial class MiniAppController
         if (!isWeekend)
         {
             // Launch Real-Time WebSocket stream for major CME proxy forex streams (0ms latency)
-            string[] topStreamSymbols = { "EURUSDT", "GBPUSDT", "AUDUSDT" };
-            BinanceWebSocketStream.StartStream(topStreamSymbols, "1m");
+            string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD" };
+            TwelveDataWebSocketStream.StartStream(topStreamSymbols);
         }
 
         // Init Telegram notifier from config or env (set in Railway dashboard)

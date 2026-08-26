@@ -39,73 +39,116 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             throw new Exception($"ОТКАЗ API: Недостаточно свечей для технического анализа. Получено {prices.Length}. Нужно минимум 14.");
         }
 
-        // Стандартный RSI(14) — базовый сигнал (стабилен на всех таймфреймах).
-        // ConnorsRSI — подтверждающий сигнал (нестабилен на M1, даёт крайние значения при нормальном рынке).
-        double rsi        = ComputeRsi(asset, timeframe, candles, 14);
+        // ── Sub-minute detection ──────────────────────────────────────────────────────────
+        // On s5/s10/s15/s30 RSI(14) covers only 70–420 seconds of price history.
+        // In that window RSI almost never crosses 30/70 → score ≈ 0 permanently → NEUTRAL bias.
+        // ADX(14) on sub-minute is always < 20 (range zone) → HMA is zeroed out → another scoring dead end.
+        // Fix: use shorter indicator periods scaled to the timeframe resolution,
+        // and replace the ADX regime branch with a micro-velocity path that reads
+        // short-term price momentum directly.
+        bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
+
+        int rsiPeriod = isSubMinute ? 8  : 14;
+        int hmaPeriod = isSubMinute ? 6  : 9;
+        int adxPeriod = isSubMinute ? 7  : 14;
+        int atrPeriod = isSubMinute ? 7  : 14;
+
+        double rsi        = ComputeRsi(asset, timeframe, candles, rsiPeriod);
         double connorsRsi = ComputeConnorsRsi(asset, timeframe, candles);
-        double hma = ComputeHma(asset, timeframe, candles, 9);
-        double lastPrice = prices[^1];
+        double hma        = ComputeHma(asset, timeframe, candles, hmaPeriod);
+        double lastPrice  = prices[^1];
 
         var (adxVal, pdiVal, mdiVal) = adxOverride.HasValue
             ? (adxOverride.Value, 0.0, 0.0)
-            : (candles.Length > 0 ? ComputeTrueAdx(asset, timeframe, candles) : (20.0, 0.0, 0.0));
+            : (candles.Length > 0 ? ComputeTrueAdx(asset, timeframe, candles, adxPeriod) : (20.0, 0.0, 0.0));
 
         double atrVal = atrOverride.HasValue
             ? atrOverride.Value
-            : (candles.Length > 0 ? ComputeAtr(asset, timeframe, candles) : 0);
+            : (candles.Length > 0 ? ComputeAtr(asset, timeframe, candles, atrPeriod) : 0);
 
-        double score = 0;
+        double score      = 0;
         double confidence = 60.0;
 
-        // ── Dynamic Thresholds (Adaptive Bands) ──
-        double rsiOverbought = 70.0;
-        double rsiOversold = 30.0;
-        
-        if (adxVal > 30.0) {
-            // In strong trends, we need EXTREME exhaustion to fade, or we just follow trend
-            rsiOverbought = 80.0; 
-            rsiOversold = 20.0;
-        } else if (adxVal < 20.0) {
-            // In quiet ranges, smaller deviations are valid reversion points
-            rsiOverbought = 65.0; 
-            rsiOversold = 35.0;
+        // ── Dynamic RSI Thresholds ────────────────────────────────────────────────────────
+        double rsiOverbought = isSubMinute ? 62.0 : 70.0;
+        double rsiOversold   = isSubMinute ? 38.0 : 30.0;
+
+        if (!isSubMinute)
+        {
+            if (adxVal > 30.0) { rsiOverbought = 80.0; rsiOversold = 20.0; }
+            else if (adxVal < 20.0) { rsiOverbought = 65.0; rsiOversold = 35.0; }
         }
 
-        // Adaptive Regime-Switching Weights (Level 3 Fix)
+        // ── Adaptive Regime Logic ─────────────────────────────────────────────────────────
         double hmaWeight = 0.15;
 
-        if (adxVal < 20.0)
+        if (isSubMinute)
         {
-            // Ranging Market: Extreme Mean-Reversion ONLY (Dynamic Thresholds)
-            hmaWeight = 0.0;
-            if (rsi > rsiOverbought) score -= 0.8;
-            else if (rsi < rsiOversold) score += 0.8;
+            // Sub-minute regime: ADX is structurally low — do NOT use it to gate HMA.
+            // Instead use micro-velocity: short-term price slope over last 5 candles.
+            // This directly captures direction-change which RSI/ADX miss at this resolution.
+
+            // Micro-velocity: slope of last 5 closes (basis points per candle)
+            double microVel = prices.Length >= 5
+                ? (prices[^1] - prices[^5]) / Math.Max(1e-8, prices[^5]) * 10_000.0
+                : 0.0;
+
+            // HMA direction signal — on sub-minute this is the primary trend indicator
+            hmaWeight = 0.35;
+            if (lastPrice > hma) score += hmaWeight;
+            else if (lastPrice < hma) score -= hmaWeight;
+
+            // Micro-velocity contribution — normalized, capped ±0.40
+            score += Math.Clamp(microVel / 25.0, -0.40, 0.40);
+
+            // RSI with tighter bands (62/38 set above) — still valid, just narrower window
+            if (rsi > rsiOverbought)      score -= 0.30;
+            else if (rsi < rsiOversold)   score += 0.30;
+
+            // ConnorsRSI follow-through
+            double connorsSignalSub = (connorsRsi - 50.0) / 50.0;
+            score += Math.Clamp(connorsSignalSub * 0.15, -0.15, 0.15);
+
+            // Confidence boost from velocity clarity
+            double velClarity = Math.Abs(microVel);
+            confidence += Math.Min(velClarity * 1.5, 15.0);
         }
-        else if (adxVal > 25.0)
+        else
         {
-            // Trending Market: Boost Trend-Following (PDI/MDI alignment)
-            hmaWeight = 0.40;
-            if (pdiVal > mdiVal) score += 0.6; // Up trend
-            if (mdiVal > pdiVal) score -= 0.6; // Down trend
-        }
-        else 
-        {
-            // Neutral zone (Transition)
-            if (rsi > 75.0) score -= 0.4;
-            else if (rsi < 25.0) score += 0.4;
-        }
+            // ── Standard minute+ regime logic (unchanged) ────────────────────────────────
+            if (adxVal < 20.0)
+            {
+                // Ranging Market: Extreme Mean-Reversion ONLY
+                hmaWeight = 0.0;
+                if (rsi > rsiOverbought) score -= 0.8;
+                else if (rsi < rsiOversold) score += 0.8;
+            }
+            else if (adxVal > 25.0)
+            {
+                // Trending Market: Boost Trend-Following (PDI/MDI alignment)
+                hmaWeight = 0.40;
+                if (pdiVal > mdiVal) score += 0.6;
+                if (mdiVal > pdiVal) score -= 0.6;
+            }
+            else
+            {
+                // Neutral zone (Transition)
+                if (rsi > 75.0) score -= 0.4;
+                else if (rsi < 25.0) score += 0.4;
+            }
 
-        // ConnorsRSI как подтверждающий сигнал.
-        double connorsSignal = (connorsRsi - 50.0) / 50.0;
-        if (adxVal > 25.0)
-            score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15); 
-        else if (adxVal < 20.0)
-            score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10); 
+            // ConnorsRSI как подтверждающий сигнал.
+            double connorsSignal = (connorsRsi - 50.0) / 50.0;
+            if (adxVal > 25.0)
+                score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15);
+            else if (adxVal < 20.0)
+                score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10);
 
-        if (lastPrice > hma) score += hmaWeight;
-        else if (lastPrice < hma) score -= hmaWeight;
+            if (lastPrice > hma) score += hmaWeight;
+            else if (lastPrice < hma) score -= hmaWeight;
+        } // end else (minute+ regime)
 
-        if (adxVal > 25.0)
+        if (adxVal > 25.0 && !isSubMinute)
         {
             confidence += Math.Min((adxVal - 25.0) * 0.8, 20.0);
         }

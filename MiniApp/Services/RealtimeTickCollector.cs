@@ -37,11 +37,13 @@ namespace ValutaBot.MiniApp
             }
         }
         
-        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s5 = new();
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s5  = new();
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s10 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s15 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s30 = new();
 
         private static Timer? _s5Timer;
+        private static Timer? _s10Timer;
         private static Timer? _s15Timer;
         private static Timer? _s30Timer;
         private static Timer? _pruneTimer;
@@ -59,17 +61,54 @@ namespace ValutaBot.MiniApp
                 });
             };
 
-            int msToNext5s = 5000 - (now.Millisecond + (now.Second % 5) * 1000);
+            int msToNext5s = Math.Max(1, 5000 - (now.Millisecond + (now.Second % 5) * 1000));
             _s5Timer = new Timer(_ => safeFlush(_s5, "s5"), null, msToNext5s, 5000);
+
+            int msToNext10s = Math.Max(1, 10000 - (now.Millisecond + (now.Second % 10) * 1000));
+            _s10Timer = new Timer(_ => safeFlush(_s10, "s10"), null, msToNext10s, 10000);
             
-            int msToNext15s = 15000 - (now.Millisecond + (now.Second % 15) * 1000);
+            int msToNext15s = Math.Max(1, 15000 - (now.Millisecond + (now.Second % 15) * 1000));
             _s15Timer = new Timer(_ => safeFlush(_s15, "s15"), null, msToNext15s, 15000);
             
-            int msToNext30s = 30000 - (now.Millisecond + (now.Second % 30) * 1000);
+            int msToNext30s = Math.Max(1, 30000 - (now.Millisecond + (now.Second % 30) * 1000));
             _s30Timer = new Timer(_ => safeFlush(_s30, "s30"), null, msToNext30s, 30000);
             
             _pruneTimer = new Timer(async _ => await TickRepository.PruneOldCandlesAsync(14), null, TimeSpan.FromMinutes(1), TimeSpan.FromHours(12));
             BotLogger.Info("[TickCollector] Initialized real-time subminute candle accumulation.");
+        }
+
+                public static async Task<MiniAppController.OhlcCandle[]> GetRecentCandles(string asset, string interval, int limit)
+        {
+            try
+            {
+                // CRITICAL FIX: OnPriceUpdate writes as "EURUSD" (stripped), so query must match.
+                string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+
+                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                await conn.OpenAsync();
+                
+                var records = (await Dapper.SqlMapper.QueryAsync(conn, @"
+                    SELECT open_time as OpenTime, open_price as Open, high_price as High, low_price as Low, close_price as Close, volume as Volume
+                    FROM subminute_candles
+                    WHERE asset = @Asset AND interval = @Interval
+                    ORDER BY open_time DESC
+                    LIMIT @Limit;
+                ", new { Asset = cleanAsset, Interval = interval, Limit = limit })).ToList();
+
+                var result = new MiniAppController.OhlcCandle[records.Count];
+                // Convert reverse order (DESC) back to chronological
+                for (int i = 0; i < records.Count; i++)
+                {
+                    var r = records[records.Count - 1 - i]; // Reverse back
+                    result[i] = new MiniAppController.OhlcCandle((double)r.Open, (double)r.High, (double)r.Low, (double)r.Close, (double)r.Volume, DateTime.Parse((string)r.OpenTime));
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[RealtimeTickCollector] Failed to fetch recent {interval} candles for {asset}: {ex.Message}");
+                return Array.Empty<MiniAppController.OhlcCandle>();
+            }
         }
 
         public static void OnPriceUpdate(string asset, double price)
@@ -80,7 +119,8 @@ namespace ValutaBot.MiniApp
             // which aligns with the model key used in training and feedback.
             string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
 
-            UpdateAccumulator(_s5, cleanAsset, price);
+            UpdateAccumulator(_s5,  cleanAsset, price);
+            UpdateAccumulator(_s10, cleanAsset, price);
             UpdateAccumulator(_s15, cleanAsset, price);
             UpdateAccumulator(_s30, cleanAsset, price);
         }
@@ -102,7 +142,6 @@ namespace ValutaBot.MiniApp
                 var acc = kvp.Value;
                 
                 double open, high, low, close;
-                int count;
                 DateTime openTime;
 
                 lock (acc)
@@ -112,13 +151,15 @@ namespace ValutaBot.MiniApp
                     high = acc.High;
                     low = acc.Low;
                     close = acc.Close;
-                    count = acc.TickCount;
                     openTime = acc.OpenTime;
+                    // On Forex, volume = number of transactions in the period (tick count)
+                    double tickVolume = acc.TickCount;
                     
                     acc.Reset(DateTime.UtcNow);
-                }
 
-                _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, count);
+                    // Fire-and-forget DB write — outside the lock to minimize contention
+                    _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);
+                }
             }
         }
     }

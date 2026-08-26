@@ -52,12 +52,7 @@ public class PendingTradeVerificationService : BackgroundService
 
         if (SignalTracker._livePrices.TryGetValue(record.Asset, out double memPrice) && memPrice > 0)
             exitPrice = memPrice;
-        else if (!record.IsForex)
-        {
-            if (BinanceWebSocketStream.TryGetLiveCandles(record.BinanceSymbol, "1m",
-                    out _, out _, out _, out double[] wsPrices, out _, out int count) && count > 0)
-                exitPrice = wsPrices[count - 1];
-        }
+        
 
         if (!exitPrice.HasValue || exitPrice.Value <= 0)
         {
@@ -68,7 +63,7 @@ public class PendingTradeVerificationService : BackgroundService
 
         double priceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
 
-        // FIX C-17: skip doji (entry==exit) — no meaningful outcome to learn from.
+        // FIX C-17: skip doji (entry==exit) � no meaningful outcome to learn from.
         if (Math.Abs(priceDiff) < 1e-8)
         {
             BotLogger.Warn($"[PendingVerifier] Doji detected for {record.Asset}. Skipping SGD feedback.");

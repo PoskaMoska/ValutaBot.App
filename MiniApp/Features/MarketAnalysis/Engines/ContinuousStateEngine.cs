@@ -56,19 +56,26 @@ public static class ContinuousStateEngine
         double momentumContribution = 0;
         string desc;
 
-        if (instantVelocity > 3.0 && instantAcceleration > 0.5)
+        bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
+        // Scale thresholds based on the timeframe resolution.
+        // Sub-minute candles represent fractions of a minute, so basis-point velocity per candle is much smaller.
+        double velThreshold = isSubMinute ? 0.3 : 3.0;
+        double accelThreshold = isSubMinute ? 0.05 : 0.5;
+        double decelThreshold = isSubMinute ? 0.2 : 2.0;
+
+        if (instantVelocity > velThreshold && instantAcceleration > accelThreshold)
         {
             regime = "HYPER_ACCELERATING_UP";
             momentumContribution = 0.45;
-            desc = $"Непрерывный вектор: Гипер-ускорение ВВЕРХ (Velocity={instantVelocity:F1} bps/s, Accel={instantAcceleration:F2} bps/s²).";
+            desc = $"Непрерывный вектор: Гипер-ускорение ВВЕРХ (Velocity={instantVelocity:F2} bps/s, Accel={instantAcceleration:F3} bps/s²).";
         }
-        else if (instantVelocity < -3.0 && instantAcceleration < -0.5)
+        else if (instantVelocity < -velThreshold && instantAcceleration < -accelThreshold)
         {
             regime = "HYPER_ACCELERATING_DOWN";
             momentumContribution = -0.45;
-            desc = $"Непрерывный вектор: Гипер-ускорение ВНИЗ (Velocity={instantVelocity:F1} bps/s, Accel={instantAcceleration:F2} bps/s²).";
+            desc = $"Непрерывный вектор: Гипер-ускорение ВНИЗ (Velocity={instantVelocity:F2} bps/s, Accel={instantAcceleration:F3} bps/s²).";
         }
-        else if (Math.Sign(instantVelocity) != Math.Sign(instantAcceleration) && Math.Abs(instantVelocity) > 2.0)
+        else if (Math.Sign(instantVelocity) != Math.Sign(instantAcceleration) && Math.Abs(instantVelocity) > decelThreshold)
         {
             regime = "DECELERATING";
             momentumContribution = -Math.Sign(instantVelocity) * 0.20;

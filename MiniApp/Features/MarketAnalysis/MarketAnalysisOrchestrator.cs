@@ -165,6 +165,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
             return result;
         }
+        catch (MarketClosedException mcEx)
+        {
+            BotLogger.Warn($"[Analysis] Market closed for {_asset}: {mcEx.Message}");
+            throw;
+        }
         catch (ExchangeUnavailableException exEx)
         {
             BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms вЂ” ExchangeUnavailable");
@@ -216,7 +221,18 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         else if (_ohlcCandles.Length < 2)
         {
-            BotLogger.Warn($"[Orchestrator] Only {_ohlcCandles.Length} candle(s) for {_asset} ({_timeframe}) вЂ” analysis may be limited.");
+            BotLogger.Warn($"[Orchestrator] Only {_ohlcCandles.Length} candle(s) for {_asset} ({_timeframe}) — analysis may be limited.");
+        }
+
+        // FIX: For sub-minute TFs (s5/s10/s15/s30), IntervalMap maps to "1m".
+        // _mainPrices would contain 1m closes while _ohlcCandles has real 5s candles.
+        // ScoreTimeframe and ContinuousStateEngine must see the SAME granularity.
+        // Override _mainPrices/_mainVolumes from the actual sub-minute OHLC candles.
+        if (_tfLower.StartsWith("s") && _ohlcCandles.Length >= 14)
+        {
+            _mainPrices  = _ohlcCandles.Select(c => c.Close).ToArray();
+            _mainVolumes = _ohlcCandles.Select(c => c.Volume).ToArray();
+            BotLogger.Info($"[Orchestrator] Sub-minute {_timeframe}: using {_mainPrices.Length} real candles for prices (not 1m).");
         }
 
         var higherTask = _higherTf != null ? SafeFetch(_higherTf) : Task.FromResult<(double[] prices, double[] volumes)?>(null);
@@ -503,16 +519,13 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         int timeframeSec = _fetcher.TimeframeSeconds(_timeframe);
         var timeoutResult = _timeoutEngine.CalculateTimeout(_asset, _timeframe, _mainAtr, volRatio, _smcResult, _mainPrices[^1]);
         
-        // --- PRODUCTION KILL SWITCH (Pre-Simulation) ---
+        // --- PRODUCTION KILL SWITCH REMOVED ---
+        // We no longer block the user. Instead, we generate a soft warning.
+        string adaptiveReasoning = $"{timeoutResult.Reasoning} | {mtfResult.SummaryReasoning}";
         if (_wfResult.IsCooloffActive)
         {
-            var remaining = _wfResult.CooloffUntil - DateTime.UtcNow;
-            int mins = Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes));
-            BotLogger.Warn($"[KillSwitch] Blocked trade for {_asset} {_timeframe} due to WFE Cooloff. Resumes in {mins} min.");
-            throw new Exception(
-                $"\u26a0\ufe0f \u0410\u043d\u0430\u043b\u0438\u0437\u0430\u0442\u043e\u0440 \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d: 3 \u043f\u043e\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u043d\u044b\u0445 \u0443\u0431\u044b\u0442\u043a\u0430 (\u0414\u0440\u043e\u0443\u0434\u0430\u0443\u043d \u043f\u0440\u043e\u0442\u0435\u043a\u0446\u0438\u044f). " +
-                $"\u23f3 \u0420\u0430\u0437\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u043a\u0430 \u0447\u0435\u0440\u0435\u0437: {mins} \u043c\u0438\u043d. (\u0432 {_wfResult.CooloffUntil:HH:mm} UTC). " +
-                "\u041f\u043e\u0434\u043e\u0436\u0434\u0438\u0442\u0435 \u0438\u043b\u0438 \u0441\u043c\u0435\u043d\u0438\u0442\u0435 \u0430\u043a\u0442\u0438\u0432, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c \u0430\u043d\u0430\u043b\u0438\u0437.");
+            BotLogger.Warn($"[Drawdown] {_asset} {_timeframe} is unstable. Soft-warning the user instead of blocking.");
+            adaptiveReasoning = "⚠️ Рынок нестабилен (серия убытков), ИИ перестраивается. Торгуйте осторожно! | " + adaptiveReasoning;
         }
 
         // Р—Р°РјРµРЅР° Monte Carlo (O(1000)) РЅР° С‚СЂРё Р·Р°РєСЂС‹С‚С‹Рµ С„РѕСЂРјСѓР»С‹ (O(1)).
@@ -567,7 +580,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         await SignalTracker.RecordPredictionAsync(
             finalDirection, _asset, _timeframe, _mainPrices[^1],
             expiryCandles: timeoutResult.TimeoutCandles,
-            timeframeSecs: timeframeSec, isForex: _isForex, binanceSymbol: _symbol,
+            timeframeSecs: timeframeSec, isForex: _isForex,
             sourceDirections: new Dictionary<string, string> {
                 ["LIGHTGBM"] = _lgbmDirection, ["SKENDER_MATH"] = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
                 ["SMC"] = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL", ["ORDERFLOW"] = orderFlowDir,
@@ -592,7 +605,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             direction = finalDirection,
             probability = finalProbability,
             duration = timeoutResult.TimeoutText,
-            adaptiveReasoning = $"{timeoutResult.Reasoning} | {mtfResult.SummaryReasoning}",
+            adaptiveReasoning = adaptiveReasoning,
             goldenSetup = mtfResult.IsGoldenSetup,
             confluenceLabel = mtfResult.ConfluenceLabel,
             confluenceRatio = mtfResult.ConfluenceRatio,

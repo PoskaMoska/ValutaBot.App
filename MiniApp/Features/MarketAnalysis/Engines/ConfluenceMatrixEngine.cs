@@ -43,9 +43,9 @@ public class ConfluenceMatrixEngine(
             var (primaryPrices, primaryVolumes) = await primaryTask;
             var (macroPrices,   macroVolumes)   = await macroTask;
 
-            string dirMicro   = ScoreDirection(microPrices,   microVolumes);
-            string dirPrimary = ScoreDirection(primaryPrices, primaryVolumes);
-            string dirMacro   = ScoreDirection(macroPrices,   macroVolumes);
+            string dirMicro   = ScoreDirection(microPrices,   microVolumes, microTf);
+            string dirPrimary = ScoreDirection(primaryPrices, primaryVolumes, primaryTf);
+            string dirMacro   = ScoreDirection(macroPrices,   macroVolumes, macroTf);
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -119,11 +119,11 @@ public class ConfluenceMatrixEngine(
     /// candles.Length == 0 &lt; 14 в†’ always return score=0.0 в†’ always "NEUTRAL".
     /// Now constructs a real OhlcCandle[] from price/volume arrays.
     /// </summary>
-    private string ScoreDirection(double[] prices, double[] volumes)
+    private string ScoreDirection(double[] prices, double[] volumes, string tf)
     {
         if (prices == null || prices.Length < 10) 
         {
-            throw new Exception($"РћРўРљРђР— API: РџРѕР»СѓС‡РµРЅРѕ {(prices == null ? 0 : prices.Length)} СЃРІРµС‡РµР№ РґР»СЏ РјР°С‚СЂРёС†С‹ (РЅСѓР¶РЅРѕ РјРёРЅ 10).");
+            throw new Exception($"ОТКАЗ API: Получено {(prices == null ? 0 : prices.Length)} свечей для матрицы (нужно мин 10).");
         }
 
         double avgDiff = 0;
@@ -133,7 +133,7 @@ public class ConfluenceMatrixEngine(
         }
         if (avgDiff == 0) avgDiff = prices[0] * 0.0001;
 
-        // ArrayPool: РІРјРµСЃС‚Рѕ new OhlcCandle[n] (4 Р°Р»Р»РѕРєР°С†РёРё РЅР° Р·Р°РїСЂРѕСЃ) Р±РµСЂС‘Рј Р±СѓС„РµСЂ РёР· РїСѓР»Р°.
+        // ArrayPool: вместо new OhlcCandle[n] (4 аллокации на запрос) берём буфер из пула.
         var candles = ArrayPool<MiniAppController.OhlcCandle>.Shared.Rent(prices.Length);
         try
         {
@@ -154,7 +154,7 @@ public class ConfluenceMatrixEngine(
             }
 
             var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
-                "internal", "internal", prices,
+                "internal", tf, prices,
                 volumes: volumes,
                 candles: candles.AsSpan(0, prices.Length)
             );
@@ -191,30 +191,31 @@ public class ConfluenceMatrixEngine(
         double totalWeight     = 0.0;
 
         // 1. Technical Analysis (Lagging вЂ” СЂРѕР»СЊ С„РѕРЅРѕРІРѕРіРѕ С„РёР»СЊС‚СЂР°, РІРµСЃ СЃРЅРёР¶РµРЅ РґРѕ 0.5)
-        double taWeight  = await SignalTracker.GetSignalWeightAsync("INDICATORS", 0.5);
+        double taWeight  = await SignalTracker.GetSignalWeightAsync("INDICATORS", 0.8);
         totalScore      += taSignal.Score * taWeight;
         totalConfidence += taSignal.Confidence * taWeight;
         totalWeight     += taWeight;
 
         // 1b. Order Flow (Leading вЂ” РІС‹РґРµР»РµРЅ РІ РѕС‚РґРµР»СЊРЅС‹Р№ РєРѕРјРїРѕРЅРµРЅС‚, РїСЂРёРѕСЂРёС‚РµС‚РЅС‹Р№ СЃРёРіРЅР°Р» РґР»СЏ РѕРїС†РёРѕРЅРѕРІ)
-        double ofWeight  = await SignalTracker.GetSignalWeightAsync("ORDERFLOW", 1.8);
+        double ofWeight  = await SignalTracker.GetSignalWeightAsync("ORDERFLOW", 1.2);
         totalScore      += ofSignal.ScoreContribution * ofWeight;
         totalConfidence += 65.0 * ofWeight;
         totalWeight     += ofWeight;
 
         // 2. Velocity / Continuous State (Leading вЂ” РјРёРєСЂРѕ-СѓСЃРєРѕСЂРµРЅРёРµ С†РµРЅС‹, РїРѕРІС‹С€РµРЅ РґРѕ 2.0)
-        double stateWeight  = await SignalTracker.GetSignalWeightAsync("VelocityState", 2.0);
+        double stateWeight  = await SignalTracker.GetSignalWeightAsync("VelocityState", 1.0);
         totalScore         += stateSignal.MomentumContribution * stateWeight;
         totalConfidence    += 55.0 * stateWeight;
         totalWeight        += stateWeight;
 
-        // 3. SMC (Smart Money Concepts) — adaptive weights based on ADX regime
+        // 3. SMC (Smart Money Concepts) - adaptive weights based on ADX regime
         double smcTrendScore     = 0.0;
         double smcReversionScore = 0.0;
 
-        if (smcSignal.BosDirection == "BULLISH")  smcTrendScore     += 2.0;
-        if (smcSignal.BosDirection == "BEARISH")  smcTrendScore     -= 2.0;
-        // FIX: "NONE" is not an empty string — guard against it explicitly
+        // FIX BUG-1: StatefulSmc returns "BULLISH_BOS"/"BEARISH_BOS", not "BULLISH"/"BEARISH".
+        // Previously this comparison NEVER matched -> BOS contributed 0 points always.
+        if (smcSignal.BosDirection == "BULLISH_BOS")  smcTrendScore += 2.0;
+        if (smcSignal.BosDirection == "BEARISH_BOS")  smcTrendScore -= 2.0;
         if (!string.IsNullOrEmpty(smcSignal.OrderBlockType) && smcSignal.OrderBlockType != "NONE")
             smcTrendScore += smcSignal.OrderBlockType.Contains("BULL") ? 1.0 : -1.0;
         if (!string.IsNullOrEmpty(smcSignal.FvgType) && smcSignal.FvgType != "NONE")
@@ -227,36 +228,34 @@ public class ConfluenceMatrixEngine(
 
         if (taSignal.Adx < 20.0)
         {
-            // Choppy / Flat Market: Nerf BOS, Boost Sweeps
             trendWeight     = 0.0;
             reversionWeight = 2.0;
         }
         else if (taSignal.Adx > 25.0)
         {
-            // Trending Market: Boost BOS, Nerf Sweeps
             trendWeight     = 1.5;
             reversionWeight = 0.5;
         }
 
-                if (consecutiveLosses >= 2)
+        // FIX BUG-3: graduated penalty instead of binary taWeight flip (0.1x/2.0x).
+        // Binary caused instability: 2 random losses -> radical weight change -> more errors.
+        if (consecutiveLosses >= 2)
         {
-            BotLogger.Warn($"[Regime Switch] {asset}/{timeframe} Hit {consecutiveLosses} losses in a row. Activating Dynamic Penalty.");
+            double lossPenalty = Math.Max(0.5, 1.0 - (consecutiveLosses - 1) * 0.15);
+            BotLogger.Warn($"[Regime Switch] {asset}/{timeframe}: {consecutiveLosses} losses. Graduated penalty={lossPenalty:F2}x");
             if (volRatio < 1.0)
             {
-                BotLogger.Info("[Regime Switch] Low Volume detected. Switching to Counter-Trend (Reversion) Mode.");
-                trendWeight = 0.0;
-                reversionWeight = 3.0; 
-                taWeight *= 0.1; 
+                trendWeight     *= lossPenalty;
+                reversionWeight *= (2.0 - lossPenalty);
+                BotLogger.Info("[Regime Switch] Low vol + losses -> boosting reversion.");
             }
             else
             {
-                BotLogger.Info("[Regime Switch] High Volume detected. Switching to Trend-Following Mode.");
-                trendWeight = 3.0;
-                reversionWeight = 0.0; 
-                taWeight *= 2.0; 
+                trendWeight     *= (2.0 - lossPenalty);
+                reversionWeight *= lossPenalty;
+                BotLogger.Info("[Regime Switch] High vol + losses -> boosting trend-following.");
             }
         }
-
         double finalSmcScore = (smcTrendScore * trendWeight) + (smcReversionScore * reversionWeight);
 
         if (Math.Abs(finalSmcScore) > 0.1)

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -40,10 +40,10 @@ public static class SignalTracker
         int expiryCandles = 3,
         int timeframeSecs = 60,
         bool isForex = false,
-        string? binanceSymbol = null,
+        
         Dictionary<string, string>? sourceDirections = null)
     {
-        string sym = (binanceSymbol ?? MapToBinanceSymbol(asset)).ToUpper();
+        string sym = asset.ToUpper();
         int verifyDelaySecs = expiryCandles * timeframeSecs + 5; // +5s buffer for candle close
 
         string cooldownKey = $"{asset}_{timeframe}";
@@ -107,13 +107,7 @@ public static class SignalTracker
                 {
                     exitPrice = memPrice;
                 }
-                else if (!isForex)
-                {
-                    if (BinanceWebSocketStream.TryGetLiveCandles(sym, "1m", out _, out _, out _, out double[] wsPrices, out _, out int count) && count > 0)
-                    {
-                        exitPrice = wsPrices[count - 1];
-                    }
-                }
+                
                 
                 if (exitPrice.HasValue && exitPrice.Value > 0)
                 {
