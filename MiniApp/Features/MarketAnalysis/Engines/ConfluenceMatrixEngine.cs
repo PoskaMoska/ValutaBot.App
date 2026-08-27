@@ -137,6 +137,11 @@ public class ConfluenceMatrixEngine(
         var candles = ArrayPool<MiniAppController.OhlcCandle>.Shared.Rent(prices.Length);
         try
         {
+            // AUDIT FIX: детерминированные timestamps вместо DateTime.UtcNow.
+            // Старый код: каждый вызов генерировал UtcNow-based timestamps → IndicatorCache.CountUnseen
+            // видел "новые" свечи → полный сброс и пересчёт O(n) на каждый запрос.
+            // Фикс: фиксированная эпоха + i*шаг → timestamps одинаковы между вызовами для тех же данных.
+            var baseTime = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             for (int i = 0; i < prices.Length; i++)
             {
                 double v = volumes != null && i < volumes.Length ? volumes[i] : 1.0;
@@ -149,12 +154,14 @@ public class ConfluenceMatrixEngine(
                 candles[i] = new MiniAppController.OhlcCandle(
                     open, high, low, close,
                     v,
-                    DateTime.UtcNow.AddMinutes(i - prices.Length)
+                    baseTime.AddMinutes(i)
                 );
             }
 
+            // AUDIT FIX: передаём реальный tf как asset-ключ (вместо "internal") чтобы IndicatorCache
+            // корректно разделял кэши по таймфреймам матрицы (m1/m3/m5 и т.д.).
             var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
-                "internal", tf, prices,
+                $"4dmatrix_{tf}", tf, prices,
                 volumes: volumes,
                 candles: candles.AsSpan(0, prices.Length)
             );
@@ -197,16 +204,26 @@ public class ConfluenceMatrixEngine(
         totalWeight     += taWeight;
 
         // 1b. Order Flow (Leading вЂ” РІС‹РґРµР»РµРЅ РІ РѕС‚РґРµР»СЊРЅС‹Р№ РєРѕРјРїРѕРЅРµРЅС‚, РїСЂРёРѕСЂРёС‚РµС‚РЅС‹Р№ СЃРёРіРЅР°Р» РґР»СЏ РѕРїС†РёРѕРЅРѕРІ)
+        // 1b. Order Flow (Leading — выделен в отдельный компонент, приоритетный сигнал для опционов)
         double ofWeight  = await SignalTracker.GetSignalWeightAsync("ORDERFLOW", 1.2);
         totalScore      += ofSignal.ScoreContribution * ofWeight;
         totalConfidence += 65.0 * ofWeight;
         totalWeight     += ofWeight;
 
-        // 2. Velocity / Continuous State (Leading вЂ” РјРёРєСЂРѕ-СѓСЃРєРѕСЂРµРЅРёРµ С†РµРЅС‹, РїРѕРІС‹С€РµРЅ РґРѕ 2.0)
+        // 2. Velocity / Continuous State (Leading — микро-ускорение цены)
+        // AUDIT FIX: только включаем в totalWeight если contribution ненулевой (>= 0.03).
+        // При STABLE (contribution=0) добавление stateWeight в знаменатель лишь разбавляет TA и OF.
         double stateWeight  = await SignalTracker.GetSignalWeightAsync("VelocityState", 1.0);
-        totalScore         += stateSignal.MomentumContribution * stateWeight;
-        totalConfidence    += 55.0 * stateWeight;
-        totalWeight        += stateWeight;
+        if (Math.Abs(stateSignal.MomentumContribution) >= 0.03)
+        {
+            totalScore         += stateSignal.MomentumContribution * stateWeight;
+            totalConfidence    += 55.0 * stateWeight;
+            totalWeight        += stateWeight;
+        }
+        else
+        {
+            BotLogger.Info($"[State] MomentumContribution={stateSignal.MomentumContribution:F3} < 0.03 (STABLE) — skipping VelocityState weight.");
+        }
 
         // 3. SMC (Smart Money Concepts) - adaptive weights based on ADX regime
         double smcTrendScore     = 0.0;
@@ -258,9 +275,12 @@ public class ConfluenceMatrixEngine(
         }
         double finalSmcScore = (smcTrendScore * trendWeight) + (smcReversionScore * reversionWeight);
 
-        if (Math.Abs(finalSmcScore) > 0.1)
+        if (Math.Abs(finalSmcScore) > 0.1 && !isSubMinute)
         {
             // FIX W-20: dynamic normalization — max score depends on active weights
+            // AUDIT FIX: SMC полностью отключён на sub-minute (s5/s10/s15/s30).
+            // BOS, FVG, OrderBlock — институциональные концепции для H1/H4/D1.
+            // На 5-секундных свечах это статистический шум, загрязняющий скоринг.
             double maxPossibleSmc = (trendWeight * 4.0) + (reversionWeight * 2.0);
             double normSmcScore   = maxPossibleSmc > 0 ? finalSmcScore / maxPossibleSmc : 0;
 
@@ -268,6 +288,10 @@ public class ConfluenceMatrixEngine(
             totalScore        += normSmcScore * smcWeight;
             totalConfidence   += 60.0 * smcWeight;
             totalWeight       += smcWeight;
+        }
+        else if (isSubMinute)
+        {
+            BotLogger.Info($"[SMC] Sub-minute timeframe — SMC scoring disabled (institutional concepts not valid on {timeframe}).");
         }
 
         // Normalize internal base scores
@@ -279,6 +303,42 @@ public class ConfluenceMatrixEngine(
 
         // Apply conflict penalty globally to the normalized score
         totalScore *= conflictPenalty;
+
+        // AUDIT FIX: AutoCalibrationEngine — применяем режимный мультипликатор.
+        // AutoCalibrationEngine был написан, но никогда не вызывался в решении.
+        // Теперь детектируем режим рынка (Trending / Ranging / Chaos) и корректируем score.
+        if (TradeOutcomeTracker.CalibrationEngine is AutoCalibrationEngine calibEngine)
+        {
+            var regime = calibEngine.DetectMarketRegime(taSignal.Adx, volRatio, taSignal.Rsi);
+            // Получаем мультипликатор для ENSEMBLE-источника: отражает общую историческую точность
+            double regimeMultiplier = calibEngine.GetCalibratedRegimeWeight("SKENDER_MATH", asset, timeframe, regime);
+            // Применяем как мягкий скейлинг (clamp чтобы не инвертировать знак)
+            double scaledMultiplier = Math.Clamp(regimeMultiplier, 0.5, 1.5);
+            totalScore *= scaledMultiplier;
+            BotLogger.Info($"[AutoCalib] Regime={regime}, Multiplier={regimeMultiplier:F2}x → scaled={scaledMultiplier:F2}x, adjustedScore={totalScore:F3}");
+        }
+
+        // AUDIT FIX: FearGreed — добавляем контрарный вклад для крипто-пар.
+        // FearGreedService существовал, но нигде не вызывался в матрице решений.
+        // Только для крипто (isForex=false); для forex возвращает contribution=0.0.
+        // Максимальный вклад ±0.08 (масштабированный с оригинального ±0.12).
+        bool isForexAsset = !asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL")
+                         && !asset.Contains("XRP") && !asset.Contains("BNB");
+        try
+        {
+            var fg = await ValutaBot.App.MiniApp.Services.FearGreedService.GetAsync(isForexAsset);
+            if (Math.Abs(fg.ScoreContribution) > 0.01)
+            {
+                // Масштабируем до ±0.08 максимум чтобы не доминировать над основными сигналами
+                double fgContrib = Math.Clamp(fg.ScoreContribution * 0.67, -0.08, 0.08);
+                totalScore += fgContrib;
+                BotLogger.Info($"[FearGreed] Zone={fg.Zone}, Contrib={fg.ScoreContribution:+0.00;-0.00} → applied={fgContrib:+0.00;-0.00}");
+            }
+        }
+        catch (Exception fgEx)
+        {
+            BotLogger.Info($"[FearGreed] Skipped: {fgEx.Message}");
+        }
 
         // 4. ML / Mathematical Consensus Matrix Layer (META-LABELING OVERRIDE)
         // FIX C-13: totalScore is already normalized to [-1, 1] after /totalWeight.
@@ -310,9 +370,11 @@ public class ConfluenceMatrixEngine(
             finalConfidenceScore = (mlScore * mlWeight) + (scoreMath * mathWeight);
         }
 
-        // FIX W-21: wider neutral dead-zone (was ±0.0001 → ±0.05)
-        // ±0.0001 treated almost any non-zero value as a signal, generating noise.
-        candidateDir = finalConfidenceScore > 0.01 ? "BUY" : finalConfidenceScore < -0.01 ? "PUT" : "NEUTRAL";
+        // AUDIT FIX (КРИТИЧНО): dead-zone поднята с ±0.01 до ±0.12.
+        // Старый порог 0.01 — это 1% от шкалы [-1,+1].
+        // Любой шум в TA/OF/State давал направленный сигнал в боковом рынке.
+        // ±0.12 требует реального перевеса нескольких компонентов одновременно.
+        candidateDir = finalConfidenceScore > 0.12 ? "BUY" : finalConfidenceScore < -0.12 ? "PUT" : "NEUTRAL";
 
         // 5. Final Decision
         double absWeightedScore = Math.Abs(finalConfidenceScore);
@@ -327,6 +389,15 @@ public class ConfluenceMatrixEngine(
             && mtfResult.DominantDirection == candidateDir)
         {
             probability = Math.Clamp(probability + mtfResult.ProbabilityBoost, 55, 95);
+        }
+
+        // AUDIT FIX: minimum probability threshold.
+        // При score 0.12-0.20 probability ≈ 55-59% — это слабый, граничный сигнал.
+        // Если уверенность системы ниже 58% — лучше отказаться от ставки.
+        if (candidateDir != "NEUTRAL" && probability < 58)
+        {
+            BotLogger.Info($"[Filter] Probability={probability}% < 58% threshold — reverting to NEUTRAL (score={finalConfidenceScore:F3}).");
+            candidateDir = "NEUTRAL";
         }
 
         // 6. Reasoning text
