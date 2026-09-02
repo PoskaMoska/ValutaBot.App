@@ -576,17 +576,23 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
 
         string orderFlowDir = _orderFlowResult.ScoreContribution > 0 ? "BUY" : _orderFlowResult.ScoreContribution < 0 ? "PUT" : "NEUTRAL";
-        
-        await SignalTracker.RecordPredictionAsync(
-            finalDirection, _asset, _timeframe, _mainPrices[^1],
-            expiryCandles: timeoutResult.TimeoutCandles,
-            timeframeSecs: timeframeSec, isForex: _isForex,
-            sourceDirections: new Dictionary<string, string> {
-                ["LIGHTGBM"] = _lgbmDirection, ["SKENDER_MATH"] = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
-                ["SMC"] = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL", ["ORDERFLOW"] = orderFlowDir,
-                ["NATIVE_ML"] = "NEUTRAL"
-            }
-        );
+
+        // BUGFIX: Do NOT record NEUTRAL signals as pending trades.
+        // NEUTRAL direction always evaluates to isCorrect=false → always recorded as LOSS →
+        // ML learns "NEUTRAL = always lose" → model avoids NEUTRAL → generates random BUY/PUT → degrades.
+        if (finalDirection != "NEUTRAL")
+        {
+            await SignalTracker.RecordPredictionAsync(
+                finalDirection, _asset, _timeframe, _mainPrices[^1],
+                expiryCandles: timeoutResult.TimeoutCandles,
+                timeframeSecs: timeframeSec, isForex: _isForex,
+                sourceDirections: new Dictionary<string, string> {
+                    ["LIGHTGBM"] = _lgbmDirection, ["SKENDER_MATH"] = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
+                    ["SMC"] = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL", ["ORDERFLOW"] = orderFlowDir,
+                    ["NATIVE_ML"] = "NEUTRAL"
+                }
+            );
+        }
 
         // РџР°СЂР°Р»Р»РµР»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє С‚СЂС‘С… РЅРµР·Р°РІРёСЃРёРјС‹С… DB-Р·Р°РїСЂРѕСЃРѕРІ РІРјРµСЃС‚Рѕ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕРіРѕ.
         // Р­РєРѕРЅРѕРјРёСЏ: ~2вЂ“3x latency РїСЂРё РєР°Р¶РґРѕРј РІС‹Р·РѕРІРµ (СѓСЃС‚СЂР°РЅСЏРµС‚ sequential await chain).
