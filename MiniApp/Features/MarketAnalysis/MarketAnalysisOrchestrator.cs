@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -37,6 +37,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private string? _lowerTf;
     private double[] _mainPrices = Array.Empty<double>();
     private double[] _mainVolumes = Array.Empty<double>();
+    private double _currentLivePrice;
     private string _mainOhlcKey = "";
     private MiniAppController.OhlcCandle[]? _ohlcCandles;
     private (double[] prices, double[] volumes)? _higherResultData;
@@ -255,7 +256,25 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (extraTasks.Count > 0) await Task.WhenAll(extraTasks);
 
         _higherResultData = await higherTask;
-        _lowerResultData = await lowerTask;
+                _lowerResultData = await lowerTask;
+
+        if (_mainPrices != null && _mainPrices.Length > 0)
+        {
+            _currentLivePrice = _mainPrices[^1];
+
+            if (_ohlcCandles != null && _ohlcCandles.Length > 1)
+            {
+                var last = _ohlcCandles[^1];
+                int tfSecs = _fetcher.TimeframeSeconds(_timeframe);
+                if (DateTime.UtcNow < last.Timestamp.AddSeconds(tfSecs))
+                {
+                    BotLogger.Info($"[Orchestrator] Stripped unclosed {_timeframe} candle for {_asset} to prevent repainting.");
+                    _ohlcCandles = _ohlcCandles[..^1];
+                    _mainPrices = _mainPrices[..^1];
+                    _mainVolumes = _mainVolumes[..^1];
+                }
+            }
+        }
     }
 
     private async Task<(double[] prices, double[] volumes)?> SafeFetch(string tf)
@@ -268,7 +287,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     {
         if (IsSettingEnabled(_settings.EnableSmc, _userSettings?.EnableSmc))
         {
-            _smcResult = SmcEngine.AnalyzeSmcStructure(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _mainPrices[^1]);
+            _smcResult = SmcEngine.AnalyzeSmcStructure(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
             BotLogger.Info($"[SMC Engine] Asset {_asset} ({_timeframe}): SMC Zones updated.");
         }
         else
@@ -278,7 +297,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         if (IsSettingEnabled(_settings.EnableOrderFlow, _userSettings?.EnableOf))
         {
-            _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _mainPrices[^1]);
+            _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
             BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
         }
         else
@@ -517,7 +536,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         int finalProbability = consensus.Probability;
         
         int timeframeSec = _fetcher.TimeframeSeconds(_timeframe);
-        var timeoutResult = _timeoutEngine.CalculateTimeout(_asset, _timeframe, _mainAtr, volRatio, _smcResult, _mainPrices[^1]);
+        var timeoutResult = _timeoutEngine.CalculateTimeout(_asset, _timeframe, _mainAtr, volRatio, _smcResult, _currentLivePrice);
         
         // --- PRODUCTION KILL SWITCH REMOVED ---
         // We no longer block the user. Instead, we generate a soft warning.
@@ -583,7 +602,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (finalDirection != "NEUTRAL")
         {
             await SignalTracker.RecordPredictionAsync(
-                finalDirection, _asset, _timeframe, _mainPrices[^1],
+                finalDirection, _asset, _timeframe, _currentLivePrice,
                 expiryCandles: timeoutResult.TimeoutCandles,
                 timeframeSecs: timeframeSec, isForex: _isForex,
                 sourceDirections: new Dictionary<string, string> {
