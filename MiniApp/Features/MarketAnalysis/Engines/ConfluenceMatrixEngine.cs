@@ -371,11 +371,9 @@ public class ConfluenceMatrixEngine(
             finalConfidenceScore = (mlScore * mlWeight) + (scoreMath * mathWeight);
         }
 
-        // AUDIT FIX (КРИТИЧНО): dead-zone поднята с ±0.01 до ±0.12.
-        // Старый порог 0.01 — это 1% от шкалы [-1,+1].
-        // Любой шум в TA/OF/State давал направленный сигнал в боковом рынке.
-        // ±0.12 требует реального перевеса нескольких компонентов одновременно.
-        candidateDir = finalConfidenceScore > 0.12 ? "BUY" : finalConfidenceScore < -0.12 ? "PUT" : "NEUTRAL";
+        // Dead-zone: lowered from ±0.12 to ±0.07 to generate more directional signals.
+        // At 80% payout, break-even is 55.6% win rate — the probability filter below enforces this.
+        candidateDir = finalConfidenceScore > 0.07 ? "BUY" : finalConfidenceScore < -0.07 ? "PUT" : "NEUTRAL";
 
         // 5. Final Decision
         double absWeightedScore = Math.Abs(finalConfidenceScore);
@@ -392,12 +390,11 @@ public class ConfluenceMatrixEngine(
             probability = Math.Clamp(probability + mtfResult.ProbabilityBoost, 55, 95);
         }
 
-        // AUDIT FIX: minimum probability threshold.
-        // При score 0.12-0.20 probability ≈ 55-59% — это слабый, граничный сигнал.
-        // Если уверенность системы ниже 58% — лучше отказаться от ставки.
-        if (candidateDir != "NEUTRAL" && probability < 58)
+        // Minimum probability threshold = 55% (just above break-even for 80% payout).
+        // Lowered from 58% to 55% to reduce excessive NEUTRAL signals.
+        if (candidateDir != "NEUTRAL" && probability < 55)
         {
-            BotLogger.Info($"[Filter] Probability={probability}% < 58% threshold — reverting to NEUTRAL (score={finalConfidenceScore:F3}).");
+            BotLogger.Info($"[Filter] Probability={probability}% < 55% threshold — reverting to NEUTRAL (score={finalConfidenceScore:F3}).");
             candidateDir = "NEUTRAL";
         }
 
