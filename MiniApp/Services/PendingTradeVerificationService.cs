@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -63,10 +63,11 @@ public class PendingTradeVerificationService : BackgroundService
 
         double priceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
 
-        // FIX C-17: skip doji (entry==exit) � no meaningful outcome to learn from.
+        // FIX C-17: skip doji (entry==exit) — no meaningful outcome to learn from.
         if (Math.Abs(priceDiff) < 1e-8)
         {
             BotLogger.Warn($"[PendingVerifier] Doji detected for {record.Asset}. Skipping SGD feedback.");
+            await TradeRepository.DeletePendingTradeAsync(record.Id); // BUGFIX: was missing, caused infinite retry loop
             return;
         }
 

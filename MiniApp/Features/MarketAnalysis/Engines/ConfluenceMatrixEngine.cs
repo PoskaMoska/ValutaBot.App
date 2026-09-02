@@ -137,11 +137,12 @@ public class ConfluenceMatrixEngine(
         var candles = ArrayPool<MiniAppController.OhlcCandle>.Shared.Rent(prices.Length);
         try
         {
-            // AUDIT FIX: детерминированные timestamps вместо DateTime.UtcNow.
-            // Старый код: каждый вызов генерировал UtcNow-based timestamps → IndicatorCache.CountUnseen
-            // видел "новые" свечи → полный сброс и пересчёт O(n) на каждый запрос.
-            // Фикс: фиксированная эпоха + i*шаг → timestamps одинаковы между вызовами для тех же данных.
-            var baseTime = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            // BUGFIX: Use real relative timestamps instead of the hardcoded 2020 epoch.
+            // The 2020 epoch was added to prevent IndicatorCache from resetting on every call,
+            // but it caused a worse problem: all calls have identical timestamps → cache always hits
+            // → indicators are frozen at the values computed on first call after startup.
+            // Fix: Use UtcNow-relative timestamps so cache correctly detects new data each call.
+            var baseTime = DateTime.UtcNow.AddMinutes(-(prices.Length - 1));
             for (int i = 0; i < prices.Length; i++)
             {
                 double v = volumes != null && i < volumes.Length ? volumes[i] : 1.0;

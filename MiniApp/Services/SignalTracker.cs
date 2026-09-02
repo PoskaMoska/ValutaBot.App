@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -153,9 +153,14 @@ public static class SignalTracker
                         if (TradeOutcomeTracker.CalibrationEngine != null)
                             TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", asset, timeframe, isCorrect);
 
-                        // SGD online learning feedback is handled EXCLUSIVELY by PendingTradeVerificationService
-                        // (reads from PostgreSQL after trade is saved). Calling it here too caused double-training.
-                        // FIX C-16: removed duplicate MLPythonService.RecordOnlineTradeOutcomeAsync call.
+                        // BUGFIX: Restore SGD online learning feedback.
+                        // FIX C-16 incorrectly removed this call assuming PendingVerificationService would handle it.
+                        // However, SignalTracker deletes the trade from DB immediately after processing (line above),
+                        // so PendingVerificationService (running every 60s) never finds the trade and ML never gets feedback.
+                        // This was the primary reason the ML model stopped learning in real-time.
+                        _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
+                            asset, timeframe, price, exitPrice.Value,
+                            direction, wasWin: isCorrect, isForex: record.IsForex));
 
                         // Invalidate signal votes cache so UI refreshes
                         _signalVotesCacheExpiry = DateTime.MinValue;
