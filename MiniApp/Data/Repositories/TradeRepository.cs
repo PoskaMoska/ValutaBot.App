@@ -70,9 +70,9 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             {
                 using var conn = DbConnectionFactory.GetConnection();
                 var rows = await conn.QueryAsync(@"
-                    SELECT id as "Id", asset as "Asset", timeframe as "Timeframe", direction as "Direction",
-                           entry_price as "EntryPrice", exit_price as ExitPrice, pnl_bps as PnlBps,
-                           was_win as WasWin, created_at as CreatedAt, verified_at as VerifiedAt
+                    SELECT id as ""Id"", asset as ""Asset"", timeframe as ""Timeframe"", direction as ""Direction"",
+                           entry_price as ""EntryPrice"", exit_price as ""ExitPrice"", pnl_bps as ""PnlBps"",
+                           was_win as ""WasWin"", created_at as ""CreatedAt"", verified_at as ""VerifiedAt""
                     FROM trade_outcomes
                     ORDER BY verified_at DESC
                     LIMIT @limit
@@ -126,10 +126,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<SignalTracker.PredictionRecord>();
             using var conn = DbConnectionFactory.GetConnection();
             var rows = await conn.QueryAsync(@"
-                SELECT id as "Id", direction as "Direction", asset as "Asset", timeframe as "Timeframe", 
-                       binance_symbol as "BinanceSymbol", entry_price as "EntryPrice", 
-                       created_at as "CreatedAtStr", verify_at as "VerifyAtStr", 
-                       is_forex as "IsForex", source_directions as "SourceDirectionsStr"
+                SELECT id as ""Id"", direction as ""Direction"", asset as ""Asset"", timeframe as ""Timeframe"", 
+                       binance_symbol as ""BinanceSymbol"", entry_price as ""EntryPrice"", 
+                       created_at as ""CreatedAtStr"", verify_at as ""VerifyAtStr"", 
+                       is_forex as ""IsForex"", source_directions as ""SourceDirectionsStr""
                 FROM pending_trades 
                 WHERE verify_at <= @UpToStr", 
                 new { UpToStr = upTo.ToString("o") });
