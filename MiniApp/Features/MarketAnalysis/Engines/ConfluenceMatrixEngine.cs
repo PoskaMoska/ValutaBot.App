@@ -371,9 +371,10 @@ public class ConfluenceMatrixEngine(
             finalConfidenceScore = (mlScore * mlWeight) + (scoreMath * mathWeight);
         }
 
-        // Dead-zone: lowered from ±0.12 to ±0.07 to generate more directional signals.
-        // At 80% payout, break-even is 55.6% win rate — the probability filter below enforces this.
-        candidateDir = finalConfidenceScore > 0.07 ? "BUY" : finalConfidenceScore < -0.07 ? "PUT" : "NEUTRAL";
+        // Dead-zone: near-zero (±0.01). Bot always gives a directional signal.
+        // NEUTRAL only when score is truly zero (no market data bias at all).
+        // User decides whether to act on low-confidence signals.
+        candidateDir = finalConfidenceScore > 0.01 ? "BUY" : finalConfidenceScore < -0.01 ? "PUT" : "NEUTRAL";
 
         // 5. Final Decision
         double absWeightedScore = Math.Abs(finalConfidenceScore);
@@ -390,13 +391,9 @@ public class ConfluenceMatrixEngine(
             probability = Math.Clamp(probability + mtfResult.ProbabilityBoost, 55, 95);
         }
 
-        // Minimum probability threshold = 55% (just above break-even for 80% payout).
-        // Lowered from 58% to 55% to reduce excessive NEUTRAL signals.
-        if (candidateDir != "NEUTRAL" && probability < 55)
-        {
-            BotLogger.Info($"[Filter] Probability={probability}% < 55% threshold — reverting to NEUTRAL (score={finalConfidenceScore:F3}).");
-            candidateDir = "NEUTRAL";
-        }
+        // Probability filter removed: bot always gives a signal.
+        // User sees the probability % and decides whether to trade.
+        // Low probability signals are shown as-is with their confidence level.
 
         // 6. Reasoning text
         string modelAccText = mlSignal.Accuracy.HasValue
