@@ -1,7 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
+using ValutaBot.App.MiniApp.Data;
+using Dapper;
+using System.Collections.Generic;
 
 namespace ValutaBot.MiniApp;
 
@@ -20,42 +23,28 @@ public class MarketClosedException : Exception
 {
     public string UserFriendlyMessage { get; }
 
-    public MarketClosedException(string message, string userFriendlyMessage)
-        : base(message)
+    public MarketClosedException(string message, string userFriendlyMessage, Exception? inner = null)
+        : base(message, inner)
     {
         UserFriendlyMessage = userFriendlyMessage;
     }
 }
 
-/// <summary>
-/// Service for fetching historical candle data via TwelveData.
-/// Sub-minute (s5, s15, s30) uses RealtimeTickCollector for live data.
-/// </summary>
 public class MarketDataFetcher
 {
-    public static MarketDataFetcher Instance { get; set; } = new MarketDataFetcher();
-
+    // Caches mappings for standard intervals
     public string IntervalMap(string tf) => tf.ToLower() switch
     {
-        "m1" => "1m", "m2" => "1m", "m3" => "5m",
-        "m5" => "5m", "m15" => "15m", "m30" => "30m",
-        "h1" => "1h", "h4" => "4h",
-        "d1" => "1d", _ => "1m" // Sub-minute tf will fallback to 1m for historical bounds if needed
-    };
-
-    public int TimeframeSeconds(string tf) => tf.ToLower() switch
-    {
-        "s3" => 3, "s5" => 5, "s10" => 10, "s15" => 15, "s30" => 30,
-        "m1" => 60, "m2" => 120, "m3" => 180, "m5" => 300,
-        "m15" => 900, "m30" => 1800,
-        "h1" => 3600, "h4" => 14400,
-        "d1" => 86400, _ => 60
+        "s5" => "1min", "s15" => "1min", "s30" => "1min",
+        "m1" => "1min", "m2" => "1min", "m3" => "3min", 
+        "m5" => "5min", "m15" => "15min", "m30" => "30min",
+        "h1" => "1h", "h4" => "4h", "d1" => "1day", _ => "1min"
     };
 
     public string? HigherTf(string tf) => tf.ToLower() switch
     {
-        "s3" or "s5" or "s10" or "s15" or "s30" => "m5",
-        "m1" => "m5", "m2" => "m5", "m3" => "m5",
+        "s5" => "m1", "s10" => "m1", "s15" => "m1", "s30" => "m1",
+        "m1" => "m5", "m2" => "m15", "m3" => "m15",
         "m5" => "m15", "m15" => "h1", "m30" => "h1",
         "h1" => "h4", "h4" => "d1", _ => null
     };
@@ -71,36 +60,66 @@ public class MarketDataFetcher
         "d1" => "h4", _ => null
     };
 
-    private void CheckWeekendClosure()
+    private static bool IsCrypto(string asset)
+    {
+        return asset.Contains("BTC", StringComparison.OrdinalIgnoreCase) ||
+               asset.Contains("ETH", StringComparison.OrdinalIgnoreCase) ||
+               asset.Contains("SOL", StringComparison.OrdinalIgnoreCase) ||
+               asset.Contains("XRP", StringComparison.OrdinalIgnoreCase) ||
+               asset.Contains("USDT", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWeekendNow()
     {
         var utcNow = DateTime.UtcNow;
         var dayOfWeek = utcNow.DayOfWeek;
-        
-        bool isWeekend = (dayOfWeek == DayOfWeek.Friday && utcNow.Hour >= 22) ||
-                         (dayOfWeek == DayOfWeek.Saturday) ||
-                         (dayOfWeek == DayOfWeek.Sunday && utcNow.Hour < 22);
+        return (dayOfWeek == DayOfWeek.Friday && utcNow.Hour >= 22) ||
+               (dayOfWeek == DayOfWeek.Saturday) ||
+               (dayOfWeek == DayOfWeek.Sunday && utcNow.Hour < 22);
+    }
 
-        if (isWeekend)
+    private void CheckWeekendClosure(string asset, bool isOtc)
+    {
+        if (isOtc || IsCrypto(asset)) return;
+
+        if (IsWeekendNow())
         {
             throw new MarketClosedException(
                 "Weekend Market Closed",
-                "\u26a0\ufe0f Р С‹РЅРѕРє Р¤РѕСЂРµРєСЃ Р·Р°РєСЂС‹С‚ РЅР° РІС‹С…РѕРґРЅС‹Рµ (РџС‚ 22:00 - Р’СЃ 22:00 UTC)."
+                "⚠️ Рынок Форекс закрыт на выходные (Пт 22:00 - Вс 22:00 UTC)."
             );
         }
     }
 
+    public int TimeframeSeconds(string rawInterval)
+    {
+        string t = rawInterval.ToLower();
+        if (t.StartsWith("s") && int.TryParse(t.Substring(1), out int s)) return s;
+        if (t.StartsWith("m") && int.TryParse(t.Substring(1), out int m)) return m * 60;
+        if (t.StartsWith("h") && int.TryParse(t.Substring(1), out int h)) return h * 3600;
+        if (t == "d1") return 86400;
+        return 60;
+    }
+
     public virtual async Task<MiniAppController.OhlcCandle[]> FetchOhlcWithFallbackAsync(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
-        CheckWeekendClosure();
-
         string assetToFetch = originalAsset ?? symbol ?? "EUR/USD";
+        bool isOtc = assetToFetch.Contains("OTC", StringComparison.OrdinalIgnoreCase);
+        
+        CheckWeekendClosure(assetToFetch, isOtc);
+
         string cleanAsset = AssetSanitizer.Sanitize(assetToFetch);
         if (cleanAsset.Length == 6) cleanAsset = $"{cleanAsset.Substring(0, 3)}/{cleanAsset.Substring(3, 3)}";
+
+        // If weekend + OTC -> Use offline database
+        if (IsWeekendNow() && isOtc)
+        {
+            return await FetchOtcHistoricalAsync(assetToFetch, rawInterval, limit);
+        }
 
         // For sub-minute timeframes, first try live ticks from the DB
         if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
         {
-            // Use the same key format as RealtimeTickCollector writes: "EURUSD" not "EUR/USD"
             string cleanKey = AssetSanitizer.Sanitize(assetToFetch).Replace("/", "").ToUpper();
             var liveCandles = await RealtimeTickCollector.GetRecentCandles(cleanKey, rawInterval, limit);
 
@@ -110,37 +129,19 @@ public class MarketDataFetcher
                 return liveCandles;
             }
 
-            // Cold-start: not enough live ticks yet — synthesize from 1m as warm-up.
-            // S5CandleSynthesizer is intentionally used ONLY here as a temporary placeholder
-            // until the WebSocket accumulates enough real ticks (typically < 5 min after startup).
             BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length} ticks in DB). Synthesizing from 1m candles as warm-up.");
 
-            int m1Needed = (limit / 12) + 2; // 12 s5-candles per 1m candle
+            int m1Needed = (limit / 12) + 2;
             var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1m", m1Needed);
 
             if (m1Result != null && m1Result.Value.candles.Length > 0)
             {
-                // Synthesize to s5 first (finest granularity)
                 var s5Candles = ValutaBot.App.MiniApp.Backtesting.S5CandleSynthesizer.SynthesizeFromM1(m1Result.Value.candles);
-
-                // Aggregate s5 up to the requested sub-minute interval
-                int groupSize = rawInterval.ToLower() switch
-                {
-                    "s5"  => 1,
-                    "s10" => 2,
-                    "s15" => 3,
-                    "s30" => 6,
-                    _     => 1
-                };
-
-                var aggregated = groupSize == 1
-                    ? s5Candles
-                    : AggregateCandles(s5Candles, groupSize);
-
+                int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
+                var aggregated = groupSize == 1 ? s5Candles : AggregateCandles(s5Candles, groupSize);
                 return aggregated.TakeLast(limit).ToArray();
             }
 
-            // If even 1m data is unavailable, fall through to the normal TwelveData fetch below
             BotLogger.Warn($"[MarketDataFetcher] 1m cold-start data unavailable for {cleanAsset}.");
         }
 
@@ -150,29 +151,78 @@ public class MarketDataFetcher
         if (tdResult != null)
             return tdResult.Value.candles;
 
-        throw new ExchangeUnavailableException("TwelveData API Unavailable", "\u26a0\ufe0f РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РґР°РЅРЅС‹Рµ РѕС‚ Р±СЂРѕРєРµСЂР° (TwelveData).");
+        throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData).");
+    }
+
+    private async Task<MiniAppController.OhlcCandle[]> FetchOtcHistoricalAsync(string asset, string rawInterval, int limit)
+    {
+        string dbSymbol = asset.Replace("/", "").Replace("OTC", "").Trim().ToUpper();
+        if (dbSymbol == "GBPJPY") dbSymbol = "USDCHF"; // Fallback proxy
+
+        int m1Needed = limit;
+        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase)) m1Needed = (limit / 12) + 2;
+        else if (rawInterval.StartsWith("m") && int.TryParse(rawInterval.Substring(1), out int m)) m1Needed = limit * m;
+        else if (rawInterval.StartsWith("h") && int.TryParse(rawInterval.Substring(1), out int h)) m1Needed = limit * h * 60;
+
+        int maxIndex = 98000; 
+        int offset = (int)((DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute) % maxIndex);
+
+        using var conn = DbConnectionFactory.GetConnection();
+        var rows = await conn.QueryAsync<MiniAppController.OhlcCandle>(@"
+            SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
+            FROM historical_candles
+            WHERE asset = @Asset
+            ORDER BY open_time ASC
+            LIMIT @Limit OFFSET @Offset
+        ", new { Asset = dbSymbol, Limit = m1Needed, Offset = offset });
+
+        var m1Candles = rows.ToArray();
+        if (m1Candles.Length < m1Needed)
+        {
+            m1Candles = (await conn.QueryAsync<MiniAppController.OhlcCandle>(@"
+                SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
+                FROM historical_candles WHERE asset = 'EURUSD' ORDER BY open_time ASC LIMIT @Limit OFFSET @Offset
+            ", new { Limit = m1Needed, Offset = offset })).ToArray();
+        }
+
+        MiniAppController.OhlcCandle[] finalCandles;
+        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
+        {
+            var s5 = ValutaBot.App.MiniApp.Backtesting.S5CandleSynthesizer.SynthesizeFromM1(m1Candles);
+            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
+            finalCandles = (groupSize == 1 ? s5 : AggregateCandles(s5, groupSize)).TakeLast(limit).ToArray();
+        }
+        else
+        {
+            int mGroup = 1;
+            if (rawInterval.StartsWith("m") && int.TryParse(rawInterval.Substring(1), out int m)) mGroup = m;
+            if (rawInterval.StartsWith("h") && int.TryParse(rawInterval.Substring(1), out int h)) mGroup = h * 60;
+            finalCandles = (mGroup == 1 ? m1Candles : AggregateCandles(m1Candles, mGroup)).TakeLast(limit).ToArray();
+        }
+
+        var now = DateTime.UtcNow;
+        int intervalSeconds = TimeframeSeconds(rawInterval);
+        for (int i = 0; i < finalCandles.Length; i++)
+        {
+            finalCandles[i] = finalCandles[i] with { Timestamp = now.AddSeconds(- (finalCandles.Length - 1 - i) * intervalSeconds) };
+        }
+
+        BotLogger.Info($"[OTC Weekend] Served {finalCandles.Length} virtual candles for {asset} from history.");
+        return finalCandles;
     }
 
     public virtual async Task<(double[] prices, double[] volumes)> FetchBinanceWithFallback(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         var candles = await FetchOhlcWithFallbackAsync(symbol, rawInterval, originalAsset, limit);
-        
         var prices = candles.Select(c => c.Close).ToArray();
         var volumes = candles.Select(c => c.Volume).ToArray();
-        
         return (prices, volumes);
     }
 
-    /// <summary>
-    /// Aggregates an array of fine-grained candles (e.g. s5) into coarser candles (e.g. s10, s15, s30).
-    /// Used only during cold-start to upsample synthesized s5 data to the requested sub-minute timeframe.
-    /// </summary>
     private static MiniAppController.OhlcCandle[] AggregateCandles(MiniAppController.OhlcCandle[] candles, int groupSize)
     {
         if (groupSize <= 1) return candles;
-
         var result = new List<MiniAppController.OhlcCandle>(candles.Length / groupSize);
-
         for (int i = 0; i + groupSize <= candles.Length; i += groupSize)
         {
             double open   = candles[i].Open;
@@ -187,10 +237,8 @@ public class MarketDataFetcher
                 if (candles[j].Low  < low)   low    = candles[j].Low;
                 volume += candles[j].Volume;
             }
-
             result.Add(new MiniAppController.OhlcCandle(open, high, low, close, volume, candles[i].Timestamp));
         }
-
         return result.ToArray();
     }
 }
