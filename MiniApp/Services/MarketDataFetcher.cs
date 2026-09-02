@@ -60,15 +60,6 @@ public class MarketDataFetcher
         "d1" => "h4", _ => null
     };
 
-    private static bool IsCrypto(string asset)
-    {
-        return asset.Contains("BTC", StringComparison.OrdinalIgnoreCase) ||
-               asset.Contains("ETH", StringComparison.OrdinalIgnoreCase) ||
-               asset.Contains("SOL", StringComparison.OrdinalIgnoreCase) ||
-               asset.Contains("XRP", StringComparison.OrdinalIgnoreCase) ||
-               asset.Contains("USDT", StringComparison.OrdinalIgnoreCase);
-    }
-
     private static bool IsWeekendNow()
     {
         var utcNow = DateTime.UtcNow;
@@ -80,7 +71,7 @@ public class MarketDataFetcher
 
     private void CheckWeekendClosure(string asset, bool isOtc)
     {
-        if (isOtc || IsCrypto(asset)) return;
+        if (isOtc) return;
 
         if (IsWeekendNow())
         {
