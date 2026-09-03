@@ -273,7 +273,7 @@ export async function executeAnalysis() {
             /*
             if (data.evLabel || data.kellyLabel) {
                 const mcCard = document.getElementById('mcCard');
-                if (mcCard) mcCard.style.display = 'block';
+                if (mcCard) mcCard.style.display = 'none';
                 const mcSimEl = document.getElementById('mcSimCount');
                 if (mcSimEl && data.monteCarloIterations) {
                     mcSimEl.innerText = (data.monteCarloSuccess || 0) + ' / ' + data.monteCarloIterations + ' удачных';
@@ -304,7 +304,7 @@ export async function executeAnalysis() {
             // Reasoning Card
             if (data.claudeReasoning) {
                 const rCard = document.getElementById('reasoningCard');
-                if (rCard) rCard.style.display = 'block';
+                if (rCard) rCard.style.display = 'none';
                 const rText = document.getElementById('reasoningText');
                 if (rText) rText.innerText = data.claudeReasoning;
                 const rDir = document.getElementById('reasoningDir');
@@ -318,7 +318,7 @@ export async function executeAnalysis() {
             /*
             if (data.newsScore && Math.abs(data.newsScore) > 0.1 && data.newsSummary) {
                 const nCard = document.getElementById('newsCard');
-                if (nCard) nCard.style.display = 'block';
+                if (nCard) nCard.style.display = 'none';
                 const nSent = document.getElementById('newsSentimentEl');
                 if (nSent) {
                     nSent.innerText = data.newsSentiment || '--';

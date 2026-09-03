@@ -32,7 +32,7 @@ export function switchResultTab(tabName) {
     const contentAI = document.getElementById('tabContentAI');
 
     if (contentChart) contentChart.style.display = 'grid';
-    if (contentAI) contentAI.style.display = 'none';
+    if (contentAI) contentAI.style.display = 'block';
 }
 
 export function clearResults() {
