@@ -95,7 +95,15 @@ public class ConfluenceMatrixEngine(
         catch (Exception ex)
         {
             BotLogger.Error($"[Confluence 3D] Error evaluating matrix for {asset}", ex);
-            throw new Exception($"OTKAZ API: 3D Matrix error for {asset}. {ex.Message}");
+            return new ConfluenceMatrixResult(
+                ConfluenceRatio: 0.0,
+                IsGoldenSetup: false,
+                ProbabilityBoost: 0,
+                ConfluenceLabel: "⚠️ 3D Matrix Unavailable",
+                SummaryReasoning: "MTF sync failed due to rate limits",
+                TimeframeDirections: new Dictionary<string, string>(),
+                DominantDirection: "NEUTRAL"
+            );
         }
     }
 
