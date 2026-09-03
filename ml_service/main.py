@@ -331,7 +331,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         WHERE asset = %s AND interval = %s AND open_time <= %s
                         ORDER BY open_time DESC LIMIT %s
                     """
-                    df = _pd.read_sql_query(query, conn, params=(symbol, interval, entry_unix, limit))
+                    df = _pd.read_sql_query(query, conn, params=(symbol, interval, entry_timestamp, limit))
                 
                 # Если пустой датафрейм (или не s-таймфрейм), берем historical_candles
                 if df.empty:
@@ -342,7 +342,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         WHERE asset = %s AND interval = %s AND open_time <= %s
                         ORDER BY open_time DESC LIMIT %s
                     """
-                    df = _pd.read_sql_query(query, conn, params=(symbol, norm, entry_unix, limit))
+                    df = _pd.read_sql_query(query, conn, params=(symbol, norm, entry_timestamp, limit))
                 
                 conn.close()
             except Exception as e:
