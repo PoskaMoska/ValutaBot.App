@@ -1,4 +1,4 @@
-import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset } from './api.js';
+import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js';
 import { switchResultTab } from './ui.js';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
@@ -94,6 +94,7 @@ function setAsset(el) {
     const sphere = document.getElementById('mainSphere');
     if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
     initPriceWebSocket();
+    resetSignalKey();
 }
 
 function setTf(el) {
@@ -111,6 +112,7 @@ function setTf(el) {
     const sphere = document.getElementById('mainSphere');
     if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
     initPriceWebSocket();
+    resetSignalKey();
 }
 
 function handleGlobalInteraction(e) {

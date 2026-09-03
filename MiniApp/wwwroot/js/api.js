@@ -5,6 +5,10 @@ export let priceSocket = null;
 export let lastPriceVal = 0;
 export let timeOffset = 0;
 
+// Tracks the last signal to detect unchanged results
+let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
+export function resetSignalKey() { lastSignalKey = null; }
+
 export function initPriceWebSocket() {
     closePriceWebSocket();
 
@@ -144,16 +148,24 @@ export async function executeAnalysis() {
             }
 
             const resDir = document.getElementById('resDir');
+            const signalKey = `${currentAsset}_${currentTf}_${data.direction}_${data.probability}`;
+            const isRepeat = lastSignalKey !== null && signalKey === lastSignalKey;
+            lastSignalKey = signalKey;
+
             if (data.direction === 'BUY') {
-                resDir.innerText = 'ВВЕРХ';
+                resDir.innerHTML = isRepeat
+                    ? 'ВВЕРХ <span title="Сигнал не изменился" style="font-size:13px;opacity:0.7">🔄</span>'
+                    : 'ВВЕРХ';
                 resDir.style.color = '#00e676';
                 sphere.classList.add('buy-signal');
             } else if (data.direction === 'PUT') {
-                resDir.innerText = 'ВНИЗ';
+                resDir.innerHTML = isRepeat
+                    ? 'ВНИЗ <span title="Сигнал не изменился" style="font-size:13px;opacity:0.7">🔄</span>'
+                    : 'ВНИЗ';
                 resDir.style.color = '#ff1744';
                 sphere.classList.add('put-signal');
             } else {
-                resDir.innerText = 'НЕЙТРАЛЬНО';
+                resDir.innerHTML = 'НЕЙТРАЛЬНО';
                 resDir.style.color = 'var(--dim)';
                 sphere.classList.add('neutral-signal');
             }
