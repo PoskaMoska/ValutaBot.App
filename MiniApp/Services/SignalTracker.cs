@@ -54,7 +54,7 @@ public static class SignalTracker
             _ => { isOnCooldown = false; return now; },
             (_, lastSignalAt) =>
             {
-                if ((now - lastSignalAt).TotalSeconds >= 30)
+                if ((now - lastSignalAt).TotalSeconds >= 3)
                 {
                     isOnCooldown = false;
                     return now;
@@ -112,32 +112,29 @@ public static class SignalTracker
                 if (exitPrice.HasValue && exitPrice.Value > 0)
                 {
                     double priceDiff = (exitPrice.Value - price) / price;
-                    if (Math.Abs(priceDiff) < 1e-8)
-                    {
-                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
-                    }
-                    else
-                    {
-                        bool isCorrect = (direction == "BUY" && exitPrice.Value > price) || (direction == "PUT" && exitPrice.Value < price);
+                    bool isCorrect = (direction == "BUY" && exitPrice.Value > price) || (direction == "PUT" && exitPrice.Value < price);
+                    bool isDoji = Math.Abs(priceDiff) < 1e-8;
 
-                        // Save verified outcome and remove from pending
-                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(
-                            new ValutaBot.App.MiniApp.Data.Repositories.TradeOutcomeRecord
-                            {
-                                Id = record.Id,
-                                Direction = direction,
-                                Asset = asset,
-                                Timeframe = timeframe,
-                                EntryPrice = price,
-                                ExitPrice = exitPrice.Value,
-                                PnlBps = Math.Round((exitPrice.Value - price) / price * 10000, 2),
-                                WasWin = isCorrect,
-                                CreatedAt = record.CreatedAt.ToString("O"),
-                                VerifiedAt = DateTime.UtcNow.ToString("O")
-                            });
-                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
+                    // Always save the trade outcome — even Doji. User must see all their trades.
+                    await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(
+                        new ValutaBot.App.MiniApp.Data.Repositories.TradeOutcomeRecord
+                        {
+                            Id = record.Id,
+                            Direction = direction,
+                            Asset = asset,
+                            Timeframe = timeframe,
+                            EntryPrice = price,
+                            ExitPrice = exitPrice.Value,
+                            PnlBps = Math.Round(priceDiff * 10000, 2),
+                            WasWin = isCorrect,
+                            CreatedAt = record.CreatedAt.ToString("O"),
+                            VerifiedAt = DateTime.UtcNow.ToString("O")
+                        });
+                    await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
 
-                        // Record per-source signal votes
+                    // Record per-source signal votes (skip for Doji — no meaningful result)
+                    if (!isDoji)
+                    {
                         foreach (var kvp in record.SourceDirections)
                         {
                             if (kvp.Value == "NEUTRAL") continue;
@@ -153,11 +150,7 @@ public static class SignalTracker
                         if (TradeOutcomeTracker.CalibrationEngine != null)
                             TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", asset, timeframe, isCorrect);
 
-                        // BUGFIX: Restore SGD online learning feedback.
-                        // FIX C-16 incorrectly removed this call assuming PendingVerificationService would handle it.
-                        // However, SignalTracker deletes the trade from DB immediately after processing (line above),
-                        // so PendingVerificationService (running every 60s) never finds the trade and ML never gets feedback.
-                        // This was the primary reason the ML model stopped learning in real-time.
+                        // Skip ML feedback for Doji — no real directional move to learn from
                         _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
                             asset, timeframe, price, exitPrice.Value,
                             direction, wasWin: isCorrect, isForex: record.IsForex));
@@ -166,7 +159,7 @@ public static class SignalTracker
                         _signalVotesCacheExpiry = DateTime.MinValue;
                     }
                 }
-                else 
+                else
                 {
                     await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
                 }

@@ -8,9 +8,9 @@ using ValutaBot.App.MiniApp.Data.Repositories;
 namespace ValutaBot.MiniApp;
 
 /// <summary>
-/// FIX #6: Zombie pending trades on bot restart.
 /// BackgroundService that every 60 seconds reads trades where
 /// verify_at &lt; UtcNow and verifies them against current price.
+/// On server restart _livePrices is empty — falls back to TwelveData HTTP instead of discarding.
 /// </summary>
 public class PendingTradeVerificationService : BackgroundService
 {
@@ -50,30 +50,46 @@ public class PendingTradeVerificationService : BackgroundService
     {
         double? exitPrice = null;
 
+        // 1st try: in-memory live price (fastest, available when server is running)
         if (SignalTracker._livePrices.TryGetValue(record.Asset, out double memPrice) && memPrice > 0)
+        {
             exitPrice = memPrice;
-        
+            BotLogger.Info($"[PendingVerifier] Got exit price for {record.Asset} from memory: {exitPrice}");
+        }
 
+        // 2nd try: HTTP fallback — needed when server just restarted and _livePrices is empty
         if (!exitPrice.HasValue || exitPrice.Value <= 0)
         {
-            BotLogger.Warn($"[PendingVerifier] No exit price for {record.Asset}/{record.Timeframe} (id={record.Id}). Discarding stale pending trade.");
+            BotLogger.Warn($"[PendingVerifier] No live price for {record.Asset} — fetching via HTTP fallback.");
+            try
+            {
+                var httpResult = await TwelveDataService.FetchCandlesAsync(record.Asset, "1m", limit: 2, cacheTtlSeconds: 0);
+                if (httpResult.HasValue && httpResult.Value.prices.Length > 0)
+                {
+                    exitPrice = httpResult.Value.prices[^1];
+                    BotLogger.Info($"[PendingVerifier] HTTP fallback price for {record.Asset}: {exitPrice}");
+                }
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[PendingVerifier] HTTP fallback failed for {record.Asset}: {ex.Message}");
+            }
+        }
+
+        // If still no price — discard (no way to verify)
+        if (!exitPrice.HasValue || exitPrice.Value <= 0)
+        {
+            BotLogger.Warn($"[PendingVerifier] No exit price for {record.Asset}/{record.Timeframe} (id={record.Id}) even after HTTP fallback. Discarding.");
             await TradeRepository.DeletePendingTradeAsync(record.Id);
             return;
         }
 
         double priceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
-
-        // FIX C-17: skip doji (entry==exit) — no meaningful outcome to learn from.
-        if (Math.Abs(priceDiff) < 1e-8)
-        {
-            BotLogger.Warn($"[PendingVerifier] Doji detected for {record.Asset}. Skipping SGD feedback.");
-            await TradeRepository.DeletePendingTradeAsync(record.Id); // BUGFIX: was missing, caused infinite retry loop
-            return;
-        }
-
+        bool isDoji = Math.Abs(priceDiff) < 1e-8;
         bool isCorrect = (record.Direction == "BUY" && exitPrice.Value > record.EntryPrice)
                       || (record.Direction == "PUT" && exitPrice.Value < record.EntryPrice);
 
+        // Always write to trade_outcomes — user must see all trades, including Doji
         await TradeRepository.SaveTradeOutcomeAsync(new TradeOutcomeRecord
         {
             Id         = record.Id,
@@ -89,6 +105,12 @@ public class PendingTradeVerificationService : BackgroundService
         });
         await TradeRepository.DeletePendingTradeAsync(record.Id);
 
+        if (isDoji)
+        {
+            BotLogger.Warn($"[PendingVerifier] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
+            return;
+        }
+
         foreach (var kvp in record.SourceDirections)
         {
             if (kvp.Value == "NEUTRAL") continue;
@@ -102,8 +124,6 @@ public class PendingTradeVerificationService : BackgroundService
         if (TradeOutcomeTracker.CalibrationEngine != null)
             TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", record.Asset, record.Timeframe, isCorrect);
 
-        // FIX C-16: this is the SINGLE place where SGD feedback is sent.
-        // Removed duplicate call from SignalTracker in-memory path.
         _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
             record.Asset, record.Timeframe, record.EntryPrice, exitPrice.Value,
             record.Direction, wasWin: isCorrect, isForex: record.IsForex));
