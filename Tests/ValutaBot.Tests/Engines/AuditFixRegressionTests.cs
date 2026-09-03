@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -173,6 +173,36 @@ namespace ValutaBot.Tests.Engines
         // ═══════════════════════════════════════════════════════════
         // W-21: NONE values in SmcSignal must not bias score
         // ═══════════════════════════════════════════════════════════
+
+        // ---
+        // Trend Filter: Block counter-trend TA during HYPER_ACCELERATING
+        // ---
+
+        [Fact]
+        public async Task TrendFilter_BlocksCounterTrendTA_WhenAcceleratingUp()
+        {
+            var engine = new ConfluenceMatrixEngine(null, null, null);
+
+            // TA score is -1.0 (strong short)
+            var taSignal    = new TaSignal(-1.0, 90.0, 80, 50, 0, 10);
+            var smcSignal   = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var ofSignal    = new OrderflowSignal(0, "None");
+            var mlSignal    = new MlSignal("NEUTRAL", 0, null, "none");
+            
+            // Market is accelerating UP
+            var stateSignal = new StateSignal("HYPER_ACCELERATING_UP", 5.0, 0.45);
+            var mtfResult   = new ConfluenceMatrixResult(0, false, 0, "None", "None",
+                new Dictionary<string, string>(), "NEUTRAL");
+
+            var decision = await engine.EvaluateMatrixAsync("EURUSD", "1m", true, 1.0,
+                taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult);
+
+            _out.WriteLine($"[TrendFilter] TA was SHORT, but Regime is UP. Final direction: {decision.FinalDirection}");
+            
+            // Without the fix, it would be "SELL". With the fix, TA score is 0, so it remains "BUY" (from state momentum) or "NEUTRAL".
+            // Since MomentumContribution is 0.45 (UP), it should be BUY or NEUTRAL, definitely NOT SELL.
+            Assert.NotEqual("SELL", decision.FinalDirection);
+        }
 
         [Fact]
         public async Task W21_EmptySignals_ReturnsNeutral()

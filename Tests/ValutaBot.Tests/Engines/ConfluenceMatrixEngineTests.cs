@@ -65,7 +65,8 @@ namespace ValutaBot.Tests.Engines
             var mtfResult = new ConfluenceMatrixResult(0, false, 0, "None", "None", new Dictionary<string, string>(), "NEUTRAL");
 
             // Act
-            var decision = await _engine.EvaluateMatrixAsync("BTCUSDT", "m5", false, 1.0, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult);
+            // Set asset to EURUSD to bypass the real crypto Fear and Greed API which could shift the score from 0.0 to negative/positive
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "m5", false, 1.0, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult);
 
             // Assert
             Assert.Equal("NEUTRAL", decision.FinalDirection);
