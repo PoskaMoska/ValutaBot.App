@@ -1,5 +1,5 @@
 import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js';
-import { switchResultTab } from './ui.js';
+import { switchResultTab, updateTrafficLight } from './ui.js';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
@@ -206,7 +206,17 @@ function updateCountdown() {
     const el = document.getElementById('candleTime');
     if (!el) return;
     el.innerText = `${mins}:${secs.toString().padStart(2,'0')}`;
-    el.className = 'time' + (remaining <= 5 ? ' critical' : remaining <= 15 ? ' warning' : '');
+    
+    if (remaining <= 5) {
+        el.className = 'time critical';
+        updateTrafficLight('action');
+    } else if (remaining <= 15) {
+        el.className = 'time warning';
+        updateTrafficLight('prepare');
+    } else {
+        el.className = 'time';
+        updateTrafficLight('wait');
+    }
 }
 
 setInterval(updateCountdown, 1000);
