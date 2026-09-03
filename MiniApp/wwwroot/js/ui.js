@@ -28,22 +28,11 @@ export function updateLivePriceUI(price) {
 }
 
 export function switchResultTab(tabName) {
-    const btnChart = document.getElementById('tabBtnChart');
-    const btnAI = document.getElementById('tabBtnAI');
     const contentChart = document.getElementById('resultsGrid');
     const contentAI = document.getElementById('tabContentAI');
 
-    if (tabName === 'chart') {
-        btnChart.classList.add('active');
-        btnAI.classList.remove('active');
-        if (contentChart) contentChart.style.display = 'grid';
-        contentAI.style.display = 'none';
-    } else {
-        btnChart.classList.remove('active');
-        btnAI.classList.add('active');
-        if (contentChart) contentChart.style.display = 'none';
-        contentAI.style.display = 'block';
-    }
+    if (contentChart) contentChart.style.display = 'grid';
+    if (contentAI) contentAI.style.display = 'block';
 }
 
 export function clearResults() {

@@ -238,7 +238,9 @@ export async function executeAnalysis() {
             const confLabel = document.getElementById('confluenceLabel');
             if (confLabel) confLabel.innerText = data.confluenceLabel || 'Анализ';
             const goldenBadge = document.getElementById('goldenSetupBadge');
+            const goldenBadgeMain = document.getElementById('goldenSetupBadgeMain');
             if (goldenBadge) goldenBadge.style.display = data.goldenSetup ? 'inline-block' : 'none';
+            if (goldenBadgeMain) goldenBadgeMain.style.display = data.goldenSetup ? 'inline-block' : 'none';
             const wrAssetEl = document.getElementById('winRateAsset');
             if (wrAssetEl) {
                 if (data.winRateAsset != null) {
