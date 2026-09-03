@@ -18,6 +18,7 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
     private static int TimeframeToSeconds(string timeframe) => timeframe.ToLower() switch
     {
         "s5"  => 5,
+        "s10" => 10,
         "s15" => 15,
         "s30" => 30,
         "m1"  => 60,
@@ -84,6 +85,7 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         int minCandles = timeframe.ToLower() switch
         {
             "s5"  => 5,
+            "s10" => 3,
             "s15" => 3,
             "s30" => 3,
             _     => 3

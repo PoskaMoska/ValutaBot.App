@@ -146,23 +146,35 @@ namespace ValutaBot.MiniApp
                 
                 double open, high, low, close;
                 DateTime openTime;
+                double tickVolume;
 
                 lock (acc)
                 {
-                    if (acc.TickCount == 0 || !acc.Open.HasValue) continue;
+                    if (acc.TickCount == 0 || !acc.Open.HasValue) 
+                    {
+                        // Emit a flat candle using the last known price to prevent timeframe gaps!
+                        if (ValutaBot.MiniApp.SignalTracker._livePrices.TryGetValue(asset, out double lastPrice))
+                        {
+                            open = lastPrice; high = lastPrice; low = lastPrice; close = lastPrice;
+                            openTime = acc.OpenTime;
+                            tickVolume = 0;
+                            acc.Reset(DateTime.UtcNow);
+                            _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);
+                        }
+                        continue;
+                    }
+                    
                     open = acc.Open.Value;
                     high = acc.High;
                     low = acc.Low;
                     close = acc.Close;
                     openTime = acc.OpenTime;
-                    // On Forex, volume = number of transactions in the period (tick count)
-                    double tickVolume = acc.TickCount;
+                    tickVolume = acc.TickCount;
                     
                     acc.Reset(DateTime.UtcNow);
-
-                    // Fire-and-forget DB write — outside the lock to minimize contention
-                    _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);
                 }
+                
+                _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);
             }
         }
     }
