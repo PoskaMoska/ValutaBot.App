@@ -346,13 +346,18 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     if (_prediction.Direction != "NEUTRAL")
                     {
                         _lgbmDirection = _prediction.Direction;
-                        _lgbmConfidence = (float)(_prediction.Confidence * _wfResult.WeightMultiplier);
+                        
+                        // FIX: Scale confidence around 0.5 (Neutral).
+                        // Previously: _prediction.Confidence * Multiplier (e.g. 0.55 * 0.1 = 0.055 = Strong PUT!).
+                        _lgbmConfidence = (float)(0.5 + (_prediction.Confidence - 0.5) * _wfResult.WeightMultiplier);
                         _lgbmConfidence = Math.Clamp(_lgbmConfidence, 0f, 1f);
 
-                        if (_lgbmConfidence < 0.51f)
+                        // If confidence is extremely close to 50%, treat as NEUTRAL
+                        if (_lgbmConfidence >= 0.499f && _lgbmConfidence <= 0.501f)
                         {
-                            BotLogger.Info($"[ML Override] WalkForward suppressed ML confidence to {_lgbmConfidence:F2}. Reverting to pure Math.");
+                            BotLogger.Info($"[ML Override] ML confidence {_lgbmConfidence:F3} is practically neutral. Suppressing.");
                             _lgbmDirection = "NEUTRAL";
+                            _lgbmConfidence = 0.5f;
                         }
                         else
                         {
