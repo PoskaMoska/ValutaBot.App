@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace ValutaBot.MiniApp;
 
@@ -76,6 +76,22 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
             baseCandles = (int)(baseCandles * 0.6);
             if (baseCandles < 3) baseCandles = 3;
             dynamicReason += " | SMC: OrderBlock/FVG detected. Timeout cut by 40%.";
+        }
+
+        // Per-timeframe minimum candle floor.
+        // s5: min 5 candles = 25s (PocketOption minimum expiry).
+        // Other sub-minute TFs get proportional floors.
+        int minCandles = timeframe.ToLower() switch
+        {
+            "s5"  => 5,
+            "s15" => 3,
+            "s30" => 3,
+            _     => 3
+        };
+        if (baseCandles < minCandles)
+        {
+            dynamicReason += $" | Floor: minimum {minCandles} candles enforced for {timeframe}.";
+            baseCandles = minCandles;
         }
 
         int tfSeconds = TimeframeToSeconds(timeframe);
