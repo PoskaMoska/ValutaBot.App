@@ -62,7 +62,7 @@ export function clearResults() {
     safeSetStyle('reasoningCard', 'display', 'none');
     safeSetStyle('newsCard', 'display', 'none');
     safeSetStyle('welcomeSec', 'display', 'flex');
-    safeSetStyle('topCategories', 'display', 'flex');
+    safeSetStyle('topCategories', 'display', 'none');
     document.querySelectorAll('.res-card').forEach(c => c.classList.remove('flash'));
 }
 
