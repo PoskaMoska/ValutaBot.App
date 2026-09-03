@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
@@ -123,7 +123,9 @@ public class MarketDataFetcher
             BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length} ticks in DB). Synthesizing from 1m candles as warm-up.");
 
             int m1Needed = (limit / 12) + 2;
-            var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1m", m1Needed);
+            // Cold-start: use very short cache TTL (5s) so consecutive s5 signals
+            // see fresh 1m data and don't return identical duplicate signals.
+            var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1m", m1Needed, cacheTtlSeconds: 5);
 
             if (m1Result != null && m1Result.Value.candles.Length > 0)
             {
@@ -137,7 +139,16 @@ public class MarketDataFetcher
         }
 
         string interval = IntervalMap(rawInterval);
-        var tdResult = await TwelveDataService.FetchCandlesAsync(cleanAsset, interval, limit);
+        // Cache TTL scales with timeframe — shorter TFs need fresher data
+        int cacheTtl = rawInterval.ToLower() switch
+        {
+            "s5" or "s10"       => 5,
+            "s15" or "s30"      => 10,
+            "m1"                => 15,
+            "m2" or "m3" or "m5"=> 30,
+            _                   => 45
+        };
+        var tdResult = await TwelveDataService.FetchCandlesAsync(cleanAsset, interval, limit, cacheTtlSeconds: cacheTtl);
         
         if (tdResult != null)
             return tdResult.Value.candles;
