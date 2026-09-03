@@ -88,9 +88,8 @@ public static partial class MiniAppController
                 .WithHeaders("X-Telegram-Init-Data", "Content-Type", "Accept"));
         });
         builder.Services.AddHostedService<TelegramBotService>();
-        // FIX #6: Р’РµСЂРёС„РёС†РёСЂСѓРµС‚ Р·Р°РІРёСЃС€РёРµ pending_trades РїСЂРё СЂРµСЃС‚Р°СЂС‚Рµ Рё РєР°Р¶РґС‹Рµ 60 СЃРµРє.
+        // FIX #6: Верифицирует зависшие pending_trades при рестарте и каждые 60 сек.
         builder.Services.AddHostedService<PendingTradeVerificationService>();
-        builder.Services.AddHostedService<ModelVersionMonitorService>();
         builder.Services.AddHostedService<HistoricalCandleAccumulatorService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
 
         builder.Services.AddHttpClient("Binance").AddStandardResilienceHandler(options =>
