@@ -161,7 +161,10 @@ public static class SignalTracker
                 }
                 else
                 {
-                    await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
+                    // No live price available in memory (e.g. server just restarted).
+                    // Do NOT delete from pending_trades — PendingTradeVerificationService will
+                    // pick it up within 60s and use HTTP fallback to get the exit price.
+                    BotLogger.Warn($"[InMemoryVerify] No exit price for {asset}/{timeframe} in memory. Leaving in pending_trades for HTTP-fallback sweep.");
                 }
             }
             catch (Exception ex)
