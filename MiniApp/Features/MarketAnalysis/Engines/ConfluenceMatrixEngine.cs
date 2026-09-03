@@ -403,11 +403,38 @@ public class ConfluenceMatrixEngine(
         // User decides whether to act on low-confidence signals.
         candidateDir = finalConfidenceScore > 0.01 ? "BUY" : finalConfidenceScore < -0.01 ? "PUT" : "NEUTRAL";
 
-        // 5. Final Decision
+        // 5. Final Decision & Market Session Awareness
         double absWeightedScore = Math.Abs(finalConfidenceScore);
+        
+        // Внедрение интеллекта сессий (Market Session Modifier)
+        // Бот осознает время суток и снижает вероятность в тихие/опасные периоды, 
+        // тем самым отсекая выдачу ложных "Golden Setups", когда ликвидности нет.
+        double sessionMultiplier = 1.0;
+        string sessionName = "DEFAULT";
+        if (!asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL") && !asset.Contains("OTC"))
+        {
+            int h = DateTime.UtcNow.Hour;
+            if (h >= 21 || h < 2) { sessionMultiplier = 0.75; sessionName = "DEAD_ZONE"; } // Поздний вечер (расширение спредов, мертвый рынок)
+            else if (h >= 2 && h < 8) { sessionMultiplier = 0.85; sessionName = "ASIAN"; } // Азия (низкая волатильность, пила)
+            else if (h >= 8 && h < 13) { sessionMultiplier = 1.0; sessionName = "LONDON_MORNING"; } // Лондон
+            else if (h >= 13 && h < 17) { sessionMultiplier = 1.1; sessionName = "LONDON_NY_OVERLAP"; } // Макс. ликвидность (супер-тренды)
+            else if (h >= 17 && h < 21) { sessionMultiplier = 1.0; sessionName = "NY_AFTERNOON"; } // Нью-Йорк вечер
+        }
+        
+        absWeightedScore *= sessionMultiplier;
+        
         int probability = isSubMinute
             ? Math.Clamp(50 + (int)Math.Round(absWeightedScore * 40), 50, 91)
             : Math.Clamp(50 + (int)Math.Round(absWeightedScore * 45), 50, 95);
+
+        if (sessionMultiplier < 1.0)
+        {
+            BotLogger.Info($"[MarketSession] {sessionName} detected. Multiplier={sessionMultiplier}. Lowering probability.");
+        }
+        else if (sessionMultiplier > 1.0)
+        {
+            BotLogger.Info($"[MarketSession] {sessionName} detected. High liquidity! Multiplier={sessionMultiplier}.");
+        }
 
         // MTF Golden Boost — only when 4D dominant direction EXPLICITLY matches candidateDir.
         // FIX W-16: removed || "NEUTRAL" condition — neutral MTF must not boost confidence.
