@@ -34,7 +34,7 @@ log = logging.getLogger("ml-service")
 from contextlib import asynccontextmanager
 
 _DEFAULT_SYMBOLS = os.getenv("PRETRAIN_SYMBOLS", "EURUSD,GBPUSD,USDJPY,USDCAD,USDCHF,AUDUSD").split(",")
-_DEFAULT_INTERVALS = os.getenv("PRETRAIN_INTERVALS", "s5,s15,s30,1m,5m,15m").split(",")
+_DEFAULT_INTERVALS = os.getenv("PRETRAIN_INTERVALS", "s5,s10,s15,s30,1m,5m,15m").split(",")
 
 
 async def _train_all():
