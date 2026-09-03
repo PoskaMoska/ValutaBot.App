@@ -301,47 +301,83 @@ def _fetch_local_sqlite_main(symbol: str, interval: str, limit: int) -> list:
 
 def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, limit: int = 200) -> list:
     """
-    FIX #5: Читает свечи из SQLite строго ДО момента входа в сделку (entry_timestamp).
-    Это устраняет SGD Look-Ahead Bias: раньше брались свечи из _live_candles_cache,
-    которые могли быть уже перезаписаны новыми predict-запросами (момент выхода из сделки).
-    Теперь SGD обучается на состоянии рынка в момент принятия решения о входе.
+    FIX #5: Читает свечи из БД строго ДО момента входа в сделку (entry_timestamp).
+    Это устраняет SGD Look-Ahead Bias.
     """
-    import sqlite3 as _sqlite3
+    import os
     import pandas as _pd
-    db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
-    if not os.path.exists(db_path):
-        return _fetch_local_sqlite_main(symbol, interval, limit)
+    import logging
+    log = logging.getLogger("SGD")
+    
     try:
-        # Парсим ISO timestamp и конвертируем в Unix seconds для сравнения с OpenTime
         from datetime import datetime, timezone as _tz
         entry_dt = datetime.fromisoformat(entry_timestamp.replace("Z", "+00:00"))
         entry_unix = int(entry_dt.timestamp())
-
-        conn = _sqlite3.connect(db_path, timeout=10.0)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
-        norm = _normalize_interval(interval)
-        if cursor.fetchone():
-            df = _pd.read_sql_query(
-                "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
-                "FROM HistoricalCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
-                "ORDER BY OpenTime DESC LIMIT ?",
-                conn, params=(symbol, norm, entry_unix, limit)
-            )
-        else:
-            df = _pd.read_sql_query(
-                "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
-                "FROM SubminuteCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
-                "ORDER BY OpenTime DESC LIMIT ?",
-                conn, params=(symbol, interval, entry_unix, limit)
-            )
-        conn.close()
+        
+        db_url = os.getenv("DATABASE_URL")
+        df = _pd.DataFrame()
+        if db_url:
+            import psycopg2
+            try:
+                conn = psycopg2.connect(db_url)
+                norm = _normalize_interval(interval)
+                
+                # Попробуем subminute_candles (если младший таймфрейм)
+                if interval.startswith("s"):
+                    query = """
+                        SELECT open_time as "openTime", open_price as "open", high_price as "high", 
+                               low_price as "low", close_price as "close", volume as "volume"
+                        FROM subminute_candles
+                        WHERE asset = %s AND interval = %s AND open_time <= %s
+                        ORDER BY open_time DESC LIMIT %s
+                    """
+                    df = _pd.read_sql_query(query, conn, params=(symbol, interval, entry_unix, limit))
+                
+                # Если пустой датафрейм (или не s-таймфрейм), берем historical_candles
+                if df.empty:
+                    query = """
+                        SELECT open_time as "openTime", open as "open", high as "high",
+                               low as "low", close as "close", volume as "volume"
+                        FROM historical_candles
+                        WHERE asset = %s AND interval = %s AND open_time <= %s
+                        ORDER BY open_time DESC LIMIT %s
+                    """
+                    df = _pd.read_sql_query(query, conn, params=(symbol, norm, entry_unix, limit))
+                
+                conn.close()
+            except Exception as e:
+                log.warning(f"PostgreSQL fetch failed in _fetch_candles_at_entry: {e}")
+        
+        # Fallback to local SQLite if PostgreSQL not available or failed
+        if df.empty:
+            import sqlite3 as _sqlite3
+            db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
+            if os.path.exists(db_path):
+                conn = _sqlite3.connect(db_path, timeout=10.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
+                norm = _normalize_interval(interval)
+                if cursor.fetchone():
+                    df = _pd.read_sql_query(
+                        "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
+                        "FROM HistoricalCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
+                        "ORDER BY OpenTime DESC LIMIT ?",
+                        conn, params=(symbol, norm, entry_unix, limit)
+                    )
+                else:
+                    df = _pd.read_sql_query(
+                        "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
+                        "FROM SubminuteCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
+                        "ORDER BY OpenTime DESC LIMIT ?",
+                        conn, params=(symbol, interval, entry_unix, limit)
+                    )
+                conn.close()
 
         if df.empty:
-            # Fallback: если нет данных до entry (например, нет истории в БД) — берём последние
             log.warning(f"[SGD] No candles before entry for {symbol}/{interval}. Fallback to recent.")
             return _fetch_local_sqlite_main(symbol, interval, limit)
 
+        # Переименуем колонки в нужный регистр, если надо, но выше алиасы уже заданы
         return df.iloc[::-1].to_dict(orient="records")
     except Exception as e:
         log.warning(f"[SGD] _fetch_candles_at_entry failed: {e}. Fallback to recent.")

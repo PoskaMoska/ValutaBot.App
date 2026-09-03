@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -256,24 +256,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (extraTasks.Count > 0) await Task.WhenAll(extraTasks);
 
         _higherResultData = await higherTask;
-                _lowerResultData = await lowerTask;
+        _lowerResultData = await lowerTask;
 
         if (_mainPrices != null && _mainPrices.Length > 0)
         {
             _currentLivePrice = _mainPrices[^1];
-
-            if (_ohlcCandles != null && _ohlcCandles.Length > 1)
-            {
-                var last = _ohlcCandles[^1];
-                int tfSecs = _fetcher.TimeframeSeconds(_timeframe);
-                if (DateTime.UtcNow < last.Timestamp.AddSeconds(tfSecs))
-                {
-                    BotLogger.Info($"[Orchestrator] Stripped unclosed {_timeframe} candle for {_asset} to prevent repainting.");
-                    _ohlcCandles = _ohlcCandles[..^1];
-                    _mainPrices = _mainPrices[..^1];
-                    _mainVolumes = _mainVolumes[..^1];
-                }
-            }
         }
     }
 

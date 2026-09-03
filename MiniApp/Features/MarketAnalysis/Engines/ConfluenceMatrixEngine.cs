@@ -198,13 +198,26 @@ public class ConfluenceMatrixEngine(
         double totalConfidence = 0.0;
         double totalWeight     = 0.0;
 
-        // 1. Technical Analysis (Lagging вЂ” СЂРѕР»СЊ С„РѕРЅРѕРІРѕРіРѕ С„РёР»СЊС‚СЂР°, РІРµСЃ СЃРЅРёР¶РµРЅ РґРѕ 0.5)
+        // 1. Technical Analysis (Lagging — Оценка Индикаторов)
+        double taScoreOverride = taSignal.Score;
+        
+        // Умный фильтр тренда (Trend Filter): блокировка RSI в трендовых пробоях
+        if (stateSignal.Regime == "HYPER_ACCELERATING_UP" && taScoreOverride < 0)
+        {
+            BotLogger.Warn($"[TrendFilter] Blocking TA SHORT signal (Score {taScoreOverride}) because market is HYPER_ACCELERATING_UP.");
+            taScoreOverride = 0.0;
+        }
+        else if (stateSignal.Regime == "HYPER_ACCELERATING_DOWN" && taScoreOverride > 0)
+        {
+            BotLogger.Warn($"[TrendFilter] Blocking TA BUY signal (Score {taScoreOverride}) because market is HYPER_ACCELERATING_DOWN.");
+            taScoreOverride = 0.0;
+        }
+
         double taWeight  = await SignalTracker.GetSignalWeightAsync("INDICATORS", 0.8);
-        totalScore      += taSignal.Score * taWeight;
+        totalScore      += taScoreOverride * taWeight;
         totalConfidence += taSignal.Confidence * taWeight;
         totalWeight     += taWeight;
 
-        // 1b. Order Flow (Leading вЂ” РІС‹РґРµР»РµРЅ РІ РѕС‚РґРµР»СЊРЅС‹Р№ РєРѕРјРїРѕРЅРµРЅС‚, РїСЂРёРѕСЂРёС‚РµС‚РЅС‹Р№ СЃРёРіРЅР°Р» РґР»СЏ РѕРїС†РёРѕРЅРѕРІ)
         // 1b. Order Flow (Leading — выделен в отдельный компонент, приоритетный сигнал для опционов)
         double ofWeight  = await SignalTracker.GetSignalWeightAsync("ORDERFLOW", 1.2);
         totalScore      += ofSignal.ScoreContribution * ofWeight;
