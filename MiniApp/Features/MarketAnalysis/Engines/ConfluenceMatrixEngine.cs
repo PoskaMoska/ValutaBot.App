@@ -145,12 +145,18 @@ public class ConfluenceMatrixEngine(
         var candles = ArrayPool<MiniAppController.OhlcCandle>.Shared.Rent(prices.Length);
         try
         {
-            // BUGFIX: Use real relative timestamps instead of the hardcoded 2020 epoch.
-            // The 2020 epoch was added to prevent IndicatorCache from resetting on every call,
-            // but it caused a worse problem: all calls have identical timestamps → cache always hits
-            // → indicators are frozen at the values computed on first call after startup.
-            // Fix: Use UtcNow-relative timestamps so cache correctly detects new data each call.
-            var baseTime = DateTime.UtcNow.AddMinutes(-(prices.Length - 1));
+            // FIX C-2: Use the correct timeframe step for synthetic timestamps.
+            // Previously AddMinutes(i) always used 1-minute steps, making H1 candles
+            // appear to span 40 minutes instead of 40 hours — invalidating all time-based indicators.
+            int tfSeconds = tf.ToLower() switch
+            {
+                "s3"  => 3,  "s5"  => 5,  "s10" => 10, "s15" => 15, "s30" => 30,
+                "m1"  => 60, "m2"  => 120, "m3" => 180, "m5" => 300,
+                "m15" => 900, "m30" => 1800,
+                "h1"  => 3600, "h4" => 14400, "d1" => 86400,
+                _ => 60
+            };
+            var baseTime = DateTime.UtcNow.AddSeconds(-(long)(prices.Length - 1) * tfSeconds);
             for (int i = 0; i < prices.Length; i++)
             {
                 double v = volumes != null && i < volumes.Length ? volumes[i] : 1.0;

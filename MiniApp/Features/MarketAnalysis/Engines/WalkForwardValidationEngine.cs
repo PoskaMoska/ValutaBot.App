@@ -103,7 +103,13 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
                 {
                     state.CooloffUntil = DateTime.UtcNow.AddMinutes(10);
                     state.ConsecutiveLosses = 0;
-                    BotLogger.Warn($"[Drawdown Protection] Rolling win rate {rollingWinRate:P0} < 35% for {key}. Cooloff 10 min until {state.CooloffUntil:HH:mm:ss}");
+                    // FIX H-5: Reset ring buffer after cooloff trigger.
+                    // Without this, the next trade after cooloff re-checks the same
+                    // stale 10-trade window, immediately triggers another 10-min cooloff,
+                    // trapping the bot in "1 trade per 10 minutes" mode all day.
+                    state.OutcomeCount = 0;
+                    state.OutcomeIndex = 0;
+                    BotLogger.Warn($"[Drawdown Protection] Rolling win rate {rollingWinRate:P0} < 35% for {key}. Cooloff 10 min until {state.CooloffUntil:HH:mm:ss}. Buffer reset.");
                 }
             }
         }

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Two-Tier Forex Predictor.
   Tier 1 (Global Strategist):  LightGBM вЂ” retrained every 24h on up to 100k candles.
   Tier 2 (Local Tactician):    SGDClassifier вЂ” updated via partial_fit after every trade (<1ms).
@@ -640,6 +640,25 @@ class ForexPredictor:
             )
 
             self._save(final_model, meta)
+
+            # FIX H-3: Quality Gate — do not deploy new model if it's significantly worse
+            # than the current one. This prevents weekly retraining from replacing a
+            # good 58%-accuracy model with a bad 49% model on noisy/thin data.
+            with self._lock:
+                current_acc = self._meta.accuracy if self._meta is not None else 0.0
+
+            if avg_acc < current_acc - 0.02:
+                log.warning(
+                    f"[Train] Quality Gate BLOCKED deploy for {self._key}: "
+                    f"new_acc={avg_acc:.4f} < current_acc={current_acc:.4f} - 0.02. "
+                    f"Keeping old model."
+                )
+                return {
+                    "symbol": self.symbol, "interval": self.interval,
+                    "n_train": len(X), "accuracy": round(avg_acc, 4),
+                    "auc": round(avg_auc, 4), "version": version,
+                    "deployed": False, "reason": "quality_gate_blocked"
+                }
 
             with self._lock:
                 self._model = final_model

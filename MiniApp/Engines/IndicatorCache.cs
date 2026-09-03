@@ -12,6 +12,8 @@ internal sealed class IndicatorCache
 {
     private sealed class CacheState
     {
+        public DateTime            LastAccess = DateTime.UtcNow;
+
         public StatefulRsi?        Rsi;
         public long                RsiLastTick;
         public double              RsiLast;
@@ -42,13 +44,22 @@ internal sealed class IndicatorCache
 
     private static readonly ConcurrentDictionary<string, Indicators.StatefulOrderFlow> _orderFlowCache = new();
 
-    // Evict oldest 25% of entries instead of clearing all — prevents losing active asset state
+    // FIX C-3: LRU eviction — evict the least-recently-used 25% of entries.
+    // Previously used Take(toRemove) on unordered ConcurrentDictionary keys,
+    // which was effectively random and could delete actively-trading pairs.
     private static void PruneOrderFlowCache()
     {
-        var keys = _orderFlowCache.Keys.ToArray();
-        int toRemove = Math.Max(1, keys.Length / 4);
-        foreach (var k in keys.Take(toRemove))
+        var ordered = _orderFlowCache
+            .OrderBy(kv => _orderFlowLastTicks.GetValueOrDefault($"{kv.Key}", 0))
+            .Take(Math.Max(1, _orderFlowCache.Count / 4))
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var k in ordered)
+        {
             _orderFlowCache.TryRemove(k, out _);
+            // FIX M-1: Also remove from _orderFlowLastTicks to prevent stale tick lookup
+            _orderFlowLastTicks.TryRemove(k, out _);
+        }
     }
 
     // Maintain last tick for OrderFlow cache validation
@@ -80,12 +91,16 @@ internal sealed class IndicatorCache
 
     // ── RSI ──────────────────────────────────────────────────────────────────
 
-    // Evict oldest 25% of entries instead of clearing all — prevents losing active asset state
+    // FIX C-3: LRU eviction — sort by LastAccess so the most recently used pairs survive.
+    // Previously used Take(toRemove) on unordered ConcurrentDictionary keys — random eviction.
     private void PruneStates()
     {
-        var keys = _states.Keys.ToArray();
-        int toRemove = Math.Max(1, keys.Length / 4);
-        foreach (var k in keys.Take(toRemove))
+        var toDelete = _states
+            .OrderBy(kv => kv.Value.LastAccess)
+            .Take(Math.Max(1, _states.Count / 4))
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var k in toDelete)
             _states.TryRemove(k, out _);
     }
 
@@ -97,6 +112,7 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.RsiLastTick);
             if (s.Rsi is null || unseen > 50 || IsTimestampRewind(candles, s.RsiLastTick))
             {
@@ -278,8 +294,10 @@ internal sealed class IndicatorCache
             }
             else if (unseen > 0)
             {
-                // We only need the unseen candles + the previous 5 for context (fractals need 5 candles)
-                int startIdx = Math.Max(0, candles.Length - unseen - 5);
+                // FIX C-4: ATR-14 inside StatefulSmc needs at least 14 candles of context.
+                // Previously only passed unseen+5, which caused ATR to be computed over 4-5 bars
+                // instead of 14, generating false FVG/OrderBlock signals on every tick.
+                int startIdx = Math.Max(0, candles.Length - unseen - 20);
                 s.Smc.Update(candles.Slice(startIdx), currentPrice);
                 s.SmcLastTick = candles[^1].Timestamp.Ticks;
             }

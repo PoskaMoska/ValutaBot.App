@@ -100,7 +100,10 @@ namespace ValutaBot.MiniApp
                 for (int i = 0; i < records.Count; i++)
                 {
                     var r = records[records.Count - 1 - i]; // Reverse back
-                    result[i] = new MiniAppController.OhlcCandle((double)r.Open, (double)r.High, (double)r.Low, (double)r.Close, (double)r.Volume, DateTime.Parse((string)r.OpenTime));
+                    result[i] = new MiniAppController.OhlcCandle((double)r.Open, (double)r.High, (double)r.Low, (double)r.Close, (double)r.Volume,
+                        // FIX H-1: Parse with AdjustToUniversal to prevent timezone shift.
+                        // DateTime.Parse on ISO 8601 "Z" strings converts to local time by default.
+                        DateTime.Parse((string)r.OpenTime, null, System.Globalization.DateTimeStyles.AdjustToUniversal));
                 }
                 return result;
             }

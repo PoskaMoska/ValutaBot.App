@@ -124,9 +124,12 @@ public class PendingTradeVerificationService : BackgroundService
         if (TradeOutcomeTracker.CalibrationEngine != null)
             TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", record.Asset, record.Timeframe, isCorrect);
 
+        // FIX C-1: Pass entry timestamp so SGD fetches candles BEFORE trade entry,
+        // not at verification time (which would be look-ahead bias).
         _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
             record.Asset, record.Timeframe, record.EntryPrice, exitPrice.Value,
-            record.Direction, wasWin: isCorrect, isForex: record.IsForex));
+            record.Direction, wasWin: isCorrect, isForex: record.IsForex,
+            entryTime: record.CreatedAt));
 
         BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {(isCorrect ? "WIN" : "LOSS")}");
     }

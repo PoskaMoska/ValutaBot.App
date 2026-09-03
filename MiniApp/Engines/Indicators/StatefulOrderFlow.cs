@@ -78,6 +78,9 @@ public class StatefulOrderFlow
                     _shortTermWindow.Clear();
                     _shortTermBuyVolume = 0;
                     _shortTermSellVolume = 0;
+                    // FIX C-3: Clear volume window so stale thresholds from previous session
+                    // don't cause morning blindness to block trades.
+                    _volWindow.Clear();
                 }
 
                 // FIX: Reset permanent block trade flag before processing the new closed candle
