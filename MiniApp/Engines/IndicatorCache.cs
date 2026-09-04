@@ -12,7 +12,18 @@ internal sealed class IndicatorCache
 {
     private sealed class CacheState
     {
-        public DateTime            LastAccess = DateTime.UtcNow;
+        public DateTime            LastAccess    = DateTime.UtcNow;
+
+        // ROOT-CAUSE FIX: Time-based cache invalidation.
+        // Previously indicators accumulated state indefinitely — reset only on unseen > 50.
+        // At active trading pace (1 req/30s), unseen is always 0-3 → reset NEVER happened.
+        // Result: yesterday's RSI/HMA/EMA "memory" poisoned today's signals.
+        //
+        // Two reset triggers:
+        //   1. Every MaxCacheAgeHours (4h) — clears within-session contamination
+        //      (e.g. cold-start synthetic 1m candles followed by real s5 ticks)
+        //   2. New trading day (UTC midnight) — ensures day-to-day clean slate
+        public DateTime            LastFullReset = DateTime.MinValue;
 
         public StatefulRsi?        Rsi;
         public long                RsiLastTick;
@@ -39,6 +50,10 @@ internal sealed class IndicatorCache
         public StatefulSmc?        Smc;
         public long                SmcLastTick;
     }
+
+    // Indicators are fully recalculated if their last reset is older than this.
+    // 4 hours covers: London→NY session transition, cold-start synthetic contamination.
+    private const double MaxCacheAgeHours = 4.0;
 
     private readonly ConcurrentDictionary<(string, string), CacheState> _states = new();
 
@@ -104,6 +119,20 @@ internal sealed class IndicatorCache
             _states.TryRemove(k, out _);
     }
 
+    /// <summary>
+    /// Returns true if the indicator state is too old and must be fully recalculated.
+    /// Called inside lock(s) — no thread-safety concerns.
+    /// </summary>
+    private static bool IsStale(CacheState s)
+    {
+        var now = DateTime.UtcNow;
+        // Trigger 1: New trading day (UTC midnight) — day-to-day market regime change
+        if (s.LastFullReset.Date < now.Date) return true;
+        // Trigger 2: 4-hour threshold — within-session contamination (cold-start synthetic → real ticks)
+        if ((now - s.LastFullReset).TotalHours > MaxCacheAgeHours) return true;
+        return false;
+    }
+
     public double GetRsi(string asset, string tf,
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
@@ -114,13 +143,14 @@ internal sealed class IndicatorCache
         {
             s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.RsiLastTick);
-            if (s.Rsi is null || unseen > 50 || IsTimestampRewind(candles, s.RsiLastTick))
+            if (s.Rsi is null || unseen > 50 || IsTimestampRewind(candles, s.RsiLastTick) || IsStale(s))
             {
                 s.Rsi     = new StatefulRsi(period);
                 s.RsiLast = 50.0;
                 for (int i = 0; i < candles.Length; i++)
                     s.RsiLast = s.Rsi.Update(candles[i].Close);
-                s.RsiLastTick = candles[^1].Timestamp.Ticks;
+                s.RsiLastTick  = candles[^1].Timestamp.Ticks;
+                s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
@@ -143,13 +173,14 @@ internal sealed class IndicatorCache
         lock (s)
         {
             int unseen = CountUnseen(candles, s.ConnorsRsiLastTick);
-            if (s.ConnorsRsi is null || unseen > 50 || IsTimestampRewind(candles, s.ConnorsRsiLastTick))
+            if (s.ConnorsRsi is null || unseen > 50 || IsTimestampRewind(candles, s.ConnorsRsiLastTick) || IsStale(s))
             {
                 s.ConnorsRsi     = new StatefulConnorsRsi();
                 s.ConnorsRsiLast = 50.0;
                 for (int i = 0; i < candles.Length; i++)
                     s.ConnorsRsiLast = s.ConnorsRsi.Update(candles[i].Close);
                 s.ConnorsRsiLastTick = candles[^1].Timestamp.Ticks;
+                s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
@@ -172,13 +203,14 @@ internal sealed class IndicatorCache
         lock (s)
         {
             int unseen = CountUnseen(candles, s.HmaLastTick);
-            if (s.Hma is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastTick))
+            if (s.Hma is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastTick) || IsStale(s))
             {
                 s.Hma     = new StatefulHma(period);
                 s.HmaLast = 0.0;
                 for (int i = 0; i < candles.Length; i++)
                     s.HmaLast = s.Hma.Update(candles[i].Close);
-                s.HmaLastTick = candles[^1].Timestamp.Ticks;
+                s.HmaLastTick  = candles[^1].Timestamp.Ticks;
+                s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
@@ -201,13 +233,14 @@ internal sealed class IndicatorCache
         lock (s)
         {
             int unseen = CountUnseen(candles, s.EmaLastTick);
-            if (s.Ema is null || unseen > 50 || IsTimestampRewind(candles, s.EmaLastTick))
+            if (s.Ema is null || unseen > 50 || IsTimestampRewind(candles, s.EmaLastTick) || IsStale(s))
             {
                 s.Ema     = new StatefulEma(period);
                 s.EmaLast = 0.0;
                 for (int i = 0; i < candles.Length; i++)
                     s.EmaLast = s.Ema.Update(candles[i].Close);
-                s.EmaLastTick = candles[^1].Timestamp.Ticks;
+                s.EmaLastTick  = candles[^1].Timestamp.Ticks;
+                s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
@@ -230,12 +263,13 @@ internal sealed class IndicatorCache
         lock (s)
         {
             int unseen = CountUnseen(candles, s.AdxLastTick);
-            if (s.Adx is null || unseen > 50 || IsTimestampRewind(candles, s.AdxLastTick))
+            if (s.Adx is null || unseen > 50 || IsTimestampRewind(candles, s.AdxLastTick) || IsStale(s))
             {
                 s.Adx = new StatefulTrueAdx(period);
                 for (int i = 0; i < candles.Length; i++)
                     s.Adx.Update(candles[i].High, candles[i].Low, candles[i].Close);
-                s.AdxLastTick = candles[^1].Timestamp.Ticks;
+                s.AdxLastTick  = candles[^1].Timestamp.Ticks;
+                s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
@@ -258,12 +292,13 @@ internal sealed class IndicatorCache
         lock (s)
         {
             int unseen = CountUnseen(candles, s.AtrLastTick);
-            if (s.Atr is null || unseen > 50 || IsTimestampRewind(candles, s.AtrLastTick))
+            if (s.Atr is null || unseen > 50 || IsTimestampRewind(candles, s.AtrLastTick) || IsStale(s))
             {
                 s.Atr = new StatefulAtr(period);
                 for (int i = 0; i < candles.Length; i++)
                     s.Atr.Update(candles[i].High, candles[i].Low, candles[i].Close);
-                s.AtrLastTick = candles[^1].Timestamp.Ticks;
+                s.AtrLastTick  = candles[^1].Timestamp.Ticks;
+                s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
@@ -286,11 +321,12 @@ internal sealed class IndicatorCache
             int unseen = CountUnseen(candles, s.SmcLastTick);
             // W-04 FIX: Reset threshold was 500, allowing stale FVG/OB zones to linger for hours
             // if bot was paused. Changed to 50 to match technical indicators.
-            if (s.Smc is null || unseen > 50 || IsTimestampRewind(candles, s.SmcLastTick))
+            if (s.Smc is null || unseen > 50 || IsTimestampRewind(candles, s.SmcLastTick) || IsStale(s))
             {
                 s.Smc = new StatefulSmc();
                 s.Smc.Update(candles, currentPrice);
                 if (candles.Length > 0) s.SmcLastTick = candles[^1].Timestamp.Ticks;
+                s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
