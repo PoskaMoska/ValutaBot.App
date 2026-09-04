@@ -515,7 +515,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (_smcResult.HasBos && !string.IsNullOrEmpty(_smcResult.BosDirection)) smcParts.Add($"BOS: {_smcResult.BosDirection}");
         if (_smcResult.HasFvg && !string.IsNullOrEmpty(_smcResult.FvgType)) smcParts.Add($"FVG: {_smcResult.FvgType}");
         if (_smcResult.HasOrderBlock && !string.IsNullOrEmpty(_smcResult.OrderBlockType)) smcParts.Add($"OB: {_smcResult.OrderBlockType}");
-        string smcReasoning = smcParts.Count > 0 ? string.Join(", ", smcParts) : "No clear structure";
+        string smcReasoning = smcParts.Count > 0 ? string.Join(", ", smcParts) : "Нет ярко выраженной структуры";
 
         var smcSignal = new SmcSignal(_smcResult.BosDirection, _smcResult.SweepDirection, _smcResult.OrderBlockType, _smcResult.FvgType, smcReasoning);
         var ofSignal = new OrderflowSignal(_orderFlowResult.ScoreContribution, _orderFlowResult.Description);

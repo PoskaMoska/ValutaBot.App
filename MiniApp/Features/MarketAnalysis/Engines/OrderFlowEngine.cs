@@ -14,7 +14,7 @@ public static class OrderFlowEngine
         double SellVolume,
         double DeltaRatio,
         double CumulativeVolumeDelta,
-        string OrderFlowState, // "STRONG_BULLISH_FLOW" | "STRONG_BEARISH_FLOW" | "BULLISH_ABSORPTION" | "BEARISH_ABSORPTION" | "SPOOFING_TRAP" | "BALANCED"
+        string OrderFlowState, // "STRONG_BULLISH_FLOW" | "STRONG_BEARISH_FLOW" | "BULLISH_ABSORPTION" | "BEARISH_ABSORPTION" | "Ловушка (Спуфинг)" | "БАЛАНС"
         double ScoreContribution,
         bool IsInstitutionalBlockTrade,
         string Description
@@ -28,7 +28,7 @@ public static class OrderFlowEngine
     {
         if (candles.IsEmpty || candles.Length < 5)
         {
-            return new OrderFlowResult(0, 0, 1.0, 0, "BALANCED", 0, false, "INSUFFICIENT_DATA");
+            return new OrderFlowResult(0, 0, 1.0, 0, "БАЛАНС", 0, false, "НЕДОСТАТОЧНО ДАННЫХ");
         }
 
         var statefulOf = IndicatorCache.GetOrderFlow(asset, timeframe, candles);
@@ -42,56 +42,56 @@ public static class OrderFlowEngine
 
         string state;
         double scoreContribution = 0;
-        string desc = "BALANCED";
+        string desc = "БАЛАНС";
 
         // ─── 2. Spoofing & Absorption Detection (BPS Based) ───
         if (deltaRatio > 1.8 && recentCvd > 0 && priceDeltaBps < -0.1)
         {
             state = "BEARISH_ABSORPTION";
             scoreContribution = -0.30;
-            desc = "BEARISH_CVD_DIVERGENCE";
+            desc = "Дивергенция (Скрытые продажи)";
         }
         else if (deltaRatio < 0.55 && recentCvd < 0 && priceDeltaBps > 0.1)
         {
             state = "BULLISH_ABSORPTION";
             scoreContribution = 0.30;
-            desc = "BULLISH_CVD_DIVERGENCE";
+            desc = "Дивергенция (Скрытые покупки)";
         }
         else if (deltaRatio > 1.8 && Math.Abs(priceDeltaBps) < 0.05)
         {
-            state = "SPOOFING_TRAP";
+            state = "Ловушка (Спуфинг)";
             scoreContribution = 0;
-            desc = "SPOOFING_TRAP";
+            desc = "Ловушка (Спуфинг)";
         }
         // ─── 3. Passive Limit Absorption Detection ───
         else if (deltaRatio > 1.8 && priceDeltaBps <= -0.5)
         {
             state = "BEARISH_ABSORPTION";
             scoreContribution = -0.35;
-            desc = "BEARISH_PASSIVE_ABSORPTION";
+            desc = "Лимитное поглощение (Продажи)";
         }
         else if (deltaRatio < 0.55 && priceDeltaBps >= 0.5)
         {
             state = "BULLISH_ABSORPTION";
             scoreContribution = 0.35;
-            desc = "BULLISH_PASSIVE_ABSORPTION";
+            desc = "Лимитное поглощение (Покупки)";
         }
         // ─── 4. Real Institutional Momentum Flow ───
         else if (deltaRatio >= 1.6 && priceDelta > 0)
         {
             state = "STRONG_BULLISH_FLOW";
             scoreContribution = statefulOf.HasInstitutionalBlockTrade ? 0.5 : 0.35;
-            desc = statefulOf.HasInstitutionalBlockTrade ? "INSTITUTIONAL_BULLISH_BLOCK" : "BULLISH_MOMENTUM";
+            desc = statefulOf.HasInstitutionalBlockTrade ? "Крупный блок (Покупки)" : "Растущий объем (Покупки)";
         }
         else if (deltaRatio <= 0.62 && priceDelta < 0)
         {
             state = "STRONG_BEARISH_FLOW";
             scoreContribution = statefulOf.HasInstitutionalBlockTrade ? -0.5 : -0.35;
-            desc = statefulOf.HasInstitutionalBlockTrade ? "INSTITUTIONAL_BEARISH_BLOCK" : "BEARISH_MOMENTUM";
+            desc = statefulOf.HasInstitutionalBlockTrade ? "Крупный блок (Продажи)" : "Падающий объем (Продажи)";
         }
         else
         {
-            state = "BALANCED";
+            state = "БАЛАНС";
             scoreContribution = 0;
         }
 
