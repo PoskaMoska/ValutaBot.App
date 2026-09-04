@@ -232,11 +232,15 @@ public class ConfluenceMatrixEngine(
         totalConfidence += taSignal.Confidence * taWeight;
         totalWeight     += taWeight;
 
-        // 1b. Order Flow (Leading — выделен в отдельный компонент, приоритетный сигнал для опционов)
+        // 1b. Order Flow — only applied when not OTC (OTC tick volume ≠ real market pressure)
+        // If disabled (OTC), ScoreContribution=0 — skip adding to totalWeight to avoid diluting other signals.
         double ofWeight  = await SignalTracker.GetSignalWeightAsync("ORDERFLOW", 1.2);
-        totalScore      += ofSignal.ScoreContribution * ofWeight;
-        totalConfidence += 65.0 * ofWeight;
-        totalWeight     += ofWeight;
+        if (Math.Abs(ofSignal.ScoreContribution) > 0)
+        {
+            totalScore      += ofSignal.ScoreContribution * ofWeight;
+            totalConfidence += 65.0 * ofWeight;
+            totalWeight     += ofWeight;
+        }
 
         // 2. Velocity / Continuous State (Leading — микро-ускорение цены)
         // AUDIT FIX: только включаем в totalWeight если contribution ненулевой (>= 0.03).

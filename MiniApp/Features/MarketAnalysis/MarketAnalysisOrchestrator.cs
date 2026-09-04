@@ -282,7 +282,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             _smcResult = new SmcEngine.SmcAnalysisResult();
         }
 
-        if (IsSettingEnabled(_settings.EnableOrderFlow, _userSettings?.EnableOf))
+        // OrderFlow is disabled for OTC pairs: OTC volume = tick count, not real market pressure.
+        // Statistical evidence: 35.8% win rate on 363 signal votes = inverted/wrong for OTC.
+        bool isOtcAsset = _asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
+        if (IsSettingEnabled(_settings.EnableOrderFlow, _userSettings?.EnableOf) && !isOtcAsset)
         {
             _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
             BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
@@ -290,6 +293,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         else
         {
             _orderFlowResult = new OrderFlowEngine.OrderFlowResult();
+            if (isOtcAsset)
+                BotLogger.Info($"[Order Flow] Disabled for OTC asset {_asset} — tick volume is not real order flow.");
         }
 
         // FIX Race Condition: MTF SMC выравнивание перенесено сюда из EvaluateTechnicalIndicatorsAsync.
