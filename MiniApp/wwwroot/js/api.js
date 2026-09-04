@@ -223,7 +223,7 @@ export async function executeAnalysis() {
                 if (conf && data.lgbmConfidence) {
                     conf.innerText = (data.lgbmConfidence * 100).toFixed(0) + '%';
                 }
-                const rep = document.getElementById('llmReportContent');
+                const rep = document.getElementById('mlEnsembleReport');
                 if (rep) {
                     rep.innerHTML = parseMd(data.llmReport);
                 }
