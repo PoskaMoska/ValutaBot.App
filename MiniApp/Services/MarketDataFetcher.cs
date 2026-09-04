@@ -170,21 +170,22 @@ public class MarketDataFetcher
         int offset = (int)((DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute) % maxIndex);
 
         using var conn = DbConnectionFactory.GetConnection();
-        var rows = await conn.QueryAsync<MiniAppController.OhlcCandle>(@"
-            SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume, open_time AS Timestamp
+        var rows = await conn.QueryAsync<dynamic>(@"
+            SELECT open, high, low, close, volume
             FROM historical_candles
             WHERE asset = @Asset
             ORDER BY open_time ASC
             LIMIT @Limit OFFSET @Offset
         ", new { Asset = dbSymbol, Limit = m1Needed, Offset = offset });
 
-        var m1Candles = rows.ToArray();
+        var m1Candles = rows.Select(r => new MiniAppController.OhlcCandle(Convert.ToDouble(r.open), Convert.ToDouble(r.high), Convert.ToDouble(r.low), Convert.ToDouble(r.close), Convert.ToDouble(r.volume), default(DateTime))).ToArray();
         if (m1Candles.Length < m1Needed)
         {
-            m1Candles = (await conn.QueryAsync<MiniAppController.OhlcCandle>(@"
-                SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume, open_time AS Timestamp
+            var fallbackRows = await conn.QueryAsync<dynamic>(@"
+                SELECT open, high, low, close, volume
                 FROM historical_candles WHERE asset = 'EURUSD' ORDER BY open_time ASC LIMIT @Limit OFFSET @Offset
-            ", new { Limit = m1Needed, Offset = offset })).ToArray();
+            ", new { Limit = m1Needed, Offset = offset });
+            m1Candles = fallbackRows.Select(r => new MiniAppController.OhlcCandle(Convert.ToDouble(r.open), Convert.ToDouble(r.high), Convert.ToDouble(r.low), Convert.ToDouble(r.close), Convert.ToDouble(r.volume), default(DateTime))).ToArray();
         }
 
         MiniAppController.OhlcCandle[] finalCandles;
