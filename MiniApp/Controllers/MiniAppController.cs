@@ -235,14 +235,14 @@ public static partial class MiniAppController
 
             var userSettings = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.GetSettingsAsync(userId);
 
-            string cleanAsset = AssetSanitizer.Sanitize(asset);
             string tf = timeframe.ToLower().Trim();
-            Console.WriteLine($"[ANALYZE] {cleanAsset} | TF: {timeframe} | User: {userId}");
+            string assetTrimmed = asset.Trim();
+            Console.WriteLine($"[ANALYZE] {assetTrimmed} | TF: {tf} | User: {userId}");
 
             try
             {
                 var handler = context.RequestServices.GetRequiredService<ValutaBot.MiniApp.CQRS.Handlers.GetMarketAnalysisQueryHandler>();
-                var query = new ValutaBot.MiniApp.CQRS.Queries.GetMarketAnalysisQuery(cleanAsset, tf);
+                var query = new ValutaBot.MiniApp.CQRS.Queries.GetMarketAnalysisQuery(assetTrimmed, tf);
                 query.UserSettings = userSettings; // Pass settings to the query
                 
                 var result = await handler.Handle(query, context.RequestAborted);
