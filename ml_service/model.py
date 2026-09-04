@@ -71,7 +71,10 @@ def is_forex_symbol(symbol: str) -> bool:
     return False
 
 def to_twelvedata_symbol(symbol: str) -> str:
-    sym = symbol.upper()
+    sym = symbol.upper().replace("_OTC", "").replace("OTC", "").strip()
+    if sym.endswith("USDT"):
+        sym = sym.replace("USDT", "USD")
+        
     if sym in ["GOLD", "XAUUSD"]:
         return "XAU/USD"
     if sym in ["SILVER", "XAGUSD"]:

@@ -559,6 +559,20 @@ def feedback(req: TrainFeedback):
             )
         ''')
         cursor.execute('''
+            CREATE TABLE IF NOT EXISTS SubminuteCandles (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Asset TEXT NOT NULL,
+                Interval TEXT NOT NULL,
+                OpenTime TEXT NOT NULL,
+                Open REAL NOT NULL,
+                High REAL NOT NULL,
+                Low REAL NOT NULL,
+                Close REAL NOT NULL,
+                Volume REAL NOT NULL,
+                UNIQUE(Asset, Interval, OpenTime)
+            )
+        ''')
+        cursor.execute('''
             INSERT INTO OnlineFeedback (Asset, Interval, Direction, EntryPrice, ExitPrice, WasWin, Timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (req.asset, req.timeframe, req.direction, req.entry_price, req.exit_price, int(req.was_win), req.timestamp))
