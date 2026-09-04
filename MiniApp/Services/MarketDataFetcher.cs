@@ -171,7 +171,7 @@ public class MarketDataFetcher
 
         using var conn = DbConnectionFactory.GetConnection();
         var rows = await conn.QueryAsync<MiniAppController.OhlcCandle>(@"
-            SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
+            SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume, open_time AS Timestamp
             FROM historical_candles
             WHERE asset = @Asset
             ORDER BY open_time ASC
@@ -182,7 +182,7 @@ public class MarketDataFetcher
         if (m1Candles.Length < m1Needed)
         {
             m1Candles = (await conn.QueryAsync<MiniAppController.OhlcCandle>(@"
-                SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
+                SELECT open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume, open_time AS Timestamp
                 FROM historical_candles WHERE asset = 'EURUSD' ORDER BY open_time ASC LIMIT @Limit OFFSET @Offset
             ", new { Limit = m1Needed, Offset = offset })).ToArray();
         }
