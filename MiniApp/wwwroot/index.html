@@ -169,6 +169,28 @@
         <!-- ═══ TAB: ИИ Аналитика ═══ -->
         <div id='tabContentAI' style='display:none'>
 
+            <!-- MARKET WEATHER WIDGET -->
+            <div class='ml-card' style='margin-bottom:12px;background:rgba(14, 165, 233, 0.05);border:1px solid rgba(14, 165, 233, 0.2);'>
+                <div class='ml-header' style='display:flex;justify-content:center;align-items:center;margin-bottom:8px'>
+                    <span class='ml-badge' style='background:linear-gradient(135deg,#0ea5e9,#2563eb);font-size:11px;padding:4px 10px'>🌍 Обстановка на рынке</span>
+                </div>
+                <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;padding:4px 0'>
+                    <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
+                        <div style='font-size:9px;color:var(--subtext)'>Сессия</div>
+                        <div style='font-size:10.5px;font-weight:700;margin-top:4px;color:#e2e8f0' id='weatherSession'>--</div>
+                    </div>
+                    <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
+                        <div style='font-size:9px;color:var(--subtext)'>Фаза рынка</div>
+                        <div style='font-size:10.5px;font-weight:700;margin-top:4px;color:#e2e8f0' id='weatherPhase'>--</div>
+                    </div>
+                    <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
+                        <div style='font-size:9px;color:var(--subtext)'>Энтропия</div>
+                        <div style='font-size:10.5px;font-weight:700;margin-top:4px;color:#e2e8f0' id='weatherEntropy'>--</div>
+                    </div>
+                </div>
+            </div>
+
+
             <!-- 1. ML Ensemble Card -->
             <div class='news-card' id='mlEnsembleCard' style='display:none !important;'>
                 <div class='news-header'>

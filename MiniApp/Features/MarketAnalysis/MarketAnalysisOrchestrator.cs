@@ -624,8 +624,38 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var assetStats   = await assetStatsTask;
         int pendingCount = await pendingCountTask;
 
+
+        // Market Weather Widget calculations
+        string uiMarketSession = "ВНЕБИРЖЕВЫЕ (OTC)";
+        if (!_asset.Contains("BTC") && !_asset.Contains("ETH") && !_asset.Contains("SOL") && !_asset.Contains("OTC"))
+        {
+            int h = DateTime.UtcNow.Hour;
+            if (h >= 21 || h < 2) uiMarketSession = "НОЧЬ (Тихий рынок)";
+            else if (h >= 2 && h < 8) uiMarketSession = "АЗИЯ (Пила)";
+            else if (h >= 8 && h < 13) uiMarketSession = "ЛОНДОН (Начало)";
+            else if (h >= 13 && h < 17) uiMarketSession = "НЬЮ-ЙОРК (Объемы)";
+            else if (h >= 17 && h < 21) uiMarketSession = "НЬЮ-ЙОРК (Вечер)";
+        }
+        else if (_asset.Contains("BTC") || _asset.Contains("ETH") || _asset.Contains("SOL"))
+        {
+            uiMarketSession = "КРИПТО";
+        }
+
+        string uiMarketPhase = "Боковик (Флэт)";
+        if (_mainResult.rsiVal > 60) uiMarketPhase = "Бычий тренд";
+        else if (_mainResult.rsiVal < 40) uiMarketPhase = "Медвежий тренд";
+
+        string uiMarketEntropy = "В норме (Безопасно)";
+        double vel = Math.Abs(_continuousState?.VelocityBpsPerSec ?? 0);
+        if (vel > 2.0) uiMarketEntropy = "ВЫСОКАЯ (Опасно!)";
+        else if (vel < 0.1) uiMarketEntropy = "Мертвый рынок";
+
         return new
         {
+            uiMarketSession = uiMarketSession,
+            uiMarketPhase = uiMarketPhase,
+            uiMarketEntropy = uiMarketEntropy,
+
             direction = finalDirection,
             probability = finalProbability,
             duration = timeoutResult.TimeoutText,

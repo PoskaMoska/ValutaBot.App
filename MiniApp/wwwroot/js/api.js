@@ -204,7 +204,26 @@ export async function executeAnalysis() {
                 if (rp) rp.innerText += ' ⚠️';
             }
 
+
+            // Market Weather Bindings
+            const wSession = document.getElementById("weatherSession");
+            if (wSession && data.uiMarketSession) wSession.innerText = data.uiMarketSession;
+            const wPhase = document.getElementById("weatherPhase");
+            if (wPhase && data.uiMarketPhase) wPhase.innerText = data.uiMarketPhase;
+            const wEntropy = document.getElementById("weatherEntropy");
+            if (wEntropy && data.uiMarketEntropy) {
+                wEntropy.innerText = data.uiMarketEntropy;
+                if (data.uiMarketEntropy.includes("Опасно") || data.uiMarketEntropy.includes("ВЫСОКАЯ")) {
+                    wEntropy.style.color = "#ef4444";
+                } else if (data.uiMarketEntropy.includes("Мертвый")) {
+                    wEntropy.style.color = "#f59e0b";
+                } else {
+                    wEntropy.style.color = "#10b981";
+                }
+            }
+
             // ML Ensemble Card
+
             if (data.llmReport && !data.llmReport.includes('Оффлайн')) {
                 const mlCard = document.getElementById('mlEnsembleCard');
                 if (mlCard) mlCard.style.display = (config && config.ml === false) ? 'none' : 'block';
