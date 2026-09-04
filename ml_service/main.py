@@ -286,6 +286,11 @@ def _fetch_local_sqlite_main(symbol: str, interval: str, limit: int) -> list:
                 "FROM HistoricalCandles WHERE Asset=? AND Interval=? ORDER BY OpenTime DESC LIMIT ?",
                 conn, params=(symbol, norm, limit)
             )
+            if not df.empty and interval.startswith("s"):
+                from model import _interpolate_subminute
+                dicts = df.iloc[::-1].to_dict(orient="records")
+                dicts = _interpolate_subminute(dicts, interval)
+                df = __import__("pandas").DataFrame(dicts[-limit:][::-1])
         else:
             df = __import__("pandas").read_sql_query(
                 "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
@@ -343,6 +348,16 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         ORDER BY open_time DESC LIMIT %s
                     """
                     df = _pd.read_sql_query(query, conn, params=(symbol, norm, entry_timestamp, limit))
+                    
+                    if not df.empty and interval.startswith("s"):
+                        # FIX BUG-3: Если мы взяли 1m свечи для s5/s10/s15/s30, их ОБЯЗАТЕЛЬНО
+                        # нужно проинтерполировать. Иначе SGD учится на 1m свечах, а предиктит на s10.
+                        # Это ломало distribution всех индикаторов.
+                        from model import _interpolate_subminute
+                        dicts = df.iloc[::-1].to_dict(orient="records")
+                        dicts = _interpolate_subminute(dicts, interval)
+                        # Берем последние limit штук, и переворачиваем обратно как ожидает логика ниже
+                        df = _pd.DataFrame(dicts[-limit:][::-1])
                 
                 conn.close()
             except Exception as e:
@@ -364,6 +379,11 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         "ORDER BY OpenTime DESC LIMIT ?",
                         conn, params=(symbol, norm, entry_unix, limit)
                     )
+                    if not df.empty and interval.startswith("s"):
+                        from model import _interpolate_subminute
+                        dicts = df.iloc[::-1].to_dict(orient="records")
+                        dicts = _interpolate_subminute(dicts, interval)
+                        df = _pd.DataFrame(dicts[-limit:][::-1])
                 else:
                     df = _pd.read_sql_query(
                         "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
