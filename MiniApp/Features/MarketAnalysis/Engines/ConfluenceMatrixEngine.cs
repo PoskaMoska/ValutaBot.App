@@ -411,7 +411,7 @@ public class ConfluenceMatrixEngine(
         // тем самым отсекая выдачу ложных "Golden Setups", когда ликвидности нет.
         double sessionMultiplier = 1.0;
         string sessionName = "DEFAULT";
-        if (!asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL") && !asset.Contains("OTC"))
+        if (!asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL"))
         {
             int h = DateTime.UtcNow.Hour;
             if (h >= 21 || h < 2) { sessionMultiplier = 0.75; sessionName = "DEAD_ZONE"; } // Поздний вечер (расширение спредов, мертвый рынок)

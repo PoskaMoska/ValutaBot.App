@@ -548,7 +548,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         else
         {
-            const double Payout = 0.80; // РЎС‚Р°РЅРґР°СЂС‚РЅС‹Р№ РєРѕСЌС„С„РёС†РёРµРЅС‚ РІС‹РїР»Р°С‚С‹ Pocket Option (80%)
+            const double Payout = 0.92; // PocketOption payout (92%)
             double p = Math.Clamp(finalProbability / 100.0, 0.35, 0.95);
             double q = 1.0 - p;
 
