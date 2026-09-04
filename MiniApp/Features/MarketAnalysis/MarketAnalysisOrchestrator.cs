@@ -511,10 +511,14 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var taSignal = new TaSignal(_mainResult.score, _mainResult.confidence, _mainResult.rsiVal, _mainResult.emaVal, _mainResult.volStrengthVal, _mainAtr, _mainAdx);
         
         var smcParts = new List<string>();
-        if (_smcResult.HasLiquiditySweep && !string.IsNullOrEmpty(_smcResult.SweepDirection)) smcParts.Add($"Sweep: {_smcResult.SweepDirection}");
-        if (_smcResult.HasBos && !string.IsNullOrEmpty(_smcResult.BosDirection)) smcParts.Add($"BOS: {_smcResult.BosDirection}");
-        if (_smcResult.HasFvg && !string.IsNullOrEmpty(_smcResult.FvgType)) smcParts.Add($"FVG: {_smcResult.FvgType}");
-        if (_smcResult.HasOrderBlock && !string.IsNullOrEmpty(_smcResult.OrderBlockType)) smcParts.Add($"OB: {_smcResult.OrderBlockType}");
+        if (_smcResult.HasLiquiditySweep && !string.IsNullOrEmpty(_smcResult.SweepDirection)) 
+            smcParts.Add(_smcResult.SweepDirection.Contains("BULLISH") ? "Сбор ликвидности (Покупки)" : "Сбор ликвидности (Продажи)");
+        if (_smcResult.HasBos && !string.IsNullOrEmpty(_smcResult.BosDirection)) 
+            smcParts.Add(_smcResult.BosDirection.Contains("BULLISH") ? "Слом структуры (Покупки)" : "Слом структуры (Продажи)");
+        if (_smcResult.HasFvg && !string.IsNullOrEmpty(_smcResult.FvgType)) 
+            smcParts.Add(_smcResult.FvgType.Contains("BULLISH") ? "Имбаланс (Вверх)" : "Имбаланс (Вниз)");
+        if (_smcResult.HasOrderBlock && !string.IsNullOrEmpty(_smcResult.OrderBlockType)) 
+            smcParts.Add(_smcResult.OrderBlockType.Contains("BULLISH") ? "Ордерблок (Быки)" : "Ордерблок (Медведи)");
         string smcReasoning = smcParts.Count > 0 ? string.Join(", ", smcParts) : "Нет ярко выраженной структуры";
 
         var smcSignal = new SmcSignal(_smcResult.BosDirection, _smcResult.SweepDirection, _smcResult.OrderBlockType, _smcResult.FvgType, smcReasoning);
