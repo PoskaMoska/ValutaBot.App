@@ -216,9 +216,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _ohlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _timeframe, _asset, _limit);
         if (_ohlcCandles == null || _ohlcCandles.Length == 0)
         {
-            // OTC candles not yet accumulated вЂ” use main prices as synthetic OHLC
-            BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_timeframe}) вЂ” using synthetic OHLC from main prices.");
-            _ohlcCandles = _mainPrices.Select(p => new MiniAppController.OhlcCandle(p, p, p, p, 0)).ToArray();
+            // OTC candles not yet accumulated — use main prices as synthetic OHLC
+            BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_timeframe}) — using synthetic OHLC from main prices.");
+            var now = DateTime.UtcNow;
+            int intervalSeconds = _fetcher.TimeframeSeconds(_timeframe);
+            _ohlcCandles = _mainPrices.Select((p, i) => new MiniAppController.OhlcCandle(p, p, p, p, 0, now.AddSeconds(-(_mainPrices.Length - 1 - i) * intervalSeconds))).ToArray();
         }
         else if (_ohlcCandles.Length < 2)
         {
