@@ -76,6 +76,20 @@ public class PendingTradeVerificationService : BackgroundService
             }
         }
 
+        // STALE CHECK: If verify_at was > 2 minutes ago, the server restarted after the trade expired.
+        // Using current live price now would give a random result (price moved on since then).
+        // Better to discard the trade cleanly than to poison the AI training set with a random win/loss.
+        double staleThresholdSeconds = 120;
+        double secondsOverdue = (DateTime.UtcNow - record.VerifyAt).TotalSeconds;
+        if (secondsOverdue > staleThresholdSeconds)
+        {
+            BotLogger.Warn($"[PendingVerifier] STALE trade {record.Id} ({record.Asset}/{record.Timeframe}): " +
+                           $"verify_at was {secondsOverdue:F0}s ago (threshold={staleThresholdSeconds}s). " +
+                           $"Discarding to prevent corrupt win/loss recording after server restart.");
+            await TradeRepository.DeletePendingTradeAsync(record.Id);
+            return;
+        }
+
         // If still no price — discard (no way to verify)
         if (!exitPrice.HasValue || exitPrice.Value <= 0)
         {
