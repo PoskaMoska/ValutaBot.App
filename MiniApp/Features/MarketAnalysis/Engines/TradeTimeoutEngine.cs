@@ -44,14 +44,26 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         double atr,
         double volRatio,
         SmcEngine.SmcAnalysisResult smc,
-        double currentPrice)
+        double currentPrice,
+        bool isForex = false)
     {
+        int tfSeconds = TimeframeToSeconds(timeframe);
+        bool isSubMinute = tfSeconds < 60;
+
         int baseCandles = 15;
         string dynamicReason = "Base timeout applied (15 candles).";
 
         double lastPrice = currentPrice > 0 ? currentPrice : 1.0;
         double normalizedAtr = atr / lastPrice;
-        bool isDeadMarket = atr > 0 && normalizedAtr < 0.0005;
+
+        // Dead-market threshold calibrated for m1 (60s), then scaled linearly by timeframe.
+        // EUR/USD m1 ATR ≈ 0.0002 → normalizedAtr ≈ 0.000182. Dead threshold = 0.000030 (< 16% of normal).
+        // EUR/USD s5 ATR ≈ 0.000007 → normalizedAtr ≈ 0.0000064. Dead threshold = 0.0000025 (scales with TF).
+        // Crypto BTC m1 ATR ≈ $30 → normalizedAtr ≈ 0.0005. Threshold = 0.0005, scales for sub-minute.
+        double baseDeadMarketThreshold = isForex ? 0.000030 : 0.0005;
+        double deadMarketThreshold = baseDeadMarketThreshold * (tfSeconds / 60.0);
+
+        bool isDeadMarket = atr > 0 && normalizedAtr < deadMarketThreshold;
         bool isZeroAtr = atr <= 0;
 
         if (isZeroAtr || isDeadMarket || volRatio < 0.3)
@@ -68,8 +80,10 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         }
         else if (volRatio < 0.8)
         {
-            baseCandles = 25;
-            dynamicReason = "Low Volatility. Extended timeout (25 candles).";
+            // On sub-minute TFs, "Low Volatility" extended timeout is capped at 15 candles:
+            // 25 candles × 5s = 125 sec is too long for a scalping signal.
+            baseCandles = isSubMinute ? 15 : 25;
+            dynamicReason = "Low Volatility. Extended timeout " + (isSubMinute ? "(15 candles, sub-minute cap)." : "(25 candles).");
         }
 
         if (smc.HasOrderBlock || smc.HasFvg)
@@ -96,7 +110,6 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
             baseCandles = minCandles;
         }
 
-        int tfSeconds = TimeframeToSeconds(timeframe);
         int totalSeconds = baseCandles * tfSeconds;
         string timeoutText = FormatSeconds(totalSeconds);
 

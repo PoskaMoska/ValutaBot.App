@@ -196,8 +196,20 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         _isForex = _symbol == null || _symbol == "EURUSDT" || _symbol == "GBPUSDT" || _symbol == "AUDUSDT";
         _isMajor = _symbol == "BTCUSDT" || _symbol == "ETHUSDT" || _symbol == "SOLUSDT";
-        _limit = 100;
+
+        // ── Economic Calendar Guard ──────────────────────────────────────────
+        // Check BEFORE any HTTP calls to avoid wasting TwelveData credits.
+        // Fail-open: if the calendar API is unavailable, analysis continues normally.
+        var newsBlock = await EconomicCalendarService.GetBlockingEventAsync(_asset);
+        if (newsBlock != null)
+        {
+            string msg = EconomicCalendarService.FormatBlockMessage(newsBlock, _asset);
+            BotLogger.Warn($"[EconomicCalendar] BLOCKED: {_asset} — {newsBlock.Name} ({newsBlock.Currency}) at {newsBlock.EventTimeUtc:HH:mm} UTC");
+            throw new MarketClosedException(msg, msg);
+        }
+
         _tfLower = _timeframe.ToLower().Trim();
+        _limit = 100;
         if (_tfLower == "s10" || _tfLower == "s15" || _tfLower == "s30") _limit = 130;
         else if (_tfLower == "m1" || _tfLower == "m2" || _tfLower == "m3" || _tfLower == "m5") _limit = 150;
         else if (_tfLower == "m15" || _tfLower == "m30" || _tfLower == "h1") _limit = 200;
@@ -209,7 +221,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         _mainOhlcKey = _symbol != null ? $"{_symbol}_{_mainInterval}" : $"{_clean}_{_mainInterval}";
 
-        var mainResultTuple = await _fetcher.FetchBinanceWithFallback(_symbol, _mainInterval, _clean, _limit);
+        var mainResultTuple = await _fetcher.FetchBinanceWithFallback(_symbol, _mainInterval, _asset, _limit);
         _mainPrices = mainResultTuple.prices;
         _mainVolumes = mainResultTuple.volumes;
 
@@ -539,7 +551,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         int finalProbability = consensus.Probability;
         
         int timeframeSec = _fetcher.TimeframeSeconds(_timeframe);
-        var timeoutResult = _timeoutEngine.CalculateTimeout(_asset, _timeframe, _mainAtr, volRatio, _smcResult, _currentLivePrice);
+        var timeoutResult = _timeoutEngine.CalculateTimeout(_asset, _timeframe, _mainAtr, volRatio, _smcResult, _currentLivePrice, _isForex);
         
         // --- PRODUCTION KILL SWITCH REMOVED ---
         // We no longer block the user. Instead, we generate a soft warning.
@@ -645,14 +657,24 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             uiMarketSession = "КРИПТО";
         }
 
+        // Адаптивная фаза рынка (синхронизировано с ContinuousStateEngine)
         string uiMarketPhase = "Боковик (Флэт)";
-        if (_mainResult.rsiVal > 60) uiMarketPhase = "Бычий тренд";
-        else if (_mainResult.rsiVal < 40) uiMarketPhase = "Медвежий тренд";
+        string regime = _continuousState?.VelocityRegime ?? "";
+        if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс (Резкий)";
+        else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс (Резкий)";
+        else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Разворот)";
+        else if (_mainResult.rsiVal > 62) uiMarketPhase = "Бычий тренд (Плавный)";
+        else if (_mainResult.rsiVal < 38) uiMarketPhase = "Медвежий тренд (Плавный)";
 
+        // Адаптивная энтропия с учетом таймфрейма (субминутные против минутных)
         string uiMarketEntropy = "В норме (Безопасно)";
         double vel = Math.Abs(_continuousState?.VelocityBpsPerSec ?? 0);
-        if (vel > 2.0) uiMarketEntropy = "ВЫСОКАЯ (Опасно!)";
-        else if (vel < 0.1) uiMarketEntropy = "Мертвый рынок";
+        bool isSub = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
+        double dangerVel = isSub ? 0.3 : 3.0; // Пороги из ContinuousStateEngine
+        double deadVel   = isSub ? 0.02 : 0.1;
+
+        if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
+        else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
 
         return new
         {

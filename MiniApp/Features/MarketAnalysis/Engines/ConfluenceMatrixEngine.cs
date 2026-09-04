@@ -111,7 +111,10 @@ public class ConfluenceMatrixEngine(
         Resolve3DTimeframes(string tf) =>
         tf.ToLower() switch
         {
-            "s3" or "s5" or "s10" or "s15" or "s30" => ("m1",  "m3",  "m5"),
+            // Sub-minute: signal expires in seconds → context must be near-term only.
+            // s30 (micro) gives immediate momentum, m1 (primary) gives the current candle
+            // structure, m3 (macro) filters out pure noise without going too far in time.
+            "s3" or "s5" or "s10" or "s15" or "s30" => ("s30", "m1",  "m3"),
             "m1"                                     => ("s30", "m1",  "m5"),
             "m2" or "m3"                             => ("m1",  "m3",  "m15"),
             "m5"                                     => ("m1",  "m5",  "m15"),
@@ -169,7 +172,7 @@ public class ConfluenceMatrixEngine(
                 candles[i] = new MiniAppController.OhlcCandle(
                     open, high, low, close,
                     v,
-                    baseTime.AddMinutes(i)
+                    baseTime.AddSeconds((long)i * tfSeconds)
                 );
             }
 
@@ -415,14 +418,21 @@ public class ConfluenceMatrixEngine(
         // тем самым отсекая выдачу ложных "Golden Setups", когда ликвидности нет.
         double sessionMultiplier = 1.0;
         string sessionName = "DEFAULT";
-        if (!asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL"))
+        bool isOtcAsset = asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
+        if (!asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL") && !isOtcAsset)
         {
+            // Session modifier applies only to live weekday forex/crypto.
+            // OTC pairs trade from historical DB — no real sessions, no dead zones.
             int h = DateTime.UtcNow.Hour;
             if (h >= 21 || h < 2) { sessionMultiplier = 0.75; sessionName = "DEAD_ZONE"; } // Поздний вечер (расширение спредов, мертвый рынок)
             else if (h >= 2 && h < 8) { sessionMultiplier = 0.85; sessionName = "ASIAN"; } // Азия (низкая волатильность, пила)
             else if (h >= 8 && h < 13) { sessionMultiplier = 1.0; sessionName = "LONDON_MORNING"; } // Лондон
             else if (h >= 13 && h < 17) { sessionMultiplier = 1.1; sessionName = "LONDON_NY_OVERLAP"; } // Макс. ликвидность (супер-тренды)
             else if (h >= 17 && h < 21) { sessionMultiplier = 1.0; sessionName = "NY_AFTERNOON"; } // Нью-Йорк вечер
+        }
+        else if (isOtcAsset)
+        {
+            sessionName = "OTC_WEEKEND";
         }
         
         absWeightedScore *= sessionMultiplier;

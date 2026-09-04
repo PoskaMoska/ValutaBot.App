@@ -207,10 +207,24 @@ function updateCountdown() {
     if (!el) return;
     el.innerText = `${mins}:${secs.toString().padStart(2,'0')}`;
     
-    if (remaining <= 5) {
+    // Динамические пороги светофора под таймфрейм
+    let greenThresh = 5;
+    let yellowThresh = 15;
+    
+    if (tfSec <= 5) {
+        greenThresh = 1; yellowThresh = 2;
+    } else if (tfSec <= 10) {
+        greenThresh = 2; yellowThresh = 4;
+    } else if (tfSec <= 15) {
+        greenThresh = 2; yellowThresh = 5;
+    } else if (tfSec <= 30) {
+        greenThresh = 3; yellowThresh = 10;
+    }
+
+    if (remaining <= greenThresh) {
         el.className = 'time critical';
         updateTrafficLight('action');
-    } else if (remaining <= 15) {
+    } else if (remaining <= yellowThresh) {
         el.className = 'time warning';
         updateTrafficLight('prepare');
     } else {
