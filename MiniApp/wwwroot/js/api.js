@@ -323,7 +323,7 @@ export async function executeAnalysis() {
             // Reasoning Card
             if (data.claudeReasoning) {
                 const rCard = document.getElementById('reasoningCard');
-                if (rCard) rCard.style.display = 'none';
+                if (rCard) rCard.style.display = 'block';
                 const rText = document.getElementById('reasoningText');
                 if (rText) rText.innerText = data.claudeReasoning;
                 const rDir = document.getElementById('reasoningDir');
