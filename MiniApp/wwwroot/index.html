@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang='ru'>
 <head>
     <meta charset='utf-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>
-    <title>TradeBE Бот Анализа</title>
+    <title>TradeBE Р‘РѕС‚ РђРЅР°Р»РёР·Р°</title>
     <script src='https://telegram.org/js/telegram-web-app.js'></script>
     <link rel="stylesheet" href="/css/style.css">
 </head>
@@ -20,7 +20,7 @@
     <div id='screen-home' class='app-screen active'>
 
         <div class='welcome-section' id='welcomeSec'>
-            <div class='welcome-title'>Приветствую<br>на голодных<br>играх</div>
+            <div class='welcome-title'>РџСЂРёРІРµС‚СЃС‚РІСѓСЋ<br>РЅР° РіРѕР»РѕРґРЅС‹С…<br>РёРіСЂР°С…</div>
             <div id='mainSphere' class='sphere-container'>
                 <div class='sphere-scene'>
                     <div class='sphere-particles'>
@@ -64,39 +64,39 @@
         <div class='top-categories' id='topCategories' style='display:none;'>
             <div class='top-cat-btn active' data-cat='fiat'>
                 <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round'><circle cx='12' cy='12' r='9'/><path d='M7 9h6a2 2 0 0 1 0 4H7'/><path d='M10 5v2m0 8v2'/></svg>
-                <div class='label'>Валюты</div>
+                <div class='label'>Р’Р°Р»СЋС‚С‹</div>
             </div>
             <div class='cat-divider'></div>
             <div class='top-cat-btn' data-cat='commodities'>
                 <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round'><path d='M12 2a8 8 0 0 0-8 8c0 5 8 12 8 12s8-7 8-12a8 8 0 0 0-8-8z'/><circle cx='12' cy='10' r='3'/></svg>
-                <div class='label'>Сырьё</div>
+                <div class='label'>РЎС‹СЂСЊС‘</div>
             </div>
             <div class='cat-divider'></div>
             <div class='top-cat-btn' data-cat='crypto'>
                 <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>
-                <div class='label'>Крипта</div>
+                <div class='label'>РљСЂРёРїС‚Р°</div>
             </div>
             <div class='cat-divider'></div>
             <div class='top-cat-btn' data-cat='stocks'>
                 <svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='22 7 13.5 15.5 8.5 10.5 2 17'/><polyline points='16 7 22 7 22 13'/></svg>
-                <div class='label'>Акции</div>
+                <div class='label'>РђРєС†РёРё</div>
             </div>
         </div>
 
         <div class='selector-section'>
             <div class='sel-grid'>
                 <div class='sel-group'>
-                    <span class='sel-label'>Актив</span>
+                    <span class='sel-label'>РђРєС‚РёРІ</span>
                     <div class='dropdown-trigger' id='assetBtn'>
                         <span class='dropdown-val' id='selectedAsset'>EUR/USD OTC</span>
-                        <span class='dropdown-arrow'>▼</span>
+                        <span class='dropdown-arrow'>в–ј</span>
                     </div>
                 </div>
                 <div class='sel-group'>
-                    <span class='sel-label'>Таймфрейм</span>
+                    <span class='sel-label'>РўР°Р№РјС„СЂРµР№Рј</span>
                     <div class='dropdown-trigger' id='tfBtn'>
                         <span class='dropdown-val' id='selectedTf'>M1</span>
-                        <span class='dropdown-arrow'>▼</span>
+                        <span class='dropdown-arrow'>в–ј</span>
                     </div>
                 </div>
             </div>
@@ -123,18 +123,18 @@
             <div class='candle-countdown'>
                 <span class='label'>
                     <span id='trafficLight' style='display:inline-block;width:10px;height:10px;border-radius:50%;background:gray;margin-right:6px;box-shadow:0 0 5px gray;transition:all 0.3s ease'></span>
-                    До закрытия свечи
+                    Р”Рѕ Р·Р°РєСЂС‹С‚РёСЏ СЃРІРµС‡Рё
                 </span>
                 <span class='time' id='candleTime'>--</span>
             </div>
 
-            <button class='btn-analyze' id='btnGet'>ПОЛУЧИТЬ АНАЛИЗ</button>
+            <button class='btn-analyze' id='btnGet'>РџРћР›РЈР§РРўР¬ РђРќРђР›РР—</button>
             <div id='errorDisplay' class='error-box' style='display:none'></div>
 
             <div class='status-bar' id='statusBar'>
                 <div class='sb-text'>
-                    <div class='sb-title' id='sbTitle'>АНАЛИЗИРУЮ РЫНОК<span class='blink'>.</span></div>
-                    <div class='sb-sub' id='sbSub'>ЗАГРУЗКА ДАННЫХ</div>
+                    <div class='sb-title' id='sbTitle'>РђРќРђР›РР—РР РЈР® Р Р«РќРћРљ<span class='blink'>.</span></div>
+                    <div class='sb-sub' id='sbSub'>Р—РђР“Р РЈР—РљРђ Р”РђРќРќР«РҐ</div>
                 </div>
                 <div class='sb-bars'><div class='sbb'></div><div class='sbb'></div><div class='sbb'></div><div class='sbb'></div><div class='sbb'></div></div>
             </div>
@@ -144,21 +144,21 @@
         <div class='results-grid' id='resultsGrid' style='display:none'>
             <div class='res-card'>
                 <div class='res-label' style='display:flex; justify-content:space-between; align-items:center; width:100%'>
-                    <span>Вероятность</span>
-                    <span id='goldenSetupBadgeMain' style='display:none;font-size:9px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 4px;border-radius:6px'>⭐ GOLDEN</span>
+                    <span>Р’РµСЂРѕСЏС‚РЅРѕСЃС‚СЊ</span>
+                    <span id='goldenSetupBadgeMain' style='display:none;font-size:9px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 4px;border-radius:6px'>в­ђ GOLDEN</span>
                 </div>
                 <div class='res-value' id='resProb' style='color:var(--accent)'>--%</div>
                 <div class='res-chart' id='probChart'></div>
             </div>
             <div class='res-card'>
-                <div class='res-label'>Направление</div>
+                <div class='res-label'>РќР°РїСЂР°РІР»РµРЅРёРµ</div>
                 <div class='res-value' id='resDir' style='color:var(--subtext)'>--</div>
                 <div class='res-dir-chart' id='dirChart'>
                     <svg viewBox='0 0 80 40'><path d='M10 35 L40 5 L70 35' stroke='var(--dim)' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round' opacity='0.3'/></svg>
                 </div>
             </div>
             <div class='res-card'>
-                <div class='res-label'>Время</div>
+                <div class='res-label'>Р’СЂРµРјСЏ</div>
                 <div class='res-value' id='resDur' style='color:var(--subtext)'>--</div>
                 <div class='res-chart' id='durChart'></div>
             </div>
@@ -166,14 +166,14 @@
 
         <!-- Tab Bar removed by user request so all info is on one screen -->
 
-        <!-- ═══ TAB: ИИ Аналитика ═══ -->
+        <!-- в•ђв•ђв•ђ TAB: РР РђРЅР°Р»РёС‚РёРєР° в•ђв•ђв•ђ -->
         <div id='tabContentAI' style='display:none'>
 
             <!-- 1. ML Ensemble Card -->
             <div class='news-card' id='mlEnsembleCard' style='display:none;margin-bottom:8px'>
                 <div class='news-header'>
-                    <span class='news-badge' id='mlEnsembleBadge'>🧠 ML</span>
-                    <span class='news-label'>Ансамбль моделей</span>
+                    <span class='news-badge' id='mlEnsembleBadge'>рџ§  ML</span>
+                    <span class='news-label'>РђРЅСЃР°РјР±Р»СЊ РјРѕРґРµР»РµР№</span>
                     <span class='news-sentiment' id='mlEnsembleDir'>--</span>
                 </div>
                 <div class='news-summary' id='mlEnsembleReport' style='max-height:160px;overflow-y:auto;scrollbar-width:thin;padding-right:4px;font-size:10.5px;line-height:1.5;color:var(--subtext);white-space:pre-wrap'></div>
@@ -182,20 +182,20 @@
             <!-- 2. Confluence + Win Rate Card -->
             <div class='ml-card' id='confluenceCard' style='display:none;margin-bottom:8px;background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.25)'>
                 <div class='ml-header' style='display:flex;justify-content:space-between;align-items:center'>
-                    <div><span class='ml-badge' style='background:linear-gradient(135deg,#8b5cf6,#6d28d9)' id='confluenceBadge'>📡 Математика</span><span class='ml-label' id='confluenceLabel'>--</span></div>
-                    <span id='goldenSetupBadge' style='display:none;font-size:9px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 6px;border-radius:8px'>⭐ GOLDEN</span>
+                    <div><span class='ml-badge' style='background:linear-gradient(135deg,#8b5cf6,#6d28d9)' id='confluenceBadge'>рџ“Ў РњР°С‚РµРјР°С‚РёРєР°</span><span class='ml-label' id='confluenceLabel'>--</span></div>
+                    <span id='goldenSetupBadge' style='display:none;font-size:9px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 6px;border-radius:8px'>в­ђ GOLDEN</span>
                 </div>
                 <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px;padding:4px 0'>
                     <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
-                        <div style='font-size:9px;color:var(--subtext)'>Точность (актив)</div>
+                        <div style='font-size:9px;color:var(--subtext)'>РўРѕС‡РЅРѕСЃС‚СЊ (Р°РєС‚РёРІ)</div>
                         <div style='font-size:12px;font-weight:700;margin-top:2px' id='winRateAsset'>--</div>
                     </div>
                     <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
-                        <div style='font-size:9px;color:var(--subtext)'>Точность (общая)</div>
+                        <div style='font-size:9px;color:var(--subtext)'>РўРѕС‡РЅРѕСЃС‚СЊ (РѕР±С‰Р°СЏ)</div>
                         <div style='font-size:12px;font-weight:700;color:var(--subtext);margin-top:2px' id='winRateOverall'>--</div>
                     </div>
                     <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
-                        <div style='font-size:9px;color:var(--subtext)'>Сигналов</div>
+                        <div style='font-size:9px;color:var(--subtext)'>РЎРёРіРЅР°Р»РѕРІ</div>
                         <div style='font-size:12px;font-weight:700;color:var(--subtext);margin-top:2px' id='signalsCount'>--</div>
                     </div>
                 </div>
@@ -204,16 +204,16 @@
             <!-- 3. Monte Carlo & Risk Card -->
             <div class='ml-card' id='mcCard' style='display:none;margin-bottom:8px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.25)'>
                 <div class='ml-header' style='display:flex;justify-content:space-between;align-items:center'>
-                    <div><span class='ml-badge' style='background:linear-gradient(135deg,#10b981,#059669)'>🎰 Монте-Карло</span><span class='ml-label'>Риск &amp; Матожидание</span></div>
-                    <span style='font-size:9px;color:#10b981;font-weight:700' id='mcSimCount'>1,000 прогонов</span>
+                    <div><span class='ml-badge' style='background:linear-gradient(135deg,#10b981,#059669)'>рџЋ° РњРѕРЅС‚Рµ-РљР°СЂР»Рѕ</span><span class='ml-label'>Р РёСЃРє &amp; РњР°С‚РѕР¶РёРґР°РЅРёРµ</span></div>
+                    <span style='font-size:9px;color:#10b981;font-weight:700' id='mcSimCount'>1,000 РїСЂРѕРіРѕРЅРѕРІ</span>
                 </div>
                 <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px;padding:4px 0'>
                     <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
-                        <div style='font-size:9px;color:var(--subtext)'>Матожидание (EV)</div>
+                        <div style='font-size:9px;color:var(--subtext)'>РњР°С‚РѕР¶РёРґР°РЅРёРµ (EV)</div>
                         <div style='font-size:11.5px;font-weight:700;color:#10b981;margin-top:2px' id='mcEv'>--</div>
                     </div>
                     <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
-                        <div style='font-size:9px;color:var(--subtext)'>Риск по Келли</div>
+                        <div style='font-size:9px;color:var(--subtext)'>Р РёСЃРє РїРѕ РљРµР»Р»Рё</div>
                         <div style='font-size:11.5px;font-weight:700;color:#f59e0b;margin-top:2px' id='mcKelly'>--</div>
                     </div>
                     <div style='background:rgba(255,255,255,0.03);padding:6px;border-radius:6px;text-align:center'>
@@ -245,8 +245,8 @@
             <!-- 5. Reasoning Card (consensus analysis text) -->
             <div class='news-card' id='reasoningCard' style='display:none;margin-bottom:8px'>
                 <div class='news-header'>
-                    <span class='news-badge' style='background:linear-gradient(135deg,#0ea5e9,#2563eb)'>📊 Математический анализ</span>
-                    <span class='news-label'>Анализ графика</span>
+                    <span class='news-badge' style='background:linear-gradient(135deg,#0ea5e9,#2563eb)'>рџ“Љ РњР°С‚РµРјР°С‚РёС‡РµСЃРєРёР№ Р°РЅР°Р»РёР·</span>
+                    <span class='news-label'>РђРЅР°Р»РёР· РіСЂР°С„РёРєР°</span>
                     <span class='news-sentiment' id='reasoningDir'>--</span>
                 </div>
                 <div class='news-summary' id='reasoningText' style='max-height:120px;overflow-y:auto;scrollbar-width:thin;padding-right:4px;font-size:10.5px;line-height:1.45;color:var(--subtext);white-space:pre-wrap'></div>
@@ -255,8 +255,8 @@
             <!-- 6. News Card (shown only when news is active) -->
             <div class='news-card' id='newsCard' style='display:none;margin-bottom:8px'>
                 <div class='news-header'>
-                    <span class='news-badge' style='background:linear-gradient(135deg,#f59e0b,#d97706)'>📰 Новости</span>
-                    <span class='news-label'>Фундаментальный анализ</span>
+                    <span class='news-badge' style='background:linear-gradient(135deg,#f59e0b,#d97706)'>рџ“° РќРѕРІРѕСЃС‚Рё</span>
+                    <span class='news-label'>Р¤СѓРЅРґР°РјРµРЅС‚Р°Р»СЊРЅС‹Р№ Р°РЅР°Р»РёР·</span>
                     <span class='news-sentiment' id='newsSentimentEl'>--</span>
                 </div>
                 <div class='news-summary' id='newsSummaryEl' style='max-height:100px;overflow-y:auto;scrollbar-width:thin;padding-right:4px;font-size:10.5px;line-height:1.45;color:var(--subtext)'></div>
@@ -268,3 +268,4 @@
     <script type="module" src="/js/main.js"></script>
 </body>
 </html>
+
