@@ -35,7 +35,7 @@ public static partial class TwelveDataService
 
     public static async Task<(double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles)?> FetchCandlesAsync(string rawAsset, string interval, int limit = 100, int cacheTtlSeconds = 45)
     {
-        string key = $"TWELVE_DATA_{AssetSanitizer.Sanitize(rawAsset)}_{interval.ToLower()}";
+        string key = $"TWELVE_DATA_{AssetSanitizer.Sanitize(rawAsset)}_{interval.ToLower()}_{limit}";
 
         if (cacheTtlSeconds > 0 && _memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) cachedData))
         {

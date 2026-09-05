@@ -140,13 +140,17 @@ public static class SignalTracker
                             if (kvp.Value == "NEUTRAL") continue;
                             bool isSourceCorrect = (kvp.Value == "BUY" && exitPrice.Value > price) || (kvp.Value == "PUT" && exitPrice.Value < price);
                             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kvp.Key, isSourceCorrect);
+                            
+                            // FIX: Update AutoCalibration engine per-source so individual component weights adapt!
+                            if (TradeOutcomeTracker.CalibrationEngine != null)
+                                TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome(kvp.Key, asset, timeframe, isSourceCorrect);
                         }
 
                         // Update WalkForward engine
                         if (TradeOutcomeTracker.WfEngine != null)
                             TradeOutcomeTracker.WfEngine.RecordTradeOutcome(asset, timeframe, isCorrect);
 
-                        // Update AutoCalibration engine
+                        // Update AutoCalibration engine for ENSEMBLE (overall performance)
                         if (TradeOutcomeTracker.CalibrationEngine != null)
                             TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", asset, timeframe, isCorrect);
 

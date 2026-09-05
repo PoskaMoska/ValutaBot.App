@@ -43,6 +43,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private (double[] prices, double[] volumes)? _higherResultData;
     private (double[] prices, double[] volumes)? _lowerResultData;
     
+    private readonly object _penaltyLock = new object();
     private double _conflictPenalty = 1.0;
 
     private SmcEngine.SmcAnalysisResult _smcResult;
@@ -117,6 +118,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     public async Task<object> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null)
     {
+        _conflictPenalty = 1.0;
         _asset = asset;
         _timeframe = timeframe;
         _userSettings = userSettings;
@@ -324,7 +326,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 {
                     var htfSmcResult = SmcEngine.AnalyzeSmcStructure(_asset, _higherTf, higherOhlcForSmc, _higherResultData.Value.prices[^1]);
                     var mtfValidation = SmcEngine.ValidateMtfSmcAlignment(_smcResult, htfSmcResult);
-                    _conflictPenalty *= mtfValidation.ConfluenceMultiplier;
+                    lock (_penaltyLock) 
+                    {
+                        _conflictPenalty *= mtfValidation.ConfluenceMultiplier;
+                    }
                     BotLogger.Info($"[MTF SMC Validation] Alignment: {mtfValidation.AlignmentStatus} | Multiplier={mtfValidation.ConfluenceMultiplier:F2}x");
                 }
             }
@@ -511,7 +516,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             double hAtr = higherOhlc != null ? _mathEngine.ComputeAtr(_asset, _higherTf ?? "", higherOhlc) : 0;
             var higherResult = _marketAnalyzer.ScoreTimeframe(_asset, _higherTf ?? "", _higherResultData.Value.prices, _higherResultData.Value.volumes ?? Array.Empty<double>(), candles: higherOhlc, adxOverride: hAdx, atrOverride: hAtr, isForex: _isForex);
 
-            _conflictPenalty *= MfConflictPenalty(_mainResult, higherResult);
+            lock (_penaltyLock)
+            {
+                _conflictPenalty *= MfConflictPenalty(_mainResult, higherResult);
+            }
         }
     }
 

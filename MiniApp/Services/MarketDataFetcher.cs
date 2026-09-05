@@ -205,6 +205,16 @@ public class MarketDataFetcher
 
         var now = DateTime.UtcNow;
         int intervalSeconds = TimeframeSeconds(rawInterval);
+        
+        // FIX: Grid-snap the timestamp to the current interval.
+        // Prevents the "now" timestamp from drifting every second, which falsely triggers
+        // CountUnseen() in IndicatorCache and causes RSI/HMA to accumulate phantom states.
+        long ticksPerInterval = TimeSpan.TicksPerSecond * intervalSeconds;
+        if (ticksPerInterval > 0)
+        {
+            now = new DateTime(now.Ticks - (now.Ticks % ticksPerInterval), DateTimeKind.Utc);
+        }
+
         for (int i = 0; i < finalCandles.Length; i++)
         {
             finalCandles[i] = finalCandles[i] with { Timestamp = now.AddSeconds(- (finalCandles.Length - 1 - i) * intervalSeconds) };
