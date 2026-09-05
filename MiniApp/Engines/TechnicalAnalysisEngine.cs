@@ -102,8 +102,10 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             score += Math.Clamp(microVel / 25.0, -0.40, 0.40);
 
             // RSI with tighter bands (62/38 set above) — still valid, just narrower window
-            if (rsi > rsiOverbought)      score -= 0.30;
-            else if (rsi < rsiOversold)   score += 0.30;
+            // FIX: Increased from 0.30 to 0.75 so extreme RSI can actually veto the microVel+HMA trend 
+            // and prevent the bot from buying the absolute top of a micro-pump.
+            if (rsi > rsiOverbought)      score -= 0.75;
+            else if (rsi < rsiOversold)   score += 0.75;
 
             // ConnorsRSI follow-through
             double connorsSignalSub = (connorsRsi - 50.0) / 50.0;
@@ -116,34 +118,31 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         else
         {
             // ── Standard minute+ regime logic (unchanged) ────────────────────────────────
-            if (adxVal < 20.0)
-            {
-                // Ranging Market: Extreme Mean-Reversion ONLY
-                hmaWeight = 0.0;
-                if (rsi > rsiOverbought) score -= 0.8;
-                else if (rsi < rsiOversold) score += 0.8;
-            }
-            else if (adxVal > 25.0)
-            {
-                // Trending Market: Boost Trend-Following (PDI/MDI alignment)
-                hmaWeight = 0.40;
-                if (pdiVal > mdiVal) score += 0.6;
-                if (mdiVal > pdiVal) score -= 0.6;
-            }
-            else
-            {
-                // Neutral zone (Transition)
-                if (rsi > 75.0) score -= 0.4;
-                else if (rsi < 25.0) score += 0.4;
-            }
+            // FIX: Continuous ADX Regime Blending (Removes the Binary Cliff)
+            // Instead of violently flipping from 100% mean-reversion at ADX=19.9 to 100% trend-following at ADX=25.1,
+            // we calculate a smooth trend multiplier [0.0 to 1.0] based on ADX.
+            double trendMultiplier = Math.Clamp((adxVal - 18.0) / 10.0, 0.0, 1.0); // 18 -> 0%, 28 -> 100%
+            double rangeMultiplier = 1.0 - trendMultiplier;
 
-            // ConnorsRSI как подтверждающий сигнал.
+            // 1. Ranging Signals (scaled by rangeMultiplier)
+            if (rsi > rsiOverbought) score -= 0.8 * rangeMultiplier;
+            else if (rsi < rsiOversold) score += 0.8 * rangeMultiplier;
+            
+            // Neutral zone RSI (applies mostly in transition, scales down as trend strengthens)
+            if (rsi > 75.0 && rsi <= rsiOverbought) score -= 0.4 * rangeMultiplier;
+            else if (rsi < 25.0 && rsi >= rsiOversold) score += 0.4 * rangeMultiplier;
+
+            // 2. Trending Signals (scaled by trendMultiplier)
+            if (pdiVal > mdiVal) score += 0.6 * trendMultiplier;
+            if (mdiVal > pdiVal) score -= 0.6 * trendMultiplier;
+
+            // 3. ConnorsRSI (Dynamic flip based on regime)
             double connorsSignal = (connorsRsi - 50.0) / 50.0;
-            if (adxVal > 25.0)
-                score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15);
-            else if (adxVal < 20.0)
-                score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10);
+            score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15) * trendMultiplier;
+            score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10) * rangeMultiplier; // subtracts (reversion) in range
 
+            // 4. HMA Trend Signal
+            hmaWeight = 0.40 * trendMultiplier;
             if (lastPrice > hma) score += hmaWeight;
             else if (lastPrice < hma) score -= hmaWeight;
         } // end else (minute+ regime)

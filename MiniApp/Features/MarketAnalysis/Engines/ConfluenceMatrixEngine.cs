@@ -278,37 +278,24 @@ public class ConfluenceMatrixEngine(
         double trendWeight     = 1.0;
         double reversionWeight = 1.0;
 
-        if (taSignal.Adx < 20.0)
-        {
-            trendWeight     = 0.0;
-            reversionWeight = 2.0;
-        }
-        else if (taSignal.Adx > 25.0)
-        {
-            trendWeight     = 1.5;
-            reversionWeight = 0.5;
-        }
+        // FIX: Continuous SMC Regime Blending
+        double smcTrendMultiplier = Math.Clamp((taSignal.Adx - 18.0) / 10.0, 0.0, 1.0); // 18->0%, 28->100%
+        double smcRangeMultiplier = 1.0 - smcTrendMultiplier;
+        
+        double trendWeight     = 1.5 * smcTrendMultiplier;
+        double reversionWeight = 2.0 * smcRangeMultiplier;
 
-        // FIX BUG-3: graduated penalty instead of binary taWeight flip (0.1x/2.0x).
-        // Binary caused instability: 2 random losses -> radical weight change -> more errors.
+        double finalSmcScore = (smcTrendScore * trendWeight) + (smcReversionScore * reversionWeight);
+
+        // FIX: Consecutive losses should ONLY reduce the final SMC confidence/score.
+        // It must NOT invert the trading style (forcing reversion in a trend), 
+        // which was causing the "death spiral" loss clusters.
         if (consecutiveLosses >= 2)
         {
             double lossPenalty = Math.Max(0.5, 1.0 - (consecutiveLosses - 1) * 0.15);
-            BotLogger.Warn($"[Regime Switch] {asset}/{timeframe}: {consecutiveLosses} losses. Graduated penalty={lossPenalty:F2}x");
-            if (volRatio < 1.0)
-            {
-                trendWeight     *= lossPenalty;
-                reversionWeight *= (2.0 - lossPenalty);
-                BotLogger.Info("[Regime Switch] Low vol + losses -> boosting reversion.");
-            }
-            else
-            {
-                trendWeight     *= (2.0 - lossPenalty);
-                reversionWeight *= lossPenalty;
-                BotLogger.Info("[Regime Switch] High vol + losses -> boosting trend-following.");
-            }
+            BotLogger.Warn($"[SMC Penalty] {asset}/{timeframe}: {consecutiveLosses} losses. Suppressing SMC score by {lossPenalty:F2}x");
+            finalSmcScore *= lossPenalty;
         }
-        double finalSmcScore = (smcTrendScore * trendWeight) + (smcReversionScore * reversionWeight);
 
         if (Math.Abs(finalSmcScore) > 0.1 && !isSubMinute)
         {
