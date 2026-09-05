@@ -194,7 +194,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         DayOfWeek day = DateTime.UtcNow.DayOfWeek;
         _symbol = AssetSanitizer.MapSymbolByDayOfWeek(_clean, day);
 
-        _isForex = _symbol == null || _symbol == "EURUSDT" || _symbol == "GBPUSDT" || _symbol == "AUDUSDT";
+        _isForex = AssetSanitizer.IsForexAsset(_clean);
         _isMajor = _symbol == "BTCUSDT" || _symbol == "ETHUSDT" || _symbol == "SOLUSDT";
 
         // ── Economic Calendar Guard ──────────────────────────────────────────
