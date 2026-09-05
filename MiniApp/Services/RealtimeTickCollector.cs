@@ -95,16 +95,44 @@ namespace ValutaBot.MiniApp
                     LIMIT @Limit;
                 ", new { Asset = cleanAsset, Interval = interval, Limit = limit })).ToList();
 
-                var result = new MiniAppController.OhlcCandle[records.Count];
-                // Convert reverse order (DESC) back to chronological
-                for (int i = 0; i < records.Count; i++)
+                // FIX: Retrieve the live, unclosed candle from memory to eliminate the 2-5 second DB flush lag.
+                ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch 
                 {
-                    var r = records[records.Count - 1 - i]; // Reverse back
-                    result[i] = new MiniAppController.OhlcCandle((double)r.Open, (double)r.High, (double)r.Low, (double)r.Close, (double)r.Volume,
-                        // FIX H-1: Parse with AdjustToUniversal to prevent timezone shift.
-                        // DateTime.Parse on ISO 8601 "Z" strings converts to local time by default.
+                    "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, _ => null
+                };
+
+                CandleAccumulator? liveAcc = null;
+                if (targetDict != null && targetDict.TryGetValue(cleanAsset, out var acc) && acc.Open.HasValue)
+                {
+                    liveAcc = acc;
+                }
+
+                int totalCount = records.Count + (liveAcc != null ? 1 : 0);
+                int resultSize = Math.Min(limit, totalCount);
+                var result = new MiniAppController.OhlcCandle[resultSize];
+                
+                int resultIdx = 0;
+                // If total exceeds limit, we must skip the oldest DB record to make room for the live one
+                int dbRecordsToTake = liveAcc != null ? Math.Min(records.Count, limit - 1) : Math.Min(records.Count, limit);
+                
+                // Add DB records in chronological order (records is DESC, so start from the oldest we want to take)
+                for (int i = dbRecordsToTake - 1; i >= 0; i--)
+                {
+                    var r = records[i]; 
+                    result[resultIdx++] = new MiniAppController.OhlcCandle((double)r.Open, (double)r.High, (double)r.Low, (double)r.Close, (double)r.Volume,
                         DateTime.Parse((string)r.OpenTime, null, System.Globalization.DateTimeStyles.AdjustToUniversal));
                 }
+
+                // Append the live, unclosed candle to give the TA engine zero-lag reflexes
+                if (liveAcc != null && resultIdx < resultSize)
+                {
+                    lock (liveAcc)
+                    {
+                        result[resultIdx] = new MiniAppController.OhlcCandle(
+                            liveAcc.Open.Value, liveAcc.High, liveAcc.Low, liveAcc.Close, liveAcc.TickCount, liveAcc.OpenTime);
+                    }
+                }
+
                 return result;
             }
             catch (Exception ex)
