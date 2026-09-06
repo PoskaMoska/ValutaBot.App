@@ -158,7 +158,8 @@ public static partial class MiniAppController
         if (!isWeekend)
         {
             // Launch Real-Time WebSocket stream for major CME proxy forex streams (0ms latency)
-            string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD" };
+            // Added USDCAD, USDCHF, USDJPY to ensure all 6 active ML pairs are accumulated in the DB
+            string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
             TwelveDataWebSocketStream.StartStream(topStreamSymbols);
         }
 

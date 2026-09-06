@@ -85,21 +85,29 @@ async def lifespan(app: FastAPI):
 WEEKLY_RETRAIN_INTERVAL_H = int(os.getenv("WEEKLY_RETRAIN_INTERVAL_H", "168"))  # 7 days
 _BOT_BASE_URL = os.getenv("BOT_BASE_URL", "")   # e.g. https://valutatbot.railway.app
 
-# Only retrain the main 1m models weekly (s5/s15/s30 use proxy anyway)
-_WEEKLY_INTERVALS = ["1m", "5m", "15m"]
+# Retrain ALL timeframes weekly, including subminute
+_WEEKLY_INTERVALS = _DEFAULT_INTERVALS
 
 
 async def _weekly_global_retrain_loop():
     """
-    Background loop that forces a full retrain on all pairs every 7 days.
+    Background loop that forces a full retrain on all pairs every Friday evening (after market close).
     Uses 100k candles from PostgreSQL historical_candles table.
     Sends a summary Telegram notification via the C# bot's internal webhook.
     """
-    # Wait 1 hour after startup before first check (let daily retrain finish first)
-    await asyncio.sleep(3600)
+    import datetime
+
+    # Wait 10 minutes after startup before first check
+    await asyncio.sleep(600)
 
     while True:
-        now = time.time()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        # Trigger window: Friday 22:00 UTC through Saturday 02:00 UTC
+        is_friday_night = (now_utc.weekday() == 4 and now_utc.hour >= 22)
+        is_saturday_morning = (now_utc.weekday() == 5 and now_utc.hour < 2)
+        in_schedule_window = is_friday_night or is_saturday_morning
+
         results = []
 
         for sym in _DEFAULT_SYMBOLS:
@@ -107,19 +115,20 @@ async def _weekly_global_retrain_loop():
             if not sym:
                 continue
             for tf in _WEEKLY_INTERVALS:
+                tf = tf.strip().lower()
                 for regime in ["FLAT", "TREND", "CHAOS"]:
                     predictor = _get_predictor(sym, tf, regime)
                     
-                    # FIX W-15: read predictor._meta safely under lock
                     with predictor._lock:
                         meta = predictor._meta
                     
-                    age_h = (now - meta.trained_at) / 3600 if meta else 9999
+                    age_h = (time.time() - meta.trained_at) / 3600 if meta else 9999
 
-                    if age_h >= WEEKLY_RETRAIN_INTERVAL_H:
+                    # Trigger if it's the Friday schedule window (and hasn't been trained in the last 24h)
+                    # OR if the model is missing / extremely old (> 168h)
+                    if (in_schedule_window and age_h > 24) or age_h > 168:
                         log.info(f"[WeeklyRetrain] Forcing retrain: {sym} ({tf}) [{regime}], age={age_h:.0f}h")
                         try:
-                            # FIX C-08: _meta = None was written without the lock
                             with predictor._lock:
                                 predictor._meta = None
                             predictor.train(candles=None)
@@ -141,7 +150,7 @@ async def _weekly_global_retrain_loop():
         if results:
             _send_weekly_summary(results)
 
-        # Sleep 1 hour then check again (so we catch the right week boundary)
+        # Sleep 1 hour then check again
         await asyncio.sleep(3600)
 
 
@@ -498,13 +507,7 @@ def predict(req: PredictRequest):
     predictor = _get_predictor(req.symbol, interval, regime)
 
     # Auto-train in background if model is stale or missing
-    if predictor.needs_retrain():
-        t = threading.Thread(
-            target=_background_train,
-            args=(req.symbol, interval, None),
-            daemon=True,
-        )
-        t.start()
+    # [REMOVED: lazy mid-day retraining to prevent CPU spikes during active trading]
 
     direction, confidence, version = predictor.predict(candle_dicts, mtf_candle_dicts)
 
