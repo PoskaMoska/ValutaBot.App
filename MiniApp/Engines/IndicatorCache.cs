@@ -25,30 +25,30 @@ internal sealed class IndicatorCache
         //   2. New trading day (UTC midnight) — ensures day-to-day clean slate
         public DateTime            LastFullReset = DateTime.MinValue;
 
-        public StatefulRsi?        Rsi;
-        public long                RsiLastTick;
+        public StatefulRsi?        RsiBase;
+        public long                RsiLastClosedTick;
         public double              RsiLast;
 
-        public StatefulConnorsRsi? ConnorsRsi;
-        public long                ConnorsRsiLastTick;
+        public StatefulConnorsRsi? ConnorsRsiBase;
+        public long                ConnorsRsiLastClosedTick;
         public double              ConnorsRsiLast;
 
-        public StatefulHma?        Hma;
-        public long                HmaLastTick;
+        public StatefulHma?        HmaBase;
+        public long                HmaLastClosedTick;
         public double              HmaLast;
 
-        public StatefulEma?        Ema;
-        public long                EmaLastTick;
+        public StatefulEma?        EmaBase;
+        public long                EmaLastClosedTick;
         public double              EmaLast;
 
-        public StatefulTrueAdx?    Adx;
-        public long                AdxLastTick;
+        public StatefulTrueAdx?    AdxBase;
+        public long                AdxLastClosedTick;
 
-        public StatefulAtr?        Atr;
-        public long                AtrLastTick;
+        public StatefulAtr?        AtrBase;
+        public long                AtrLastClosedTick;
 
-        public StatefulSmc?        Smc;
-        public long                SmcLastTick;
+        public StatefulSmc?        SmcBase;
+        public long                SmcLastClosedTick;
     }
 
     // Indicators are fully recalculated if their last reset is older than this.
@@ -142,22 +142,30 @@ internal sealed class IndicatorCache
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
-            int unseen = CountUnseen(candles, s.RsiLastTick);
-            if (s.Rsi is null || unseen > 50 || IsTimestampRewind(candles, s.RsiLastTick) || IsStale(s))
+            int unseen = CountUnseen(candles, s.RsiLastClosedTick);
+            if (s.RsiBase is null || unseen > 50 || IsTimestampRewind(candles, s.RsiLastClosedTick) || IsStale(s))
             {
-                s.Rsi     = new StatefulRsi(period);
-                s.RsiLast = 50.0;
-                for (int i = 0; i < candles.Length; i++)
-                    s.RsiLast = s.Rsi.Update(candles[i].Close);
-                s.RsiLastTick  = candles[^1].Timestamp.Ticks;
+                s.RsiBase = new StatefulRsi(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.RsiBase.Update(candles[i].Close);
+                
+                s.RsiLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
-                for (int i = candles.Length - unseen; i < candles.Length; i++)
-                    s.RsiLast = s.Rsi.Update(candles[i].Close);
-                s.RsiLastTick = candles[^1].Timestamp.Ticks;
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.RsiLastClosedTick)
+                    {
+                        s.RsiBase.Update(candles[i].Close);
+                        s.RsiLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
             }
+
+            var liveRsi = s.RsiBase.Clone();
+            s.RsiLast = liveRsi.Update(candles[^1].Close);
             return s.RsiLast;
         }
     }
@@ -172,22 +180,30 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
         lock (s)
         {
-            int unseen = CountUnseen(candles, s.ConnorsRsiLastTick);
-            if (s.ConnorsRsi is null || unseen > 50 || IsTimestampRewind(candles, s.ConnorsRsiLastTick) || IsStale(s))
+            int unseen = CountUnseen(candles, s.ConnorsRsiLastClosedTick);
+            if (s.ConnorsRsiBase is null || unseen > 50 || IsTimestampRewind(candles, s.ConnorsRsiLastClosedTick) || IsStale(s))
             {
-                s.ConnorsRsi     = new StatefulConnorsRsi();
-                s.ConnorsRsiLast = 50.0;
-                for (int i = 0; i < candles.Length; i++)
-                    s.ConnorsRsiLast = s.ConnorsRsi.Update(candles[i].Close);
-                s.ConnorsRsiLastTick = candles[^1].Timestamp.Ticks;
+                s.ConnorsRsiBase = new StatefulConnorsRsi();
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.ConnorsRsiBase.Update(candles[i].Close);
+                
+                s.ConnorsRsiLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
-                for (int i = candles.Length - unseen; i < candles.Length; i++)
-                    s.ConnorsRsiLast = s.ConnorsRsi.Update(candles[i].Close);
-                s.ConnorsRsiLastTick = candles[^1].Timestamp.Ticks;
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.ConnorsRsiLastClosedTick)
+                    {
+                        s.ConnorsRsiBase.Update(candles[i].Close);
+                        s.ConnorsRsiLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
             }
+
+            var liveRsi = s.ConnorsRsiBase.Clone();
+            s.ConnorsRsiLast = liveRsi.Update(candles[^1].Close);
             return s.ConnorsRsiLast;
         }
     }
@@ -202,22 +218,30 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
         lock (s)
         {
-            int unseen = CountUnseen(candles, s.HmaLastTick);
-            if (s.Hma is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastTick) || IsStale(s))
+            int unseen = CountUnseen(candles, s.HmaLastClosedTick);
+            if (s.HmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastClosedTick) || IsStale(s))
             {
-                s.Hma     = new StatefulHma(period);
-                s.HmaLast = 0.0;
-                for (int i = 0; i < candles.Length; i++)
-                    s.HmaLast = s.Hma.Update(candles[i].Close);
-                s.HmaLastTick  = candles[^1].Timestamp.Ticks;
+                s.HmaBase = new StatefulHma(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.HmaBase.Update(candles[i].Close);
+                
+                s.HmaLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
-                for (int i = candles.Length - unseen; i < candles.Length; i++)
-                    s.HmaLast = s.Hma.Update(candles[i].Close);
-                s.HmaLastTick = candles[^1].Timestamp.Ticks;
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.HmaLastClosedTick)
+                    {
+                        s.HmaBase.Update(candles[i].Close);
+                        s.HmaLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
             }
+
+            var liveHma = s.HmaBase.Clone();
+            s.HmaLast = liveHma.Update(candles[^1].Close);
             return s.HmaLast;
         }
     }
@@ -232,22 +256,30 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
         lock (s)
         {
-            int unseen = CountUnseen(candles, s.EmaLastTick);
-            if (s.Ema is null || unseen > 50 || IsTimestampRewind(candles, s.EmaLastTick) || IsStale(s))
+            int unseen = CountUnseen(candles, s.EmaLastClosedTick);
+            if (s.EmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.EmaLastClosedTick) || IsStale(s))
             {
-                s.Ema     = new StatefulEma(period);
-                s.EmaLast = 0.0;
-                for (int i = 0; i < candles.Length; i++)
-                    s.EmaLast = s.Ema.Update(candles[i].Close);
-                s.EmaLastTick  = candles[^1].Timestamp.Ticks;
+                s.EmaBase = new StatefulEma(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.EmaBase.Update(candles[i].Close);
+                
+                s.EmaLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
-                for (int i = candles.Length - unseen; i < candles.Length; i++)
-                    s.EmaLast = s.Ema.Update(candles[i].Close);
-                s.EmaLastTick = candles[^1].Timestamp.Ticks;
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.EmaLastClosedTick)
+                    {
+                        s.EmaBase.Update(candles[i].Close);
+                        s.EmaLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
             }
+
+            var liveEma = s.EmaBase.Clone();
+            s.EmaLast = liveEma.Update(candles[^1].Close);
             return s.EmaLast;
         }
     }
@@ -262,22 +294,31 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
         lock (s)
         {
-            int unseen = CountUnseen(candles, s.AdxLastTick);
-            if (s.Adx is null || unseen > 50 || IsTimestampRewind(candles, s.AdxLastTick) || IsStale(s))
+            int unseen = CountUnseen(candles, s.AdxLastClosedTick);
+            if (s.AdxBase is null || unseen > 50 || IsTimestampRewind(candles, s.AdxLastClosedTick) || IsStale(s))
             {
-                s.Adx = new StatefulTrueAdx(period);
-                for (int i = 0; i < candles.Length; i++)
-                    s.Adx.Update(candles[i].High, candles[i].Low, candles[i].Close);
-                s.AdxLastTick  = candles[^1].Timestamp.Ticks;
+                s.AdxBase = new StatefulTrueAdx(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.AdxBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                
+                s.AdxLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
-                for (int i = candles.Length - unseen; i < candles.Length; i++)
-                    s.Adx.Update(candles[i].High, candles[i].Low, candles[i].Close);
-                s.AdxLastTick = candles[^1].Timestamp.Ticks;
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.AdxLastClosedTick)
+                    {
+                        s.AdxBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                        s.AdxLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
             }
-            return (s.Adx.LastAdx, s.Adx.LastPdi, s.Adx.LastMdi);
+
+            var liveAdx = s.AdxBase.Clone();
+            liveAdx.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
+            return (liveAdx.LastAdx, liveAdx.LastPdi, liveAdx.LastMdi);
         }
     }
 
@@ -291,22 +332,31 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
         lock (s)
         {
-            int unseen = CountUnseen(candles, s.AtrLastTick);
-            if (s.Atr is null || unseen > 50 || IsTimestampRewind(candles, s.AtrLastTick) || IsStale(s))
+            int unseen = CountUnseen(candles, s.AtrLastClosedTick);
+            if (s.AtrBase is null || unseen > 50 || IsTimestampRewind(candles, s.AtrLastClosedTick) || IsStale(s))
             {
-                s.Atr = new StatefulAtr(period);
-                for (int i = 0; i < candles.Length; i++)
-                    s.Atr.Update(candles[i].High, candles[i].Low, candles[i].Close);
-                s.AtrLastTick  = candles[^1].Timestamp.Ticks;
+                s.AtrBase = new StatefulAtr(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.AtrBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                
+                s.AtrLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
-                for (int i = candles.Length - unseen; i < candles.Length; i++)
-                    s.Atr.Update(candles[i].High, candles[i].Low, candles[i].Close);
-                s.AtrLastTick = candles[^1].Timestamp.Ticks;
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.AtrLastClosedTick)
+                    {
+                        s.AtrBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                        s.AtrLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
             }
-            return s.Atr?.LastAtr ?? 0.0;
+
+            var liveAtr = s.AtrBase.Clone();
+            liveAtr.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
+            return liveAtr.LastAtr;
         }
     }
 
@@ -318,31 +368,24 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
         lock (s)
         {
-            int unseen = CountUnseen(candles, s.SmcLastTick);
-            // W-04 FIX: Reset threshold was 500, allowing stale FVG/OB zones to linger for hours
-            // if bot was paused. Changed to 50 to match technical indicators.
-            if (s.Smc is null || unseen > 50 || IsTimestampRewind(candles, s.SmcLastTick) || IsStale(s))
+            int unseen = CountUnseen(candles, s.SmcLastClosedTick);
+            if (s.SmcBase is null || unseen > 50 || IsTimestampRewind(candles, s.SmcLastClosedTick) || IsStale(s))
             {
-                s.Smc = new StatefulSmc();
-                s.Smc.Update(candles, currentPrice);
-                if (candles.Length > 0) s.SmcLastTick = candles[^1].Timestamp.Ticks;
+                s.SmcBase = new StatefulSmc();
+                s.SmcBase.Update(candles.Slice(0, Math.Max(0, candles.Length - 1)), currentPrice);
+                s.SmcLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
             else if (unseen > 0)
             {
-                // FIX C-4: ATR-14 inside StatefulSmc needs at least 14 candles of context.
-                // Previously only passed unseen+5, which caused ATR to be computed over 4-5 bars
-                // instead of 14, generating false FVG/OrderBlock signals on every tick.
                 int startIdx = Math.Max(0, candles.Length - unseen - 20);
-                s.Smc.Update(candles.Slice(startIdx), currentPrice);
-                s.SmcLastTick = candles[^1].Timestamp.Ticks;
+                s.SmcBase.Update(candles.Slice(startIdx, candles.Length - 1 - startIdx), currentPrice);
+                s.SmcLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
             }
-            else
-            {
-                // Just update with latest currentPrice for live mitigation
-                s.Smc.Update(candles.Slice(Math.Max(0, candles.Length - 5)), currentPrice);
-            }
-            return s.Smc;
+
+            var liveSmc = s.SmcBase.Clone();
+            liveSmc.Update(candles.Slice(Math.Max(0, candles.Length - 5)), currentPrice);
+            return liveSmc;
         }
     }
 

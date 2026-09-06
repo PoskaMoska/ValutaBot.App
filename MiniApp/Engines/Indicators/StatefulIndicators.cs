@@ -56,21 +56,23 @@ public sealed class StatefulRsi
     }
 
     public bool IsWarm => _count > _period;
+
+    public StatefulRsi Clone() => (StatefulRsi)this.MemberwiseClone();
 }
 
 // ── ConnorsRSI ─────────────────────────────────────────────────────────────
 
 public sealed class StatefulConnorsRsi
 {
-    private readonly StatefulRsi _rsi       = new(3);
-    private readonly StatefulRsi _streakRsi = new(2);
+    private StatefulRsi _rsi       = new(3);
+    private StatefulRsi _streakRsi = new(2);
     private double _currentStreak;
     private double _prevPrice;
     private int _count;
 
     // Percentile rank: 50 periods → 2% resolution (industry standard uses 100)
     private const int RankPeriod = 50;
-    private readonly double[] _returnsHistory = new double[RankPeriod];
+    private double[] _returnsHistory = new double[RankPeriod];
     private int _returnsCount;
 
     /// <summary>Returns ConnorsRSI 0-100. Returns 50.0 during warm-up.</summary>
@@ -108,6 +110,15 @@ public sealed class StatefulConnorsRsi
         _count++;
         return (rsiVal + streakRsiVal + pctRank) / 3.0;
     }
+
+    public StatefulConnorsRsi Clone()
+    {
+        var clone = (StatefulConnorsRsi)this.MemberwiseClone();
+        clone._rsi = this._rsi.Clone();
+        clone._streakRsi = this._streakRsi.Clone();
+        clone._returnsHistory = (double[])this._returnsHistory.Clone();
+        return clone;
+    }
 }
 
 // ── Hull Moving Average (HMA) ──────────────────────────────────────────────
@@ -117,9 +128,9 @@ public sealed class StatefulHma
     private readonly int _period;
     private readonly int _halfPeriod;
     private readonly int _sqrtPeriod;
-    private readonly double[] _priceHistory;
+    private double[] _priceHistory;
     private int _priceCount;
-    private readonly double[] _diffHistory;
+    private double[] _diffHistory;
     private int _diffCount;
 
     public StatefulHma(int period = 9)
@@ -130,6 +141,14 @@ public sealed class StatefulHma
         _sqrtPeriod  = (int)Math.Sqrt(_period);
         _priceHistory = new double[_period];
         _diffHistory  = new double[_sqrtPeriod];
+    }
+
+    public StatefulHma Clone()
+    {
+        var clone = (StatefulHma)this.MemberwiseClone();
+        clone._priceHistory = (double[])this._priceHistory.Clone();
+        clone._diffHistory = (double[])this._diffHistory.Clone();
+        return clone;
     }
 
     /// <summary>Returns HMA. Returns raw price during warm-up.</summary>
@@ -211,6 +230,8 @@ public sealed class StatefulEma
     }
 
     public bool IsWarm => _count >= _period;
+
+    public StatefulEma Clone() => (StatefulEma)this.MemberwiseClone();
 }
 
 // ── Average True Range (ATR) ───────────────────────────────────────────────
@@ -256,6 +277,8 @@ public sealed class StatefulAtr
     }
 
     public bool IsWarm => _count > _period;
+
+    public StatefulAtr Clone() => (StatefulAtr)this.MemberwiseClone();
 }
 
 // ── True ADX (Wilder) ──────────────────────────────────────────────────────
@@ -267,7 +290,7 @@ public sealed class StatefulTrueAdx
     private double _prevClose, _prevHigh, _prevLow;
     private double _smoothTr, _smoothPdm, _smoothMdm;
     private double _adx;
-    private readonly double[] _dxHistory;
+    private double[] _dxHistory;
     private double _sumDx;
 
     public double LastPdi { get; private set; }
@@ -278,6 +301,13 @@ public sealed class StatefulTrueAdx
     {
         _period    = period;
         _dxHistory = new double[period];
+    }
+
+    public StatefulTrueAdx Clone()
+    {
+        var clone = (StatefulTrueAdx)this.MemberwiseClone();
+        clone._dxHistory = (double[])this._dxHistory.Clone();
+        return clone;
     }
 
     /// <summary>Returns ADX 0-100. Returns 20.0 during warm-up.</summary>

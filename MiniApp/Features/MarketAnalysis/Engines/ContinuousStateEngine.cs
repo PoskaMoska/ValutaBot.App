@@ -25,6 +25,12 @@ public static class ContinuousStateEngine
     /// </summary>
     public static ContinuousStateResult EvaluateContinuousState(ReadOnlySpan<double> prices, string asset = "GLOBAL", string timeframe = "m1")
     {
+        // Drop the live unclosed candle to maintain uniform dt for Savitzky-Golay and Kalman
+        if (prices.Length > 10)
+        {
+            prices = prices.Slice(0, prices.Length - 1);
+        }
+
         if (prices.Length < 10)
         {
             return new ContinuousStateResult(0, 0, 0, "UNKNOWN", 0, "Недостаточно данных для непрерывного анализа.");

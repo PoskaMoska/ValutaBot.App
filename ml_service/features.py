@@ -1,4 +1,4 @@
-﻿"""
+"""
 Feature engineering for Forex/Crypto LightGBM predictor.
 Takes OHLCV candle arrays and returns a feature DataFrame.
 """
@@ -80,10 +80,24 @@ def _fvg_features(h: np.ndarray, lo: np.ndarray) -> tuple:
     return fvg_bullish, fvg_bearish
 
 
-def build_features(candles: List[Dict]) -> pd.DataFrame:
+def _parse_to_datetime(ts):
+    if pd.isna(ts) or ts == 0: return pd.Timestamp('1970-01-01', tz='UTC')
+    if isinstance(ts, str):
+        if ts.isdigit():
+            ts = float(ts)
+        else:
+            try:
+                return pd.to_datetime(ts, utc=True)
+            except Exception:
+                return pd.Timestamp('1970-01-01', tz='UTC')
+    if ts > 1e11: ts = ts / 1000.0
+    return pd.to_datetime(ts, unit='s', utc=True)
+
+def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.DataFrame:
     """
     Build feature matrix from list of OHLCV candle dicts.
-    Each dict: {'open', 'high', 'low', 'close', 'volume'}
+    Each dict: {'open', 'high', 'low', 'close', 'volume', 'opentime'}
+    Optionally accepts mtf_candles to build Multi-Timeframe features.
     Returns DataFrame with one row per candle, features only (no NaN rows).
     """
     df = pd.DataFrame(candles)
@@ -129,10 +143,13 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
     bb_std = pd.Series(c).rolling(20).std().values
     feats['bb_z']  = ((c - bb_mavg) / (bb_std + 1e-10))
 
-    # в”Ђв”Ђ Volatility в”Ђв”Ђ
+    # в”Ђв”Ђ Volatility & Regime (ADX) в”Ђв”Ђ
     atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14).values
     feats['atr_norm']     = atr / (c + 1e-10)
     feats['rolling_std']  = _rolling_std(c, 10) / (c + 1e-10)
+    
+    adx_indicator = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
+    feats['adx']          = adx_indicator.adx().values
 
     # в”Ђв”Ђ Price Returns в”Ђв”Ђ
     for lag in [1, 2, 3, 5, 10]:
@@ -206,6 +223,48 @@ def build_features(candles: List[Dict]) -> pd.DataFrame:
     # Remove raw unscaled prices (lethal for SGD gradient descent)
     for k in ['ema9', 'ema21', 'ema50']:
         if k in feats: feats.pop(k)
+
+    # в”Ђв”Ђ MTF Integration (Multi-Timeframe) в”Ђв”Ђ
+    if mtf_candles and len(mtf_candles) > 10 and 'opentime' in df.columns:
+        df['opentime_dt'] = df['opentime'].apply(_parse_to_datetime)
+        
+        df_mtf = pd.DataFrame(mtf_candles)
+        df_mtf.columns = [col.lower() for col in df_mtf.columns]
+        if 'opentime' in df_mtf.columns:
+            df_mtf['opentime_dt'] = df_mtf['opentime'].apply(_parse_to_datetime)
+            
+            # Calculate MTF indicators
+            df_mtf['mtf_ema50'] = ta.trend.ema_indicator(df_mtf['close'].astype(float), window=50)
+            df_mtf['mtf_rsi'] = ta.momentum.rsi(df_mtf['close'].astype(float), window=14)
+            df_mtf['mtf_trend'] = (df_mtf['close'].astype(float) > df_mtf['mtf_ema50']).astype(float)
+            
+            df_mtf_sub = df_mtf[['opentime_dt', 'mtf_rsi', 'mtf_trend']].dropna()
+            
+            # For merge_asof, both dataframes MUST be sorted by the key
+            df_sorted = df[['opentime_dt']].copy()
+            df_sorted['original_index'] = df_sorted.index
+            df_sorted = df_sorted.sort_values('opentime_dt')
+            
+            df_mtf_sub = df_mtf_sub.sort_values('opentime_dt')
+            
+            # Shift MTF timestamps by their interval so they are only matched AFTER the candle closes
+            # This completely eliminates historical look-ahead bias.
+            if len(df_mtf_sub) > 1:
+                mtf_interval = df_mtf_sub['opentime_dt'].diff().median()
+                df_mtf_sub['opentime_dt'] = df_mtf_sub['opentime_dt'] + mtf_interval
+            
+            # Merge backwards (look-ahead bias protection)
+            merged = pd.merge_asof(df_sorted, df_mtf_sub, on='opentime_dt', direction='backward')
+            merged = merged.sort_values('original_index')
+            
+            feats['mtf_rsi'] = merged['mtf_rsi'].fillna(50.0).values / 100.0 - 0.5
+            feats['mtf_trend'] = merged['mtf_trend'].fillna(0.0).values
+        else:
+            feats['mtf_rsi'] = np.zeros(len(c))
+            feats['mtf_trend'] = np.zeros(len(c))
+    else:
+        feats['mtf_rsi'] = np.zeros(len(c))
+        feats['mtf_trend'] = np.zeros(len(c))
 
     result = pd.DataFrame(feats, index=df.index)
 

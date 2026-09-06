@@ -108,7 +108,8 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
         string symbol,
         string interval,
         MiniAppController.OhlcCandle[] candles,
-        bool isForex = false)
+        bool isForex = false,
+        MiniAppController.OhlcCandle[]? mtfCandles = null)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl))
             return null;
@@ -129,11 +130,22 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
                 volume = c.Volume
             }).ToArray();
 
+            var mtfCandleList = mtfCandles?.Select(c => new
+            {
+                openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
+                open = c.Open,
+                high = c.High,
+                low = c.Low,
+                close = c.Close,
+                volume = c.Volume
+            }).ToArray();
+
             var payload = new
             {
                 symbol = binanceSymbol,
                 interval = interval,
                 candles = candleList,
+                mtf_candles = mtfCandleList,
                 is_forex = isForex
             };
 

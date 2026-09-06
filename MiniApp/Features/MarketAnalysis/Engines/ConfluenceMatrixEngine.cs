@@ -282,8 +282,8 @@ public class ConfluenceMatrixEngine(
         double smcTrendMultiplier = Math.Clamp((taSignal.Adx - 18.0) / 10.0, 0.0, 1.0); // 18->0%, 28->100%
         double smcRangeMultiplier = 1.0 - smcTrendMultiplier;
         
-        double trendWeight     = 1.5 * smcTrendMultiplier;
-        double reversionWeight = 2.0 * smcRangeMultiplier;
+        trendWeight     = 1.5 * smcTrendMultiplier;
+        reversionWeight = 2.0 * smcRangeMultiplier;
 
         double finalSmcScore = (smcTrendScore * trendWeight) + (smcReversionScore * reversionWeight);
 

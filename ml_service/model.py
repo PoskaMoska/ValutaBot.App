@@ -305,10 +305,14 @@ class ForexPredictor:
     global registry `_predictors` in main.py.
     """
 
-    def __init__(self, symbol: str, interval: str):
+    def __init__(self, symbol: str, interval: str, regime: str = "ALL"):
         self.symbol = symbol.upper()
         self.interval = interval.lower()
-        self._key = f"{self.symbol}_{self.interval}"
+        self.regime = regime.upper()
+        if self.regime == "ALL":
+            self._key = f"{self.symbol}_{self.interval}"
+        else:
+            self._key = f"{self.symbol}_{self.interval}_{self.regime}"
         # Tier 1: Global Strategist
         self._model: Optional[lgb.LGBMClassifier] = None
         self._meta: Optional[ModelMeta] = None
@@ -323,9 +327,16 @@ class ForexPredictor:
         SGD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 
+    def _get_higher_tf(self) -> str:
+        mapping = {"s5": "1m", "s10": "1m", "s15": "5m", "s30": "5m", 
+                   "1m": "15m", "m1": "15m", 
+                   "5m": "1h", "m5": "1h", 
+                   "15m": "4h", "m15": "4h"}
+        return mapping.get(self.interval.lower(), "1d")
+
     # в”Ђв”Ђ Public API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
-    def predict(self, candles: List[Dict]) -> Tuple[str, float, str]:
+    def predict(self, candles: List[Dict], mtf_candles: Optional[List[Dict]] = None) -> Tuple[str, float, str]:
         """
         Predict next candle direction from supplied candle list.
         Returns (direction, confidence, model_version).
@@ -350,7 +361,7 @@ class ForexPredictor:
             return "NEUTRAL", 0.5, "not-trained"
 
         try:
-            feats = build_features(candles)
+            feats = build_features(candles, mtf_candles)
             if feats.empty or len(feats) < 5:
                 return "NEUTRAL", 0.5, meta.version if meta else "no-feats"
 
@@ -450,7 +461,7 @@ class ForexPredictor:
 
 
 
-    def train(self, candles: Optional[List[Dict]] = None) -> Dict:
+    def train(self, candles: Optional[List[Dict]] = None, mtf_candles: Optional[List[Dict]] = None) -> Dict:
         """
         Train model. If candles not provided, fetch from Binance.
         Returns training report dict.
@@ -509,12 +520,30 @@ class ForexPredictor:
                             candles = []
 
 
+            if mtf_candles is None:
+                higher_tf = self._get_higher_tf()
+                mtf_candles = _fetch_historical_candles(self.symbol, higher_tf, 10000)
+                if len(mtf_candles) < 50:
+                    log.warning(f"[Train] Could not fetch enough MTF candles for {higher_tf}. MTF features will be neutral.")
+
             if len(candles) < 150:
                 return {"error": f"Not enough candles: {len(candles)} < 150"}
 
-            feats = build_features(candles)
+            feats = build_features(candles, mtf_candles)
             if feats.empty or len(feats) < 100:
                 return {"error": "Feature engineering yielded too few rows"}
+
+            # --- REGIME FILTERING ---
+            if self.regime != "ALL" and 'adx' in feats.columns:
+                if self.regime == "FLAT":
+                    feats = feats[feats['adx'] < 20.0]
+                elif self.regime == "TREND":
+                    feats = feats[(feats['adx'] >= 20.0) & (feats['adx'] < 40.0)]
+                elif self.regime == "CHAOS":
+                    feats = feats[feats['adx'] >= 40.0]
+            
+            if feats.empty or len(feats) < 50:
+                return {"error": f"Too few rows after filtering for regime {self.regime}"}
 
             # Bug2 fix: configurable target horizon aligned with TradeTimeout (was 3, now TARGET_HORIZON_CANDLES=5)
             H = TARGET_HORIZON_CANDLES
@@ -539,7 +568,15 @@ class ForexPredictor:
                 log.info(f"[{self._key}] Training on {len(y)} candles. Class balance: BUY {buy_pct:.1f}% | PUT {put_pct:.1f}%")
 
             # --- Bug1 fix: Online RL Integration вЂ” match by timestamp (not price) ---
-            sample_weights = np.ones(len(y), dtype=np.float32)
+            # --- TIME DECAY (Concept Drift Fix) ---
+            N = len(y)
+            if N > 1:
+                power = np.linspace(0, 1, N)
+                base_weights = 0.1 * np.power(10.0, power)
+            else:
+                base_weights = np.ones(N)
+                
+            sample_weights = base_weights.astype(np.float32)
             rl_feedbacks = _fetch_rl_feedback(self.symbol, self.interval)
 
             if rl_feedbacks:

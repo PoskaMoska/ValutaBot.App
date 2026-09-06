@@ -324,6 +324,19 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 var higherOhlcForSmc = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset);
                 if (higherOhlcForSmc != null && _higherResultData.Value.prices.Length > 0)
                 {
+                    var lastH = higherOhlcForSmc[^1];
+                    if (lastH.Timestamp < DateTime.UtcNow.AddSeconds(-_fetcher.TimeframeSeconds(_higherTf)))
+                    {
+                        var synthetic = new MiniAppController.OhlcCandle(_currentLivePrice, _currentLivePrice, _currentLivePrice, _currentLivePrice, 0, DateTime.UtcNow);
+                        higherOhlcForSmc = higherOhlcForSmc.Append(synthetic).ToArray();
+                    }
+                    else
+                    {
+                        double newHigh = Math.Max(lastH.High, _currentLivePrice);
+                        double newLow = Math.Min(lastH.Low, _currentLivePrice);
+                        higherOhlcForSmc[^1] = lastH with { High = newHigh, Low = newLow, Close = _currentLivePrice };
+                    }
+
                     var htfSmcResult = SmcEngine.AnalyzeSmcStructure(_asset, _higherTf, higherOhlcForSmc, _higherResultData.Value.prices[^1]);
                     var mtfValidation = SmcEngine.ValidateMtfSmcAlignment(_smcResult, htfSmcResult);
                     lock (_penaltyLock) 
@@ -361,7 +374,19 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         {
             try
             {
-                _prediction = await MLPythonService.PredictAsync(_asset, _timeframe, _ohlcCandles, _isForex);
+                MiniAppController.OhlcCandle[]? higherOhlcForMl = null;
+                if (_higherTf != null)
+                {
+                    try {
+                        higherOhlcForMl = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset);
+                    } catch (Exception) { /* ignore */ }
+                }
+
+                var mlCandles = _ohlcCandles.Length > 1 
+                    ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
+                    : _ohlcCandles;
+
+                _prediction = await MLPythonService.PredictAsync(_asset, _timeframe, mlCandles, _isForex, higherOhlcForMl);
                 if (_prediction != null)
                 {
                     _lgbmModelVersion = string.IsNullOrEmpty(_prediction.ModelVersion) ? "unknown" : _prediction.ModelVersion;
@@ -500,6 +525,21 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     {
                         BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_higherTf}) — using synthetic OHLC from higher prices.");
                         higherOhlc = _higherResultData.Value.prices.Select(p => new MiniAppController.OhlcCandle(p, p, p, p, 0)).ToArray();
+                    }
+                    else
+                    {
+                        var lastH = higherOhlc[^1];
+                        if (lastH.Timestamp < DateTime.UtcNow.AddSeconds(-_fetcher.TimeframeSeconds(_higherTf)))
+                        {
+                            var synthetic = new MiniAppController.OhlcCandle(_currentLivePrice, _currentLivePrice, _currentLivePrice, _currentLivePrice, 0, DateTime.UtcNow);
+                            higherOhlc = higherOhlc.Append(synthetic).ToArray();
+                        }
+                        else
+                        {
+                            double newHigh = Math.Max(lastH.High, _currentLivePrice);
+                            double newLow = Math.Min(lastH.Low, _currentLivePrice);
+                            higherOhlc[^1] = lastH with { High = newHigh, Low = newLow, Close = _currentLivePrice };
+                        }
                     }
                 }
                 catch (Exception ex)

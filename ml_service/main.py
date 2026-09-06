@@ -50,8 +50,14 @@ async def _train_all():
             if not tf:
                 continue
             
-            predictor = _get_predictor(sym, tf)
-            if predictor.needs_retrain():
+            needs = False
+            for r in ["FLAT", "TREND", "CHAOS"]:
+                p = _get_predictor(sym, tf, r)
+                if p.needs_retrain():
+                    needs = True
+                    break
+                    
+            if needs:
                 # Stagger to avoid TwelveData 8 requests/min rate limit (12s space = 5 reqs/min)
                 delay = 12.0 if is_forex else 1.5
                 
@@ -101,35 +107,36 @@ async def _weekly_global_retrain_loop():
             if not sym:
                 continue
             for tf in _WEEKLY_INTERVALS:
-                predictor = _get_predictor(sym, tf)
-                
-                # FIX W-15: read predictor._meta safely under lock
-                with predictor._lock:
-                    meta = predictor._meta
-                
-                age_h = (now - meta.trained_at) / 3600 if meta else 9999
+                for regime in ["FLAT", "TREND", "CHAOS"]:
+                    predictor = _get_predictor(sym, tf, regime)
+                    
+                    # FIX W-15: read predictor._meta safely under lock
+                    with predictor._lock:
+                        meta = predictor._meta
+                    
+                    age_h = (now - meta.trained_at) / 3600 if meta else 9999
 
-                if age_h >= WEEKLY_RETRAIN_INTERVAL_H:
-                    log.info(f"[WeeklyRetrain] Forcing retrain: {sym} ({tf}), age={age_h:.0f}h")
-                    try:
-                        # FIX C-08: _meta = None was written without the lock — a concurrent
-                        # /predict or /feedback reading _meta.trained_at could crash with AttributeError.
-                        with predictor._lock:
-                            predictor._meta = None
-                        predictor.train(candles=None)
-                        if predictor._meta:
-                            results.append({
-                                "symbol": sym,
-                                "interval": tf,
-                                "accuracy": predictor._meta.accuracy,
-                                "auc": predictor._meta.auc,
-                                "n_train": predictor._meta.n_train,
-                            })
-                    except Exception as e:
-                        log.error(f"[WeeklyRetrain] Error retraining {sym}/{tf}: {e}")
-                        results.append({"symbol": sym, "interval": tf, "error": str(e)})
+                    if age_h >= WEEKLY_RETRAIN_INTERVAL_H:
+                        log.info(f"[WeeklyRetrain] Forcing retrain: {sym} ({tf}) [{regime}], age={age_h:.0f}h")
+                        try:
+                            # FIX C-08: _meta = None was written without the lock
+                            with predictor._lock:
+                                predictor._meta = None
+                            predictor.train(candles=None)
+                            if predictor._meta:
+                                results.append({
+                                    "symbol": sym,
+                                    "interval": tf,
+                                    "regime": regime,
+                                    "accuracy": predictor._meta.accuracy,
+                                    "auc": predictor._meta.auc,
+                                    "n_train": predictor._meta.n_train,
+                                })
+                        except Exception as e:
+                            log.error(f"[WeeklyRetrain] Error retraining {sym}/{tf}/{regime}: {e}")
+                            results.append({"symbol": sym, "interval": tf, "regime": regime, "error": str(e)})
 
-                    await asyncio.sleep(15)  # rate limit between pairs
+                        await asyncio.sleep(15)  # rate limit between pairs
 
         if results:
             _send_weekly_summary(results)
@@ -193,11 +200,16 @@ _registry_lock = threading.Lock()
 START_TIME = time.time()
 
 
-def _get_predictor(symbol: str, interval: str) -> ForexPredictor:
-    key = f"{symbol.upper()}_{interval.lower()}"
+def _get_predictor(symbol: str, interval: str, regime: str = "ALL") -> ForexPredictor:
+    regime = regime.upper()
+    if regime == "ALL":
+        key = f"{symbol.upper()}_{interval.lower()}"
+    else:
+        key = f"{symbol.upper()}_{interval.lower()}_{regime}"
+        
     with _registry_lock:
         if key not in _predictors:
-            p = ForexPredictor(symbol, interval)
+            p = ForexPredictor(symbol, interval, regime)
             p._try_load()          # load from disk if exists
             _predictors[key] = p
         return _predictors[key]
@@ -218,6 +230,7 @@ class PredictRequest(BaseModel):
     symbol: str                         # e.g. "BTCUSDT" or "EURUSD"
     interval: str                       # e.g. "1m" or "m5"
     candles: List[CandleItem]           # OHLCV history, latest last
+    mtf_candles: Optional[List[CandleItem]] = None # Higher timeframe OHLCV
     is_forex: bool = False
 
 
@@ -233,7 +246,8 @@ class PredictResponse(BaseModel):
 class TrainRequest(BaseModel):
     symbol: str
     interval: str
-    candles: Optional[List[CandleItem]] = None   # if None → fetch from Binance
+    candles: Optional[List[CandleItem]] = None   # if None -> fetch from DB
+    mtf_candles: Optional[List[CandleItem]] = None
 
 
 class TrainResponse(BaseModel):
@@ -462,7 +476,26 @@ def predict(req: PredictRequest):
     with _cache_lock:
         _live_candles_cache[(req.symbol, interval)] = req.candles
 
-    predictor = _get_predictor(req.symbol, interval)
+    candle_dicts = _candles_to_dicts(req.candles)
+    mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
+    
+    # Determine current market regime
+    regime = "ALL"
+    try:
+        from features import build_features
+        feats = build_features(candle_dicts, mtf_candle_dicts)
+        if not feats.empty and 'adx' in feats.columns:
+            current_adx = feats['adx'].iloc[-1]
+            if current_adx < 20.0:
+                regime = "FLAT"
+            elif current_adx < 40.0:
+                regime = "TREND"
+            else:
+                regime = "CHAOS"
+    except Exception as e:
+        log.error(f"[Predict] Failed to calc regime, fallback to ALL: {e}")
+
+    predictor = _get_predictor(req.symbol, interval, regime)
 
     # Auto-train in background if model is stale or missing
     if predictor.needs_retrain():
@@ -473,8 +506,7 @@ def predict(req: PredictRequest):
         )
         t.start()
 
-    candle_dicts = _candles_to_dicts(req.candles)
-    direction, confidence, version = predictor.predict(candle_dicts)
+    direction, confidence, version = predictor.predict(candle_dicts, mtf_candle_dicts)
 
     meta = predictor._meta
     return PredictResponse(
@@ -492,10 +524,8 @@ def predict(req: PredictRequest):
 def train(req: TrainRequest, background_tasks: BackgroundTasks):
     interval = _normalize_interval(req.interval)
     candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
-
-    # Run training in background so the API returns immediately
-    background_tasks.add_task(_background_train, req.symbol, interval, candle_dicts)
-
+    mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
+    background_tasks.add_task(_background_train, req.symbol, interval, candle_dicts, mtf_candle_dicts)
     return TrainResponse(
         symbol=req.symbol,
         interval=interval,
@@ -507,9 +537,10 @@ def train(req: TrainRequest, background_tasks: BackgroundTasks):
 def train_sync(req: TrainRequest):
     """Blocking train (useful for testing / initial setup)."""
     interval = _normalize_interval(req.interval)
-    candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
     predictor = _get_predictor(req.symbol, interval)
-    report = predictor.train(candle_dicts)
+    candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
+    mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
+    report = predictor.train(candle_dicts, mtf_candle_dicts)
 
     if "error" in report:
         return TrainResponse(symbol=req.symbol, interval=interval, error=report["error"])
@@ -524,11 +555,12 @@ def train_sync(req: TrainRequest):
     )
 
 
-def _background_train(symbol: str, interval: str, candles: Optional[list]):
-    predictor = _get_predictor(symbol, interval)
-    log.info(f"[BG Train] Starting {symbol}_{interval}")
-    report = predictor.train(candles)
-    log.info(f"[BG Train] Done: {report}")
+def _background_train(symbol: str, interval: str, candles: Optional[list] = None, mtf_candles: Optional[list] = None):
+    log.info(f"[BG Train] Starting clustered training for {symbol}_{interval}")
+    for regime in ["FLAT", "TREND", "CHAOS"]:
+        predictor = _get_predictor(symbol, interval, regime)
+        report = predictor.train(candles, mtf_candles)
+        log.info(f"[BG Train] Done {regime}: {report}")
 
 
 @app.post("/feedback")
@@ -581,12 +613,26 @@ def feedback(req: TrainFeedback):
         
         # Tier 2 (Local Tactician): instant SGD update — no heavy retrain
         norm_interval = _normalize_interval(req.timeframe)
-        predictor = _get_predictor(req.asset, norm_interval)
 
         # FIX #5: Берём свечи строго ДО момента входа (req.timestamp), а не из _live_candles_cache.
-        # Кэш перезаписывается при каждом /predict — к моменту /feedback там уже свечи
-        # момента выхода из сделки. SGD учился бы на будущем состоянии рынка.
         recent_candles = _fetch_candles_at_entry(req.asset, norm_interval, req.timestamp, limit=200)
+
+        regime = "ALL"
+        try:
+            from features import build_features
+            feats = build_features(recent_candles)
+            if not feats.empty and 'adx' in feats.columns:
+                current_adx = feats['adx'].iloc[-1]
+                if current_adx < 20.0:
+                    regime = "FLAT"
+                elif current_adx < 40.0:
+                    regime = "TREND"
+                else:
+                    regime = "CHAOS"
+        except Exception as e:
+            log.error(f"[Feedback] Failed to calc regime, fallback to ALL: {e}")
+            
+        predictor = _get_predictor(req.asset, norm_interval, regime)
 
         if len(recent_candles) >= 60:
             ok = predictor.partial_fit_online(recent_candles, req.was_win, req.direction)

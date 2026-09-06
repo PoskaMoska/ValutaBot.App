@@ -19,8 +19,8 @@ public class StatefulSmc
 
     private readonly object _lockObj = new();
 
-    private readonly List<FvgZone>        _activeFvgs = new();
-    private readonly List<OrderBlockZone> _activeObs  = new();
+    private List<FvgZone>        _activeFvgs = new();
+    private List<OrderBlockZone> _activeObs  = new();
 
     private Fractal _lastSwingHigh;
     private Fractal _lastSwingLow;
@@ -34,6 +34,17 @@ public class StatefulSmc
     private string _sweepDirection = "NONE";
     private bool   _hasBos;
     private string _bosDirection   = "NONE";
+
+    public StatefulSmc Clone()
+    {
+        lock (_lockObj)
+        {
+            var clone = (StatefulSmc)this.MemberwiseClone();
+            clone._activeFvgs = new List<FvgZone>(this._activeFvgs);
+            clone._activeObs = new List<OrderBlockZone>(this._activeObs);
+            return clone;
+        }
+    }
 
     public bool   HasLiquiditySweep { get { lock (_lockObj) { return _hasLiquiditySweep; } } }
     public string SweepDirection    { get { lock (_lockObj) { return _sweepDirection;    } } }
