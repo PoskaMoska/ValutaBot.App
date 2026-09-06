@@ -154,14 +154,12 @@ public static partial class MiniAppController
             });
         });
 
-        bool isWeekend = DateTime.UtcNow.DayOfWeek == DayOfWeek.Saturday || DateTime.UtcNow.DayOfWeek == DayOfWeek.Sunday;
-        if (!isWeekend)
-        {
-            // Launch Real-Time WebSocket stream for major CME proxy forex streams (0ms latency)
-            // Added USDCAD, USDCHF, USDJPY to ensure all 6 active ML pairs are accumulated in the DB
-            string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
-            TwelveDataWebSocketStream.StartStream(topStreamSymbols);
-        }
+        // Launch Real-Time WebSocket stream for major CME proxy forex streams (0ms latency)
+        // Added USDCAD, USDCHF, USDJPY to ensure all 6 active ML pairs are accumulated in the DB
+        // FIX: Removed 'isWeekend' check so the stream always starts. If booted on a weekend, 
+        // it simply idles until Monday morning when ticks resume.
+        string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
+        TwelveDataWebSocketStream.StartStream(topStreamSymbols);
 
         // Init Telegram notifier from config or env (set in Railway dashboard)
         TelegramNotifier.Init(builder.Configuration["TelegramBotToken"] ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));
