@@ -224,62 +224,42 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         _mainOhlcKey = _symbol != null ? $"{_symbol}_{_mainInterval}" : $"{_clean}_{_mainInterval}";
 
-        var mainResultTuple = await _fetcher.FetchBinanceWithFallback(_symbol, _mainInterval, _asset, _limit);
-        _mainPrices = mainResultTuple.prices;
-        _mainVolumes = mainResultTuple.volumes;
-
         _ohlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _timeframe, _asset, _limit);
+
         if (_ohlcCandles == null || _ohlcCandles.Length == 0)
         {
-            // OTC candles not yet accumulated — use main prices as synthetic OHLC
-            BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_timeframe}) — using synthetic OHLC from main prices.");
-            var now = DateTime.UtcNow;
-            int intervalSeconds = _fetcher.TimeframeSeconds(_timeframe);
-            _ohlcCandles = _mainPrices.Select((p, i) => new MiniAppController.OhlcCandle(p, p, p, p, 0, now.AddSeconds(-(_mainPrices.Length - 1 - i) * intervalSeconds))).ToArray();
+            BotLogger.Warn($"[Orchestrator] Data unavailable for {_asset} ({_timeframe}).");
+            _mainPrices = Array.Empty<double>();
+            _mainVolumes = Array.Empty<double>();
         }
-        else if (_ohlcCandles.Length < 2)
+        else
         {
-            BotLogger.Warn($"[Orchestrator] Only {_ohlcCandles.Length} candle(s) for {_asset} ({_timeframe}) — analysis may be limited.");
-        }
-
-        // FIX: For sub-minute TFs (s5/s10/s15/s30), IntervalMap maps to "1m".
-        // _mainPrices would contain 1m closes while _ohlcCandles has real 5s candles.
-        // ScoreTimeframe and ContinuousStateEngine must see the SAME granularity.
-        // Override _mainPrices/_mainVolumes from the actual sub-minute OHLC candles.
-        if (_tfLower.StartsWith("s") && _ohlcCandles.Length >= 14)
-        {
-            _mainPrices  = _ohlcCandles.Select(c => c.Close).ToArray();
-            _mainVolumes = _ohlcCandles.Select(c => c.Volume).ToArray();
-            BotLogger.Info($"[Orchestrator] Sub-minute {_timeframe}: using {_mainPrices.Length} real candles for prices (not 1m).");
-        }
-
-        var higherTask = _higherTf != null ? SafeFetch(_higherTf) : Task.FromResult<(double[] prices, double[] volumes)?>(null);
-        var lowerTask = _lowerTf != null ? SafeFetch(_lowerTf) : Task.FromResult<(double[] prices, double[] volumes)?>(null);
-
-        var extraTasks = new List<Task<(double[] prices, double[] volumes)?>>();
-        if (_isMajor)
-        {
-            string[] checkTfs = { "m1", "m5", "m15", "h1" };
-            foreach (var cTf in checkTfs)
+            if (_ohlcCandles.Length < 2)
             {
-                if (cTf != _timeframe && cTf != _higherTf && cTf != _lowerTf)
-                {
-                    extraTasks.Add(SafeFetch(cTf));
-                }
+                BotLogger.Warn($"[Orchestrator] Only {_ohlcCandles.Length} candle(s) for {_asset} ({_timeframe}) — analysis may be limited.");
             }
+            _mainPrices = _ohlcCandles.Select(c => c.Close).ToArray();
+            _mainVolumes = _ohlcCandles.Select(c => c.Volume).ToArray();
         }
-
-        await Task.WhenAll(higherTask, lowerTask);
-        if (extraTasks.Count > 0) await Task.WhenAll(extraTasks);
-
-        _higherResultData = await higherTask;
-        _lowerResultData = await lowerTask;
 
         if (_higherTf != null)
         {
-            try { _higherOhlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset); }
-            catch { _higherOhlcCandles = null; }
+            try 
+            { 
+                _higherOhlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset); 
+                if (_higherOhlcCandles != null && _higherOhlcCandles.Length > 0)
+                {
+                    _higherResultData = (_higherOhlcCandles.Select(c => c.Close).ToArray(), _higherOhlcCandles.Select(c => c.Volume).ToArray());
+                }
+            }
+            catch { _higherOhlcCandles = null; _higherResultData = null; }
         }
+        else 
+        {
+            _higherResultData = null;
+        }
+
+        _lowerResultData = null; // Unused
 
         if (_mainPrices != null && _mainPrices.Length > 0)
         {
