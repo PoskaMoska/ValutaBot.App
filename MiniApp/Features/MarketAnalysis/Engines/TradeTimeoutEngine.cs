@@ -50,16 +50,13 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         int tfSeconds = TimeframeToSeconds(timeframe);
         bool isSubMinute = tfSeconds < 60;
 
-        int baseCandles = 15;
-        string dynamicReason = "Base timeout applied (15 candles).";
+        int baseCandles = 5;
+        string dynamicReason = "Base timeout applied (5 candles).";
 
         double lastPrice = currentPrice > 0 ? currentPrice : 1.0;
         double normalizedAtr = atr / lastPrice;
 
         // Dead-market threshold calibrated for m1 (60s), then scaled linearly by timeframe.
-        // EUR/USD m1 ATR ≈ 0.0002 → normalizedAtr ≈ 0.000182. Dead threshold = 0.000030 (< 16% of normal).
-        // EUR/USD s5 ATR ≈ 0.000007 → normalizedAtr ≈ 0.0000064. Dead threshold = 0.0000025 (scales with TF).
-        // Crypto BTC m1 ATR ≈ $30 → normalizedAtr ≈ 0.0005. Threshold = 0.0005, scales for sub-minute.
         double baseDeadMarketThreshold = isForex ? 0.000030 : 0.0005;
         double deadMarketThreshold = baseDeadMarketThreshold * (tfSeconds / 60.0);
 
@@ -68,22 +65,20 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
 
         if (isZeroAtr || isDeadMarket || volRatio < 0.3)
         {
-            baseCandles = 5;
+            baseCandles = 3;
             dynamicReason = isZeroAtr
-                ? "ATR=0: no volatility data. Minimum timeout (5 candles)."
-                : "Dead market detected. Fast timeout (5 candles).";
+                ? "ATR=0: no volatility data. Minimum timeout (3 candles)."
+                : "Dead market detected. Fast timeout (3 candles).";
         }
         else if (volRatio > 1.5)
         {
-            baseCandles = 10;
-            dynamicReason = "High Volatility. Reduced timeout (10 candles).";
+            baseCandles = 3;
+            dynamicReason = "High Volatility. Fast timeout to avoid chop (3 candles).";
         }
         else if (volRatio < 0.8)
         {
-            // On sub-minute TFs, "Low Volatility" extended timeout is capped at 15 candles:
-            // 25 candles × 5s = 125 sec is too long for a scalping signal.
-            baseCandles = isSubMinute ? 15 : 25;
-            dynamicReason = "Low Volatility. Extended timeout " + (isSubMinute ? "(15 candles, sub-minute cap)." : "(25 candles).");
+            baseCandles = 7;
+            dynamicReason = "Low Volatility. Extended timeout (7 candles).";
         }
 
         if (smc.HasOrderBlock || smc.HasFvg)

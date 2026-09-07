@@ -235,7 +235,7 @@ export function updateTrafficLight(status) {
         tl.style.background = '#f59e0b';
         tl.style.boxShadow = '0 0 10px #f59e0b';
     } else {
-        tl.style.background = 'gray';
-        tl.style.boxShadow = '0 0 5px gray';
+        tl.style.background = '#ef4444';
+        tl.style.boxShadow = '0 0 10px #ef4444';
     }
 }

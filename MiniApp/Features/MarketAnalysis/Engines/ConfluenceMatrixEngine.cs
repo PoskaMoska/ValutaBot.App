@@ -111,10 +111,12 @@ public class ConfluenceMatrixEngine(
         Resolve3DTimeframes(string tf) =>
         tf.ToLower() switch
         {
-            // Sub-minute: signal expires in seconds → context must be near-term only.
-            // s30 (micro) gives immediate momentum, m1 (primary) gives the current candle
-            // structure, m3 (macro) filters out pure noise without going too far in time.
-            "s3" or "s5" or "s10" or "s15" or "s30" => ("s30", "m1",  "m3"),
+            // Sub-minute fixes: The horizon is 5 candles.
+            // Micro captures 1-2 candles, Primary is the timeframe itself, Macro captures 3x-5x the horizon.
+            "s5"                                     => ("s5",  "s15", "m1"),
+            "s10"                                    => ("s5",  "s10", "s30"),
+            "s15"                                    => ("s5",  "s15", "m1"),
+            "s30"                                    => ("s15", "s30", "m1"),
             "m1"                                     => ("s30", "m1",  "m5"),
             "m2" or "m3"                             => ("m1",  "m3",  "m15"),
             "m5"                                     => ("m1",  "m5",  "m15"),
@@ -382,11 +384,22 @@ public class ConfluenceMatrixEngine(
             double mlWeight   = options?.Value.MlWeight   ?? 0.5;
             double mathWeight = options?.Value.MathWeight ?? 0.5;
 
-            // FIX C-12: if ML and Math clearly contradict, reduce ML dominance
-            if (Math.Sign(mlScore) != Math.Sign(scoreMath) && Math.Abs(scoreMath) > 0.3)
+            // FIX C-12 (Revised): Dynamic contradiction resolution.
+            if (Math.Sign(mlScore) != Math.Sign(scoreMath))
             {
-                mlWeight   *= 0.6;
-                mathWeight *= 1.4;
+                if (mlSignal.Confidence >= 0.75)
+                {
+                    // ML is highly confident (>75%). It usually detects a breakout that Math 
+                    // interprets purely as "overbought/oversold" in a range. Protect ML.
+                    mlWeight   *= 1.2;
+                    mathWeight *= 0.8;
+                }
+                else if (Math.Abs(scoreMath) > 0.3)
+                {
+                    // Standard contradiction: ML is uncertain, Math has a clear structure.
+                    mlWeight   *= 0.6;
+                    mathWeight *= 1.4;
+                }
             }
 
             finalConfidenceScore = (mlScore * mlWeight) + (scoreMath * mathWeight);
