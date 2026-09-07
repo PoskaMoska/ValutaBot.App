@@ -114,26 +114,40 @@ public class MarketDataFetcher
             string cleanKey = AssetSanitizer.Sanitize(assetToFetch).Replace("/", "").ToUpper();
             var liveCandles = await RealtimeTickCollector.GetRecentCandles(cleanKey, rawInterval, limit);
 
-            if (liveCandles.Length >= limit / 2)
+            if (liveCandles.Length >= limit)
             {
                 BotLogger.Info($"[MarketDataFetcher] Using {liveCandles.Length} live {rawInterval} candles for {cleanKey}.");
                 return liveCandles;
             }
 
-            BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length} ticks in DB). Synthesizing from 1m candles as warm-up.");
+            BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length}/{limit} ticks in DB). Bridging gap.");
 
-            int m1Needed = (limit / 12) + 2;
-            // Cold-start: use very short cache TTL (5s) so consecutive s5 signals
-            // see fresh 1m data and don't return identical duplicate signals.
-            var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1m", m1Needed, cacheTtlSeconds: 5);
+            int missingCount = limit - liveCandles.Length;
+            int m1Needed = (missingCount / 12) + 2;
+            
+            // Cache for 60 seconds to prevent rate limit exhaustion on 5s polling!
+            // The live candles will provide the 5s real-time updates.
+            var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1m", m1Needed, cacheTtlSeconds: 60);
 
             if (m1Result != null && m1Result.Value.candles.Length > 0)
             {
                 var s5Candles = ValutaBot.App.MiniApp.Backtesting.S5CandleSynthesizer.SynthesizeFromM1(m1Result.Value.candles);
                 int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
                 var aggregated = groupSize == 1 ? s5Candles : AggregateCandles(s5Candles, groupSize);
-                return aggregated.TakeLast(limit).ToArray();
+                
+                var synthPart = aggregated.TakeLast(limit).ToArray();
+                if (liveCandles.Length == 0) return synthPart;
+
+                var merged = new System.Collections.Generic.List<MiniAppController.OhlcCandle>();
+                int synthToTake = limit - liveCandles.Length;
+                if (synthPart.Length > synthToTake) merged.AddRange(synthPart.Take(synthPart.Length - liveCandles.Length));
+                else merged.AddRange(synthPart);
+                merged.AddRange(liveCandles);
+                
+                return merged.TakeLast(limit).ToArray();
             }
+
+            if (liveCandles.Length > 0) return liveCandles;
 
             BotLogger.Warn($"[MarketDataFetcher] 1m cold-start data unavailable for {cleanAsset}.");
         }

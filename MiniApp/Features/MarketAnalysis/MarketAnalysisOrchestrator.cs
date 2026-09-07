@@ -40,6 +40,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private double _currentLivePrice;
     private string _mainOhlcKey = "";
     private MiniAppController.OhlcCandle[]? _ohlcCandles;
+    private MiniAppController.OhlcCandle[]? _higherOhlcCandles;
     private (double[] prices, double[] volumes)? _higherResultData;
     private (double[] prices, double[] volumes)? _lowerResultData;
     
@@ -274,6 +275,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _higherResultData = await higherTask;
         _lowerResultData = await lowerTask;
 
+        if (_higherTf != null)
+        {
+            try { _higherOhlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset); }
+            catch { _higherOhlcCandles = null; }
+        }
+
         if (_mainPrices != null && _mainPrices.Length > 0)
         {
             _currentLivePrice = _mainPrices[^1];
@@ -321,7 +328,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         {
             try
             {
-                var higherOhlcForSmc = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset);
+                var higherOhlcForSmc = _higherOhlcCandles?.ToArray();
                 if (higherOhlcForSmc != null && _higherResultData.Value.prices.Length > 0)
                 {
                     var lastH = higherOhlcForSmc[^1];
@@ -378,7 +385,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 if (_higherTf != null)
                 {
                     try {
-                        higherOhlcForMl = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset);
+                        higherOhlcForMl = _higherOhlcCandles?.ToArray();
                     } catch (Exception) { /* ignore */ }
                 }
 
@@ -520,7 +527,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             {
                 try
                 {
-                    higherOhlc = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset);
+                    higherOhlc = _higherOhlcCandles?.ToArray();
                     if (higherOhlc == null || higherOhlc.Length == 0)
                     {
                         BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_higherTf}) — using synthetic OHLC from higher prices.");
