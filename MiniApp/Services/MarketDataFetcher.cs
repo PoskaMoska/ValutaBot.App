@@ -173,9 +173,13 @@ public class MarketDataFetcher
             // This prevents a 15-second stale cache from causing ML entries & targets to be completely disjointed from reality.
             if (candles.Length > 0 && TwelveDataWebSocketStream.TryGetLivePrice(cleanAsset, out double realPrice))
             {
-                candles[^1].Close = realPrice;
-                if (realPrice > candles[^1].High) candles[^1].High = realPrice;
-                if (realPrice < candles[^1].Low) candles[^1].Low = realPrice;
+                var last = candles[^1];
+                candles[^1] = last with 
+                { 
+                    Close = realPrice, 
+                    High = Math.Max(last.High, realPrice), 
+                    Low = Math.Min(last.Low, realPrice) 
+                };
             }
             return candles;
         }

@@ -150,15 +150,22 @@ namespace ValutaBot.MiniApp
             // which aligns with the model key used in training and feedback.
             string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
 
-            UpdateAccumulator(_s5,  cleanAsset, price);
-            UpdateAccumulator(_s10, cleanAsset, price);
-            UpdateAccumulator(_s15, cleanAsset, price);
-            UpdateAccumulator(_s30, cleanAsset, price);
+            UpdateAccumulator(_s5,  cleanAsset, price, 5);
+            UpdateAccumulator(_s10, cleanAsset, price, 10);
+            UpdateAccumulator(_s15, cleanAsset, price, 15);
+            UpdateAccumulator(_s30, cleanAsset, price, 30);
         }
 
-        private static void UpdateAccumulator(ConcurrentDictionary<string, CandleAccumulator> dict, string asset, double price)
+        private static void UpdateAccumulator(ConcurrentDictionary<string, CandleAccumulator> dict, string asset, double price, int intervalSeconds)
         {
-            var acc = dict.GetOrAdd(asset, _ => new CandleAccumulator { OpenTime = DateTime.UtcNow });
+            var acc = dict.GetOrAdd(asset, _ => {
+                // ROOT CAUSE FIX: Grid-Snap timestamp. Prevents IndicatorCache 'IsTimestampRewind' from falsely 
+                // detecting rewinds when merging with synthetic/REST candles.
+                long ticks = DateTime.UtcNow.Ticks;
+                long intervalTicks = TimeSpan.FromSeconds(intervalSeconds).Ticks;
+                var gridTime = new DateTime(ticks - (ticks % intervalTicks), DateTimeKind.Utc);
+                return new CandleAccumulator { OpenTime = gridTime };
+            });
             lock (acc)
             {
                 acc.AddTick(price);
