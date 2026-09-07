@@ -154,10 +154,11 @@ public static class SignalTracker
                         if (TradeOutcomeTracker.CalibrationEngine != null)
                             TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", asset, timeframe, isCorrect);
 
-                        // Skip ML feedback for Doji — no real directional move to learn from
+                        // Skip ML feedback for Doji - no real directional move to learn from
+                        // ROOT CAUSE FIX: Pass record.CreatedAt to prevent Future Leakage in Python ML SGD
                         _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
                             asset, timeframe, price, exitPrice.Value,
-                            direction, wasWin: isCorrect, isForex: record.IsForex));
+                            direction, wasWin: isCorrect, isForex: record.IsForex, entryTime: record.CreatedAt));
 
                         // Invalidate signal votes cache so UI refreshes
                         _signalVotesCacheExpiry = DateTime.MinValue;

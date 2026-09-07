@@ -378,10 +378,11 @@ class ForexPredictor:
 
 
     def _get_higher_tf(self) -> str:
-        mapping = {"s5": "1m", "s10": "1m", "s15": "5m", "s30": "5m", 
-                   "1m": "15m", "m1": "15m", 
-                   "5m": "1h", "m5": "1h", 
-                   "15m": "4h", "m15": "4h"}
+        mapping = {"s5": "1m", "s10": "1m", "s15": "1m", "s30": "1m", 
+                   "1m": "5m", "m1": "5m", "m2": "15m", "m3": "15m",
+                   "5m": "15m", "m5": "15m", 
+                   "15m": "1h", "m15": "1h", "m30": "1h", "30m": "1h",
+                   "1h": "4h", "h1": "4h", "4h": "1d", "h4": "1d"}
         return mapping.get(self.interval.lower(), "1d")
 
     # в”Ђв”Ђ Public API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
@@ -453,7 +454,7 @@ class ForexPredictor:
             log.error(f"[Predict] {self._key}: {e}")
             return "NEUTRAL", 0.5, "error"
 
-    def partial_fit_online(self, candles: List[Dict], was_win: bool, direction: str) -> bool:
+    def partial_fit_online(self, candles: List[Dict], mtf_candles: Optional[List[Dict]], was_win: bool, direction: str) -> bool:
         """
         Tier 2 (Local Tactician): Update SGDClassifier with a single real trade outcome.
         Called immediately after a trade closes. Executes in <1ms.
@@ -462,7 +463,7 @@ class ForexPredictor:
         if not HAS_LGBM:
             return False
         try:
-            feats = build_features(candles)
+            feats = build_features(candles, mtf_candles)
             if feats.empty or len(feats) < 5:
                 return False
 

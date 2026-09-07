@@ -636,9 +636,11 @@ def feedback(req: TrainFeedback):
             log.error(f"[Feedback] Failed to calc regime, fallback to ALL: {e}")
             
         predictor = _get_predictor(req.asset, norm_interval, regime)
+        higher_tf = predictor._get_higher_tf()
+        mtf_candles = _fetch_candles_at_entry(req.asset, higher_tf, req.timestamp, limit=100)
 
         if len(recent_candles) >= 60:
-            ok = predictor.partial_fit_online(recent_candles, req.was_win, req.direction)
+            ok = predictor.partial_fit_online(recent_candles, mtf_candles, req.was_win, req.direction)
             if ok:
                 log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | win={req.was_win} | candles_at_entry={len(recent_candles)}")
             

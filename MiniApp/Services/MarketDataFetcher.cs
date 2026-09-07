@@ -122,12 +122,10 @@ public class MarketDataFetcher
 
             BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length}/{limit} ticks in DB). Bridging gap.");
 
-            int missingCount = limit - liveCandles.Length;
-            int m1Needed = (missingCount / 12) + 2;
-            
-            // Cache for 60 seconds to prevent rate limit exhaustion on 5s polling!
-            // The live candles will provide the 5s real-time updates.
-            var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1m", m1Needed, cacheTtlSeconds: 60);
+            // Use 50 as fixed limit and "1min" to match the exact cache key of _higherTf ("m1").
+            // This prevents duplicate TwelveData requests when _timeframe="s15" and _higherTf="m1".
+            int m1FixedLimit = 50;
+            var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1min", m1FixedLimit, cacheTtlSeconds: 60);
 
             if (m1Result != null && m1Result.Value.candles.Length > 0)
             {
@@ -150,6 +148,7 @@ public class MarketDataFetcher
             if (liveCandles.Length > 0) return liveCandles;
 
             BotLogger.Warn($"[MarketDataFetcher] 1m cold-start data unavailable for {cleanAsset}.");
+            throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData). API лимит или недоступность.");
         }
 
         string interval = IntervalMap(rawInterval);
@@ -159,13 +158,27 @@ public class MarketDataFetcher
             "s5" or "s10"       => 5,
             "s15" or "s30"      => 10,
             "m1"                => 15,
-            "m2" or "m3" or "m5"=> 30,
-            _                   => 45
+            "m2" or "m3"        => 30,
+            "m5"                => 60,
+            "m15" or "m30"      => 120,
+            "h1" or "h4"        => 300,
+            _                   => 300
         };
         var tdResult = await TwelveDataService.FetchCandlesAsync(cleanAsset, interval, limit, cacheTtlSeconds: cacheTtl);
         
         if (tdResult != null)
-            return tdResult.Value.candles;
+        {
+            var candles = tdResult.Value.candles;
+            // ROOT CAUSE FIX: Ghost Pricing. Overwrite the final (forming) candle's Close/High/Low with real WS tick.
+            // This prevents a 15-second stale cache from causing ML entries & targets to be completely disjointed from reality.
+            if (candles.Length > 0 && TwelveDataWebSocketStream.TryGetLivePrice(cleanAsset, out double realPrice))
+            {
+                candles[^1].Close = realPrice;
+                if (realPrice > candles[^1].High) candles[^1].High = realPrice;
+                if (realPrice < candles[^1].Low) candles[^1].Low = realPrice;
+            }
+            return candles;
+        }
 
         throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData).");
     }

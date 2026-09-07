@@ -208,18 +208,31 @@ export async function executeAnalysis() {
             // Market Weather Bindings
             const wSession = document.getElementById("weatherSession");
             if (wSession && data.uiMarketSession) wSession.innerText = data.uiMarketSession;
+            
             const wPhase = document.getElementById("weatherPhase");
-            if (wPhase && data.uiMarketPhase) wPhase.innerText = data.uiMarketPhase;
+            if (wPhase && data.uiMarketPhase) {
+                wPhase.innerText = data.uiMarketPhase;
+                let phaseColor = "#10b981";
+                if (data.uiMarketPhase.includes("Боковик") || data.uiMarketPhase.includes("Неопределенность") || data.uiMarketPhase.includes("Слабый")) {
+                    phaseColor = "#f59e0b";
+                } else if (data.uiMarketPhase.includes("Волатильный") || data.uiMarketPhase.includes("Резкий") || data.uiMarketPhase.includes("Шум")) {
+                    phaseColor = "#ef4444";
+                }
+                wPhase.style.color = phaseColor;
+            }
+            
             const wEntropy = document.getElementById("weatherEntropy");
+            const wTitle = document.getElementById("weatherTitle");
             if (wEntropy && data.uiMarketEntropy) {
                 wEntropy.innerText = data.uiMarketEntropy;
+                let entColor = "#10b981";
                 if (data.uiMarketEntropy.includes("Опасно") || data.uiMarketEntropy.includes("ВЫСОКАЯ")) {
-                    wEntropy.style.color = "#ef4444";
-                } else if (data.uiMarketEntropy.includes("Мертвый")) {
-                    wEntropy.style.color = "#f59e0b";
-                } else {
-                    wEntropy.style.color = "#10b981";
+                    entColor = "#ef4444";
+                } else if (data.uiMarketEntropy.includes("Мертвый") || data.uiMarketEntropy.includes("Слабая") || data.uiMarketEntropy.includes("Переход")) {
+                    entColor = "#f59e0b";
                 }
+                wEntropy.style.color = entColor;
+                if (wTitle) wTitle.style.color = entColor;
             }
 
             // ML Ensemble Card
