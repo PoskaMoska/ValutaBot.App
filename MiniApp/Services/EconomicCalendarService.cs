@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
@@ -112,7 +112,9 @@ public static class EconomicCalendarService
 
     private static async Task<List<EconomicEvent>> FetchFromTwelveDataAsync()
     {
-        string apiKey = System.Environment.GetEnvironmentVariable("TwelveDataApiKey") ?? "";
+        string apiKey = System.Environment.GetEnvironmentVariable("TwelveDataApiKey");
+        if (string.IsNullOrWhiteSpace(apiKey)) apiKey = "3e0d610500f0414282d471471f59504e";
+        
         if (string.IsNullOrEmpty(apiKey))
         {
             BotLogger.Warn("[EconomicCalendar] TwelveDataApiKey not set — calendar disabled.");

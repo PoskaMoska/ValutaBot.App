@@ -29,7 +29,8 @@ public static partial class TwelveDataService
 
     public static string GetApiKey()
     {
-        _apiKey ??= Environment.GetEnvironmentVariable("TwelveDataApiKey") ?? "";
+        string envKey = Environment.GetEnvironmentVariable("TwelveDataApiKey");
+        _apiKey ??= !string.IsNullOrWhiteSpace(envKey) ? envKey : "3e0d610500f0414282d471471f59504e";
         return _apiKey;
     }
 
