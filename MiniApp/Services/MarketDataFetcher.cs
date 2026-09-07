@@ -71,17 +71,7 @@ public class MarketDataFetcher
 
     private void CheckWeekendClosure(string asset, bool isOtc)
     {
-        if (isOtc)
-        {
-            if (!IsWeekendNow())
-            {
-                throw new MarketClosedException(
-                    "OTC Closed on Weekdays",
-                    "⚠️ OTC-активы доступны только в выходные дни (с Пт 22:00 до Вс 22:00 UTC)."
-                );
-            }
-            return;
-        }
+        if (isOtc) return;
 
         if (IsWeekendNow())
         {
