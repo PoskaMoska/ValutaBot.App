@@ -42,11 +42,18 @@ TICKS_DB_PATH = os.path.join(_BASE_DIR, "data", "ValutaTicks.db")
 
 MODEL_DIR = Path(os.getenv("MODEL_DIR", str(Path(__file__).parent / "data" / "models")))
 SGD_MODEL_DIR = MODEL_DIR / "sgd"
-RETRAIN_INTERVAL_H = int(os.getenv("RETRAIN_INTERVAL_H", "168"))  # Weekly global retrain only
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+# FIX PRIORITY-3: Горизонт изменён с 5 на 3 свечи. 
+# TradeTimeoutEngine возвращает в среднем 3 свечи для сделки.
+# Прежние 5 свечей создавали систематическую ошибку прогнозирования (разрыв шаблонов).
+TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "3"))
+RETRAIN_INTERVAL_H = int(os.environ.get("RETRAIN_INTERVAL_H", "168")) # 1 неделя
+SGD_WEIGHT_MAX = float(os.environ.get("SGD_WEIGHT_MAX", "0.05")) # 5% вклад онлайн-обучения
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "100000"))  # Global Strategist window
-# Bug2 fix: configurable target horizon (default=5 candles, aligned with typical TradeTimeout 15*0.6в‰€9 в†’ 5вЂ“10)
-TARGET_HORIZON_CANDLES = int(os.getenv("TARGET_HORIZON_CANDLES", "5"))
-MIN_CONFIDENCE = 0.50  # below в†’ NEUTRAL
+MIN_CONFIDENCE = 0.50  # below → NEUTRAL
+
 BINANCE_BASE = "https://api.binance.com"
 
 # в”Ђв”Ђ TwelveData Config в”Ђв”Ђ

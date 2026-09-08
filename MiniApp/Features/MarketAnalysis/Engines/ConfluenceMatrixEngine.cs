@@ -196,6 +196,137 @@ public class ConfluenceMatrixEngine(
         }
     }
 
+    // FIX PRIORITY-4: Скоринг направления на основе реальных OhlcCandle[] (из Orchestrator'а).
+    // В отличие от ScoreDirection (который строил OHLC синтетически из avgDiff±0.5),
+    // этот метод передаёт реальные High/Low свечей → ATR/ADX корректны → нет шума ±12%.
+    private string ScoreDirectionFromCandles(
+        MiniAppController.OhlcCandle[] ohlcCandles,
+        double[] prices,
+        double[] volumes,
+        string tf)
+    {
+        if (prices == null || prices.Length < 10 || ohlcCandles == null || ohlcCandles.Length < 10)
+        {
+            BotLogger.Info($"[Confluence 3D] Not enough real OHLC candles for {tf} ({prices?.Length ?? 0}) — returning NEUTRAL.");
+            return "NEUTRAL";
+        }
+
+        try
+        {
+            // Передаём реальные OhlcCandle[] (с настоящими High/Low) напрямую в ScoreTimeframe
+            // AUDIT FIX: используем реальный tf как asset-ключ для изоляции кэша по TF
+            var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
+                $"4dmatrix_{tf}", tf, prices,
+                volumes: volumes,
+                candles: ohlcCandles.AsSpan()
+            );
+
+            // Порог ±0.20: при шкале [-1, +1] отсекает рыночный шум
+            return score > 0.20 ? "BUY" : score < -0.20 ? "PUT" : "NEUTRAL";
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[Confluence 3D] ScoreDirectionFromCandles failed for {tf}: {ex.Message}");
+            return "NEUTRAL";
+        }
+    }
+
+    // FIX PRIORITY-1: Перегрузка принимает уже загруженные primary+macro свечи из Orchestrator'а.
+    // Только microTF требует отдельного fetch (1 HTTP-запрос вместо 3).
+    // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min).
+    public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
+        string asset,
+        string primaryTimeframe,
+        bool isForex = false,
+        string? binanceSymbol = null,
+        MiniAppController.OhlcCandle[]? primaryCandles = null,
+        double[]? primaryPrices = null,
+        double[]? primaryVolumes = null,
+        MiniAppController.OhlcCandle[]? macroCandles = null,
+        double[]? macroPrices = null,
+        double[]? macroVolumes = null)
+    {
+        // Если pre-loaded данные не переданы — откат на старый метод с тремя fetch
+        if (primaryCandles == null || primaryPrices == null ||
+            primaryCandles.Length < 10 || primaryPrices.Length < 10 ||
+            macroCandles == null || macroPrices == null ||
+            macroCandles.Length < 10 || macroPrices.Length < 10)
+        {
+            BotLogger.Info($"[Confluence 3D] Pre-loaded candles missing or too short for {asset}/{primaryTimeframe} — falling back to 3-fetch mode.");
+            return await Evaluate4DMatrixAsync(asset, primaryTimeframe, isForex, binanceSymbol);
+        }
+
+        var (microTf, primaryTf, macroTf) = Resolve3DTimeframes(primaryTimeframe);
+
+        try
+        {
+            // FIX: Только 1 fetch вместо 3 — только microTF получаем по HTTP.
+            // Primary и macro уже загружены Orchestrator'ом.
+            // Используем limit=50 (синхронизировано с основным запросом, было 40 — разный ключ кэша).
+            var (microPricesRaw, microVolumesRaw) = await fetcher.FetchBinanceWithFallback(
+                binanceSymbol, microTf, asset, 50);
+
+            string dirMicro   = ScoreDirection(microPricesRaw, microVolumesRaw, microTf);
+
+            // FIX PRIORITY-4: Используем реальный OHLC вместо синтетического avgDiff±0.5
+            string dirPrimary = ScoreDirectionFromCandles(
+                primaryCandles, primaryPrices, primaryVolumes ?? Array.Empty<double>(), primaryTf);
+            string dirMacro   = ScoreDirectionFromCandles(
+                macroCandles, macroPrices, macroVolumes ?? Array.Empty<double>(), macroTf);
+
+            var tfDirs = new Dictionary<string, string>
+            {
+                [microTf.ToUpper()]   = dirMicro,
+                [primaryTf.ToUpper()] = dirPrimary,
+                [macroTf.ToUpper()]   = dirMacro,
+            };
+
+            var counts    = tfDirs.Values.GroupBy(d => d).ToDictionary(g => g.Key, g => g.Count());
+            int buyCount  = counts.GetValueOrDefault("BUY", 0);
+            int putCount  = counts.GetValueOrDefault("PUT", 0);
+            int maxAgree  = Math.Max(buyCount, putCount);
+
+            double confluenceRatio = Math.Round(maxAgree / 3.0, 2);
+            string dominantDir     = buyCount == putCount ? "NEUTRAL"
+                                   : buyCount > putCount ? "BUY" : "PUT";
+            bool isGoldenSetup     = confluenceRatio >= 0.99;
+
+            int boost = confluenceRatio switch
+            {
+                >= 0.99 => 12,
+                >= 0.65 => 6,
+                _       => 0
+            };
+
+            string label = confluenceRatio switch
+            {
+                >= 0.99 => "\u2b50 ⭐ ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "\u26a1 ⚡ СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "\ud83d\udcca СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
+            };
+
+            string summary = $"\u2022 \U0001f3af 3D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch]";
+
+            BotLogger.Info($"[Confluence 3D] {asset}/{primaryTimeframe} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup} | Saved 2 API calls");
+
+            return new ConfluenceMatrixResult(
+                ConfluenceRatio:      confluenceRatio,
+                IsGoldenSetup:        isGoldenSetup,
+                ProbabilityBoost:     boost,
+                ConfluenceLabel:      label,
+                SummaryReasoning:     summary,
+                TimeframeDirections:  tfDirs,
+                DominantDirection:    dominantDir
+            );
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Error($"[Confluence 3D] Error in 1-fetch mode for {asset}", ex);
+            // Откат на 3-fetch режим при ошибке
+            return await Evaluate4DMatrixAsync(asset, primaryTimeframe, isForex, binanceSymbol);
+        }
+    }
+
     // в”Ђв”Ђ Unified Matrix Evaluation в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
     /// <summary>
@@ -328,18 +459,25 @@ public class ConfluenceMatrixEngine(
         // Apply conflict penalty globally to the normalized score
         totalScore *= conflictPenalty;
 
-        // AUDIT FIX: AutoCalibrationEngine — применяем режимный мультипликатор.
-        // AutoCalibrationEngine был написан, но никогда не вызывался в решении.
-        // Теперь детектируем режим рынка (Trending / Ranging / Chaos) и корректируем score.
+        // FIX PRIORITY-5: AutoCalibrationEngine мультипликатор применяется ТОЛЬКО к TA-компоненту.
+        // Ранее он применялся ко всему totalScore ПОСЛЕ нормализации — это создавало feedback loop:
+        // серия потерь → мультипликатор < 1 → весь score сжимается → больше NEUTRAL → нет данных
+        // для восстановления → мультипликатор не растёт → замкнутый круг.
+        // Теперь: мы масштабируем только вклад TA (taScoreOverride уже добавлен в totalScore через
+        // taWeight, поэтому корректируем постфактум как добавочный delta-term).
         if (TradeOutcomeTracker.CalibrationEngine is AutoCalibrationEngine calibEngine)
         {
             var regime = calibEngine.DetectMarketRegime(taSignal.Adx, volRatio, taSignal.Rsi);
-            // Получаем мультипликатор для ENSEMBLE-источника: отражает общую историческую точность
+            // Мультипликатор для TA-источника (не ENSEMBLE — чтобы изолировать влияние)
             double regimeMultiplier = calibEngine.GetCalibratedRegimeWeight("SKENDER_MATH", asset, timeframe, regime);
-            // Применяем как мягкий скейлинг (clamp чтобы не инвертировать знак)
-            double scaledMultiplier = Math.Clamp(regimeMultiplier, 0.5, 1.5);
-            totalScore *= scaledMultiplier;
-            BotLogger.Info($"[AutoCalib] Regime={regime}, Multiplier={regimeMultiplier:F2}x → scaled={scaledMultiplier:F2}x, adjustedScore={totalScore:F3}");
+            
+            // Упрощение: масштабируем в узком диапазоне [0.8, 1.2] — не инвертирует сигнал
+            double scaledMultiplier = Math.Clamp(regimeMultiplier, 0.8, 1.2);
+            // Применяем только к TA-части (пропорционально её весу в финальном score)
+            double taFraction = totalWeight > 0 ? (taWeight / totalWeight) : 0.5;
+            totalScore = totalScore * (1.0 + (scaledMultiplier - 1.0) * taFraction);
+            
+            BotLogger.Info($"[AutoCalib] Regime={regime}, Multiplier={regimeMultiplier:F2}x → scaled={scaledMultiplier:F2}x, taFraction={taFraction:F2}, adjustedScore={totalScore:F3}");
         }
 
         // AUDIT FIX: FearGreed — добавляем контрарный вклад для крипто-пар.
@@ -480,7 +618,11 @@ public class ConfluenceMatrixEngine(
             ? $"\u2022 \u26a1 Нейросеть (LightGBM): {(mlSignal.Direction == "BUY" ? "ВВЕРХ \u2b06" : "ВНИЗ \u2b07")} ({Math.Round(mlSignal.Confidence * 100)}% уверенности){modelAccText}"
             : (mlSignal.ModelVersion == "disabled"
                 ? $"\u2022 \u26a1 Нейросеть (LightGBM): Отключена пользователем"
-                : $"\u2022 \u26a1 Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
+                : mlSignal.ModelVersion == "forex-only"
+                    ? $"\u2022 \u26a1 Нейросеть (LightGBM): Недоступно для крипто"
+                    : mlSignal.ModelVersion == "not-trained"
+                        ? $"\u2022 \u26a1 Нейросеть (LightGBM): Модель обучается (зайдет через пару минут)"
+                        : $"\u2022 \u26a1 Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
 
         string combinedReasoning = $"{smcText}\n{flowText}\n{lgbmText}";
 

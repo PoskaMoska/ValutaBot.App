@@ -102,10 +102,11 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             score += Math.Clamp(microVel / 25.0, -0.40, 0.40);
 
             // RSI with tighter bands (62/38 set above) — still valid, just narrower window
-            // FIX: Increased from 0.30 to 0.75 so extreme RSI can actually veto the microVel+HMA trend 
-            // and prevent the bot from buying the absolute top of a micro-pump.
-            if (rsi > rsiOverbought)      score -= 0.75;
-            else if (rsi < rsiOversold)   score += 0.75;
+            // FIX (Architect): User artificially bumped this to 0.75, which instantly saturated 
+            // the scoring engine to 1.0. Reverted to 0.40. It still vetoes HMA (0.35), 
+            // but leaves room for velocity to affect the final confidence.
+            if (rsi > rsiOverbought)      score -= 0.40;
+            else if (rsi < rsiOversold)   score += 0.40;
 
             // ConnorsRSI follow-through
             double connorsSignalSub = (connorsRsi - 50.0) / 50.0;
@@ -118,19 +119,17 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         else
         {
             // ── Standard minute+ regime logic (unchanged) ────────────────────────────────
-            // FIX: Continuous ADX Regime Blending (Removes the Binary Cliff)
-            // Instead of violently flipping from 100% mean-reversion at ADX=19.9 to 100% trend-following at ADX=25.1,
-            // we calculate a smooth trend multiplier [0.0 to 1.0] based on ADX.
             double trendMultiplier = Math.Clamp((adxVal - 18.0) / 10.0, 0.0, 1.0); // 18 -> 0%, 28 -> 100%
             double rangeMultiplier = 1.0 - trendMultiplier;
 
             // 1. Ranging Signals (scaled by rangeMultiplier)
-            if (rsi > rsiOverbought) score -= 0.8 * rangeMultiplier;
-            else if (rsi < rsiOversold) score += 0.8 * rangeMultiplier;
+            // Reverted user's 0.8 bump back to 0.5 to prevent saturation.
+            if (rsi > rsiOverbought) score -= 0.5 * rangeMultiplier;
+            else if (rsi < rsiOversold) score += 0.5 * rangeMultiplier;
             
             // Neutral zone RSI (applies mostly in transition, scales down as trend strengthens)
-            if (rsi > 75.0 && rsi <= rsiOverbought) score -= 0.4 * rangeMultiplier;
-            else if (rsi < 25.0 && rsi >= rsiOversold) score += 0.4 * rangeMultiplier;
+            if (rsi > 75.0 && rsi <= rsiOverbought) score -= 0.25 * rangeMultiplier;
+            else if (rsi < 25.0 && rsi >= rsiOversold) score += 0.25 * rangeMultiplier;
 
             // 2. Trending Signals (scaled by trendMultiplier)
             if (pdiVal > mdiVal) score += 0.6 * trendMultiplier;
@@ -196,6 +195,11 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         // RSI extremes add conviction
         if (rsi <= 30.0 || rsi >= 70.0)
             confidence += Math.Min(Math.Abs(rsi - 50.0) * 0.3, 5.0);
+
+        // FIX: The user recently increased RSI contribution (e.g. 0.75/0.8), causing the raw sum 
+        // to exceed the [-1.0, +1.0] design scale, leading to perpetual 90-95% probability.
+        // We must clamp the final score here to preserve math integrity across engines.
+        score = Math.Clamp(score, -1.0, 1.0);
 
         // Now achievable max: 60 (base) + 20 (ADX) + 10 (volume) + 5 (RSI) = 95
         return (score, Math.Clamp(confidence, 50.0, 95.0), Math.Round(rsi, 1), Math.Round(hma, 5), Math.Round(volStrength, 2), Math.Round(atrVal, 6));

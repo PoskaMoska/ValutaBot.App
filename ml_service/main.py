@@ -506,8 +506,17 @@ def predict(req: PredictRequest):
 
     predictor = _get_predictor(req.symbol, interval, regime)
 
-    # Auto-train in background if model is stale or missing
-    # [REMOVED: lazy mid-day retraining to prevent CPU spikes during active trading]
+    # Auto-train in background if model is missing
+    if model is None and not predictor.is_training:
+        predictor.is_training = True
+        log.info(f"[Predict] Model missing for {req.symbol} ({interval}). Triggering background training.")
+        import threading
+        t = threading.Thread(
+            target=_background_train, 
+            args=(req.symbol, interval, candle_dicts, mtf_candle_dicts), 
+            daemon=True
+        )
+        t.start()
 
     direction, confidence, version = predictor.predict(candle_dicts, mtf_candle_dicts)
 

@@ -212,11 +212,11 @@ export async function executeAnalysis() {
             const wPhase = document.getElementById("weatherPhase");
             if (wPhase && data.uiMarketPhase) {
                 wPhase.innerText = data.uiMarketPhase;
-                let phaseColor = "#10b981";
-                if (data.uiMarketPhase.includes("Боковик") || data.uiMarketPhase.includes("Неопределенность") || data.uiMarketPhase.includes("Слабый")) {
-                    phaseColor = "#f59e0b";
-                } else if (data.uiMarketPhase.includes("Волатильный") || data.uiMarketPhase.includes("Резкий") || data.uiMarketPhase.includes("Шум")) {
-                    phaseColor = "#ef4444";
+                let phaseColor = "#10b981"; // Green default
+                if (data.uiMarketPhase.includes("Замедление") || data.uiMarketPhase.includes("Переход")) {
+                    phaseColor = "#f59e0b"; // Yellow (Average)
+                } else if (data.uiMarketPhase.includes("Боковик") || data.uiMarketPhase.includes("Неопределенность") || data.uiMarketPhase.includes("Слабый") || data.uiMarketPhase.includes("Волатильный") || data.uiMarketPhase.includes("Резкий") || data.uiMarketPhase.includes("Шум")) {
+                    phaseColor = "#ef4444"; // Red (Bad)
                 }
                 wPhase.style.color = phaseColor;
             }

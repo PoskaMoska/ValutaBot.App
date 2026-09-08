@@ -11,12 +11,20 @@ public record StateSignal(string Regime, double VelocityBpsPerSec, double Moment
 
 public interface IConfluenceMatrixEngine
 {
-    // The previous 4D Matrix method is still useful for internal use, but we expose a unified Eval.
+    // FIX PRIORITY-1: Перегрузка с уже загруженными свечами (избегает 3 лишних HTTP-запроса).
+    // primaryCandles и macroCandles уже загружены Orchestrator'ом — передаём их напрямую.
+    // Только microTF требует отдельного fetch (1 запрос вместо 3).
     Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
         string asset,
         string primaryTimeframe,
         bool isForex = false,
-        string? binanceSymbol = null);
+        string? binanceSymbol = null,
+        MiniAppController.OhlcCandle[]? primaryCandles = null,
+        double[]? primaryPrices = null,
+        double[]? primaryVolumes = null,
+        MiniAppController.OhlcCandle[]? macroCandles = null,
+        double[]? macroPrices = null,
+        double[]? macroVolumes = null);
 
     // The new unified Confluence hub method
     Task<ConsensusDecision> EvaluateMatrixAsync(

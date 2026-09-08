@@ -574,7 +574,15 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         
         var stateSignal = new StateSignal(_continuousState?.VelocityRegime ?? "UNKNOWN", _continuousState?.VelocityBpsPerSec ?? 0, _continuousState?.MomentumContribution ?? 0);
 
-        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(_asset, _timeframe, _isForex, _symbol);
+        // FIX PRIORITY-1: Передаём уже загруженные свечи в Evaluate4DMatrixAsync.
+        // Экономит 2 HTTP-запроса к TwelveData, решая проблему Rate Limit.
+        double[] higherPrices = _higherOhlcCandles?.Select(c => c.Close).ToArray() ?? Array.Empty<double>();
+        double[] higherVolumes = _higherOhlcCandles?.Select(c => c.Volume).ToArray() ?? Array.Empty<double>();
+
+        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(
+            _asset, _timeframe, _isForex, _symbol,
+            _ohlcCandles, _mainPrices, _mainVolumes,
+            _higherOhlcCandles, higherPrices, higherVolumes);
 
                 int consecutiveLosses = TradeOutcomeTracker.GetConsecutiveLosses(_asset, _timeframe);
         double volRatio = _marketAnalyzer.CalculateVolatilityRatio(_mainPrices);

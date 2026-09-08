@@ -54,7 +54,10 @@ public static class SignalTracker
             _ => { isOnCooldown = false; return now; },
             (_, lastSignalAt) =>
             {
-                if ((now - lastSignalAt).TotalSeconds >= 3)
+                // FIX PRIORITY-6: Cooldown увеличен с 3 до 10 секунд
+                // 3 секунды слишком мало: race condition при быстрых последовательных запросах (клик+клик)
+                // приводил к дублированию сигналов в БД, что ломало AutoCalibration и ML RL.
+                if ((now - lastSignalAt).TotalSeconds >= 10)
                 {
                     isOnCooldown = false;
                     return now;
