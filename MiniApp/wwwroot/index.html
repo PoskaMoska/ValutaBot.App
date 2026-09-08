@@ -143,9 +143,9 @@
         <!-- Top 3 result cards (always visible after analysis) -->
         <div class='results-grid' id='resultsGrid' style='display:none'>
             <div class='res-card'>
-                <div class='res-label' style='display:flex; justify-content:space-between; align-items:center; width:100%'>
+                <div class='res-label' style='display:flex; justify-content:center; align-items:center; width:100%; position:relative;'>
                     <span>Вероятность</span>
-                    <span id='goldenSetupBadgeMain' style='display:none;font-size:9px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 4px;border-radius:6px'>⭐ GOLDEN</span>
+                    <span id='goldenSetupBadgeMain' style='display:none;position:absolute;top:-10px;right:-4px;font-size:8px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 3px;border-radius:4px'>⭐ GOLDEN</span>
                 </div>
                 <div class='res-value' id='resProb' style='color:var(--accent)'>--%</div>
                 <div class='res-chart' id='probChart'></div>
