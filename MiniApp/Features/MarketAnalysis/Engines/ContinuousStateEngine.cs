@@ -47,59 +47,99 @@ public static class ContinuousStateEngine
         int n = prices.Length;
         double currentPrice = prices[^1];
 
-        // SG 1st derivative coefficients: [-2, -1, 0, 1, 2] / 10
+        int tfSeconds = timeframe.ToLower() switch
+        {
+            "s5"  => 5, "s10" => 10, "s15" => 15, "s30" => 30,
+            "m1"  => 60, "m3"  => 180, "m5"  => 300, "m15" => 900, "m30" => 1800,
+            _     => 60
+        };
+        bool isSubMinute = tfSeconds < 60;
+
+        // 1. Calculate Dynamic Volatility (Proxy for ATR / Measurement Noise)
+        double sumDiff = 0, sumSqDiff = 0;
+        for (int i = 1; i < n; i++)
+        {
+            double diff = prices[i] - prices[i - 1];
+            sumDiff += diff;
+            sumSqDiff += diff * diff;
+        }
+        double meanDiff = sumDiff / (n - 1);
+        double variance = (sumSqDiff / (n - 1)) - (meanDiff * meanDiff);
+        double dynamicAtr = Math.Sqrt(Math.Max(1e-12, variance));
+
+        // 2. Historical SG Derivatives for Z-Score Normalization
+        int velCount = n - 4; // SG filter needs 5 points window
+        double sumVel = 0, sumSqVel = 0, sumAccel = 0, sumSqAccel = 0;
+        
+        for (int i = 4; i < n; i++)
+        {
+            double sgV = (-2.0 * prices[i-4] - 1.0 * prices[i-3] + 0.0 * prices[i-2] + 1.0 * prices[i-1] + 2.0 * prices[i]) / 10.0;
+            double instV = (sgV / Math.Max(1e-8, prices[i-2])) * 10_000.0;
+            sumVel += instV; sumSqVel += instV * instV;
+
+            double sgA = (2.0 * prices[i-4] - 1.0 * prices[i-3] - 2.0 * prices[i-2] - 1.0 * prices[i-1] + 2.0 * prices[i]) / 7.0;
+            double instA = (sgA / Math.Max(1e-8, prices[i-2])) * 10_000.0;
+            sumAccel += instA; sumSqAccel += instA * instA;
+        }
+
+        double meanVel = sumVel / velCount;
+        double stdDevVel = Math.Sqrt(Math.Max(1e-12, (sumSqVel / velCount) - (meanVel * meanVel)));
+        double minStdDevV = isSubMinute ? 0.05 : 0.5; // Prevent infinity in completely dead markets
+        stdDevVel = Math.Max(minStdDevV, stdDevVel);
+
+        double meanAccel = sumAccel / velCount;
+        double stdDevAccel = Math.Sqrt(Math.Max(1e-12, (sumSqAccel / velCount) - (meanAccel * meanAccel)));
+        double minStdDevA = isSubMinute ? 0.01 : 0.1;
+        stdDevAccel = Math.Max(minStdDevA, stdDevAccel);
+
+        // 3. Current Instantaneous State
         double sgVelocity = (-2.0 * prices[^5] - 1.0 * prices[^4] + 0.0 * prices[^3] + 1.0 * prices[^2] + 2.0 * prices[^1]) / 10.0;
-        double instantVelocity = (sgVelocity / Math.Max(1e-8, prices[^3])) * 10_000.0; // Bps relative to center point
+        double instantVelocity = (sgVelocity / Math.Max(1e-8, prices[^3])) * 10_000.0;
+        double zScoreVel = (instantVelocity - meanVel) / stdDevVel;
 
-        // SG 2nd derivative coefficients: [2, -1, -2, -1, 2] / 7
         double sgAccel = (2.0 * prices[^5] - 1.0 * prices[^4] - 2.0 * prices[^3] - 1.0 * prices[^2] + 2.0 * prices[^1]) / 7.0;
-        double instantAcceleration = (sgAccel / Math.Max(1e-8, prices[^3])) * 10_000.0; // Bps
+        double instantAcceleration = (sgAccel / Math.Max(1e-8, prices[^3])) * 10_000.0;
+        double zScoreAccel = (instantAcceleration - meanAccel) / stdDevAccel;
 
-        // 3. 4th-Order Continuous Kalman State Filtering
-        double kalmanState = FilterKalmanContinuous(prices);
+        // 4. 4th-Order Adaptive Continuous Kalman State Filtering
+        double kalmanState = FilterKalmanContinuous(prices, dynamicAtr, tfSeconds);
 
         string regime;
         double momentumContribution = 0;
         string desc;
 
-        bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
-        // Scale thresholds based on the timeframe resolution.
-        // Sub-minute candles represent fractions of a minute, so basis-point velocity per candle is much smaller.
-        double velThreshold = isSubMinute ? 0.3 : 3.0;
-        double accelThreshold = isSubMinute ? 0.05 : 0.5;
-        double decelThreshold = isSubMinute ? 0.2 : 2.0;
+        // Adaptive Z-Score thresholds instead of hardcoded numbers
+        double zVelThreshold = 1.6;  // ~1.6 Sigma = top ~5% of movements
+        double zAccelThreshold = 1.0; 
+        double zDecelThreshold = 1.2;
 
-        if (instantVelocity > velThreshold && instantAcceleration > accelThreshold)
+        if (zScoreVel > zVelThreshold && zScoreAccel > zAccelThreshold)
         {
             regime = "HYPER_ACCELERATING_UP";
             momentumContribution = 0.45;
-            desc = $"Непрерывный вектор: Гипер-ускорение ВВЕРХ (Velocity={instantVelocity:F2} bps/s, Accel={instantAcceleration:F3} bps/s²).";
+            desc = $"Адаптивный вектор: Гипер-ускорение ВВЕРХ (Z-Vel: +{zScoreVel:F1}σ, Z-Acc: +{zScoreAccel:F1}σ).";
         }
-        else if (instantVelocity < -velThreshold && instantAcceleration < -accelThreshold)
+        else if (zScoreVel < -zVelThreshold && zScoreAccel < -zAccelThreshold)
         {
             regime = "HYPER_ACCELERATING_DOWN";
             momentumContribution = -0.45;
-            desc = $"Непрерывный вектор: Гипер-ускорение ВНИЗ (Velocity={instantVelocity:F2} bps/s, Accel={instantAcceleration:F3} bps/s²).";
+            desc = $"Адаптивный вектор: Гипер-ускорение ВНИЗ (Z-Vel: {zScoreVel:F1}σ, Z-Acc: {zScoreAccel:F1}σ).";
         }
-        else if (Math.Sign(instantVelocity) != Math.Sign(instantAcceleration) && Math.Abs(instantVelocity) > decelThreshold)
+        else if (Math.Sign(instantVelocity) != Math.Sign(instantAcceleration) && Math.Abs(zScoreVel) > zDecelThreshold)
         {
             regime = "DECELERATING";
             momentumContribution = -Math.Sign(instantVelocity) * 0.20;
-            desc = $"Непрерывный вектор: Замедление импульса перед разворотом (Deceleration Phase).";
+            desc = $"Адаптивный вектор: Замедление импульса перед разворотом (Deceleration).";
         }
         else
         {
             regime = "STABLE";
             momentumContribution = 0;
-            desc = $"Непрерывный вектор: Стабильное ламинарное движение (Velocity={instantVelocity:F1} bps/s).";
+            desc = $"Адаптивный вектор: Стабильное движение (в пределах нормы).";
         }
 
-        // Интеграция Kalman-фильтра в скоринг:
-        // Отклонение текущей цены от kalmanState в базисных пунктах — ведущий сигнал перегрева/недогрева.
-        // Цена выше Калмана → импульс вверх; ниже → вниз. Ранее kalmanState вычислялся вхолостую.
-        double kalmanDevBps = currentPrice > 1e-8
-            ? ((currentPrice - kalmanState) / currentPrice) * 10_000.0
-            : 0;
+        // Kalman deviation contribution
+        double kalmanDevBps = currentPrice > 1e-8 ? ((currentPrice - kalmanState) / currentPrice) * 10_000.0 : 0;
         double kalmanContribution = Math.Clamp(kalmanDevBps / 10.0, -0.15, 0.15);
         momentumContribution = Math.Clamp(momentumContribution + kalmanContribution, -0.60, 0.60);
 
@@ -113,16 +153,19 @@ public static class ContinuousStateEngine
         );
     }
 
-    private static double FilterKalmanContinuous(ReadOnlySpan<double> prices)
+    private static double FilterKalmanContinuous(ReadOnlySpan<double> prices, double dynamicAtr, int tfSeconds)
     {
         double currentPrice = prices[^1];
-        // B9-FIX: Clamp noise values to minimum 1e-8 to prevent NaN when currentPrice≈0.
-        // Previously: measurementNoise=currentPrice*0.001=0 when price=0 → k=0/(0+0)=NaN → poisons VelocityRegime and StateSignal.
-        double processNoise = Math.Max(1e-8, currentPrice * 0.0001);
-        double measurementNoise = Math.Max(1e-8, currentPrice * 0.001);
+        
+        // Time-scaled Process Noise (Brownian motion rule: scales with sqrt of time)
+        double baseProcessNoise = Math.Max(1e-8, currentPrice * 0.00001); 
+        double processNoise = baseProcessNoise * Math.Sqrt(tfSeconds);
+
+        // Adaptive Measurement Noise based on actual historical standard deviation
+        double measurementNoise = Math.Max(1e-8, dynamicAtr);
 
         double est = prices[0];
-        double err = Math.Max(1e-8, currentPrice * 0.01);
+        double err = measurementNoise;
         
         for (int i = 0; i < prices.Length; i++) 
         { 

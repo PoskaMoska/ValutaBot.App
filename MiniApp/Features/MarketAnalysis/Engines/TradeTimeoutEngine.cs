@@ -50,58 +50,45 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         int tfSeconds = TimeframeToSeconds(timeframe);
         bool isSubMinute = tfSeconds < 60;
 
-        int baseCandles = 5;
-        string dynamicReason = "Base timeout applied (5 candles).";
+        int baseCandles = 3;
+        string dynamicReason = "Базовая экспирация (3 свечи).";
 
         double lastPrice = currentPrice > 0 ? currentPrice : 1.0;
         double normalizedAtr = atr / lastPrice;
 
-        // Dead-market threshold calibrated for m1 (60s), then scaled linearly by timeframe.
+        // Dead-market threshold
         double baseDeadMarketThreshold = isForex ? 0.000030 : 0.0005;
         double deadMarketThreshold = baseDeadMarketThreshold * (tfSeconds / 60.0);
 
         bool isDeadMarket = atr > 0 && normalizedAtr < deadMarketThreshold;
         bool isZeroAtr = atr <= 0;
 
-        if (isZeroAtr || isDeadMarket || volRatio < 0.3)
+        if (smc.HasOrderBlock || smc.HasFvg || volRatio > 1.5)
         {
-            baseCandles = 3;
-            dynamicReason = isZeroAtr
-                ? "ATR=0: no volatility data. Minimum timeout (3 candles)."
-                : "Dead market detected. Fast timeout (3 candles).";
+            baseCandles = 2;
+            dynamicReason = smc.HasOrderBlock || smc.HasFvg 
+                ? "SMC сигнал (OB/FVG) или высокий импульс. Быстрая экспирация (2 свечи)."
+                : "Высокая волатильность. Быстрая экспирация (2 свечи).";
         }
-        else if (volRatio > 1.5)
+        else if (isZeroAtr || isDeadMarket || volRatio < 0.8)
         {
-            baseCandles = 3;
-            dynamicReason = "High Volatility. Fast timeout to avoid chop (3 candles).";
-        }
-        else if (volRatio < 0.8)
-        {
-            baseCandles = 7;
-            dynamicReason = "Low Volatility. Extended timeout (7 candles).";
+            baseCandles = 4;
+            dynamicReason = "Низкая волатильность или консолидация. Расширенная экспирация (4 свечи).";
         }
 
-        if (smc.HasOrderBlock || smc.HasFvg)
-        {
-            baseCandles = (int)(baseCandles * 0.6);
-            if (baseCandles < 3) baseCandles = 3;
-            dynamicReason += " | SMC: OrderBlock/FVG detected. Timeout cut by 40%.";
-        }
-
-        // Per-timeframe minimum candle floor.
-        // s5: min 5 candles = 25s (PocketOption minimum expiry).
-        // Other sub-minute TFs get proportional floors.
+        // Sub-minute floor logic (Защита от тикового шума)
         int minCandles = timeframe.ToLower() switch
         {
-            "s5"  => 5,
-            "s10" => 3,
-            "s15" => 3,
-            "s30" => 3,
-            _     => 3
+            "s5"  => 4, // 20 секунд минимум
+            "s10" => 3, // 30 секунд минимум
+            "s15" => 3, // 45 секунд минимум
+            "s30" => 2, // 60 секунд минимум
+            _     => 2  // Для M1 и выше минимум 2 свечи
         };
+
         if (baseCandles < minCandles)
         {
-            dynamicReason += $" | Floor: minimum {minCandles} candles enforced for {timeframe}.";
+            dynamicReason += $" | Floor: защита от шума, минимум {minCandles} свечей для {timeframe}.";
             baseCandles = minCandles;
         }
 
