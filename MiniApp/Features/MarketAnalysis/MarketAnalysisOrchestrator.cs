@@ -99,8 +99,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     private bool IsSettingEnabled(bool globalSetting, bool? userSetting)
     {
-        if (userSetting.HasValue) return userSetting.Value;
-        return globalSetting;
+        return true;
     }
 
     private double GetSafeLimit(double value)

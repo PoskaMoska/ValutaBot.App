@@ -24,13 +24,11 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             {
                 inline_keyboard = new object[]
                 {
-                    new object[] { new { text = $"{(settings.EnableMl ? "🟢" : "🔴")} Нейросети (ИИ)", callback_data = "toggle_ml" } },
-                    new object[] { new { text = $"{(settings.EnableSmc ? "🟢" : "🔴")} SMC Структура", callback_data = "toggle_smc" } },
-                    new object[] { new { text = $"{(settings.EnableOf ? "🟢" : "🔴")} Order Flow", callback_data = "toggle_of" } }
+                    // Toggles removed as per request to prevent disabling core features.
                 }
             };
 
-            string text = "⚙️ <b>Настройки</b>\n\nОтключенные модули скрыты из интерфейса и не тратят ресурсы сервера.";
+            string text = "⚙️ <b>Настройки</b>\n\nВсе аналитические модули (ИИ, SMC, Order Flow) работают в принудительном режиме и не могут быть отключены.";
 
             await ValutaBot.MiniApp.TelegramBotService.SendMessageWithKeyboard(token, chatId, text, inlineKeyboard);
         }
