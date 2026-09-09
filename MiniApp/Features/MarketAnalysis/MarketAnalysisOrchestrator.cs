@@ -53,7 +53,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     private string _lgbmDirection = "NEUTRAL";
     private double _lgbmConfidence = 0.5;
-    private string _lgbmModelVersion = "disabled";
+    private string _lgbmModelVersion = "offline";
     private double? _lgbmAccuracy = null;
     private MLPythonService.MLPythonPrediction? _prediction;
     private ContinuousStateResult? _continuousState;

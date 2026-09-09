@@ -622,7 +622,9 @@ public class ConfluenceMatrixEngine(
                     ? $"\u2022 \u26a1 Нейросеть (LightGBM): Недоступно для крипто"
                     : mlSignal.ModelVersion == "not-trained"
                         ? $"\u2022 \u26a1 Нейросеть (LightGBM): Модель обучается (зайдет через пару минут)"
-                        : $"\u2022 \u26a1 Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
+                        : mlSignal.ModelVersion == "offline"
+                            ? $"\u2022 \u26a1 Нейросеть (LightGBM): Сервис недоступен (Оффлайн)"
+                            : $"\u2022 \u26a1 Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
 
         string combinedReasoning = $"{smcText}\n{flowText}\n{lgbmText}";
 
