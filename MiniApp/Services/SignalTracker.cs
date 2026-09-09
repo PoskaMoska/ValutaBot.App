@@ -128,7 +128,6 @@ public static class SignalTracker
 
                     // Invalidate signal votes cache so UI refreshes
                     _signalVotesCacheExpiry = DateTime.MinValue;
-                    }
                 }
                 else
                 {
