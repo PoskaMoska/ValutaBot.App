@@ -36,7 +36,10 @@ public static partial class TwelveDataService
 
     public static async Task<(double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles)?> FetchCandlesAsync(string rawAsset, string interval, int limit = 100, int cacheTtlSeconds = 45)
     {
-        string key = $"TWELVE_DATA_{AssetSanitizer.Sanitize(rawAsset)}_{interval.ToLower()}_{limit}";
+        // FIX P1: Removed limit from cache key. ConfluenceMatrix asks for limit=50, Orchestrator for 150.
+        // With limit in the key, they were 2 separate HTTP requests, burning the 7 req/min rate limit.
+        // Now they share the cache and the first fetch serves both.
+        string key = $"TWELVE_DATA_{AssetSanitizer.Sanitize(rawAsset)}_{interval.ToLower()}";
 
         if (cacheTtlSeconds > 0 && _memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) cachedData))
         {

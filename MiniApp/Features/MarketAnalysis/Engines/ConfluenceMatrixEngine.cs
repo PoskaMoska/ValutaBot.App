@@ -43,9 +43,9 @@ public class ConfluenceMatrixEngine(
             var (primaryPrices, primaryVolumes) = await primaryTask;
             var (macroPrices,   macroVolumes)   = await macroTask;
 
-            string dirMicro   = ScoreDirection(microPrices,   microVolumes, microTf);
-            string dirPrimary = ScoreDirection(primaryPrices, primaryVolumes, primaryTf);
-            string dirMacro   = ScoreDirection(macroPrices,   macroVolumes, macroTf);
+            string dirMicro   = ScoreDirection(microPrices,   microVolumes, microTf, asset);
+            string dirPrimary = ScoreDirection(primaryPrices, primaryVolumes, primaryTf, asset);
+            string dirMacro   = ScoreDirection(macroPrices,   macroVolumes, macroTf, asset);
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -132,7 +132,7 @@ public class ConfluenceMatrixEngine(
     /// candles.Length == 0 &lt; 14 в†’ always return score=0.0 в†’ always "NEUTRAL".
     /// Now constructs a real OhlcCandle[] from price/volume arrays.
     /// </summary>
-    private string ScoreDirection(double[] prices, double[] volumes, string tf)
+    private string ScoreDirection(double[] prices, double[] volumes, string tf, string asset = "global")
     {
         if (prices == null || prices.Length < 10) 
         {
@@ -178,16 +178,17 @@ public class ConfluenceMatrixEngine(
                 );
             }
 
-            // AUDIT FIX: передаём реальный tf как asset-ключ (вместо "internal") чтобы IndicatorCache
-            // корректно разделял кэши по таймфреймам матрицы (m1/m3/m5 и т.д.).
+            // FIX ROOT CAUSE #3: Include asset in cache key so different assets don't share
+            // indicator state inside ConfluenceMatrix. Previously "4dmatrix_{tf}" was the same
+            // for EUR/USD and GBP/USD analysed concurrently → cross-asset RSI/HMA bleeding.
             var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
-                $"4dmatrix_{tf}", tf, prices,
+                $"4dmatrix_{asset}_{tf}", tf, prices,
                 volumes: volumes,
                 candles: candles.AsSpan(0, prices.Length)
             );
 
-            // РџРѕСЂРѕРі РїРѕРґРЅСЏС‚ СЃ В±0.10 РґРѕ В±0.20: РїСЂРё С€РєР°Р»Рµ [-1, +1] РїСЂРµР¶РЅРёР№ РїРѕСЂРѕРі 0.10
-            // РєР»Р°СЃСЃРёС„РёС†РёСЂРѕРІР°Р» ~80% С€СѓРјРѕРІРѕРіРѕ СЂС‹РЅРєР° РєР°Рє РЅР°РїСЂР°РІР»РµРЅРЅС‹Р№ СЃРёРіРЅР°Р» (BUY/PUT).
+            // Порог поднят с ±0.10 до ±0.20: при шкале [-1, +1] прежний порог 0.10
+            // классифицировал ~80% шумового рынка как направленный сигнал (BUY/PUT).
             return score > 0.20 ? "BUY" : score < -0.20 ? "PUT" : "NEUTRAL";
         }
         finally
@@ -196,6 +197,7 @@ public class ConfluenceMatrixEngine(
         }
     }
 
+
     // FIX PRIORITY-4: Скоринг направления на основе реальных OhlcCandle[] (из Orchestrator'а).
     // В отличие от ScoreDirection (который строил OHLC синтетически из avgDiff±0.5),
     // этот метод передаёт реальные High/Low свечей → ATR/ADX корректны → нет шума ±12%.
@@ -203,7 +205,8 @@ public class ConfluenceMatrixEngine(
         MiniAppController.OhlcCandle[] ohlcCandles,
         double[] prices,
         double[] volumes,
-        string tf)
+        string tf,
+        string asset = "global")
     {
         if (prices == null || prices.Length < 10 || ohlcCandles == null || ohlcCandles.Length < 10)
         {
@@ -214,9 +217,9 @@ public class ConfluenceMatrixEngine(
         try
         {
             // Передаём реальные OhlcCandle[] (с настоящими High/Low) напрямую в ScoreTimeframe
-            // AUDIT FIX: используем реальный tf как asset-ключ для изоляции кэша по TF
+            // FIX ROOT CAUSE #3: Include asset in cache key for per-asset isolation
             var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
-                $"4dmatrix_{tf}", tf, prices,
+                $"4dmatrix_{asset}_{tf}", tf, prices,
                 volumes: volumes,
                 candles: ohlcCandles.AsSpan()
             );
@@ -230,6 +233,7 @@ public class ConfluenceMatrixEngine(
             return "NEUTRAL";
         }
     }
+
 
     // FIX PRIORITY-1: Перегрузка принимает уже загруженные primary+macro свечи из Orchestrator'а.
     // Только microTF требует отдельного fetch (1 HTTP-запрос вместо 3).
@@ -266,13 +270,14 @@ public class ConfluenceMatrixEngine(
             var (microPricesRaw, microVolumesRaw) = await fetcher.FetchBinanceWithFallback(
                 binanceSymbol, microTf, asset, 50);
 
-            string dirMicro   = ScoreDirection(microPricesRaw, microVolumesRaw, microTf);
+            string dirMicro   = ScoreDirection(microPricesRaw, microVolumesRaw, microTf, asset);
 
             // FIX PRIORITY-4: Используем реальный OHLC вместо синтетического avgDiff±0.5
             string dirPrimary = ScoreDirectionFromCandles(
-                primaryCandles, primaryPrices, primaryVolumes ?? Array.Empty<double>(), primaryTf);
+                primaryCandles, primaryPrices, primaryVolumes ?? Array.Empty<double>(), primaryTf, asset);
             string dirMacro   = ScoreDirectionFromCandles(
-                macroCandles, macroPrices, macroVolumes ?? Array.Empty<double>(), macroTf);
+                macroCandles, macroPrices, macroVolumes ?? Array.Empty<double>(), macroTf, asset);
+
 
             var tfDirs = new Dictionary<string, string>
             {

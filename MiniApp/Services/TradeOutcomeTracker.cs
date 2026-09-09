@@ -86,22 +86,25 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord);
 
             bool wasCorrect = record.WasCorrect ?? false;
-double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
+            double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
+            
+            bool isDoji = Math.Abs(record.PnlBps) < 1e-4; // 1e-8 * 10000 = 1e-4 bps
 
-string lossKey = $"{record.Asset}_{record.Timeframe}";
-if (wasCorrect)
-{
-    _consecutiveLosses[lossKey] = 0;
-}
-else
-{
-    _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
-}
+            if (isDoji)
+            {
+                BotLogger.Warn($"[TradeOutcomeTracker] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
+                return;
+            }
 
-            // РО (Pocket Option) Fix: The old secondary 'noise threshold' filter (0.00005 = 5 pips) was completely removed here.
-            // On Pocket Option, over 60% of 1-minute trades close within a 1-4 pip margin.
-            // By returning early, the ML RL loop was being starved of its most critical data.
-            // Since SignalTracker.cs already filters exact Refunds, every trade reaching this method is a guaranteed binary Win/Loss and must be processed.
+            string lossKey = $"{record.Asset}_{record.Timeframe}";
+            if (wasCorrect)
+            {
+                _consecutiveLosses[lossKey] = 0;
+            }
+            else
+            {
+                _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
+            }
 
             if (record.SourceDirections != null && record.SourceDirections.Count > 0)
             {
@@ -112,6 +115,7 @@ else
                     {
                         bool wasSourceCorrect = (kv.Value == winDirection);
                         CalibrationEngine?.RecordSourceOutcome(kv.Key, record.Asset, record.Timeframe, wasSourceCorrect);
+                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kv.Key, wasSourceCorrect);
                     }
                 }
             }
@@ -120,6 +124,9 @@ else
                 // Старая сделка без source_directions. Только глобальный исход.
                 CalibrationEngine?.RecordSourceOutcome("GLOBAL", record.Asset, record.Timeframe, wasCorrect);
             }
+            
+            // Record ensemble outcome
+            CalibrationEngine?.RecordSourceOutcome("ENSEMBLE", record.Asset, record.Timeframe, wasCorrect);
 
             // L2-FIX: Сохраняем актуальное EMA-состояние в БД (асинхронно, чтобы не блокировать основной поток)
             _ = Task.Run(async () =>
@@ -218,6 +225,7 @@ else
             BotLogger.Error($"[TradeOutcomeTracker] Error processing trade outcome for {record.Id}", ex);
         }
     }
+
 }
 
 

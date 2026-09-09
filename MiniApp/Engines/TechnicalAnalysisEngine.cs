@@ -32,7 +32,9 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
 
     public (double score, double confidence, double rsiVal, double hmaVal, double volStrengthVal, double atrVal) ScoreTimeframe(
         string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<double> volumes, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default,
-        double? adxOverride = null, double? atrOverride = null, bool isForex = false)
+        double? adxOverride = null, double? atrOverride = null, bool isForex = false,
+        double? pdiOverride = null, double? mdiOverride = null)
+
     {
         if (prices.Length < 14 || candles.Length < 14)
         {
@@ -59,8 +61,9 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         double lastPrice  = prices[^1];
 
         var (adxVal, pdiVal, mdiVal) = adxOverride.HasValue
-            ? (adxOverride.Value, 0.0, 0.0)
+            ? (adxOverride.Value, pdiOverride ?? 0.0, mdiOverride ?? 0.0)
             : (candles.Length > 0 ? ComputeTrueAdx(asset, timeframe, candles, adxPeriod) : (20.0, 0.0, 0.0));
+
 
         double atrVal = atrOverride.HasValue
             ? atrOverride.Value

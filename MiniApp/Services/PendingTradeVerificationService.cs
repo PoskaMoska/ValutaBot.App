@@ -103,47 +103,13 @@ public class PendingTradeVerificationService : BackgroundService
         bool isCorrect = (record.Direction == "BUY" && exitPrice.Value > record.EntryPrice)
                       || (record.Direction == "PUT" && exitPrice.Value < record.EntryPrice);
 
-        // Always write to trade_outcomes — user must see all trades, including Doji
-        await TradeRepository.SaveTradeOutcomeAsync(new TradeOutcomeRecord
-        {
-            Id         = record.Id,
-            Direction  = record.Direction,
-            Asset      = record.Asset,
-            Timeframe  = record.Timeframe,
-            EntryPrice = record.EntryPrice,
-            ExitPrice  = exitPrice.Value,
-            PnlBps     = Math.Round(priceDiff * 10000, 2),
-            WasWin     = isCorrect,
-            CreatedAt  = record.CreatedAt.ToString("O"),
-            VerifiedAt = DateTime.UtcNow.ToString("O")
-        });
+        // Delegate all post-trade telemetry (DB, ML RL, Calibration, WalkForward, ConsecutiveLosses)
+        record.ExitPrice = exitPrice.Value;
+        record.PnlBps = Math.Round(priceDiff * 10000, 2);
+        record.WasCorrect = isCorrect;
+
+        await TradeOutcomeTracker.OnTradeVerifiedAsync(record);
         await TradeRepository.DeletePendingTradeAsync(record.Id);
-
-        if (isDoji)
-        {
-            BotLogger.Warn($"[PendingVerifier] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
-            return;
-        }
-
-        foreach (var kvp in record.SourceDirections)
-        {
-            if (kvp.Value == "NEUTRAL") continue;
-            bool isSourceCorrect = (kvp.Value == "BUY" && exitPrice.Value > record.EntryPrice)
-                                || (kvp.Value == "PUT" && exitPrice.Value < record.EntryPrice);
-            await TradeRepository.RecordSignalVoteAsync(kvp.Key, isSourceCorrect);
-        }
-
-        if (TradeOutcomeTracker.WfEngine != null)
-            TradeOutcomeTracker.WfEngine.RecordTradeOutcome(record.Asset, record.Timeframe, isCorrect);
-        if (TradeOutcomeTracker.CalibrationEngine != null)
-            TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", record.Asset, record.Timeframe, isCorrect);
-
-        // FIX C-1: Pass entry timestamp so SGD fetches candles BEFORE trade entry,
-        // not at verification time (which would be look-ahead bias).
-        _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
-            record.Asset, record.Timeframe, record.EntryPrice, exitPrice.Value,
-            record.Direction, wasWin: isCorrect, isForex: record.IsForex,
-            entryTime: record.CreatedAt));
 
         BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {(isCorrect ? "WIN" : "LOSS")}");
     }

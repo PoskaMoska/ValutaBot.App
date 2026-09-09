@@ -118,53 +118,16 @@ public static class SignalTracker
                     bool isCorrect = (direction == "BUY" && exitPrice.Value > price) || (direction == "PUT" && exitPrice.Value < price);
                     bool isDoji = Math.Abs(priceDiff) < 1e-8;
 
-                    // Always save the trade outcome — even Doji. User must see all their trades.
-                    await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(
-                        new ValutaBot.App.MiniApp.Data.Repositories.TradeOutcomeRecord
-                        {
-                            Id = record.Id,
-                            Direction = direction,
-                            Asset = asset,
-                            Timeframe = timeframe,
-                            EntryPrice = price,
-                            ExitPrice = exitPrice.Value,
-                            PnlBps = Math.Round(priceDiff * 10000, 2),
-                            WasWin = isCorrect,
-                            CreatedAt = record.CreatedAt.ToString("O"),
-                            VerifiedAt = DateTime.UtcNow.ToString("O")
-                        });
+                    // Delegate all post-trade telemetry (DB, ML RL, Calibration, WalkForward, ConsecutiveLosses)
+                    record.ExitPrice = exitPrice.Value;
+                    record.PnlBps = Math.Round(priceDiff * 10000, 2);
+                    record.WasCorrect = isCorrect;
+                    
+                    await TradeOutcomeTracker.OnTradeVerifiedAsync(record);
                     await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
 
-                    // Record per-source signal votes (skip for Doji — no meaningful result)
-                    if (!isDoji)
-                    {
-                        foreach (var kvp in record.SourceDirections)
-                        {
-                            if (kvp.Value == "NEUTRAL") continue;
-                            bool isSourceCorrect = (kvp.Value == "BUY" && exitPrice.Value > price) || (kvp.Value == "PUT" && exitPrice.Value < price);
-                            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kvp.Key, isSourceCorrect);
-                            
-                            // FIX: Update AutoCalibration engine per-source so individual component weights adapt!
-                            if (TradeOutcomeTracker.CalibrationEngine != null)
-                                TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome(kvp.Key, asset, timeframe, isSourceCorrect);
-                        }
-
-                        // Update WalkForward engine
-                        if (TradeOutcomeTracker.WfEngine != null)
-                            TradeOutcomeTracker.WfEngine.RecordTradeOutcome(asset, timeframe, isCorrect);
-
-                        // Update AutoCalibration engine for ENSEMBLE (overall performance)
-                        if (TradeOutcomeTracker.CalibrationEngine != null)
-                            TradeOutcomeTracker.CalibrationEngine.RecordSourceOutcome("ENSEMBLE", asset, timeframe, isCorrect);
-
-                        // Skip ML feedback for Doji - no real directional move to learn from
-                        // ROOT CAUSE FIX: Pass record.CreatedAt to prevent Future Leakage in Python ML SGD
-                        _ = Task.Run(() => MLPythonService.RecordOnlineTradeOutcomeAsync(
-                            asset, timeframe, price, exitPrice.Value,
-                            direction, wasWin: isCorrect, isForex: record.IsForex, entryTime: record.CreatedAt));
-
-                        // Invalidate signal votes cache so UI refreshes
-                        _signalVotesCacheExpiry = DateTime.MinValue;
+                    // Invalidate signal votes cache so UI refreshes
+                    _signalVotesCacheExpiry = DateTime.MinValue;
                     }
                 }
                 else

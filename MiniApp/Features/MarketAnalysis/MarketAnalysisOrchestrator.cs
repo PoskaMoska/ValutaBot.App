@@ -368,9 +368,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     } catch (Exception) { /* ignore */ }
                 }
 
-                var mlCandles = _ohlcCandles.Length > 1 
-                    ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
-                    : _ohlcCandles;
+                // FIX ROOT CAUSE #2: Send all candles including the current (last) one.
+                // Previously Take(N-1) caused ML to predict from candle N-2 instead of N-1,
+                // creating a systematic -1 candle shift in every ML signal.
+                // IMPORTANT: model must be retrained after this fix to re-align train/predict.
+                var mlCandles = _ohlcCandles;
 
                 _prediction = await MLPythonService.PredictAsync(_asset, _timeframe, mlCandles, _isForex, higherOhlcForMl);
                 if (_prediction != null)
@@ -497,7 +499,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         (_mainAdx, _mainPdi, _mainMdi) = _ohlcCandles != null ? _mathEngine.ComputeTrueAdx(_asset, _timeframe, _ohlcCandles) : (20.0, 0.0, 0.0);
         _mainAtr = _ohlcCandles != null ? _mathEngine.ComputeAtr(_asset, _timeframe, _ohlcCandles) : 0;
 
-        _mainResult = _marketAnalyzer.ScoreTimeframe(_asset, _timeframe, _mainPrices, _mainVolumes ?? Array.Empty<double>(), candles: _ohlcCandles, adxOverride: _mainAdx, atrOverride: _mainAtr, isForex: _isForex);
+        _mainResult = _marketAnalyzer.ScoreTimeframe(_asset, _timeframe, _mainPrices, _mainVolumes ?? Array.Empty<double>(), candles: _ohlcCandles, adxOverride: _mainAdx, atrOverride: _mainAtr, isForex: _isForex, pdiOverride: _mainPdi, mdiOverride: _mainMdi);
+
 
         if (_higherResultData != null)
         {
@@ -540,7 +543,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
             var (hAdx, hPdi, hMdi) = higherOhlc != null ? _mathEngine.ComputeTrueAdx(_asset, _higherTf ?? "", higherOhlc) : (20.0, 0.0, 0.0);
             double hAtr = higherOhlc != null ? _mathEngine.ComputeAtr(_asset, _higherTf ?? "", higherOhlc) : 0;
-            var higherResult = _marketAnalyzer.ScoreTimeframe(_asset, _higherTf ?? "", _higherResultData.Value.prices, _higherResultData.Value.volumes ?? Array.Empty<double>(), candles: higherOhlc, adxOverride: hAdx, atrOverride: hAtr, isForex: _isForex);
+            var higherResult = _marketAnalyzer.ScoreTimeframe(_asset, _higherTf ?? "", _higherResultData.Value.prices, _higherResultData.Value.volumes ?? Array.Empty<double>(), candles: higherOhlc, adxOverride: hAdx, atrOverride: hAtr, isForex: _isForex, pdiOverride: hPdi, mdiOverride: hMdi);
+
 
             lock (_penaltyLock)
             {

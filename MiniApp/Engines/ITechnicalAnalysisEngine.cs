@@ -18,7 +18,9 @@ public interface IMarketAnalyzer
 {
     (double score, double confidence, double rsiVal, double hmaVal, double volStrengthVal, double atrVal) ScoreTimeframe(
         string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<double> volumes, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default,
-        double? adxOverride = null, double? atrOverride = null, bool isForex = false);
+        double? adxOverride = null, double? atrOverride = null, bool isForex = false,
+        double? pdiOverride = null, double? mdiOverride = null);
+
     
     double CalculateVolatilityRatio(ReadOnlySpan<double> prices);
 }
