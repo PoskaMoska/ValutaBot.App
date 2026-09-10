@@ -1,5 +1,5 @@
 import { tg, currentAsset, currentTf, getCustomInitData } from './main.js';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, switchResultTab, parseMd, pricesToBars } from './ui.js';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars } from './ui.js';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -333,16 +333,33 @@ export async function executeAnalysis() {
             }
             */
 
-            // Reasoning Card
-            if (data.claudeReasoning) {
-                const rCard = document.getElementById('reasoningCard');
-                if (rCard) rCard.style.display = 'block';
-                const rText = document.getElementById('reasoningText');
-                if (rText) rText.innerText = data.claudeReasoning;
-                const rDir = document.getElementById('reasoningDir');
-                if (rDir) {
-                    rDir.innerText = data.direction === 'BUY' ? 'ВВЕРХ' : data.direction === 'PUT' ? 'ВНИЗ' : 'НЕЙТРАЛЬНО';
-                    rDir.style.color = data.direction === 'BUY' ? '#a78bfa' : data.direction === 'PUT' ? '#f472b6' : 'var(--dim)';
+            // Consensus Radar Card
+            const rCard = document.getElementById('consensusRadarCard');
+            if (rCard) {
+                // Show the radar if there is a direction
+                if (data.direction) {
+                    rCard.style.display = 'block';
+
+                    // Formatting helper
+                    const formatDir = (dir, conf) => {
+                        if (dir === 'BUY') return `<span style='color:#10b981'>🟩 ВВЕРХ${conf ? ` (${conf}%)` : ''}</span>`;
+                        if (dir === 'PUT') return `<span style='color:#ef4444'>🟥 ВНИЗ${conf ? ` (${conf}%)` : ''}</span>`;
+                        return `<span style='color:var(--subtext)'>🟨 НЕЙТРАЛЬНО</span>`;
+                    };
+
+                    const rMl = document.getElementById('radarMl');
+                    if (rMl) rMl.innerHTML = formatDir(data.lgbmDirection, data.lgbmConfidence);
+
+                    const rSmc = document.getElementById('radarSmc');
+                    if (rSmc) rSmc.innerHTML = formatDir(data.smcDirection);
+
+                    const rOf = document.getElementById('radarOf');
+                    if (rOf) rOf.innerHTML = formatDir(data.ofDirection);
+
+                    const rTa = document.getElementById('radarTa');
+                    if (rTa) rTa.innerHTML = formatDir(data.taDirection);
+                } else {
+                    rCard.style.display = 'none';
                 }
             }
 
@@ -361,8 +378,8 @@ export async function executeAnalysis() {
             }
             */
 
-            const probBars = pricesToBars(data.chartData, 16);
-            if (probBars.length) renderMiniChart('probChart', probBars, '');
+            const probBars = pricesToBars(data.chartData, 20); // Get 20 candles for smoother history
+            if (probBars.length) renderSparklinePrediction('probChart', probBars, data.direction);
 
             renderDirSvg(data.direction);
 

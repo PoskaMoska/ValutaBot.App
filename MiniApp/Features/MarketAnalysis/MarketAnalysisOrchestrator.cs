@@ -726,6 +726,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmConfidence = Math.Round(_lgbmConfidence * 100, 0),
             lgbmAccuracy = _lgbmAccuracy.HasValue ? Math.Round(_lgbmAccuracy.Value * 100, 1) : (double?)null,
             lgbmModelVersion = _lgbmModelVersion,
+            smcDirection = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL",
+            taDirection = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
+            ofDirection = orderFlowDir,
             newsSentiment = "Neutral", // Removed old logic
             newsScore = 0.0,
             newsSummary = "",

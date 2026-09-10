@@ -143,9 +143,9 @@
         <!-- Top 3 result cards (always visible after analysis) -->
         <div class='results-grid' id='resultsGrid' style='display:none'>
             <div class='res-card'>
-                <div class='res-label' style='display:flex; justify-content:center; align-items:center; width:100%; position:relative;'>
+                <div class='res-label' style='display:flex; flex-direction:column; justify-content:center; align-items:center; width:100%; gap: 4px; padding-bottom: 2px;'>
+                    <span id='goldenSetupBadgeMain' style='display:none;font-size:8px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 4px;border-radius:4px;letter-spacing:0.5px;text-transform:uppercase;'>⭐ Golden</span>
                     <span>Вероятность</span>
-                    <span id='goldenSetupBadgeMain' style='display:none;position:absolute;top:-10px;right:-4px;font-size:8px;color:#ffd600;font-weight:700;background:rgba(255,214,0,0.1);border:1px solid rgba(255,214,0,0.3);padding:2px 3px;border-radius:4px'>⭐ GOLDEN</span>
                 </div>
                 <div class='res-value' id='resProb' style='color:var(--accent)'>--%</div>
                 <div class='res-chart' id='probChart'></div>
@@ -232,14 +232,47 @@
                 </div>
             </div>
 
-            <!-- 5. Reasoning Card (consensus analysis text) -->
-            <div class='news-card' id='reasoningCard' style='display:none;margin-bottom:8px'>
+            <!-- 5. Consensus Radar -->
+            <div class='news-card' id='consensusRadarCard' style='display:none;margin-bottom:8px'>
                 <div class='news-header'>
-                    <span class='news-badge' style='background:linear-gradient(135deg,#0ea5e9,#2563eb)'>📊 Математический анализ</span>
-                    <span class='news-label'>Анализ графика</span>
-                    <span class='news-sentiment' id='reasoningDir'>--</span>
+                    <span class='news-badge' style='background:linear-gradient(135deg,#8b5cf6,#6d28d9)'>🎯 Радар решений</span>
+                    <span class='news-label'>Консенсус модулей</span>
                 </div>
-                <div class='news-summary' id='reasoningText' style='max-height:120px;overflow-y:auto;scrollbar-width:thin;padding-right:4px;font-size:10.5px;line-height:1.45;color:var(--subtext);white-space:pre-wrap'></div>
+                <div style='display:grid;grid-template-columns:1fr;gap:6px;margin-top:8px;padding-right:4px;'>
+                    
+                    <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
+                        <div style='display:flex; align-items:center; gap:6px;'>
+                            <span style='font-size:12px;'>🤖</span>
+                            <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Нейросеть (ML)</span>
+                        </div>
+                        <div id='radarMl' style='font-size:10px; font-weight:700;'>--</div>
+                    </div>
+
+                    <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
+                        <div style='display:flex; align-items:center; gap:6px;'>
+                            <span style='font-size:12px;'>📊</span>
+                            <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Smart Money</span>
+                        </div>
+                        <div id='radarSmc' style='font-size:10px; font-weight:700;'>--</div>
+                    </div>
+
+                    <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
+                        <div style='display:flex; align-items:center; gap:6px;'>
+                            <span style='font-size:12px;'>📈</span>
+                            <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Объемы (ОFlow)</span>
+                        </div>
+                        <div id='radarOf' style='font-size:10px; font-weight:700;'>--</div>
+                    </div>
+
+                    <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
+                        <div style='display:flex; align-items:center; gap:6px;'>
+                            <span style='font-size:12px;'>📐</span>
+                            <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Теханализ</span>
+                        </div>
+                        <div id='radarTa' style='font-size:10px; font-weight:700;'>--</div>
+                    </div>
+
+                </div>
             </div>
 
             <!-- 6. News Card (shown only when news is active) -->

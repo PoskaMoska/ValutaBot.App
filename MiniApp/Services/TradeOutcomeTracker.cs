@@ -88,9 +88,9 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             bool wasCorrect = record.WasCorrect ?? false;
             double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
             
-            bool isDoji = Math.Abs(record.PnlBps) < 1e-4; // 1e-8 * 10000 = 1e-4 bps
+            bool isExactDoji = Math.Abs(record.PnlBps) < 1e-4; // Exact tie / Refund
 
-            if (isDoji)
+            if (isExactDoji)
             {
                 BotLogger.Warn($"[TradeOutcomeTracker] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
                 return;
@@ -104,6 +104,19 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             else
             {
                 _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
+            }
+
+            // ── TRAINING DOJI FILTER (Dynamic Noise Threshold) ──
+            // Calculate absolute percentage move. 0.025% is ~3 pips on EUR/USD.
+            // Trades smaller than this are statistical noise (Brownian motion). 
+            // We record them for the user's DB and consecutive losses, but hide them from ML to prevent weight poisoning.
+            double pctDiff = record.EntryPrice > 1e-8 ? Math.Abs(exitPriceVal - record.EntryPrice) / record.EntryPrice * 100.0 : 0;
+            bool isTrainingDoji = pctDiff < 0.025;
+
+            if (isTrainingDoji)
+            {
+                BotLogger.Warn($"[TradeOutcomeTracker] Training Doji (Noise) for {record.Asset} (pctDiff={pctDiff:F4}% < 0.025%). Skipping ML/WF feedback to prevent weight poisoning.");
+                return;
             }
 
             if (record.SourceDirections != null && record.SourceDirections.Count > 0)

@@ -103,6 +103,49 @@ export function renderDirSvg(direction) {
     }
 }
 
+export function renderSparklinePrediction(containerId, normalizedPrices, direction) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    const width = 100;
+    const height = 40;
+    const count = normalizedPrices.length;
+    if (count === 0) return;
+    
+    // History 75% of width
+    const points = normalizedPrices.map((v, i) => {
+        const x = (i / (count - 1)) * (width * 0.75); 
+        const y = height - (v * height * 0.8 + height * 0.1); 
+        return `${x},${y}`;
+    });
+    
+    const pathD = `M ${points.join(' L ')}`;
+    const lastX = width * 0.75;
+    const lastY = height - (normalizedPrices[count - 1] * height * 0.8 + height * 0.1);
+    
+    const predX = width - 2;
+    let predY = lastY;
+    let predColor = 'var(--dim)';
+    
+    if (direction === 'BUY') {
+        predY = 5;
+        predColor = '#10b981';
+    } else if (direction === 'PUT') {
+        predY = 35;
+        predColor = '#ef4444';
+    }
+    
+    const svgHtml = `
+        <svg viewBox="0 0 ${width} ${height}" style="width:100%; height:100%; overflow:visible;">
+            <path d="${pathD}" stroke="#8b5cf6" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            <line x1="${lastX}" y1="${lastY}" x2="${predX}" y2="${predY}" stroke="${predColor}" stroke-width="2.5" stroke-dasharray="3,3" stroke-linecap="round"/>
+            <circle cx="${lastX}" cy="${lastY}" r="3.5" fill="#8b5cf6" />
+            <circle cx="${predX}" cy="${predY}" r="3" fill="${predColor}" />
+        </svg>
+    `;
+    container.innerHTML = svgHtml;
+}
+
 const sbStatuses = ['ЗАГРУЗКА ДАННЫХ', 'ПОЛУЧЕНИЕ ЦЕНЫ', 'АНАЛИЗ РЫНКА'];
 let sbTimer = null, sbIdx = 0;
 
