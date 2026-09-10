@@ -97,10 +97,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     private ValutaBot.App.MiniApp.Data.Repositories.UserSettings? _userSettings;
 
-    private bool IsSettingEnabled(bool globalSetting, bool? userSetting)
-    {
-        return true;
-    }
 
     private double GetSafeLimit(double value)
     {
@@ -274,20 +270,13 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     private async Task AnalyzeCoreMechanicsAsync()
     {
-        if (IsSettingEnabled(_settings.EnableSmc, _userSettings?.EnableSmc))
-        {
-            _smcResult = SmcEngine.AnalyzeSmcStructure(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
-            BotLogger.Info($"[SMC Engine] Asset {_asset} ({_timeframe}): SMC Zones updated.");
-        }
-        else
-        {
-            _smcResult = new SmcEngine.SmcAnalysisResult();
-        }
+        _smcResult = SmcEngine.AnalyzeSmcStructure(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
+        BotLogger.Info($"[SMC Engine] Asset {_asset} ({_timeframe}): SMC Zones updated.");
 
         // OrderFlow is disabled for OTC pairs: OTC volume = tick count, not real market pressure.
         // Statistical evidence: 35.8% win rate on 363 signal votes = inverted/wrong for OTC.
         bool isOtcAsset = _asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
-        if (IsSettingEnabled(_settings.EnableOrderFlow, _userSettings?.EnableOf) && !isOtcAsset)
+        if (!isOtcAsset)
         {
             _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
             BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
@@ -347,14 +336,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             BotLogger.Warn($"[Anti-Overfitting] {_asset} ({_timeframe}): {_wfResult.StatusReasoning} ML weight multiplier set to {_wfResult.WeightMultiplier}x.");
         }
 
-        if (!IsSettingEnabled(_settings.EnableMachineLearning, _userSettings?.EnableMl))
-        {
-            _lgbmDirection = "NEUTRAL";
-            _lgbmConfidence = 0.5;
-            _lgbmModelVersion = "disabled";
-            BotLogger.Info($"[ML Engine] ML is disabled in settings for {_asset} ({_timeframe}).");
-            return;
-        }
 
         if (_ohlcCandles != null && _ohlcCandles.Length >= 60)
         {

@@ -168,7 +168,7 @@ public class MarketDataFetcher
         
         if (tdResult != null)
         {
-            var candles = tdResult.Value.candles;
+            var candles = tdResult.Value.candles.ToArray();
             // ROOT CAUSE FIX: Ghost Pricing. Overwrite the final (forming) candle's Close/High/Low with real WS tick.
             // This prevents a 15-second stale cache from causing ML entries & targets to be completely disjointed from reality.
             if (candles.Length > 0 && TwelveDataWebSocketStream.TryGetLivePrice(cleanAsset, out double realPrice))
@@ -224,7 +224,19 @@ public class MarketDataFetcher
         {
             var s5 = ValutaBot.App.MiniApp.Backtesting.S5CandleSynthesizer.SynthesizeFromM1(m1Candles);
             int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
-            finalCandles = (groupSize == 1 ? s5 : AggregateCandles(s5, groupSize)).TakeLast(limit).ToArray();
+            var allSubCandles = groupSize == 1 ? s5 : AggregateCandles(s5, groupSize);
+            
+            int subInterval = groupSize * 5; 
+            int maxShift = 60 / subInterval;
+            int shift = DateTime.UtcNow.Second / subInterval;
+            
+            int endIndex = allSubCandles.Length - maxShift + shift - 1;
+            int startIndex = endIndex - limit + 1;
+            if (startIndex < 0) startIndex = 0;
+            
+            if (endIndex >= allSubCandles.Length) endIndex = allSubCandles.Length - 1;
+            
+            finalCandles = allSubCandles.Skip(startIndex).Take(limit).ToArray();
         }
         else
         {

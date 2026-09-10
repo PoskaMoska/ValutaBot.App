@@ -28,6 +28,7 @@ public class StatefulSmc
 
     private DateTime _lastProcessedTime;
     private double   _recentAtr;
+    private TimeSpan _tfEstimate = TimeSpan.FromMinutes(1);
 
     // Output state — backing fields accessed under lock
     private bool   _hasLiquiditySweep;
@@ -95,6 +96,7 @@ public class StatefulSmc
                 
                 // Fallback to sane limits if timestamps are exactly the same
                 if (tf.TotalSeconds < 1) tf = TimeSpan.FromMinutes(1);
+                _tfEstimate = tf;
                 
                 PruneStaleZones(_lastProcessedTime.Subtract(tf * 50));
             }
@@ -289,7 +291,7 @@ public class StatefulSmc
             // Для m1: 30 свечей = 30 минут; для m5: 30 свечей = 2.5 часа.
             // OB, сформированный давно, с высокой вероятностью уже отработан или стал неактуальным.
             DateTime cutoff = _lastProcessedTime != default
-                ? _lastProcessedTime.AddMinutes(-maxAgeBars)
+                ? _lastProcessedTime - (_tfEstimate * maxAgeBars)
                 : DateTime.MinValue;
 
             foreach (var ob in _activeObs)

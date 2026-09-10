@@ -50,13 +50,39 @@ LGBM_PARAMS = {
     "verbose": -1,
 }
 
-TRAIN_WINDOW     = 1500
-RETRAIN_EVERY    = 200
 MIN_CONFIDENCE   = 0.60
 FORECAST_HORIZON = 3
 
 
+
+def get_higher_tf(interval):
+    interval = interval.lower()
+    if interval in ("5s", "s5", "10s", "s10", "15s", "s15"): return "1m"
+    if interval in ("1m", "m1"): return "15m"
+    if interval in ("5m", "m5"): return "1h"
+    if interval in ("15m", "m15"): return "4h"
+    if interval in ("1h", "h1"): return "1d"
+    return "1d"
+
+def get_window_params(interval):
+    interval = interval.lower()
+    if interval in ("5s", "s5", "10s", "s10", "15s", "s15"):
+        # Global Strategist: Retrain once a week (120960), Memory ~17 days (300000)
+        return 300000, 120960
+    elif interval in ("1m", "m1"):
+        # Global Strategist: Retrain once a week (10080), Memory ~4 weeks (40320)
+        return 40320, 10080
+    elif interval in ("5m", "m5"):
+        # Global Strategist: Retrain once a week (2016), Memory ~3 months (25000)
+        return 25000, 2016
+    elif interval in ("15m", "m15"):
+        # Global Strategist: Retrain once a week (672), Memory ~6 months (17000)
+        return 17000, 672
+    else:
+        return 300000, 120960
+
 def is_forex_symbol(symbol):
+
     """Forex-only policy: returns True only for forex/commodity pairs, False for crypto."""
     sym = symbol.upper()
     # Explicit crypto blocklist
@@ -190,8 +216,8 @@ def fetch_twelvedata(symbol, interval, limit):
     return candles
 
 
-def train_model(candles):
-    feats = build_features(candles)
+def train_model(candles, mtf_candles=None):
+    feats = build_features(candles, mtf_candles)
     if feats.empty or len(feats) < 100:
         return None
     closes = np.array([c["close"] for c in candles])
@@ -209,8 +235,8 @@ def train_model(candles):
     return model
 
 
-def predict_signal(model, candles):
-    feats = build_features(candles)
+def predict_signal(model, candles, mtf_candles=None):
+    feats = build_features(candles, mtf_candles)
     if feats.empty or len(feats) < 5:
         return "NEUTRAL", 0.5
     X_last = feats.iloc[[-1]].values.astype(np.float32)
@@ -222,36 +248,36 @@ def predict_signal(model, candles):
     return "NEUTRAL", 0.5
 
 
-def run_backtest(all_candles, payout):
+def run_backtest(all_candles, mtf_candles, payout, train_window, retrain_every):
     n = len(all_candles)
-    print(f"\n[Backtest] Свечей: {n} | Обучение: {TRAIN_WINDOW} | Переобучение каждые: {RETRAIN_EVERY}")
+    print(f"\n[Backtest] Свечей: {n} | Обучение: {train_window} | Переобучение каждые: {retrain_every}")
     print(f"[Backtest] Мин. уверенность: {MIN_CONFIDENCE} | Горизонт: {FORECAST_HORIZON} свечи | Payout: {payout*100:.0f}%\n")
 
     print("[Phase 1] Начальное обучение...")
-    model = train_model(all_candles[:TRAIN_WINDOW])
+    model = train_model(all_candles[:train_window], mtf_candles)
     if model is None:
         print("[ERROR] Обучение провалено. Недостаточно данных.")
         return {}
     print("[Phase 1] Готово.\n")
 
     trades = []
-    last_retrain = TRAIN_WINDOW
+    last_retrain = train_window
     retrain_count = 0
-    start = TRAIN_WINDOW
+    start = train_window
     end   = n - FORECAST_HORIZON
 
     print(f"[Phase 2] Симуляция с {start} по {end} ({end-start} шагов)...")
     for i in range(start, end):
-        if (i - last_retrain) >= RETRAIN_EVERY:
-            ws = max(0, i - TRAIN_WINDOW)
-            new_model = train_model(all_candles[ws:i])
+        if (i - last_retrain) >= retrain_every:
+            ws = max(0, i - train_window)
+            new_model = train_model(all_candles[ws:i], mtf_candles)
             if new_model is not None:
                 model = new_model
                 retrain_count += 1
             last_retrain = i
 
-        ws = max(0, i - TRAIN_WINDOW + 1)
-        signal, confidence = predict_signal(model, all_candles[ws:i+1])
+        ws = max(0, i - train_window + 1)
+        signal, confidence = predict_signal(model, all_candles[ws:i+1], mtf_candles)
         if signal == "NEUTRAL":
             continue
 
@@ -342,20 +368,29 @@ def main():
 
     symbol   = args.symbol.upper().replace("-", "")
     interval = args.interval.lower()
-    limit    = max(args.candles, TRAIN_WINDOW + FORECAST_HORIZON + 100)
+    train_window, retrain_every = get_window_params(interval)
+    limit    = max(args.candles, train_window + FORECAST_HORIZON + 100)
 
-    print(f"\n[Setup] Symbol={symbol} | Interval={interval} | Candles={limit} | Payout={args.payout*100:.0f}%")
+    print(f"
+[Setup] Symbol={symbol} | Interval={interval} | Candles={limit} | Payout={args.payout*100:.0f}%")
     is_forex = is_forex_symbol(symbol)
     print(f"[Fetch] {'TwelveData (Forex)' if is_forex else 'Binance (Crypto)'}...")
     t0 = time.time()
     candles = fetch_twelvedata(symbol, interval, limit) if is_forex else fetch_binance(symbol, interval, limit)
-    print(f"[Fetch] {len(candles)} свечей за {time.time()-t0:.1f}s")
+    print(f"[Fetch] {len(candles)} candles in {time.time()-t0:.1f}s")
+    
+    # Fetch MTF candles
+    mtf_interval = get_higher_tf(interval)
+    print(f"[Fetch MTF] {mtf_interval}...")
+    mtf_limit = 2000
+    mtf_candles = fetch_twelvedata(symbol, mtf_interval, mtf_limit) if is_forex else fetch_binance(symbol, mtf_interval, mtf_limit)
+    print(f"[Fetch MTF] Loaded {len(mtf_candles)} MTF candles.")
 
-    if len(candles) < TRAIN_WINDOW + FORECAST_HORIZON + 100:
-        print(f"[ERROR] Недостаточно свечей: {len(candles)}")
+    if len(candles) < train_window + FORECAST_HORIZON + 100:
+        print(f"[ERROR] Not enough candles: {len(candles)}")
         sys.exit(1)
 
-    result = run_backtest(candles, args.payout)
+    result = run_backtest(candles, mtf_candles, args.payout, train_window, retrain_every)
     trades = print_report(result, symbol, interval)
     if args.save_csv and trades:
         save_csv(trades, symbol, interval)

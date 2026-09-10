@@ -55,7 +55,7 @@ internal sealed class IndicatorCache
     // 4 hours covers: London→NY session transition, cold-start synthetic contamination.
     private const double MaxCacheAgeHours = 4.0;
 
-    private readonly ConcurrentDictionary<(string, string), CacheState> _states = new();
+    private readonly ConcurrentDictionary<(string asset, string tf, string indicatorKey), CacheState> _states = new();
 
     private static readonly ConcurrentDictionary<string, Indicators.StatefulOrderFlow> _orderFlowCache = new();
 
@@ -138,7 +138,7 @@ internal sealed class IndicatorCache
     {
         if (candles.Length <= period) return 50.0;
         if (_states.Count > 1000) PruneStates();
-        var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
+        var s = _states.GetOrAdd((asset, tf, $"RSI_{period}"), _ => new CacheState());
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -177,7 +177,7 @@ internal sealed class IndicatorCache
     {
         if (candles.Length < 20) return GetRsi(asset, tf, candles, 14);
         if (_states.Count > 1000) PruneStates();
-        var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
+        var s = _states.GetOrAdd((asset, tf, "CONNORS_RSI"), _ => new CacheState());
         lock (s)
         {
             int unseen = CountUnseen(candles, s.ConnorsRsiLastClosedTick);
@@ -215,7 +215,7 @@ internal sealed class IndicatorCache
     {
         if (candles.Length < period) return candles.Length > 0 ? candles[^1].Close : 0.0;
         if (_states.Count > 1000) PruneStates();
-        var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
+        var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
         lock (s)
         {
             int unseen = CountUnseen(candles, s.HmaLastClosedTick);
@@ -253,7 +253,7 @@ internal sealed class IndicatorCache
     {
         if (candles.Length == 0) return 0.0;
         if (_states.Count > 1000) PruneStates();
-        var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
+        var s = _states.GetOrAdd((asset, tf, $"EMA_{period}"), _ => new CacheState());
         lock (s)
         {
             int unseen = CountUnseen(candles, s.EmaLastClosedTick);
@@ -291,7 +291,7 @@ internal sealed class IndicatorCache
     {
         if (candles.Length <= period) return (20.0, 0.0, 0.0);
         if (_states.Count > 1000) PruneStates();
-        var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
+        var s = _states.GetOrAdd((asset, tf, $"ADX_{period}"), _ => new CacheState());
         lock (s)
         {
             int unseen = CountUnseen(candles, s.AdxLastClosedTick);
@@ -329,7 +329,7 @@ internal sealed class IndicatorCache
     {
         if (candles.Length <= period) return 0.0;
         if (_states.Count > 1000) PruneStates();
-        var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
+        var s = _states.GetOrAdd((asset, tf, $"ATR_{period}"), _ => new CacheState());
         lock (s)
         {
             int unseen = CountUnseen(candles, s.AtrLastClosedTick);
@@ -365,7 +365,7 @@ internal sealed class IndicatorCache
     public StatefulSmc GetSmcState(string asset, string tf, ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
     {
         if (_states.Count > 1000) PruneStates();
-        var s = _states.GetOrAdd((asset, tf), _ => new CacheState());
+        var s = _states.GetOrAdd((asset, tf, "SMC"), _ => new CacheState());
         lock (s)
         {
             int unseen = CountUnseen(candles, s.SmcLastClosedTick);
@@ -410,3 +410,5 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, long lastTick)
         => candles.Length > 0 && candles[^1].Timestamp.Ticks < lastTick;
 }
+
+

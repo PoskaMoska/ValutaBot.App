@@ -152,10 +152,7 @@ public partial class TelegramBotService
                     new { text = "👑 Добавить админа" },
                     new { text = "🚫 Удалить доступ" }
                 },
-                new object[]
-                {
-                    new { text = "⚙️ Настройки" }
-                }
+
             },
             resize_keyboard = true
         };

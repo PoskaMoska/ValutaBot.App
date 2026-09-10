@@ -235,7 +235,7 @@ def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Di
     df = _query_historical_candles_db(symbol, norm_interval, limit)
     
     # If we have enough data directly, return it
-    if not df.empty and len(df) >= min(limit, 1500) * 0.1:
+    if not df.empty and len(df) >= min(limit, 3000) * 0.1:
         log.info(f"[HistoricalCandles] Loaded {len(df)} rows from DB for {symbol} {norm_interval}")
         return df.iloc[::-1].to_dict(orient='records')
         
@@ -537,14 +537,17 @@ class ForexPredictor:
         try:
             if candles is None:
                 # Calculate adaptive limit
-                if self.interval == "5m":
-                    target_candles = max(MAX_HISTORICAL_CANDLES // 5, 20000)
-                elif self.interval == "15m":
-                    target_candles = max(MAX_HISTORICAL_CANDLES // 15, 20000)
-                elif self.interval.startswith("s"):
-                    target_candles = 300000  # Allow full subminute history without truncation
+                interval_lower = self.interval.lower()
+                if interval_lower.startswith("s"):
+                    target_candles = 300000  # ~17 days for Global Strategist memory
+                elif interval_lower in ("1m", "m1"):
+                    target_candles = 40320   # ~4 weeks for 1m
+                elif interval_lower in ("5m", "m5"):
+                    target_candles = 25000   # ~3 months for 5m
+                elif interval_lower in ("15m", "m15"):
+                    target_candles = 17000   # ~6 months for 15m
                 else:
-                    target_candles = max(MAX_HISTORICAL_CANDLES, 20000)
+                    target_candles = 300000  # Default fallback
 
                 # Priority 1: Large historical dataset from data_crawler (Global Strategist)
                 candles = _fetch_historical_candles(self.symbol, self.interval, target_candles)
