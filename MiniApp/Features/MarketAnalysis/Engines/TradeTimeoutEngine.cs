@@ -70,10 +70,17 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
                 ? "SMC сигнал (OB/FVG) или высокий импульс. Быстрая экспирация (2 свечи)."
                 : "Высокая волатильность. Быстрая экспирация (2 свечи).";
         }
-        else if (isZeroAtr || isDeadMarket || volRatio < 0.8)
+        else if (isZeroAtr || isDeadMarket)
+        {
+            // PROACTIVE FIX: Extreme compression (Spike Trap). We cannot extend to 4 candles because time works against us.
+            // Hit and Run approach to avoid random algorithmic spikes at the end of the trade.
+            baseCandles = 2;
+            dynamicReason = "Мертвый рынок (критическое сжатие). Риск спайка — быстрая экспирация (2 свечи).";
+        }
+        else if (volRatio < 0.8)
         {
             baseCandles = 4;
-            dynamicReason = "Низкая волатильность или консолидация. Расширенная экспирация (4 свечи).";
+            dynamicReason = "Низкая волатильность (широкий флэт). Расширенная экспирация (4 свечи).";
         }
 
         // Sub-minute floor logic (Защита от тикового шума)

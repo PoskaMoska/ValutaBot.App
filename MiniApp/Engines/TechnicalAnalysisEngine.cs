@@ -89,27 +89,28 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         {
             // Sub-minute regime: ADX is structurally low — do NOT use it to gate HMA.
             // Instead use micro-velocity: short-term price slope over last 5 candles.
-            // This directly captures direction-change which RSI/ADX miss at this resolution.
+            // PROACTIVE FIX: Chaos Mean-Reversion Patch
+            double volRatio = CalculateVolatilityRatio(prices);
+            bool isChaos = volRatio > 1.5;
 
             // Micro-velocity: slope of last 5 closes (basis points per candle)
             double microVel = prices.Length >= 5
                 ? (prices[^1] - prices[^5]) / Math.Max(1e-8, prices[^5]) * 10_000.0
                 : 0.0;
 
-            // HMA direction signal — on sub-minute this is the primary trend indicator
-            hmaWeight = 0.35;
+            // HMA direction signal — disabled in chaos (prevents buying the top)
+            hmaWeight = isChaos ? 0.0 : 0.35;
             if (lastPrice > hma) score += hmaWeight;
             else if (lastPrice < hma) score -= hmaWeight;
 
-            // Micro-velocity contribution — normalized, capped ±0.40
-            score += Math.Clamp(microVel / 25.0, -0.40, 0.40);
+            // Micro-velocity contribution — disabled in chaos
+            double velContrib = isChaos ? 0.0 : Math.Clamp(microVel / 25.0, -0.40, 0.40);
+            score += velContrib;
 
-            // RSI with tighter bands (62/38 set above) — still valid, just narrower window
-            // FIX (Architect): User artificially bumped this to 0.75, which instantly saturated 
-            // the scoring engine to 1.0. Reverted to 0.40. It still vetoes HMA (0.35), 
-            // but leaves room for velocity to affect the final confidence.
-            if (rsi > rsiOverbought)      score -= 0.40;
-            else if (rsi < rsiOversold)   score += 0.40;
+            // RSI with tighter bands — AMPLIFIED in chaos (catch the bounce)
+            double rsiWeight = isChaos ? 0.75 : 0.40;
+            if (rsi > rsiOverbought)      score -= rsiWeight;
+            else if (rsi < rsiOversold)   score += rsiWeight;
 
             // ConnorsRSI follow-through
             double connorsSignalSub = (connorsRsi - 50.0) / 50.0;
@@ -121,12 +122,20 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         }
         else
         {
-            // ── Standard minute+ regime logic (unchanged) ────────────────────────────────
+            // ── Standard minute+ regime logic ────────────────────────────────
             double trendMultiplier = Math.Clamp((adxVal - 18.0) / 10.0, 0.0, 1.0); // 18 -> 0%, 28 -> 100%
             double rangeMultiplier = 1.0 - trendMultiplier;
 
+            // PROACTIVE FIX: Chaos Mean-Reversion Patch
+            double volRatio = CalculateVolatilityRatio(prices);
+            if (volRatio > 1.5)
+            {
+                trendMultiplier = 0.0; // Force disable trend logic
+                rangeMultiplier = 1.5; // Aggressively amplify mean-reversion
+            }
+
             // 1. Ranging Signals (scaled by rangeMultiplier)
-            // Reverted user's 0.8 bump back to 0.5 to prevent saturation.
+            // In chaos, rsi logic gets amplified to 0.75 (0.5 * 1.5).
             if (rsi > rsiOverbought) score -= 0.5 * rangeMultiplier;
             else if (rsi < rsiOversold) score += 0.5 * rangeMultiplier;
             
