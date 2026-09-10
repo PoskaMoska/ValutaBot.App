@@ -549,7 +549,7 @@ class ForexPredictor:
                 else:
                     # Priority 2: Subminute SQLite ticks (real recorded ticks from live trading)
                     if self.interval.startswith("s"):
-                        candles = _fetch_local_sqlite(self.symbol, self.interval, 1500)
+                        candles = _fetch_local_sqlite(self.symbol, self.interval, target_candles)
                         if len(candles) < 150:
                             # FIXED: Never use synthetic interpolation вЂ” it produces fake ~78% accuracy
                             # by learning the sine-wave generator pattern instead of real market dynamics.
