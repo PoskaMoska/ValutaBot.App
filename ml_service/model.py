@@ -536,11 +536,15 @@ class ForexPredictor:
         log.info(f"[Train] Starting training for {self._key}")
         try:
             if candles is None:
-                # Calculate adaptive limit: max(100k / interval_minutes, 20k)
-                interval_minutes = 1
-                if self.interval == "5m": interval_minutes = 5
-                elif self.interval == "15m": interval_minutes = 15
-                target_candles = max(MAX_HISTORICAL_CANDLES // interval_minutes, 20000)
+                # Calculate adaptive limit
+                if self.interval == "5m":
+                    target_candles = max(MAX_HISTORICAL_CANDLES // 5, 20000)
+                elif self.interval == "15m":
+                    target_candles = max(MAX_HISTORICAL_CANDLES // 15, 20000)
+                elif self.interval.startswith("s"):
+                    target_candles = 300000  # Allow full subminute history without truncation
+                else:
+                    target_candles = max(MAX_HISTORICAL_CANDLES, 20000)
 
                 # Priority 1: Large historical dataset from data_crawler (Global Strategist)
                 candles = _fetch_historical_candles(self.symbol, self.interval, target_candles)
