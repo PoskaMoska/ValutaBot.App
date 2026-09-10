@@ -137,9 +137,21 @@ public class MarketDataFetcher
                 if (liveCandles.Length == 0) return synthPart;
 
                 var merged = new System.Collections.Generic.List<MiniAppController.OhlcCandle>();
+                DateTime firstLiveTime = liveCandles[0].Timestamp;
+                
+                // Only take synthetic candles that occurred BEFORE our first real live candle
+                var validSynth = synthPart.Where(c => c.Timestamp < firstLiveTime).ToList();
+                
                 int synthToTake = limit - liveCandles.Length;
-                if (synthPart.Length > synthToTake) merged.AddRange(synthPart.Take(synthPart.Length - liveCandles.Length));
-                else merged.AddRange(synthPart);
+                if (validSynth.Count > synthToTake) 
+                {
+                    merged.AddRange(validSynth.Skip(validSynth.Count - synthToTake));
+                }
+                else 
+                {
+                    merged.AddRange(validSynth);
+                }
+                
                 merged.AddRange(liveCandles);
                 
                 return merged.TakeLast(limit).ToArray();

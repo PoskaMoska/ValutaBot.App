@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -22,39 +22,43 @@ public class HistoricalCandleAccumulatorService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Align to next minute boundary
-        int secsToNext = 60 - DateTime.UtcNow.Second;
-        await Task.Delay(TimeSpan.FromSeconds(secsToNext + 2), stoppingToken);
-
-        BotLogger.Info("[HistoricalAccumulator] Started. Accumulating live m1 candles into historical_candles.");
+        BotLogger.Info("[HistoricalAccumulator] Started. Accumulating live m1 candles into historical_candles with strict grid snap.");
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            var now = DateTime.UtcNow;
+            var targetMinute = TruncateToMinute(now).AddMinutes(1);
+            var delay = targetMinute.AddSeconds(5) - now; // Wake up at 05 seconds past the minute to ensure s5 are flushed
+            
+            if (delay > TimeSpan.Zero) 
+            {
+                try { await Task.Delay(delay, stoppingToken); }
+                catch (TaskCanceledException) { break; }
+            }
+
+            if (stoppingToken.IsCancellationRequested) break;
+
             try
             {
-                var now = DateTime.UtcNow;
+                now = DateTime.UtcNow;
                 // Only on weekdays, exclude Fri 22:00+ and all weekend
                 bool isWeekday = now.DayOfWeek >= DayOfWeek.Monday && now.DayOfWeek <= DayOfWeek.Friday;
                 bool isMarketOpen = !(now.DayOfWeek == DayOfWeek.Friday && now.Hour >= 22);
 
                 if (isWeekday && isMarketOpen)
-                    await FlushAndSaveAsync();
+                {
+                    await FlushAndSaveAsync(TruncateToMinute(now).AddMinutes(-1));
+                }
             }
             catch (Exception ex)
             {
                 BotLogger.Warn($"[HistoricalAccumulator] Error: {ex.Message}");
             }
-
-            // 65s to ensure previous minute is fully closed
-            await Task.Delay(TimeSpan.FromSeconds(65), stoppingToken);
         }
     }
 
-    private static async Task FlushAndSaveAsync()
+    private static async Task FlushAndSaveAsync(DateTime closedMinute)
     {
-        // The minute that just completed (1 minute ago)
-        DateTime closedMinute = TruncateToMinute(DateTime.UtcNow).AddMinutes(-1);
-
         using var conn = DbConnectionFactory.GetConnection();
         await conn.OpenAsync();
 

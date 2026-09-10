@@ -174,6 +174,9 @@ namespace ValutaBot.MiniApp
 
         private static async Task FlushAsync(ConcurrentDictionary<string, CandleAccumulator> dict, string intervalName)
         {
+            int intervalSeconds = int.Parse(intervalName.Replace("s", ""));
+            DateTime now = DateTime.UtcNow;
+
             foreach (var kvp in dict)
             {
                 var asset = kvp.Key;
@@ -185,31 +188,27 @@ namespace ValutaBot.MiniApp
 
                 lock (acc)
                 {
+                    DateTime expectedNext = acc.OpenTime.AddSeconds(intervalSeconds);
+                    if ((now - expectedNext).TotalSeconds > intervalSeconds) 
+                    {
+                        long intervalTicks = TimeSpan.FromSeconds(intervalSeconds).Ticks;
+                        expectedNext = new DateTime(now.Ticks - (now.Ticks % intervalTicks), DateTimeKind.Utc);
+                    }
+
                     if (acc.TickCount == 0 || !acc.Open.HasValue)
                     {
-                        // ROOT-CAUSE FIX: Only emit flat candle if WebSocket is alive.
-                        //
-                        // Previously: always emitted flat candle with stale _livePrices price when WS died.
-                        // Effect: RSI/HMA/EMA received constant price for minutes → microVelocity=0,
-                        //         score≈0 → random BUY/PUT noise → BAD SIGNALS for 2-4 minutes until reconnect.
-                        // This was the GOOD→BAD→GOOD cycle root cause.
-                        //
-                        // Now: when WS is dead we skip the interval entirely (reset accumulator, no DB write).
-                        // A gap in candle data is far safer than a stale price stream.
-                        // When WS reconnects, real ticks fill subsequent intervals normally.
                         if (TwelveDataWebSocketStream.IsAlive &&
                             ValutaBot.MiniApp.SignalTracker._livePrices.TryGetValue(asset, out double lastPrice))
                         {
                             open = lastPrice; high = lastPrice; low = lastPrice; close = lastPrice;
                             openTime = acc.OpenTime;
                             tickVolume = 0;
-                            acc.Reset(DateTime.UtcNow);
+                            acc.Reset(expectedNext);
                             _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);
                         }
                         else
                         {
-                            // WS dead — skip interval, reset accumulator so next real tick starts fresh.
-                            acc.Reset(DateTime.UtcNow);
+                            acc.Reset(expectedNext);
                         }
                         continue;
                     }
@@ -221,7 +220,7 @@ namespace ValutaBot.MiniApp
                     openTime = acc.OpenTime;
                     tickVolume = acc.TickCount;
                     
-                    acc.Reset(DateTime.UtcNow);
+                    acc.Reset(expectedNext);
                 }
                 
                 _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);

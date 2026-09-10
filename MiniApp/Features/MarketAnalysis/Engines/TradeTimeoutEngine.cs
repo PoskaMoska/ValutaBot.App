@@ -65,22 +65,17 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
 
         if (smc.HasOrderBlock || smc.HasFvg || volRatio > 1.5)
         {
-            baseCandles = 2;
             dynamicReason = smc.HasOrderBlock || smc.HasFvg 
-                ? "SMC сигнал (OB/FVG) или высокий импульс. Быстрая экспирация (2 свечи)."
-                : "Высокая волатильность. Быстрая экспирация (2 свечи).";
+                ? "SMC сигнал (OB/FVG) или высокий импульс."
+                : "Высокая волатильность.";
         }
         else if (isZeroAtr || isDeadMarket)
         {
-            // PROACTIVE FIX: Extreme compression (Spike Trap). We cannot extend to 4 candles because time works against us.
-            // Hit and Run approach to avoid random algorithmic spikes at the end of the trade.
-            baseCandles = 2;
-            dynamicReason = "Мертвый рынок (критическое сжатие). Риск спайка — быстрая экспирация (2 свечи).";
+            dynamicReason = "Мертвый рынок (критическое сжатие).";
         }
         else if (volRatio < 0.8)
         {
-            baseCandles = 4;
-            dynamicReason = "Низкая волатильность (широкий флэт). Расширенная экспирация (4 свечи).";
+            dynamicReason = "Низкая волатильность (широкий флэт).";
         }
 
         // Sub-minute floor logic (Защита от тикового шума)
@@ -90,7 +85,7 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
             "s10" => 3, // 30 секунд минимум
             "s15" => 3, // 45 секунд минимум
             "s30" => 2, // 60 секунд минимум
-            _     => 2  // Для M1 и выше минимум 2 свечи
+            _     => 3  // FIX: Force to 3 candles to perfectly align with ML TARGET_HORIZON_CANDLES
         };
 
         if (baseCandles < minCandles)

@@ -44,10 +44,13 @@ public static class SignalTracker
         Dictionary<string, string>? sourceDirections = null)
     {
         string sym = asset.ToUpper();
-        int verifyDelaySecs = expiryCandles * timeframeSecs + 5; // +5s buffer for candle close
+        var now = DateTime.UtcNow;
+        long currentTicks = now.Ticks;
+        long intervalTicks = TimeSpan.FromSeconds(timeframeSecs).Ticks;
+        DateTime gridTime = new DateTime(currentTicks - (currentTicks % intervalTicks), DateTimeKind.Utc);
+        DateTime verifyAt = gridTime.AddSeconds(expiryCandles * timeframeSecs);
 
         string cooldownKey = $"{asset}_{timeframe}";
-        var now = DateTime.UtcNow;
         bool isOnCooldown = true;
 
         _cooldowns.AddOrUpdate(cooldownKey,
@@ -93,61 +96,20 @@ public static class SignalTracker
             BinanceSymbol = sym,
             EntryPrice  = price,
             CreatedAt   = DateTime.UtcNow,
-            VerifyAt    = DateTime.UtcNow.AddSeconds(verifyDelaySecs),
+            VerifyAt    = verifyAt,
             IsForex     = isForex,
             SourceDirections = sourceDirections ?? new Dictionary<string, string>()
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(verifyDelaySecs));
-                double? exitPrice = null;
-                
-                if (_livePrices.TryGetValue(asset, out double memPrice))
-                {
-                    exitPrice = memPrice;
-                }
-                
-                
-                if (exitPrice.HasValue && exitPrice.Value > 0)
-                {
-                    double priceDiff = (exitPrice.Value - price) / price;
-                    bool isCorrect = (direction == "BUY" && exitPrice.Value > price) || (direction == "PUT" && exitPrice.Value < price);
-                    bool isDoji = Math.Abs(priceDiff) < 1e-8;
-
-                    // Delegate all post-trade telemetry (DB, ML RL, Calibration, WalkForward, ConsecutiveLosses)
-                    record.ExitPrice = exitPrice.Value;
-                    record.PnlBps = Math.Round(priceDiff * 10000, 2);
-                    record.WasCorrect = isCorrect;
-                    
-                    await TradeOutcomeTracker.OnTradeVerifiedAsync(record);
-                    await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DeletePendingTradeAsync(record.Id);
-
-                    // Invalidate signal votes cache so UI refreshes
-                    _signalVotesCacheExpiry = DateTime.MinValue;
-                }
-                else
-                {
-                    // No live price available in memory (e.g. server just restarted).
-                    // Do NOT delete from pending_trades — PendingTradeVerificationService will
-                    // pick it up within 60s and use HTTP fallback to get the exit price.
-                    BotLogger.Warn($"[InMemoryVerify] No exit price for {asset}/{timeframe} in memory. Leaving in pending_trades for HTTP-fallback sweep.");
-                }
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Warn($"[InMemoryVerify] Failed: {ex.Message}");
-            }
-        });
+        
+        // Local Task.Run verification removed. PendingTradeVerificationService handles all verifications.
 
         Console.WriteLine($"[Tracker] Recorded {direction} {asset}/{timeframe} @ {price:F5} " +
-                          $"РІР‚вЂќ verify in {verifyDelaySecs}s");
+                          $"— target verify at {verifyAt:HH:mm:ss}");
     }
 
-    // РІвЂќР‚РІвЂќР‚ Public Read API РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
+    // ──────────────── Public Read API ────────────────────────────────────────────────────────
 
     public static async Task<AccuracyStats> GetOverallStatsAsync()
     {
