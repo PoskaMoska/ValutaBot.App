@@ -148,6 +148,7 @@
                     <span>Вероятность</span>
                 </div>
                 <div class='res-value' id='resProb' style='color:var(--accent)'>--%</div>
+                <div class='res-sub' id='resProbFact'></div>
                 <div class='res-chart' id='probChart'></div>
             </div>
             <div class='res-card'>
@@ -162,6 +163,15 @@
                 <div class='res-value' id='resDur' style='color:var(--subtext)'>--</div>
                 <div class='res-chart' id='durChart'></div>
             </div>
+        </div>
+
+        <!-- Live neon candlestick chart (per asset/timeframe, animated by WS ticks) -->
+        <div class='live-chart-card' id='liveChartCard' style='display:none'>
+            <div class='live-chart-head'>
+                <span id='liveChartTitle'>ГРАФИК</span>
+                <span class='live-dot' id='liveDot'></span>
+            </div>
+            <canvas id='liveChart'></canvas>
         </div>
 
         <!-- Tab Bar removed by user request so all info is on one screen -->

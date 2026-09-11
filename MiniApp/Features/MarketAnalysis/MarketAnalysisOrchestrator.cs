@@ -719,16 +719,18 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             expiryCandles = timeoutResult.TimeoutCandles,
             chartData = _mainPrices,
             chartOhlc = (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>())
-                .TakeLast(12)
+                .TakeLast(80)
                 .Select(c => new
                 {
                     o = Math.Round(c.Open, 5),
                     h = Math.Round(c.High, 5),
                     l = Math.Round(c.Low, 5),
-                    c = Math.Round(c.Close, 5)
+                    c = Math.Round(c.Close, 5),
+                    v = Math.Round(c.Volume, 2)
                 })
                 .ToArray(),
             rsi = Math.Round(_mainResult.rsiVal, 1),
+            atr = Math.Round(_mainAtr, 6),
             ema = Math.Round(_mainResult.emaVal, 2),
             volumeStrength = Math.Round(_mainResult.volStrengthVal, 2),
             tfConflict = _conflictPenalty < 1.0,
@@ -746,6 +748,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             claudeReasoning = consensus.CombinedReasoningText,
             winRateOverall = overallStats.HasData ? overallStats.WinRate : (double?)null,
             winRateAsset = assetStats.HasData ? assetStats.WinRate : (double?)null,
+            signalsVerifiedAsset = assetStats.Verified,
             signalsVerified = overallStats.Verified,
             signalsPending = pendingCount,
             monteCarloIterations = mcResult.Iterations,

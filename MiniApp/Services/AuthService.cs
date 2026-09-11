@@ -29,35 +29,10 @@ public static class AuthService
             return (false, "Empty authorization token");
         }
 
-        // ─── Standard Telegram InitData Validation ───
-        long tgUserId = 0;
-        
-        if (initData.Contains("custom_user_id=") && initData.Contains("custom_user_sign="))
+        var (ok, tgUserId, sigError) = ValidateInitData(initData, botToken);
+        if (!ok)
         {
-            var parsed = HttpUtility.ParseQueryString(initData);
-            if (long.TryParse(parsed["custom_user_id"], out tgUserId))
-            {
-                string providedSign = parsed["custom_user_sign"] ?? "";
-                using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(botToken));
-                byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(tgUserId.ToString()));
-                string expectedSign = Convert.ToHexString(hash).ToLowerInvariant();
-                
-                if (providedSign.Length != expectedSign.Length ||
-                    !CryptographicOperations.FixedTimeEquals(
-                        Encoding.UTF8.GetBytes(providedSign.ToLowerInvariant()),
-                        Encoding.UTF8.GetBytes(expectedSign)))
-                {
-                    return (false, "Invalid custom authorization signature");
-                }
-            }
-            else
-            {
-                return (false, "Invalid custom user ID");
-            }
-        }
-        else if (!TelegramInitDataValidator.Validate(initData, botToken, out tgUserId, out _))
-        {
-            return (false, "Invalid Telegram authorization signature");
+            return (false, sigError);
         }
 
         if (!await TelegramBotService.IsUserAllowed(tgUserId))
@@ -67,6 +42,54 @@ public static class AuthService
 
         context.Items["userId"] = tgUserId;
         return (true, null);
+    }
+
+    /// <summary>
+    /// Validates raw Telegram init-data (header value or WS query param) against
+    /// the bot token. Shared by HTTP auth and the /ws/prices endpoint (browsers
+    /// cannot set custom headers on WebSocket handshakes, so WS passes init-data
+    /// as a query parameter — same signature check, no duplicated logic).
+    /// Returns (ok, userId, error).
+    /// </summary>
+    public static (bool ok, long userId, string? error) ValidateInitData(string initData, string botToken)
+    {
+        long tgUserId = 0;
+
+        if (string.IsNullOrEmpty(initData))
+        {
+            return (false, 0, "Empty authorization token");
+        }
+
+        // ─── Standard Telegram InitData Validation ───
+        if (initData.Contains("custom_user_id=") && initData.Contains("custom_user_sign="))
+        {
+            var parsed = HttpUtility.ParseQueryString(initData);
+            if (long.TryParse(parsed["custom_user_id"], out tgUserId))
+            {
+                string providedSign = parsed["custom_user_sign"] ?? "";
+                using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(botToken));
+                byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(tgUserId.ToString()));
+                string expectedSign = Convert.ToHexString(hash).ToLowerInvariant();
+
+                if (providedSign.Length != expectedSign.Length ||
+                    !CryptographicOperations.FixedTimeEquals(
+                        Encoding.UTF8.GetBytes(providedSign.ToLowerInvariant()),
+                        Encoding.UTF8.GetBytes(expectedSign)))
+                {
+                    return (false, 0, "Invalid custom authorization signature");
+                }
+            }
+            else
+            {
+                return (false, 0, "Invalid custom user ID");
+            }
+        }
+        else if (!TelegramInitDataValidator.Validate(initData, botToken, out tgUserId, out _))
+        {
+            return (false, 0, "Invalid Telegram authorization signature");
+        }
+
+        return (true, tgUserId, null);
     }
 
 

@@ -630,6 +630,7 @@
         .res-card:hover { border-color: rgba(255, 255, 255, 0.15); transform: translateY(-2px); box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1), 0 8px 24px rgba(0, 0, 0, 0.25); }
         .res-label { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; font-weight: 700; margin-bottom: 4px; }
         .res-value { font-size: 16px; font-weight: 800; font-family: 'Unbounded', sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; margin: 4px 0; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+        .res-sub { font-size: 9px; color: var(--dim); font-weight: 600; letter-spacing: 0.3px; min-height: 12px; margin: -2px 0 2px; }
         .res-chart { margin-top: auto; width: 100%; height: 22px; display: flex; align-items: flex-end; justify-content: center; gap: 2px; }
         .res-chart-bar {
             width: 4px;
@@ -653,6 +654,32 @@
         }
         .res-dir-chart { margin-top: auto; width: 100%; height: 22px; }
         .res-dir-chart svg { width: 100%; height: 100%; }
+        /* Live neon candlestick chart (per asset/timeframe, WS-animated) */
+        .live-chart-card {
+            background: rgba(255, 255, 255, 0.02);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(139, 92, 246, 0.25);
+            border-radius: var(--radius);
+            padding: 10px 10px 8px;
+            margin-top: 12px;
+            box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.06), 0 4px 16px rgba(0, 0, 0, 0.15), 0 0 24px rgba(139, 92, 246, 0.08);
+            animation: slideUp 0.35s ease-out;
+        }
+        .live-chart-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            color: var(--dim);
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; flex-shrink: 0; }
+        .live-dot.on { background: #00e676; box-shadow: 0 0 8px #00e676; animation: expPulse 1.6s ease-in-out infinite; }
+        #liveChart { width: 100%; height: 180px; display: block; }
 
         /* в”Ђв”Ђв”Ђ Levels в”Ђв”Ђв”Ђ */
         .levels-bar {

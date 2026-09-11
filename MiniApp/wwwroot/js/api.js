@@ -1,5 +1,6 @@
 import { tg, currentAsset, currentTf, getCustomInitData } from './main.js';
 import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles } from './ui.js';
+import { startLiveChart, stopLiveChart } from './chart.js';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -173,6 +174,17 @@ export async function executeAnalysis() {
             document.getElementById('resProb').innerText = data.probability + '%';
             document.getElementById('resProb').style.color = data.probability >= 90 ? '#00e676' : data.probability >= 85 ? '#ffd600' : 'var(--accent)';
 
+            // Measured fact vs model score: show real asset winrate when measured
+            // (the big % is a rescaled model score, NOT a measured win probability).
+            const factEl = document.getElementById('resProbFact');
+            if (factEl) {
+                if (data.winRateAsset != null && (data.signalsVerifiedAsset || 0) >= 5) {
+                    factEl.innerText = `факт: ${Math.round(data.winRateAsset)}% (n=${data.signalsVerifiedAsset})`;
+                } else {
+                    factEl.innerText = '';
+                }
+            }
+
             document.getElementById('resDur').innerText = data.duration;
 
             if (data.rsi !== undefined) {
@@ -201,7 +213,7 @@ export async function executeAnalysis() {
             }
             if (data.tfConflict) {
                 const rp = document.getElementById('resProb');
-                if (rp) rp.innerText += ' ⚠️';
+                if (rp) rp.innerHTML += " <span title='Старший таймфрейм против сигнала — оценка уже снижена'>⚠️</span>";
             }
 
 
@@ -379,7 +391,18 @@ export async function executeAnalysis() {
             */
 
             const probBars = pricesToBars(data.chartData, 20); // Get 20 candles for smoother history
-            if (probBars.length) renderSparklinePrediction('probChart', probBars, data.direction);
+            // Honest projection length: expected move = ATR*sqrt(expiry) as a
+            // fraction of the displayed price span (volatility scaling). Falls
+            // back to legacy fixed dash when ATR is unavailable.
+            let projFrac = null;
+            if (data.atr > 0 && data.chartData && data.chartData.length >= 2 && (data.expiryCandles | 0) > 0) {
+                const tailP = data.chartData.slice(-20);
+                const spanP = Math.max(...tailP) - Math.min(...tailP);
+                if (spanP > 1e-12) {
+                    projFrac = Math.min(0.9, Math.max(0.05, (data.atr * Math.sqrt(data.expiryCandles)) / spanP * 0.8));
+                }
+            }
+            if (probBars.length) renderSparklinePrediction('probChart', probBars, data.direction, projFrac);
 
             renderDirSvg(data.direction);
 
@@ -388,6 +411,13 @@ export async function executeAnalysis() {
             // fallback to legacy price bars for old backend responses.
             if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);
             else if (durBars.length) renderMiniChart('durChart', durBars, '');
+
+            // Live neon chart for this asset/timeframe (real OHLC + WS ticks).
+            // Stopped on next analysis via clearResults() -> stopLiveChart().
+            if (data.chartOhlc && data.chartOhlc.length) {
+                const wsInitData = tg && tg.initData ? tg.initData : getCustomInitData();
+                startLiveChart(data.chartOhlc, currentAsset + ' · ' + String(currentTf).toUpperCase(), wsInitData);
+            }
 
             const tabReg = document.getElementById('resultsTabBar');
             if (tabReg) tabReg.style.display = 'flex';

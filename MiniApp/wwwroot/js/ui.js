@@ -1,5 +1,6 @@
 
 import { lastPriceVal } from './api.js';
+import { stopLiveChart } from './chart.js';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');
@@ -36,12 +37,14 @@ export function switchResultTab(tabName) {
 }
 
 export function clearResults() {
+    stopLiveChart();
     const safeSetText = (id, txt) => { const el = document.getElementById(id); if (el) el.innerText = txt; };
     const safeSetHtml = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
     const safeSetStyle = (id, prop, val) => { const el = document.getElementById(id); if (el) el.style[prop] = val; };
 
     safeSetText('resProb', '--%');
     safeSetStyle('resProb', 'color', 'var(--accent)');
+    safeSetText('resProbFact', '');
     safeSetText('resDir', '--');
     safeSetStyle('resDir', 'color', 'var(--subtext)');
     safeSetText('resDur', '--');
@@ -135,10 +138,10 @@ export function renderDirSvg(direction) {
     }
 }
 
-export function renderSparklinePrediction(containerId, normalizedPrices, direction) {
+export function renderSparklinePrediction(containerId, normalizedPrices, direction, projFrac) {
     const container = document.getElementById(containerId);
     if (!container) return;
-    
+
     const width = 100;
     const height = 40;
     const count = normalizedPrices.length;
@@ -158,12 +161,18 @@ export function renderSparklinePrediction(containerId, normalizedPrices, directi
     const predX = width - 2;
     let predY = lastY;
     let predColor = 'var(--dim)';
-    
+
+    // Projection length: if projFrac (expected move as fraction of chart
+    // height, from ATR*sqrt(expiry)/span) is given, the dashed segment shows
+    // a statistically sized move. Otherwise legacy fixed-geometry dash.
+    const hasProj = Number.isFinite(projFrac) && projFrac > 0;
+    const dashLen = hasProj ? Math.min(height - 8, Math.max(3, projFrac * height)) : null;
+
     if (direction === 'BUY') {
-        predY = 5;
+        predY = dashLen != null ? Math.max(4, lastY - dashLen) : 5;
         predColor = '#10b981';
     } else if (direction === 'PUT') {
-        predY = 35;
+        predY = dashLen != null ? Math.min(height - 4, lastY + dashLen) : 35;
         predColor = '#ef4444';
     }
     
