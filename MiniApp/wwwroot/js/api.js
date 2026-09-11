@@ -1,5 +1,5 @@
 import { tg, currentAsset, currentTf, getCustomInitData } from './main.js';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars } from './ui.js';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles } from './ui.js';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -384,7 +384,10 @@ export async function executeAnalysis() {
             renderDirSvg(data.direction);
 
             const durBars = pricesToBars(data.chartData, 8);
-            if (durBars.length) renderMiniChart('durChart', durBars, '');
+            // Expiry candles (N = expiryCandles) when backend provides OHLC;
+            // fallback to legacy price bars for old backend responses.
+            if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);
+            else if (durBars.length) renderMiniChart('durChart', durBars, '');
 
             const tabReg = document.getElementById('resultsTabBar');
             if (tabReg) tabReg.style.display = 'flex';

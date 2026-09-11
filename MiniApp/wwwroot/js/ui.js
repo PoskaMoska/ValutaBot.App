@@ -91,6 +91,38 @@ export function renderMiniChart(containerId, values, color) {
     }).join('');
 }
 
+// Expiry candles: renders N real OHLC candlesticks (N = expiryCandles),
+// so the "Время" card literally shows the N candles the trade lives through.
+// ohlc: [{o,h,l,c}...] chronological. Last candle = forming -> pulses.
+export function renderExpiryCandles(containerId, ohlc, count) {
+    const container = document.getElementById(containerId);
+    if (!container || !ohlc || !ohlc.length) return;
+    const n = Math.max(1, Math.min(count || ohlc.length, ohlc.length));
+    const tail = ohlc.slice(-n).map(k => ({
+        o: Number(k.o), h: Number(k.h), l: Number(k.l), c: Number(k.c)
+    })).filter(k => [k.o, k.h, k.l, k.c].every(Number.isFinite));
+    if (!tail.length) return;
+
+    const H = 40;
+    const lo = Math.min(...tail.map(k => k.l));
+    const hi = Math.max(...tail.map(k => k.h));
+    const span = hi - lo;
+    const y = (p) => span < 1e-12 ? H / 2 : 2 + ((hi - p) / span) * (H - 4);
+
+    container.innerHTML = tail.map((k, i) => {
+        const bull = k.c >= k.o;
+        const cls = bull ? 'exp-bull' : 'exp-bear';
+        const yH = y(k.h), yL = y(k.l);
+        const yO = y(k.o), yC = y(k.c);
+        const bodyTop = Math.min(yO, yC);
+        const bodyH = Math.max(2.5, Math.abs(yC - yO));
+        const forming = i === tail.length - 1 ? ' forming' : '';
+        const wickStyle = `top:${yH.toFixed(1)}px;height:${Math.max(1, yL - yH).toFixed(1)}px`;
+        const bodyStyle = `top:${bodyTop.toFixed(1)}px;height:${bodyH.toFixed(1)}px`;
+        return `<div class='exp-candle${forming}'><div class='exp-wick ${cls}' style='${wickStyle}'></div><div class='exp-body ${cls}' style='${bodyStyle}'></div></div>`;
+    }).join('');
+}
+
 export function renderDirSvg(direction) {
     const chart = document.getElementById('dirChart');
     if(!chart) return;

@@ -718,6 +718,16 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             confluenceRatio = mtfResult.ConfluenceRatio,
             expiryCandles = timeoutResult.TimeoutCandles,
             chartData = _mainPrices,
+            chartOhlc = (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>())
+                .TakeLast(12)
+                .Select(c => new
+                {
+                    o = Math.Round(c.Open, 5),
+                    h = Math.Round(c.High, 5),
+                    l = Math.Round(c.Low, 5),
+                    c = Math.Round(c.Close, 5)
+                })
+                .ToArray(),
             rsi = Math.Round(_mainResult.rsiVal, 1),
             ema = Math.Round(_mainResult.emaVal, 2),
             volumeStrength = Math.Round(_mainResult.volStrengthVal, 2),
