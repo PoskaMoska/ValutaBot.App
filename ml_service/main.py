@@ -340,9 +340,23 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
     log = logging.getLogger("SGD")
     
     try:
-        from datetime import datetime, timezone as _tz
+        from datetime import datetime, timezone as _tz, timedelta
         entry_dt = datetime.fromisoformat(entry_timestamp.replace("Z", "+00:00"))
-        entry_unix = int(entry_dt.timestamp())
+        
+        # Calculate strict closed-candle cutoff (ROOT CAUSE #2 FIX)
+        def _get_sec(iv: str) -> int:
+            val = int(iv[1:])
+            if iv.startswith("s"): return val
+            if iv.startswith("m"): return val * 60
+            if iv.startswith("h"): return val * 3600
+            return 60
+            
+        interval_sec = _get_sec(interval)
+        cutoff_dt = entry_dt - timedelta(seconds=interval_sec)
+        
+        # Use cutoff_dt for both unix and string comparisons
+        cutoff_unix = int(cutoff_dt.timestamp())
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z" # Format as expected by DB
         
         db_url = os.getenv("DATABASE_URL")
         df = _pd.DataFrame()
@@ -361,7 +375,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         WHERE asset = %s AND interval = %s AND open_time <= %s
                         ORDER BY open_time DESC LIMIT %s
                     """
-                    df = _pd.read_sql_query(query, conn, params=(symbol, interval, entry_timestamp, limit))
+                    df = _pd.read_sql_query(query, conn, params=(symbol, interval, cutoff_str, limit))
                 
                 # Если пустой датафрейм (или не s-таймфрейм), берем historical_candles
                 if df.empty:
@@ -372,7 +386,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         WHERE asset = %s AND interval = %s AND open_time <= %s
                         ORDER BY open_time DESC LIMIT %s
                     """
-                    df = _pd.read_sql_query(query, conn, params=(symbol, norm, entry_timestamp, limit))
+                    df = _pd.read_sql_query(query, conn, params=(symbol, norm, cutoff_str, limit))
                     
                     if not df.empty and interval.startswith("s"):
                         # FIX BUG-3: Если мы взяли 1m свечи для s5/s10/s15/s30, их ОБЯЗАТЕЛЬНО
@@ -402,7 +416,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
                         "FROM HistoricalCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
                         "ORDER BY OpenTime DESC LIMIT ?",
-                        conn, params=(symbol, norm, entry_unix, limit)
+                        conn, params=(symbol, norm, cutoff_unix, limit)
                     )
                     if not df.empty and interval.startswith("s"):
                         from model import _interpolate_subminute
@@ -414,7 +428,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
                         "FROM SubminuteCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
                         "ORDER BY OpenTime DESC LIMIT ?",
-                        conn, params=(symbol, interval, entry_unix, limit)
+                        conn, params=(symbol, interval, cutoff_unix, limit)
                     )
                 conn.close()
 

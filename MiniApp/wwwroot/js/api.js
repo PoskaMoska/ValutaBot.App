@@ -104,6 +104,16 @@ export async function executeAnalysis() {
         
         showAiChart();
 
+        // Fetch early OHLC specifically for the animated chart during the analysis phase
+        fetch(/api/chart-ohlc?asset=&timeframe=)
+            .then(r => r.json())
+            .then(ohlc => {
+                if (ohlc && ohlc.length) {
+                    updateAiChartData(ohlc);
+                }
+            })
+            .catch(err => console.log('ohlc error', err));
+
         const startTime = Date.now();
 
         const res = await fetch(`/api/analyze?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}&_=${Date.now()}`, {

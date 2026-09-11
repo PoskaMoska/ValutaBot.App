@@ -345,15 +345,18 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 if (_higherTf != null)
                 {
                     try {
-                        higherOhlcForMl = _higherOhlcCandles?.ToArray();
+                        if (_higherOhlcCandles != null && _higherOhlcCandles.Length > 0)
+                        {
+                            higherOhlcForMl = _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray();
+                        }
                     } catch (Exception) { /* ignore */ }
                 }
 
-                // FIX ROOT CAUSE #2: Send all candles including the current (last) one.
-                // Previously Take(N-1) caused ML to predict from candle N-2 instead of N-1,
-                // creating a systematic -1 candle shift in every ML signal.
-                // IMPORTANT: model must be retrained after this fix to re-align train/predict.
-                var mlCandles = _ohlcCandles;
+                // FIX ROOT CAUSE #1: Drop the currently forming (incomplete) candle.
+                // Sending an incomplete candle to ML models trained on fully closed candles causes 
+                // massive Train-Serve Skew (e.g., volume and oscillators are artificially low).
+                // The ML model MUST operate on the latest fully CLOSED candle.
+                var mlCandles = _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray();
 
                 _prediction = await MLPythonService.PredictAsync(_asset, _timeframe, mlCandles, _isForex, higherOhlcForMl);
                 if (_prediction != null)
