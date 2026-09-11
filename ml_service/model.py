@@ -25,7 +25,6 @@ from collections import deque
 try:
     import lightgbm as lgb
     from sklearn.linear_model import SGDClassifier
-    from sklearn.neural_network import MLPClassifier
     from sklearn.model_selection import TimeSeriesSplit
     from sklearn.metrics import accuracy_score, roc_auc_score
     from sklearn.mixture import GaussianMixture
@@ -33,14 +32,6 @@ try:
     HAS_LGBM = True
 except ImportError:
     HAS_LGBM = False
-
-try:
-    from hmmlearn.hmm import GaussianHMM
-    HAS_HMM = True
-except ImportError:
-    # Fallback for when hmmlearn isn't installed yet
-    from sklearn.mixture import GaussianMixture
-    HAS_HMM = False
 
 from features import build_features, _parse_to_datetime
 
@@ -467,15 +458,10 @@ class RegimeRouter:
             return np.zeros(len(X), dtype=int) # default to FLAT if too little data
             
         with self._lock:
-            if HAS_HMM:
-                model = GaussianHMM(n_components=3, covariance_type="diag", n_iter=100, random_state=42)
-                model.fit(X)
-                labels = model.predict(X)
-            else:
-                model = GaussianMixture(n_components=3, random_state=42, n_init=3)
-                labels = model.fit_predict(X)
+            gmm = GaussianMixture(n_components=3, random_state=42, n_init=3)
+            labels = gmm.fit_predict(X)
             
-            # GMM/HMM cluster numbers are random. We MUST sort them logically.
+            # GMM cluster numbers are random. We MUST sort them logically.
             # Strategy: Sort by 'micro_volatility_z' (or fallback) mean.
             # Smallest mean -> Cluster 0 (FLAT)
             # Middle -> Cluster 1 (TREND)
@@ -494,12 +480,12 @@ class RegimeRouter:
             
             mapped_labels = np.array([mapping[l] for l in labels])
             
-            self._gmm = model
+            self._gmm = gmm
             self._mapping = mapping
             
             # Save atomically
             tmp = self.path.with_suffix(".tmp")
-            joblib.dump({"gmm": model, "mapping": mapping}, tmp)
+            joblib.dump({"gmm": gmm, "mapping": mapping}, tmp)
             os.replace(tmp, self.path)
             
             return mapped_labels
@@ -574,7 +560,7 @@ class ForexPredictor:
         self._lock = threading.Lock()
         self.is_training = False
         # Tier 2: Local Tactician
-        self._online_model: Optional[MLPClassifier] = None
+        self._online_model: Optional[SGDClassifier] = None
         self._online_lock = threading.Lock()
         self._online_classes = np.array([0, 1])
         self._sgd_update_count: int = 0  # Bug3 fix: track updates for dynamic weight
@@ -901,7 +887,7 @@ class ForexPredictor:
 
     # ── End Shadow Challenger Pipeline ──────────────────────────────────────
 
-    def partial_fit_online(self, candles: List[Dict], mtf_candles: Optional[List[Dict]], entry_price: float, exit_price: float) -> bool:
+    def partial_fit_online(self, candles: List[Dict], mtf_candles: Optional[List[Dict]], was_win: bool, direction: str) -> bool:
         """
         Tier 2 (Local Tactician): Update SGDClassifier with a single real trade outcome.
         Called immediately after a trade closes. Executes in <1ms.
@@ -916,20 +902,24 @@ class ForexPredictor:
 
             X_last = feats.iloc[[-1]].values.astype(np.float32)
 
-            # Derive label directly from the price movement, ignoring what the bot guessed
-            # 1 = UP, 0 = DOWN
-            y = np.array([1 if exit_price > entry_price else 0])
+            # Derive label from real outcome
+            # WIN + BUY  в†’ price went up   в†’ label 1
+            # WIN + PUT  в†’ price went down  в†’ label 0
+            # LOSS + BUY в†’ price went down  в†’ label 0
+            # LOSS + PUT в†’ price went up    в†’ label 1
+            if direction.upper() == "BUY":
+                y = np.array([1 if was_win else 0])
+            else:
+                y = np.array([0 if was_win else 1])
 
             with self._online_lock:
                 if self._online_model is None:
-                    self._online_model = MLPClassifier(
-                        hidden_layer_sizes=(64, 32),
-                        activation='relu',
-                        solver='adam',
-                        learning_rate_init=0.001,
+                    self._online_model = SGDClassifier(
+                        loss="log_loss",
+                        learning_rate="optimal",
+                        alpha=0.01,
                         random_state=42,
                         warm_start=True,
-                        max_iter=1  # Important for partial_fit to just do 1 epoch
                     )
                 self._online_model.partial_fit(X_last, y, classes=self._online_classes)
                 self._sgd_update_count += 1  # Bug3 fix: track update count
@@ -946,7 +936,7 @@ class ForexPredictor:
                 joblib.dump({"model": online_model, "count": sgd_count}, tmp_path)
                 os.replace(tmp_path, sgd_path)
 
-            log.info(f"[SGD] partial_fit done for {self._key} | entry={entry_price} exit={exit_price} | label={y[0]} | total_updates={sgd_count}")
+            log.info(f"[SGD] partial_fit done for {self._key} | dir={direction} win={was_win} | label={y[0]} | total_updates={sgd_count}")
             return True
 
         except Exception as e:

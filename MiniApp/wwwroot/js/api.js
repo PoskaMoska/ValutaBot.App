@@ -1,5 +1,5 @@
 import { tg, currentAsset, currentTf, getCustomInitData } from './main.js';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles } from './ui.js';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -102,6 +102,18 @@ export async function executeAnalysis() {
             }
         });
 
+        showAiChart(currentAsset, currentTf);
+
+        // Fetch early OHLC specifically for the animated chart during the analysis phase
+        fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}`)
+            .then(r => r.json())
+            .then(ohlc => {
+                if (ohlc && ohlc.length) {
+                    updateAiChartData(ohlc);
+                }
+            })
+            .catch(err => console.log('ohlc error', err));
+
         const startTime = Date.now();
 
         const res = await fetch(`/api/analyze?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}&_=${Date.now()}`, {
@@ -122,6 +134,7 @@ export async function executeAnalysis() {
         const remainingDelay = Math.max(0, 2000 - elapsed);
 
         setTimeout(() => {
+            hideAiChart();
             stopStatusBar();
             if (sphere) sphere.classList.remove('analyzing');
             if (btn) {
