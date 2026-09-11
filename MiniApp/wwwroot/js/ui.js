@@ -320,3 +320,158 @@ export function updateTrafficLight(status) {
         tl.style.boxShadow = '0 0 10px #ef4444';
     }
 }
+
+
+// --- AI Animated Chart ---
+let aiChartAnimationId = null;
+let aiChartData = [];
+let aiChartPhase = 0;
+
+export function showAiChart(asset, tf) {
+    const container = document.getElementById('aiChartContainer');
+    const overlay = document.getElementById('aiChartOverlay');
+    if (container) {
+        if(overlay) {
+            overlay.innerText = (asset + ' | ' + tf).toUpperCase();
+        }
+        container.style.display = 'block';
+        // force reflow
+        void container.offsetWidth;
+        container.classList.add('active');
+        
+        aiChartData = [];
+        if (!aiChartAnimationId) {
+            renderAiChartLoop();
+        }
+    }
+}
+
+export function updateAiChartData(ohlcArray) {
+    if (ohlcArray && ohlcArray.length) {
+        // Use only the last 20 candles so they look bigger and thicker
+        aiChartData = ohlcArray.slice(-20);
+    }
+}
+
+export function hideAiChart() {
+    const container = document.getElementById('aiChartContainer');
+    if (container) {
+        container.classList.remove('active');
+        setTimeout(() => {
+            container.style.display = 'none';
+            if (aiChartAnimationId) {
+                cancelAnimationFrame(aiChartAnimationId);
+                aiChartAnimationId = null;
+            }
+        }, 400);
+    }
+}
+
+function renderAiChartLoop() {
+    const canvas = document.getElementById('aiChartCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    const rect = canvas.parentElement.getBoundingClientRect();
+    if(rect.width === 0) {
+        aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
+        return;
+    }
+    
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    
+    const w = rect.width;
+    const h = rect.height;
+    
+    ctx.clearRect(0, 0, w, h);
+    
+    aiChartPhase += 0.03;
+    
+    if (aiChartData.length === 0) {
+        ctx.beginPath();
+        for(let i=0; i<=w; i+=5) {
+            let y = h/2 + Math.sin(i*0.02 + aiChartPhase) * 15 + Math.cos(i*0.01 + aiChartPhase*1.5) * 10;
+            if(i===0) ctx.moveTo(i, y);
+            else ctx.lineTo(i, y);
+        }
+        ctx.strokeStyle = 'rgba(139,92,246,0.3)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    } else {
+        const paddingY = 25;
+        const paddingX = 15;
+        const count = aiChartData.length;
+        const spacing = (w - paddingX*2) / count;
+        const candleWidth = Math.max(3, spacing * 0.7);
+        
+        let minP = Infinity, maxP = -Infinity;
+        aiChartData.forEach(c => {
+            if(c.low < minP) minP = c.low;
+            if(c.high > maxP) maxP = c.high;
+        });
+        
+        const range = maxP - minP || 1;
+        const scaleY = (h - paddingY*2) / range;
+        
+        // Grid
+        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+        ctx.lineWidth = 1;
+        for(let i=1; i<4; i++) {
+            let y = paddingY + (h - paddingY*2) * (i/4);
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+        }
+        
+        // Connecting Line
+        ctx.beginPath();
+        aiChartData.forEach((c, i) => {
+            let cx = paddingX + i * spacing + spacing/2;
+            let cy = paddingY + (maxP - c.close) * scaleY;
+            cy += Math.sin(aiChartPhase + i*0.2) * 3;
+            if(i===0) ctx.moveTo(cx, cy);
+            else ctx.lineTo(cx, cy);
+        });
+        ctx.strokeStyle = 'rgba(139,92,246,0.3)';
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'round';
+        ctx.shadowColor = 'rgba(139,92,246,0.6)';
+        ctx.shadowBlur = 12;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        
+        // Candles
+        aiChartData.forEach((c, i) => {
+            const isBull = c.close >= c.open;
+            const swayY = Math.sin(aiChartPhase + i*0.5) * 2;
+            const swayX = Math.sin(aiChartPhase*0.8 + i*0.3) * 0.5;
+            
+            const x = paddingX + i * spacing + (spacing - candleWidth)/2 + swayX;
+            const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
+            const yLow = paddingY + (maxP - c.low) * scaleY + swayY;
+            const yOpen = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
+            let bodyH = Math.abs(c.close - c.open) * scaleY;
+            if(bodyH < 2) bodyH = 2; // minimum body height
+            
+            const color = isBull ? '#0ea5e9' : '#d946ef'; // cyan for bull, magenta for bear
+            const glow = isBull ? 'rgba(14,165,233,0.6)' : 'rgba(217,70,239,0.6)';
+            
+            ctx.shadowColor = glow;
+            ctx.shadowBlur = 8;
+            
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(x + candleWidth/2, yHigh);
+            ctx.lineTo(x + candleWidth/2, yLow);
+            ctx.stroke();
+            
+            ctx.fillStyle = color;
+            ctx.fillRect(x, yOpen, candleWidth, bodyH);
+        });
+        ctx.shadowBlur = 0;
+    }
+    
+    aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
+}

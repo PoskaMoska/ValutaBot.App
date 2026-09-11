@@ -264,11 +264,28 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
         0.0, 1.0
     )
 
-    # ── A3: Kalman-smoothed price (replaces EMA lag on sub-minute timeframes) ──
-    kalman_price = kalman_smooth(c, Q=1e-3, R=1e-2)
-    feats['kalman_close_dev'] = (c - kalman_price) / (np.abs(kalman_price) + 1e-10)  # deviation from smoothed trend
-    kalman_slope = np.zeros(len(kalman_price))
-    kalman_slope[1:] = (kalman_price[1:] - kalman_price[:-1]) / (np.abs(kalman_price[:-1]) + 1e-10)
+    # ── A3: Fractional Differentiation (Replaces Kalman on absolute prices) ──
+    # Absolute prices are non-stationary. Kalman on absolute price just creates a lagging MA.
+    # Fractional differentiation makes the series stationary (good for ML) while preserving long memory 
+    # of the macro price level (unlike standard diff/returns).
+    def frac_diff(series: np.ndarray, d: float, thres=0.01) -> np.ndarray:
+        w = [1.0]
+        for k in range(1, len(series)):
+            w_k = -w[-1] * (d - k + 1) / k
+            if abs(w_k) < thres:
+                break
+            w.append(w_k)
+        w = np.array(w[::-1])
+        
+        res = np.zeros(len(series))
+        for i in range(len(w), len(series)):
+            res[i] = np.dot(w, series[i - len(w) + 1: i + 1])
+        return res
+        
+    feats['frac_diff_0_4'] = frac_diff(c, 0.4)
+    # We still keep a short-term diff for immediate slope
+    kalman_slope = np.zeros(len(c))
+    kalman_slope[1:] = (c[1:] - c[:-1]) / (np.abs(c[:-1]) + 1e-10)
     feats['kalman_slope'] = kalman_slope
 
     # в”Ђв”Ђ Oscillators (Using ta library) в”Ђв”Ђ

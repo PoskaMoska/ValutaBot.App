@@ -146,7 +146,8 @@ def to_twelvedata_symbol(symbol: str) -> str:
 
 def _interpolate_subminute(m1_candles: List[Dict], interval: str) -> List[Dict]:
     """Interpolate 1-minute candles into sub-minute steps (s5, s10, s15, s30).
-       Uses a deterministic zig-zag interpolation to prevent injecting white noise."""
+       Uses a Brownian Bridge to generate stochastic micro-paths that respect OHLC boundaries
+       without injecting artificial deterministic patterns (like sine waves)."""
     sec = int(interval[1:]) if (interval.startswith("s") and len(interval) > 1) else 60
     if sec >= 60:
         return m1_candles
@@ -155,27 +156,50 @@ def _interpolate_subminute(m1_candles: List[Dict], interval: str) -> List[Dict]:
     interpolated = []
     
     import math
+    import random
     
     for m in m1_candles:
         start_price = m["open"]
         end_price = m["close"]
-        price_range = end_price - start_price
         high_limit = m["high"]
         low_limit = m["low"]
-        vol_step = (high_limit - low_limit) / sub_per_min
+        vol_step = m["volume"] / sub_per_min
+        
+        # Generate standard Brownian motion
+        dW = [random.gauss(0, 1) for _ in range(sub_per_min)]
+        W = [0.0]
+        for dw in dW:
+            W.append(W[-1] + dw)
+            
+        # Bridge it so it ends exactly at 0 variance from the target
+        W = W[1:]
+        T = sub_per_min
+        bridge = [W[i] - ((i + 1) / T) * W[-1] for i in range(T)]
+        
+        # Scale bridge to fit within the candle's High-Low range safely
+        max_b = max(bridge) if bridge else 0
+        min_b = min(bridge) if bridge else 0
+        range_b = max_b - min_b + 1e-10
+        
+        candle_range = high_limit - low_limit
+        scale = (candle_range * 0.5) / range_b # Scale to 50% of the true range to avoid boundary breaks
         
         for i in range(sub_per_min):
-            frac_start = i / sub_per_min
             frac_end = (i + 1) / sub_per_min
             
-            o = start_price + price_range * frac_start
-            c = start_price + price_range * frac_end
+            # Linear drift + stochastic bridge
+            c = start_price + (end_price - start_price) * frac_end + (bridge[i] * scale)
             
-            # Deterministic micro-wicks (alternating sine wave pattern instead of random noise)
-            micro_wick = vol_step * 0.25 * math.sin(i * math.pi / 2.0)
+            # Clamp to limits
+            c = max(min(c, high_limit), low_limit)
             
-            h = max(o, c) + abs(micro_wick)
-            l = min(o, c) - abs(micro_wick)
+            if i == 0:
+                o = start_price
+            else:
+                o = interpolated[-1]["close"]
+                
+            h = max(o, c) + (candle_range * 0.1 * random.random())
+            l = min(o, c) - (candle_range * 0.1 * random.random())
             
             h = min(h, high_limit)
             l = max(l, low_limit)
@@ -185,7 +209,7 @@ def _interpolate_subminute(m1_candles: List[Dict], interval: str) -> List[Dict]:
                 "high": h,
                 "low": l,
                 "close": c,
-                "volume": m["volume"] / sub_per_min
+                "volume": vol_step
             })
             
     return interpolated
@@ -767,7 +791,7 @@ class ForexPredictor:
             return None
 
     def evaluate_shadow(self, candles: List[Dict], mtf_candles: Optional[List[Dict]],
-                         was_win: bool, direction: str) -> None:
+                         entry_price: float, exit_price: float) -> None:
         """
         Called from the /feedback loop alongside partial_fit_online. Recomputes
         BOTH production's and the challenger's prediction on the same historical
@@ -791,9 +815,8 @@ class ForexPredictor:
                 return
             X_last_base = feats.iloc[[-1]]
 
-            # actual_up = True if price genuinely moved up (derived from real outcome)
-            was_buy = direction.upper() == "BUY"
-            actual_up = was_buy == was_win
+            # Derive actual market direction purely from price delta.
+            actual_up = exit_price > entry_price
 
             # D12: production model may expect ctx_emb_* columns — route through
             # the same embedding helper as predict() (backward compatible).

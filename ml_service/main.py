@@ -730,15 +730,15 @@ def feedback(req: TrainFeedback):
         mtf_candles = _fetch_candles_at_entry(req.asset, higher_tf, req.timestamp, limit=100)
 
         if len(recent_candles) >= 60:
-            ok = predictor.partial_fit_online(recent_candles, mtf_candles, req.was_win, req.direction)
+            ok = predictor.partial_fit_online(recent_candles, mtf_candles, req.entry_price, req.exit_price)
             if ok:
-                log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | win={req.was_win} | candles_at_entry={len(recent_candles)}")
+                log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | candles_at_entry={len(recent_candles)}")
 
             # D11: Shadow Challenger — score production vs challenger on this real
             # outcome without affecting live signals. Triggers promotion check
             # internally if enough shadow samples have accumulated.
             try:
-                predictor.evaluate_shadow(recent_candles, mtf_candles, req.was_win, req.direction)
+                predictor.evaluate_shadow(recent_candles, mtf_candles, req.entry_price, req.exit_price)
             except Exception as shadow_ex:
                 log.debug(f"[ShadowChallenger] evaluation skipped: {shadow_ex}")
             

@@ -27,54 +27,68 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 double high  = m1.High;
                 double low   = m1.Low;
                 double range = high - low;
-                double pip   = range > 0 ? range * 0.01 : 0.00001;
+                double scale = range * 0.5; // Scale max bridge variance to half the candle range
 
-                // Строим путь цены: Open → (возможный High/Low в середине) → Close
-                // Пик/долина в районе 4-7 свечи (середина минуты)
-                int peakAt = 4 + _rng.Next(4);
-                bool goHighFirst = close >= open
-                    ? (_rng.NextDouble() > 0.3)  // в тренде вверх — High раньше
-                    : (_rng.NextDouble() > 0.7);  // в тренде вниз — High может быть в начале
-
+                // 1. Generate Brownian increments (random walk)
+                double[] dW = new double[SubCandlesPerMinute];
+                double[] W = new double[SubCandlesPerMinute + 1];
+                W[0] = 0.0;
+                
                 for (int i = 0; i < SubCandlesPerMinute; i++)
                 {
-                    double t      = (double)i / (SubCandlesPerMinute - 1); // 0..1
-                    double tNext  = (double)(i + 1) / (SubCandlesPerMinute - 1);
-
-                    // Линейная интерполяция базового пути
-                    double basePrice     = open + (close - open) * t;
-                    double basePriceNext = open + (close - open) * Math.Min(tNext, 1.0);
-
-                    // Добавляем реалистичный профиль High/Low
-                    double peakFactor = Math.Sin(Math.PI * i / (SubCandlesPerMinute - 1));
-                    double excursion  = range * 0.5 * peakFactor;
-
-                    double subHigh, subLow;
-                    if (goHighFirst)
-                    {
-                        subHigh = Math.Max(basePrice, basePriceNext) + excursion + _rng.NextDouble() * pip;
-                        subLow  = Math.Min(basePrice, basePriceNext) - pip * _rng.NextDouble() * 0.3;
-                    }
-                    else
-                    {
-                        subHigh = Math.Max(basePrice, basePriceNext) + pip * _rng.NextDouble() * 0.3;
-                        subLow  = Math.Min(basePrice, basePriceNext) - excursion - _rng.NextDouble() * pip;
-                    }
-
-                    // Гарантируем что S5 high/low не выходят за M1 high/low
-                    subHigh = Math.Min(subHigh, high);
-                    subLow  = Math.Max(subLow,  low);
-                    subHigh = Math.Max(subHigh, Math.Max(basePrice, basePriceNext));
-                    subLow  = Math.Min(subLow,  Math.Min(basePrice, basePriceNext));
+                    // Generate Standard Normal (Box-Muller)
+                    double u1 = 1.0 - _rng.NextDouble();
+                    double u2 = 1.0 - _rng.NextDouble();
+                    double randStdNormal = Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Sin(2.0 * Math.PI * u2);
+                    
+                    dW[i] = randStdNormal;
+                    W[i + 1] = W[i] + dW[i];
+                }
+                
+                // 2. Transform into Brownian Bridge (guarantees start at 0, end at 0)
+                double[] bridge = new double[SubCandlesPerMinute];
+                double maxB = 0, minB = 0;
+                for (int i = 0; i < SubCandlesPerMinute; i++)
+                {
+                    bridge[i] = W[i + 1] - ((i + 1.0) / SubCandlesPerMinute) * W[SubCandlesPerMinute];
+                    if (bridge[i] > maxB) maxB = bridge[i];
+                    if (bridge[i] < minB) minB = bridge[i];
+                }
+                
+                // Normalize bridge amplitude to strictly fit inside our scale
+                double rangeB = maxB - minB + 1e-10;
+                double bridgeScale = scale / rangeB;
+                
+                double prevClose = open;
+                
+                for (int i = 0; i < SubCandlesPerMinute; i++)
+                {
+                    double fracEnd = (i + 1.0) / SubCandlesPerMinute;
+                    
+                    // Linear drift + Stochastic Bridge
+                    double c = open + (close - open) * fracEnd + (bridge[i] * bridgeScale);
+                    c = Math.Max(Math.Min(c, high), low); // strict clamp
+                    
+                    double o = prevClose;
+                    
+                    double h = Math.Max(o, c) + (range * 0.1 * _rng.NextDouble());
+                    double l = Math.Min(o, c) - (range * 0.1 * _rng.NextDouble());
+                    
+                    h = Math.Min(h, high);
+                    l = Math.Max(l, low);
+                    
+                    if (i == SubCandlesPerMinute - 1) c = close;
 
                     DateTime subDt = m1.Timestamp.AddSeconds(i * 5);
                     result[idx++] = new MiniAppController.OhlcCandle(
-                        Open:   basePrice,
-                        High:   subHigh,
-                        Low:    subLow,
-                        Close:  i == SubCandlesPerMinute - 1 ? close : basePriceNext,
+                        Open: o,
+                        High: h,
+                        Low: l,
+                        Close: c,
                         Volume: 0,
-                        Timestamp:   subDt);
+                        Timestamp: subDt);
+                        
+                    prevClose = c;
                 }
             }
 
