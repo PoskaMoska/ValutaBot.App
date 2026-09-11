@@ -47,7 +47,11 @@ public record ConsensusDecision(
     int Probability,
     string CombinedReasoningText,
     double FinalTotalScore,
-    string RecommendedExpiryText = ""
+    string RecommendedExpiryText = "",
+    double TaScore = 0.0,
+    double OfScore = 0.0,
+    double SmcScore = 0.0,
+    double MlProb = 0.0
 );
 
 

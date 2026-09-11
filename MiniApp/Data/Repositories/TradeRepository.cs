@@ -121,8 +121,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             using var conn = DbConnectionFactory.GetConnection();
             await conn.ExecuteAsync(@"
-                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BinanceSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr)
+                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, ta_score, of_score, smc_score, ml_prob)
+                VALUES (@Id, @Direction, @Asset, @Timeframe, @BinanceSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @TaScore, @OfScore, @SmcScore, @MlProb)
                 ON CONFLICT (id) DO NOTHING", 
                 new {
                     record.Id,
@@ -134,7 +134,11 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                     CreatedAtStr = record.CreatedAt.ToString("o"),
                     VerifyAtStr = record.VerifyAt.ToString("o"),
                     record.IsForex,
-                    SourceDirectionsStr = System.Text.Json.JsonSerializer.Serialize(record.SourceDirections, ValutaBotJsonContext.Default.DictionaryStringString)
+                    SourceDirectionsStr = System.Text.Json.JsonSerializer.Serialize(record.SourceDirections, ValutaBotJsonContext.Default.DictionaryStringString),
+                    record.TaScore,
+                    record.OfScore,
+                    record.SmcScore,
+                    record.MlProb
                 });
         }
 
@@ -146,7 +150,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 SELECT id as ""Id"", direction as ""Direction"", asset as ""Asset"", timeframe as ""Timeframe"", 
                        binance_symbol as ""BinanceSymbol"", entry_price as ""EntryPrice"", 
                        created_at as ""CreatedAtStr"", verify_at as ""VerifyAtStr"", 
-                       is_forex as ""IsForex"", source_directions as ""SourceDirectionsStr""
+                       is_forex as ""IsForex"", source_directions as ""SourceDirectionsStr"",
+                       ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"", ml_prob as ""MlProb""
                 FROM pending_trades 
                 WHERE verify_at <= @UpToStr", 
                 new { UpToStr = upTo.ToString("o") });
@@ -163,7 +168,11 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 VerifyAt = string.IsNullOrEmpty(r.VerifyAtStr) ? DateTime.MinValue : DateTime.Parse(r.VerifyAtStr).ToUniversalTime(),
                 IsForex = r.IsForex != null ? Convert.ToBoolean(r.IsForex) : false,
                 SourceDirections = string.IsNullOrEmpty(r.SourceDirectionsStr) ? new Dictionary<string, string>() : 
-                    System.Text.Json.JsonSerializer.Deserialize(r.SourceDirectionsStr, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>()
+                    System.Text.Json.JsonSerializer.Deserialize(r.SourceDirectionsStr, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>(),
+                TaScore = r.TaScore != null ? Convert.ToDouble(r.TaScore) : 0.0,
+                OfScore = r.OfScore != null ? Convert.ToDouble(r.OfScore) : 0.0,
+                SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,
+                MlProb = r.MlProb != null ? Convert.ToDouble(r.MlProb) : 0.0
             }).Where(r => r.CreatedAt != DateTime.MinValue).ToList();
         }
 

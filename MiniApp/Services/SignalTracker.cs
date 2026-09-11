@@ -40,8 +40,11 @@ public static class SignalTracker
         int expiryCandles = 3,
         int timeframeSecs = 60,
         bool isForex = false,
-        
-        Dictionary<string, string>? sourceDirections = null)
+        Dictionary<string, string>? sourceDirections = null,
+        double taScore = 0.0,
+        double ofScore = 0.0,
+        double smcScore = 0.0,
+        double mlProb = 0.0)
     {
         string sym = asset.ToUpper();
         var now = DateTime.UtcNow;
@@ -98,7 +101,11 @@ public static class SignalTracker
             CreatedAt   = DateTime.UtcNow,
             VerifyAt    = verifyAt,
             IsForex     = isForex,
-            SourceDirections = sourceDirections ?? new Dictionary<string, string>()
+            SourceDirections = sourceDirections ?? new Dictionary<string, string>(),
+            TaScore = taScore,
+            OfScore = ofScore,
+            SmcScore = smcScore,
+            MlProb = mlProb
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
@@ -219,6 +226,11 @@ public static class SignalTracker
         public bool     IsForex       { get; set; }
         public bool?    WasCorrect    { get; set; }
         public Dictionary<string, string> SourceDirections { get; set; } = new();
+        
+        public double TaScore { get; set; }
+        public double OfScore { get; set; }
+        public double SmcScore { get; set; }
+        public double MlProb { get; set; }
     }
 
     public class AccuracyStats

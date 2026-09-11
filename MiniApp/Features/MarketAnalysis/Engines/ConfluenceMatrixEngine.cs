@@ -507,71 +507,52 @@ public class ConfluenceMatrixEngine(
             BotLogger.Info($"[FearGreed] Skipped: {fgEx.Message}");
         }
 
-        // 4. ML / Mathematical Consensus Matrix Layer (META-LABELING OVERRIDE)
-        // FIX C-13: totalScore is already normalized to [-1, 1] after /totalWeight.
-        // Old code was Clamp(-2.5, 2.5)/2.5 — Clamp never triggered (dead code),
-        // and dividing by 2.5 made math weight effectively ~23% instead of 40%.
+        // 4. ML / Mathematical Consensus Matrix Layer (META-LEARNER OVERRIDE)
         double scoreMath = Math.Clamp(totalScore, -1.0, 1.0);
+        
+        // Extract raw scores for ML
+        double taScoreRaw = taSignal.Score;
+        double ofScoreRaw = ofSignal.ScoreContribution;
+        double smcScoreRaw = finalSmcScore;
+        double mlProbRaw = (mlSignal.Direction == "BUY") ? mlSignal.Confidence : (mlSignal.Direction == "PUT") ? -mlSignal.Confidence : 0;
 
-        bool   isMlActive           = (mlSignal.Direction == "BUY" || mlSignal.Direction == "PUT");
-        double finalConfidenceScore  = scoreMath;
-        string candidateDir          = "NEUTRAL";
-
-        if (isMlActive)
+        // Query the Logistic Regression Meta-Learner
+        double metaProb = OnlineMetaLearner.Predict(asset, timeframe, taScoreRaw, ofScoreRaw, smcScoreRaw, mlProbRaw);
+        
+        string candidateDir = "NEUTRAL";
+        double finalConfidenceScore = 0.0;
+        
+        if (metaProb > 0.52)
         {
-            // True Ensemble: both scoreMath and mlScore are now in [-1, 1]
-            // so the declared mlWeight/mathWeight ratio is actually honoured.
-            double normLgbm = Math.Max(0, (mlSignal.Confidence - 0.5) * 2.0);
-            double mlScore  = mlSignal.Direction == "BUY" ? normLgbm : -normLgbm;
-
-            double mlWeight   = options?.Value.MlWeight   ?? 0.5;
-            double mathWeight = options?.Value.MathWeight ?? 0.5;
-
-            // FIX C-12 (Revised): Dynamic contradiction resolution.
-            if (Math.Sign(mlScore) != Math.Sign(scoreMath))
-            {
-                if (mlSignal.Confidence >= 0.75)
-                {
-                    // ML is highly confident (>75%). It usually detects a breakout that Math 
-                    // interprets purely as "overbought/oversold" in a range. Protect ML.
-                    mlWeight   *= 1.2;
-                    mathWeight *= 0.8;
-                }
-                else if (Math.Abs(scoreMath) > 0.3)
-                {
-                    // Standard contradiction: ML is uncertain, Math has a clear structure.
-                    mlWeight   *= 0.6;
-                    mathWeight *= 1.4;
-                }
-            }
-
-            finalConfidenceScore = (mlScore * mlWeight) + (scoreMath * mathWeight);
+            candidateDir = "BUY";
+            finalConfidenceScore = (metaProb - 0.5) * 2.0; // scale [0.5, 1.0] -> [0.0, 1.0]
+        }
+        else if (metaProb < 0.48)
+        {
+            candidateDir = "PUT";
+            finalConfidenceScore = (0.5 - metaProb) * 2.0; // scale [0.0, 0.5] -> [1.0, 0.0]
+        }
+        else
+        {
+            candidateDir = "NEUTRAL";
+            finalConfidenceScore = 0.0;
         }
 
-        // Dead-zone: near-zero (±0.01). Bot always gives a directional signal.
-        // NEUTRAL only when score is truly zero (no market data bias at all).
-        // User decides whether to act on low-confidence signals.
-        candidateDir = finalConfidenceScore > 0.01 ? "BUY" : finalConfidenceScore < -0.01 ? "PUT" : "NEUTRAL";
-
         // 5. Final Decision & Market Session Awareness
-        double absWeightedScore = Math.Abs(finalConfidenceScore);
+        double absWeightedScore = finalConfidenceScore;
         
         // Внедрение интеллекта сессий (Market Session Modifier)
-        // Бот осознает время суток и снижает вероятность в тихие/опасные периоды, 
-        // тем самым отсекая выдачу ложных "Golden Setups", когда ликвидности нет.
         double sessionMultiplier = 1.0;
         string sessionName = "DEFAULT";
         bool isOtcAsset = asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
         if (!asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL") && !isOtcAsset)
         {
-            // Session modifier applies only to live weekday forex/crypto.
-            // OTC pairs trade from historical DB — no real sessions, no dead zones.
             int h = DateTime.UtcNow.Hour;
-            if (h >= 21 || h < 2) { sessionMultiplier = 0.75; sessionName = "DEAD_ZONE"; } // Поздний вечер (расширение спредов, мертвый рынок)
-            else if (h >= 2 && h < 8) { sessionMultiplier = 0.85; sessionName = "ASIAN"; } // Азия (низкая волатильность, пила)
-            else if (h >= 8 && h < 13) { sessionMultiplier = 1.0; sessionName = "LONDON_MORNING"; } // Лондон
-            else if (h >= 13 && h < 17) { sessionMultiplier = 1.1; sessionName = "LONDON_NY_OVERLAP"; } // Макс. ликвидность (супер-тренды)
-            else if (h >= 17 && h < 21) { sessionMultiplier = 1.0; sessionName = "NY_AFTERNOON"; } // Нью-Йорк вечер
+            if (h >= 21 || h < 2) { sessionMultiplier = 0.75; sessionName = "DEAD_ZONE"; }
+            else if (h >= 2 && h < 8) { sessionMultiplier = 0.85; sessionName = "ASIAN"; }
+            else if (h >= 8 && h < 13) { sessionMultiplier = 1.0; sessionName = "LONDON_MORNING"; }
+            else if (h >= 13 && h < 17) { sessionMultiplier = 1.1; sessionName = "LONDON_NY_OVERLAP"; }
+            else if (h >= 17 && h < 21) { sessionMultiplier = 1.0; sessionName = "NY_AFTERNOON"; }
         }
         else if (isOtcAsset)
         {
@@ -580,9 +561,9 @@ public class ConfluenceMatrixEngine(
         
         absWeightedScore *= sessionMultiplier;
         
-        int probability = isSubMinute
-            ? Math.Clamp(50 + (int)Math.Round(absWeightedScore * 40), 50, 91)
-            : Math.Clamp(50 + (int)Math.Round(absWeightedScore * 45), 50, 95);
+        int probability = (int)Math.Round(50 + (absWeightedScore * 50));
+        if (isSubMinute) probability = Math.Clamp(probability, 50, 91);
+        else probability = Math.Clamp(probability, 50, 95);
 
         if (sessionMultiplier < 1.0)
         {
@@ -633,7 +614,13 @@ public class ConfluenceMatrixEngine(
 
         string combinedReasoning = $"{smcText}\n{flowText}\n{lgbmText}";
 
-        return new ConsensusDecision(candidateDir, candidateDir, probability, combinedReasoning, totalScore);
+        return new ConsensusDecision(
+            candidateDir, candidateDir, probability, combinedReasoning, totalScore, "",
+            TaScore: taSignal.Score,
+            OfScore: ofSignal.ScoreContribution,
+            SmcScore: finalSmcScore,
+            MlProb: mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? -mlSignal.Confidence : 0)
+        );
     }
 
 }

@@ -79,6 +79,10 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                 ExitPrice = record.ExitPrice ?? record.EntryPrice,
                 PnlBps = record.PnlBps,
                 WasWin = record.WasCorrect ?? false,
+                TaScore = record.TaScore,
+                OfScore = record.OfScore,
+                SmcScore = record.SmcScore,
+                MlProb = record.MlProb,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };
@@ -86,6 +90,18 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord);
 
             bool wasCorrect = record.WasCorrect ?? false;
+            
+            // 🔥 META-LEARNER TRAINING 🔥
+            OnlineMetaLearner.PartialFit(
+                record.Asset, 
+                record.Timeframe, 
+                record.TaScore, 
+                record.OfScore, 
+                record.SmcScore, 
+                record.MlProb, 
+                wasCorrect, 
+                record.Direction);
+
             double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
             
             bool isExactDoji = Math.Abs(record.PnlBps) < 1e-4; // Exact tie / Refund
