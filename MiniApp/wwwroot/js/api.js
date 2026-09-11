@@ -1,5 +1,5 @@
 import { tg, currentAsset, currentTf, getCustomInitData } from './main.js';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles } from './ui.js';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -101,6 +101,8 @@ export async function executeAnalysis() {
                 btn.innerText = 'СКАНИРОВАНИЕ...';
             }
         });
+        
+        showAiChart();
 
         const startTime = Date.now();
 
@@ -110,6 +112,12 @@ export async function executeAnalysis() {
             }
         });
         const rawData = await res.json();
+        
+        if (rawData && rawData.result && rawData.result.chartOhlc) {
+            updateAiChartData(rawData.result.chartOhlc);
+        } else if (rawData && rawData.chartOhlc) {
+            updateAiChartData(rawData.chartOhlc);
+        }
         
         let data = rawData;
         let config = null;
@@ -122,6 +130,7 @@ export async function executeAnalysis() {
         const remainingDelay = Math.max(0, 2000 - elapsed);
 
         setTimeout(() => {
+            hideAiChart();
             stopStatusBar();
             if (sphere) sphere.classList.remove('analyzing');
             if (btn) {

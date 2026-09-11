@@ -1740,6 +1740,15 @@ class ContextualEmbedder:
             mtf_ts = np.array([_to_epoch_seconds(t) for t in mtf_times], dtype=np.float64)
             order = np.argsort(mtf_ts)
             mtf_ts_sorted = mtf_ts[order]
+            
+            # FIX D12: Look-Ahead Bias protection.
+            # MTF features are computed using the candle's close, which happens at openTime + interval.
+            # We must shift the alignment timestamps forward by the MTF interval.
+            if len(mtf_ts_sorted) > 1:
+                mtf_interval = np.median(np.diff(mtf_ts_sorted))
+                if mtf_interval > 0:
+                    mtf_ts_sorted += mtf_interval
+                    
             # Precompute embeddings for all MTF rows once
             clean = self._sanitize(mtf_feats)
             all_emb = self._pca.transform(clean.values.astype(np.float32))

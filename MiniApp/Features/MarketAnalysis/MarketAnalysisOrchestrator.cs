@@ -690,8 +690,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс (Резкий)";
         else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс (Резкий)";
         else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Разворот)";
-        else if (_mainResult.rsiVal > 62) uiMarketPhase = "Бычий тренд (Плавный)";
-        else if (_mainResult.rsiVal < 38) uiMarketPhase = "Медвежий тренд (Плавный)";
+        else if (_mainResult.rsiVal > 62) uiMarketPhase = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Откат)" : "Бычий тренд (Плавный)";
+        else if (_mainResult.rsiVal < 38) uiMarketPhase = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Плавный)";
 
         // Адаптивная энтропия с учетом таймфрейма (субминутные против минутных)
         string uiMarketEntropy = "В норме (Безопасно)";
