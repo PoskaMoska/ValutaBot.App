@@ -388,16 +388,18 @@ function renderAiChartLoop() {
     const w = rect.width;
     const h = rect.height;
     
-    ctx.clearRect(0, 0, w, h);
+    // Deep dark background
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(0, 0, w, h);
     
-    // Draw floor gradient reflection
-    const floorGrad = ctx.createLinearGradient(0, h * 0.7, 0, h);
+    // Floor reflection
+    const floorGrad = ctx.createLinearGradient(0, h * 0.6, 0, h);
     floorGrad.addColorStop(0, 'rgba(139,92,246,0)');
-    floorGrad.addColorStop(1, 'rgba(139,92,246,0.15)');
+    floorGrad.addColorStop(1, 'rgba(0, 243, 255, 0.1)');
     ctx.fillStyle = floorGrad;
-    ctx.fillRect(0, h * 0.7, w, h * 0.3);
+    ctx.fillRect(0, h * 0.6, w, h * 0.4);
     
-    aiChartPhase += 0.04;
+    aiChartPhase += 0.02;
     
     if (aiChartData.length > 0) {
         const paddingY = 30;
@@ -405,7 +407,7 @@ function renderAiChartLoop() {
         const count = aiChartData.length;
         const spacing = (w - paddingX*2) / count;
         
-        let candleWidth = Math.max(2, Math.floor(spacing * 0.5));
+        let candleWidth = Math.max(3, Math.floor(spacing * 0.55));
         if (candleWidth % 2 === 0) candleWidth += 1; 
         
         let minP = Infinity, maxP = -Infinity;
@@ -417,55 +419,51 @@ function renderAiChartLoop() {
         const range = maxP - minP || 1;
         const scaleY = (h - paddingY*2) / range;
         
-        // 1. Decorative smooth neon wave (blue/purple) at the bottom
+        // --- 1. Background Grid (Dots) ---
+        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+        for(let gx = paddingX; gx < w - paddingX; gx += 20) {
+            for(let gy = paddingY; gy < h - paddingY; gy += 20) {
+                ctx.fillRect(gx, gy, 1, 1);
+            }
+        }
+        
+        // --- 2. Decorative Cyberpunk Waves (like in Image 1) ---
+        // Cyan wave
         ctx.beginPath();
-        for(let i=0; i<=w; i+=10) {
-            let waveY = h - 20 + Math.sin(i*0.015 - aiChartPhase*0.8) * 15 + Math.cos(i*0.008 + aiChartPhase) * 10;
+        for(let i=0; i<=w; i+=5) {
+            let waveY = h/2 + Math.sin(i*0.01 - aiChartPhase*1.2) * 30 + Math.cos(i*0.005 + aiChartPhase) * 20;
             if(i===0) ctx.moveTo(i, waveY);
             else ctx.lineTo(i, waveY);
         }
-        ctx.strokeStyle = 'rgba(139,92,246, 0.4)';
-        ctx.lineWidth = 2;
-        ctx.shadowColor = 'rgba(139,92,246, 0.8)';
-        ctx.shadowBlur = 15;
+        ctx.strokeStyle = '#00f3ff';
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = '#00f3ff';
+        ctx.shadowBlur = 10;
         ctx.stroke();
         
-        // 2. Main smooth spline connecting the candles
+        // Magenta wave
         ctx.beginPath();
-        let pts = [];
-        aiChartData.forEach((c, i) => {
-            const swayY = Math.sin(aiChartPhase + i*0.5) * 2;
-            let cx = paddingX + i * spacing + spacing/2;
-            let cy = paddingY + (maxP - c.close) * scaleY + swayY;
-            pts.push({x: cx, y: cy});
-        });
-        
-        // Draw spline
-        if (pts.length > 1) {
-            ctx.moveTo(pts[0].x, pts[0].y);
-            for (let i = 0; i < pts.length - 1; i++) {
-                let xc = (pts[i].x + pts[i + 1].x) / 2;
-                let yc = (pts[i].y + pts[i + 1].y) / 2;
-                ctx.quadraticCurveTo(pts[i].x, pts[i].y, xc, yc);
-            }
-            ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+        for(let i=0; i<=w; i+=5) {
+            let waveY = h/2 + Math.cos(i*0.015 + aiChartPhase*0.8) * 25 + Math.sin(i*0.007 - aiChartPhase*1.5) * 15;
+            if(i===0) ctx.moveTo(i, waveY);
+            else ctx.lineTo(i, waveY);
         }
-        ctx.strokeStyle = 'rgba(14, 165, 233, 0.6)';
-        ctx.lineWidth = 2;
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.shadowColor = 'rgba(14, 165, 233, 0.8)';
-        ctx.shadowBlur = 15;
+        ctx.strokeStyle = '#ff00ea';
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = '#ff00ea';
+        ctx.shadowBlur = 12;
         ctx.stroke();
-        ctx.shadowBlur = 0;
         
-        // 3. Candles with intense glow
+        ctx.shadowBlur = 0; // reset shadow for candles
+        
+        // --- 3. Candles ---
         aiChartData.forEach((c, i) => {
             const isBull = c.close >= c.open;
-            const swayY = Math.sin(aiChartPhase + i*0.5) * 2;
-            const swayX = Math.sin(aiChartPhase*0.8 + i*0.3) * 0.5;
             
-            const cx = Math.floor(paddingX + i * spacing + spacing/2 + swayX) + 0.5;
+            // Subtle floating effect
+            const swayY = Math.sin(aiChartPhase*2 + i*0.5) * 1.5;
+            
+            const cx = Math.floor(paddingX + i * spacing + spacing/2) + 0.5;
             const x = Math.floor(cx - candleWidth/2);
             
             const yHigh = Math.floor(paddingY + (maxP - c.high) * scaleY + swayY) + 0.5;
@@ -473,38 +471,50 @@ function renderAiChartLoop() {
             const yOpen = Math.floor(paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY);
             let bodyH = Math.max(3, Math.floor(Math.abs(c.close - c.open) * scaleY));
             
-            const color = isBull ? '#00f3ff' : '#ff00ea'; // True cyberpunk neon cyan/magenta
+            // Rich colors, no white core
+            const color = isBull ? '#00f3ff' : '#ff00ea';
             
             // Wick
             ctx.strokeStyle = color;
-            ctx.lineWidth = 2; // Thicker wicks
-            ctx.shadowColor = color;
-            ctx.shadowBlur = 10;
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.9;
             ctx.beginPath();
             ctx.moveTo(cx, yHigh);
             ctx.lineTo(cx, yLow);
             ctx.stroke();
             
-            // Body
-            ctx.fillStyle = color;
-            ctx.shadowBlur = 12;
+            // Body with gradient glow effect
+            const grad = ctx.createLinearGradient(x, yOpen, x + candleWidth, yOpen);
+            if (isBull) {
+                grad.addColorStop(0, '#00a3ff');
+                grad.addColorStop(0.5, '#00f3ff');
+                grad.addColorStop(1, '#00a3ff');
+            } else {
+                grad.addColorStop(0, '#d900ff');
+                grad.addColorStop(0.5, '#ff00ea');
+                grad.addColorStop(1, '#d900ff');
+            }
+            
+            ctx.fillStyle = grad;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 6;
+            ctx.globalAlpha = 1.0;
             ctx.fillRect(x, yOpen, candleWidth, bodyH);
             
-            // Inner core for extreme brightness
-            ctx.fillStyle = '#ffffff';
             ctx.shadowBlur = 0;
-            ctx.fillRect(x + 1, yOpen + 1, candleWidth - 2, bodyH - 2);
         });
         
-        // Little floating particles for depth
-        ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        for(let i=0; i<5; i++) {
-            let px = (aiChartPhase * 20 * (i+1)) % w;
-            let py = (h/2) + Math.sin(aiChartPhase * (i+1)) * 30;
+        // --- 4. Floating Particles ---
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = '#00f3ff';
+        for(let i=0; i<6; i++) {
+            let px = (aiChartPhase * 15 * (i+1)) % w;
+            let py = (h/2) + Math.sin(aiChartPhase * (i+1)) * 40;
             ctx.beginPath();
-            ctx.arc(px, py, 1, 0, Math.PI*2);
+            ctx.arc(px, py, i%2===0 ? 1.5 : 1, 0, Math.PI*2);
             ctx.fill();
         }
+        ctx.globalAlpha = 1.0;
     }
     
     ctx.restore();
