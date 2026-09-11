@@ -504,8 +504,11 @@ def predict(req: PredictRequest):
 
     predictor = _get_predictor(req.symbol, interval, regime)
 
-    # Auto-train in background if model is missing
-    if model is None and not predictor.is_training:
+    # Auto-train in background if model is missing.
+    # FIX: was `if model is None` — bare name `model` doesn't exist in this
+    # scope (NameError on EVERY /predict → HTTP 500 → C# fallback → ML forever
+    # NEUTRAL on all pairs/timeframes). Correct check is predictor._model.
+    if predictor._model is None and not predictor.is_training:
         predictor.is_training = True
         log.info(f"[Predict] Model missing for {req.symbol} ({interval}). Triggering background training.")
         import threading
