@@ -329,11 +329,7 @@ let aiChartPhase = 0;
 
 export function showAiChart(asset, tf) {
     const container = document.getElementById('aiChartContainer');
-    const overlay = document.getElementById('aiChartOverlay');
     if (container) {
-        if(overlay) {
-            overlay.innerText = (asset + ' | ' + tf).toUpperCase();
-        }
         container.style.display = 'block';
         // force reflow
         void container.offsetWidth;
@@ -391,15 +387,7 @@ function renderAiChartLoop() {
     aiChartPhase += 0.03;
     
     if (aiChartData.length === 0) {
-        ctx.beginPath();
-        for(let i=0; i<=w; i+=5) {
-            let y = h/2 + Math.sin(i*0.02 + aiChartPhase) * 15 + Math.cos(i*0.01 + aiChartPhase*1.5) * 10;
-            if(i===0) ctx.moveTo(i, y);
-            else ctx.lineTo(i, y);
-        }
-        ctx.strokeStyle = 'rgba(139,92,246,0.3)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        // No wavy line anymore, just empty background
     } else {
         const paddingY = 25;
         const paddingX = 15;

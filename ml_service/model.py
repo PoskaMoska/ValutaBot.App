@@ -508,7 +508,10 @@ class RegimeRouter:
             
             X = self._extract_features(feats_row)
             try:
-                raw_label = self._gmm.predict(X)[0]
+                # model.predict returns an array of labels for the sequence.
+                # We want the regime of the most recent (last) candle.
+                raw_labels = self._gmm.predict(X)
+                raw_label = raw_labels[-1]
                 mapped_label = self._mapping[raw_label]
                 
                 if mapped_label == 0: return "FLAT"

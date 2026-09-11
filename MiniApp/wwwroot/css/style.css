@@ -1212,14 +1212,4 @@
     height: 100%;
     display: block;
 }
-.ai-chart-overlay {
-    position: absolute;
-    top: 12px;
-    left: 12px;
-    color: rgba(255,255,255,0.7);
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    text-shadow: 0 0 10px rgba(139,92,246,0.8);
-    pointer-events: none;
-}
+

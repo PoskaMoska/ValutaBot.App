@@ -512,7 +512,7 @@ def predict(req: PredictRequest):
         feats = build_features(candle_dicts, mtf_candle_dicts)
         if not feats.empty:
             router = get_regime_router(req.symbol, interval)
-            regime = router.predict_live(feats.iloc[[-1]])
+            regime = router.predict_live(feats.iloc[-10:])
     except Exception as e:
         log.error(f"[Predict] Failed to calc regime, fallback to ALL: {e}")
 
@@ -721,7 +721,7 @@ def feedback(req: TrainFeedback):
             feats = build_features(recent_candles)
             if not feats.empty:
                 router = get_regime_router(req.asset, norm_interval)
-                regime = router.predict_live(feats.iloc[[-1]])
+                regime = router.predict_live(feats.iloc[-10:])
         except Exception as e:
             log.error(f"[Feedback] Failed to calc regime, fallback to ALL: {e}")
             
