@@ -376,7 +376,6 @@ function renderAiChartLoop() {
     const dpr = window.devicePixelRatio || 1;
     const expectedW = Math.floor(rect.width * dpr);
     const expectedH = Math.floor(rect.height * dpr);
-    
     if (canvas.width !== expectedW || canvas.height !== expectedH) {
         canvas.width = expectedW;
         canvas.height = expectedH;
@@ -388,133 +387,105 @@ function renderAiChartLoop() {
     const w = rect.width;
     const h = rect.height;
     
-    // Deep dark background
-    ctx.fillStyle = '#0a0a1a';
+    ctx.fillStyle = '#0b0d1f';
     ctx.fillRect(0, 0, w, h);
     
-    // Floor reflection
-    const floorGrad = ctx.createLinearGradient(0, h * 0.6, 0, h);
-    floorGrad.addColorStop(0, 'rgba(139,92,246,0)');
-    floorGrad.addColorStop(1, 'rgba(0, 243, 255, 0.1)');
-    ctx.fillStyle = floorGrad;
-    ctx.fillRect(0, h * 0.6, w, h * 0.4);
-    
-    aiChartPhase += 0.02;
+    aiChartPhase += 0.018;
     
     if (aiChartData.length > 0) {
-        const paddingY = 30;
+        const paddingY = 25;
         const paddingX = 15;
         const count = aiChartData.length;
-        const spacing = (w - paddingX*2) / count;
-        
+        const spacing = (w - paddingX * 2) / count;
         let candleWidth = Math.max(3, Math.floor(spacing * 0.55));
-        if (candleWidth % 2 === 0) candleWidth += 1; 
+        if (candleWidth % 2 === 0) candleWidth += 1;
         
         let minP = Infinity, maxP = -Infinity;
         aiChartData.forEach(c => {
-            if(c.low < minP) minP = c.low;
-            if(c.high > maxP) maxP = c.high;
+            if (c.low < minP) minP = c.low;
+            if (c.high > maxP) maxP = c.high;
         });
-        
         const range = maxP - minP || 1;
-        const scaleY = (h - paddingY*2) / range;
+        const scaleY = (h - paddingY * 2) / range;
         
-        // --- 1. Background Grid (Dots) ---
-        ctx.fillStyle = 'rgba(255,255,255,0.05)';
-        for(let gx = paddingX; gx < w - paddingX; gx += 20) {
-            for(let gy = paddingY; gy < h - paddingY; gy += 20) {
-                ctx.fillRect(gx, gy, 1, 1);
-            }
-        }
+        // Compute midY of chart to pass waves THROUGH candles
+        const midY = h / 2;
         
-        // --- 2. Decorative Cyberpunk Waves (like in Image 1) ---
-        // Cyan wave
+        // --- Wave 1 (Magenta) - weaves through chart middle ---
         ctx.beginPath();
-        for(let i=0; i<=w; i+=5) {
-            let waveY = h/2 + Math.sin(i*0.01 - aiChartPhase*1.2) * 30 + Math.cos(i*0.005 + aiChartPhase) * 20;
-            if(i===0) ctx.moveTo(i, waveY);
-            else ctx.lineTo(i, waveY);
+        for (let i = 0; i <= w; i += 4) {
+            const wy = midY + Math.sin(i * 0.012 - aiChartPhase) * 35
+                             + Math.cos(i * 0.007 + aiChartPhase * 1.3) * 20;
+            if (i === 0) ctx.moveTo(i, wy); else ctx.lineTo(i, wy);
         }
-        ctx.strokeStyle = '#00f3ff';
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = '#00f3ff';
-        ctx.shadowBlur = 10;
+        ctx.strokeStyle = 'rgba(200, 0, 255, 0.55)';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = 'rgba(200, 0, 255, 0.8)';
+        ctx.shadowBlur = 14;
         ctx.stroke();
         
-        // Magenta wave
+        // --- Wave 2 (Cyan) - slightly offset phase ---
         ctx.beginPath();
-        for(let i=0; i<=w; i+=5) {
-            let waveY = h/2 + Math.cos(i*0.015 + aiChartPhase*0.8) * 25 + Math.sin(i*0.007 - aiChartPhase*1.5) * 15;
-            if(i===0) ctx.moveTo(i, waveY);
-            else ctx.lineTo(i, waveY);
+        for (let i = 0; i <= w; i += 4) {
+            const wy = midY + Math.cos(i * 0.01 + aiChartPhase * 0.9) * 28
+                             + Math.sin(i * 0.018 - aiChartPhase * 1.5) * 15;
+            if (i === 0) ctx.moveTo(i, wy); else ctx.lineTo(i, wy);
         }
-        ctx.strokeStyle = '#ff00ea';
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = '#ff00ea';
-        ctx.shadowBlur = 12;
+        ctx.strokeStyle = 'rgba(0, 220, 255, 0.55)';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = 'rgba(0, 220, 255, 0.8)';
+        ctx.shadowBlur = 14;
         ctx.stroke();
         
-        ctx.shadowBlur = 0; // reset shadow for candles
+        ctx.shadowBlur = 0;
         
-        // --- 3. Candles ---
-        aiChartData.forEach((c, i) => {
-            const isBull = c.close >= c.open;
-            
-            // Subtle floating effect
-            const swayY = Math.sin(aiChartPhase*2 + i*0.5) * 1.5;
-            
-            const cx = Math.floor(paddingX + i * spacing + spacing/2) + 0.5;
-            const x = Math.floor(cx - candleWidth/2);
-            
-            const yHigh = Math.floor(paddingY + (maxP - c.high) * scaleY + swayY) + 0.5;
-            const yLow = Math.floor(paddingY + (maxP - c.low) * scaleY + swayY) + 0.5;
-            const yOpen = Math.floor(paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY);
-            let bodyH = Math.max(3, Math.floor(Math.abs(c.close - c.open) * scaleY));
-            
-            // Rich colors, no white core
-            const color = isBull ? '#00f3ff' : '#ff00ea';
-            
-            // Wick
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 1;
-            ctx.globalAlpha = 0.9;
+        // --- Floating particles ---
+        for (let i = 0; i < 8; i++) {
+            const px = ((aiChartPhase * 22 * (i + 1)) % (w + 20)) - 10;
+            const py = midY + Math.sin(aiChartPhase * 0.7 + i * 1.2) * 50;
+            const alpha = 0.3 + Math.sin(aiChartPhase + i) * 0.2;
+            ctx.fillStyle = i % 2 === 0 ? gba(0,220,255,\)\ : gba(200,0,255,\)\;
             ctx.beginPath();
-            ctx.moveTo(cx, yHigh);
-            ctx.lineTo(cx, yLow);
-            ctx.stroke();
-            
-            // Body with gradient glow effect
-            const grad = ctx.createLinearGradient(x, yOpen, x + candleWidth, yOpen);
-            if (isBull) {
-                grad.addColorStop(0, '#00a3ff');
-                grad.addColorStop(0.5, '#00f3ff');
-                grad.addColorStop(1, '#00a3ff');
-            } else {
-                grad.addColorStop(0, '#d900ff');
-                grad.addColorStop(0.5, '#ff00ea');
-                grad.addColorStop(1, '#d900ff');
-            }
-            
-            ctx.fillStyle = grad;
-            ctx.shadowColor = color;
-            ctx.shadowBlur = 6;
-            ctx.globalAlpha = 1.0;
-            ctx.fillRect(x, yOpen, candleWidth, bodyH);
-            
-            ctx.shadowBlur = 0;
-        });
-        
-        // --- 4. Floating Particles ---
-        ctx.globalAlpha = 0.6;
-        ctx.fillStyle = '#00f3ff';
-        for(let i=0; i<6; i++) {
-            let px = (aiChartPhase * 15 * (i+1)) % w;
-            let py = (h/2) + Math.sin(aiChartPhase * (i+1)) * 40;
-            ctx.beginPath();
-            ctx.arc(px, py, i%2===0 ? 1.5 : 1, 0, Math.PI*2);
+            ctx.arc(px, py, i % 3 === 0 ? 2 : 1, 0, Math.PI * 2);
             ctx.fill();
         }
-        ctx.globalAlpha = 1.0;
+        
+        // --- Candles (drawn on top of waves) ---
+        aiChartData.forEach((c, i) => {
+            const isBull = c.close >= c.open;
+            // Very subtle float — barely perceptible
+            const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 1.2;
+            
+            const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
+            const x = Math.floor(cx - candleWidth / 2);
+            
+            const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
+            const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
+            const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
+            let bodyH = Math.abs(c.close - c.open) * scaleY;
+            if (bodyH < 3) bodyH = 3;
+            
+            const color = isBull ? '#00dcff' : '#dd00ff';
+            const glowColor = isBull ? 'rgba(0,220,255,0.6)' : 'rgba(200,0,255,0.6)';
+            
+            // Wick — thin, sharp
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 4;
+            ctx.beginPath();
+            ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
+            ctx.lineTo(cx, Math.floor(yLow) + 0.5);
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            
+            // Body — solid fill, moderate glow
+            ctx.fillStyle = color;
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 8;
+            ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+            ctx.shadowBlur = 0;
+        });
     }
     
     ctx.restore();
