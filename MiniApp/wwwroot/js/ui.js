@@ -344,7 +344,7 @@ export function showAiChart(asset, tf) {
 
 export function updateAiChartData(ohlcArray) {
     if (ohlcArray && ohlcArray.length) {
-        aiChartData = ohlcArray.slice(-40);
+        aiChartData = ohlcArray.slice(-30);
     }
 }
 

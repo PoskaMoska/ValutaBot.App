@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -17,6 +17,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public double ExitPrice { get; set; }
         public double PnlBps { get; set; }
         public bool WasWin { get; set; }
+        public double TaScore { get; set; }
+        public double OfScore { get; set; }
+        public double SmcScore { get; set; }
+        public double MlProb { get; set; }
         public string CreatedAt { get; set; } = "";
         public string VerifiedAt { get; set; } = "";
     }
@@ -31,8 +35,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                     INSERT INTO trade_outcomes 
-                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, created_at, verified_at)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @CreatedAt, @VerifiedAt)
+                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, created_at, verified_at)
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @CreatedAt, @VerifiedAt)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
                         timeframe = EXCLUDED.timeframe,
@@ -41,6 +45,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                         exit_price = EXCLUDED.exit_price,
                         pnl_bps = EXCLUDED.pnl_bps,
                         was_win = EXCLUDED.was_win,
+                        ta_score = EXCLUDED.ta_score,
+                        of_score = EXCLUDED.of_score,
+                        smc_score = EXCLUDED.smc_score,
+                        ml_prob = EXCLUDED.ml_prob,
                         created_at = EXCLUDED.created_at,
                         verified_at = EXCLUDED.verified_at
                 ", new
@@ -53,6 +61,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                     outcome.ExitPrice,
                     outcome.PnlBps,
                     outcome.WasWin,
+                    outcome.TaScore,
+                    outcome.OfScore,
+                    outcome.SmcScore,
+                    outcome.MlProb,
                     outcome.CreatedAt,
                     outcome.VerifiedAt
                 });
@@ -72,7 +84,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 var rows = await conn.QueryAsync(@"
                     SELECT id as ""Id"", asset as ""Asset"", timeframe as ""Timeframe"", direction as ""Direction"",
                            entry_price as ""EntryPrice"", exit_price as ""ExitPrice"", pnl_bps as ""PnlBps"",
-                           was_win as ""WasWin"", created_at as ""CreatedAt"", verified_at as ""VerifiedAt""
+                           was_win as ""WasWin"", ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"",
+                           ml_prob as ""MlProb"", created_at as ""CreatedAt"", verified_at as ""VerifiedAt""
                     FROM trade_outcomes
                     ORDER BY verified_at DESC
                     LIMIT @limit
@@ -88,6 +101,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                     ExitPrice = r.ExitPrice != null ? Convert.ToDouble(r.ExitPrice) : 0.0,
                     PnlBps = r.PnlBps != null ? Convert.ToDouble(r.PnlBps) : 0.0,
                     WasWin = Convert.ToBoolean(r.WasWin),
+                    TaScore = r.TaScore != null ? Convert.ToDouble(r.TaScore) : 0.0,
+                    OfScore = r.OfScore != null ? Convert.ToDouble(r.OfScore) : 0.0,
+                    SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,
+                    MlProb = r.MlProb != null ? Convert.ToDouble(r.MlProb) : 0.0,
                     CreatedAt = r.CreatedAt ?? "",
                     VerifiedAt = r.VerifiedAt ?? ""
                 }).ToList();
