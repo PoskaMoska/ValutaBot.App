@@ -280,34 +280,6 @@ public static partial class MiniAppController
             }
         }).RequireRateLimiting("Global");
 
-        app.MapGet("/api/chart-ohlc", async Task<IResult> (HttpContext context, string? asset, string? timeframe, ValutaBot.MiniApp.MarketDataFetcher fetcher) =>
-        {
-            if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(timeframe))
-                return Results.Json(Array.Empty<OhlcCandle>());
-            try
-            {
-                string clean = ValutaBot.MiniApp.AssetSanitizer.Sanitize(asset);
-                DayOfWeek day = DateTime.UtcNow.DayOfWeek;
-                string symbol = ValutaBot.MiniApp.AssetSanitizer.MapSymbolByDayOfWeek(clean, day);
-                var ohlc = await fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, asset, 40);
-                var payload = (ohlc ?? Array.Empty<OhlcCandle>())
-                    .TakeLast(40)
-                    .Select(c => new
-                    {
-                        open = c.Open,
-                        high = c.High,
-                        low = c.Low,
-                        close = c.Close,
-                        time = c.Timestamp != default ? new DateTimeOffset(c.Timestamp).ToUnixTimeSeconds() : 0
-                    }).ToArray();
-                return Results.Json(payload);
-            }
-            catch
-            {
-                return Results.Json(Array.Empty<object>());
-            }
-        }).RequireRateLimiting("Global");
-        
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
 
