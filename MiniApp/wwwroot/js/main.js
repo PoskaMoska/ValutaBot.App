@@ -1,6 +1,5 @@
 import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js';
 import { switchResultTab, updateTrafficLight } from './ui.js';
-import { stopLiveChart } from './chart.js';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
@@ -94,7 +93,6 @@ function setAsset(el) {
     if (menuEl) menuEl.classList.remove('show');
     const sphere = document.getElementById('mainSphere');
     if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
-    stopLiveChart(); // stale chart must not survive asset switch: chart lives only with its analysis
     initPriceWebSocket();
     resetSignalKey();
 }
@@ -113,7 +111,6 @@ function setTf(el) {
     if (menuEl) menuEl.classList.remove('show');
     const sphere = document.getElementById('mainSphere');
     if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
-    stopLiveChart(); // stale chart must not survive timeframe switch
     initPriceWebSocket();
     resetSignalKey();
 }

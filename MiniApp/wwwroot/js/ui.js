@@ -1,6 +1,5 @@
 
 import { lastPriceVal } from './api.js';
-import { stopLiveChart } from './chart.js';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');
@@ -37,7 +36,6 @@ export function switchResultTab(tabName) {
 }
 
 export function clearResults() {
-    stopLiveChart();
     const safeSetText = (id, txt) => { const el = document.getElementById(id); if (el) el.innerText = txt; };
     const safeSetHtml = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
     const safeSetStyle = (id, prop, val) => { const el = document.getElementById(id); if (el) el.style[prop] = val; };

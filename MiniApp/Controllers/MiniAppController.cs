@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
-using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
@@ -20,9 +19,6 @@ namespace ValutaBot.MiniApp;
 public static partial class MiniAppController
 {
     private static readonly IMemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
-
-    // Cap concurrent /ws/prices connections: WS bypasses the HTTP rate limiter.
-    private static readonly SemaphoreSlim WsPriceGate = new(50, 50);
 
     public static string? LastExceptionMessage { get; set; }
 
@@ -198,101 +194,6 @@ public static partial class MiniAppController
 
         app.UseRateLimiter();
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
-
-        // ── Live price WebSocket for the MiniApp chart ──────────────────────
-        // The frontend already connected here (api.js: /ws/prices?asset=...),
-        // but no handler was ever mapped — ticks never reached the browser.
-        // Pushes the latest TwelveData tick for the requested asset every ~1s.
-        // Auth: browsers can't set headers on WS handshakes, so init-data comes
-        // as ?init_data= and goes through the same HMAC check as REST.
-        app.Map("/ws/prices", async (HttpContext context) =>
-        {
-            if (!context.WebSockets.IsWebSocketRequest)
-            {
-                context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                return;
-            }
-
-            // Connection cap: WS bypasses the HTTP rate limiter, so bound it here.
-            if (!await WsPriceGate.WaitAsync(0, context.RequestAborted))
-            {
-                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                return;
-            }
-
-            try
-            {
-                string? botToken = TelegramNotifier.GetToken();
-                string initData = context.Request.Query["init_data"].ToString();
-                if (string.IsNullOrEmpty(botToken))
-                {
-                    context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                    return;
-                }
-                var (ok, tgUserId, _) = AuthService.ValidateInitData(initData, botToken);
-                if (!ok || !await TelegramBotService.IsUserAllowed(tgUserId))
-                {
-                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    return;
-                }
-
-                string asset = context.Request.Query["asset"].ToString();
-                if (string.IsNullOrWhiteSpace(asset))
-                {
-                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                    return;
-                }
-
-                using var ws = await context.WebSockets.AcceptWebSocketAsync();
-                var recvBuf = new byte[256];
-
-                while (ws.State == WebSocketState.Open && !context.RequestAborted.IsCancellationRequested)
-                {
-                    // Drain close frames without blocking the tick loop.
-                    using (var cts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted))
-                    {
-                        cts.CancelAfter(TimeSpan.FromSeconds(1));
-                        try
-                        {
-                            var recv = await ws.ReceiveAsync(recvBuf, cts.Token);
-                            if (recv.MessageType == WebSocketMessageType.Close)
-                                break;
-                        }
-                        catch (OperationCanceledException) { /* 1s elapsed → send next tick */ }
-                    }
-
-                    if (ws.State != WebSocketState.Open || context.RequestAborted.IsCancellationRequested)
-                        break;
-
-                    // Resolve live price across key formats ("EURUSD" stripped cache
-                    // vs "EUR/USD" TwelveData cache). Skip tick if nothing fresh.
-                    double price = 0;
-                    bool havePrice = TwelveDataWebSocketStream.TryGetLivePrice(asset, out price);
-                    if (!havePrice || price <= 0)
-                        continue;
-
-                    var payload = JsonSerializer.Serialize(new { price });
-                    var bytes = Encoding.UTF8.GetBytes(payload);
-                    try
-                    {
-                        await ws.SendAsync(bytes, WebSocketMessageType.Text, true, context.RequestAborted);
-                    }
-                    catch (OperationCanceledException) { break; }
-                    catch (WebSocketException) { break; }
-                }
-
-                try
-                {
-                    if (ws.State == WebSocketState.Open)
-                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
-                }
-                catch { }
-            }
-            finally
-            {
-                WsPriceGate.Release();
-            }
-        });
 
         app.MapGet("/", async (HttpContext context) =>
         {

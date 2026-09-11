@@ -1,6 +1,5 @@
 import { tg, currentAsset, currentTf, getCustomInitData } from './main.js';
 import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles } from './ui.js';
-import { startLiveChart, stopLiveChart } from './chart.js';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -411,13 +410,6 @@ export async function executeAnalysis() {
             // fallback to legacy price bars for old backend responses.
             if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);
             else if (durBars.length) renderMiniChart('durChart', durBars, '');
-
-            // Live neon chart for this asset/timeframe (real OHLC + WS ticks).
-            // Stopped on next analysis via clearResults() -> stopLiveChart().
-            if (data.chartOhlc && data.chartOhlc.length) {
-                const wsInitData = tg && tg.initData ? tg.initData : getCustomInitData();
-                startLiveChart(data.chartOhlc, currentAsset + ' · ' + String(currentTf).toUpperCase(), wsInitData);
-            }
 
             const tabReg = document.getElementById('resultsTabBar');
             if (tabReg) tabReg.style.display = 'flex';

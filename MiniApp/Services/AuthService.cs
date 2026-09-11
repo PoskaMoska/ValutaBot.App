@@ -45,10 +45,9 @@ public static class AuthService
     }
 
     /// <summary>
-    /// Validates raw Telegram init-data (header value or WS query param) against
-    /// the bot token. Shared by HTTP auth and the /ws/prices endpoint (browsers
-    /// cannot set custom headers on WebSocket handshakes, so WS passes init-data
-    /// as a query parameter — same signature check, no duplicated logic).
+    /// Validates raw Telegram init-data (header value or query parameter) against
+    /// the bot token. Shared by HTTP auth and any future query-param auth flows —
+    /// single HMAC-check implementation, no duplicated logic.
     /// Returns (ok, userId, error).
     /// </summary>
     public static (bool ok, long userId, string? error) ValidateInitData(string initData, string botToken)
