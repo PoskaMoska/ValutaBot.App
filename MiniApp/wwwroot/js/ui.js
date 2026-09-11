@@ -344,8 +344,7 @@ export function showAiChart(asset, tf) {
 
 export function updateAiChartData(ohlcArray) {
     if (ohlcArray && ohlcArray.length) {
-        // Use only the last 20 candles so they look bigger and thicker
-        aiChartData = ohlcArray.slice(-20);
+        aiChartData = ohlcArray.slice(-40);
     }
 }
 
@@ -375,8 +374,15 @@ function renderAiChartLoop() {
     }
     
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+    const expectedW = Math.floor(rect.width * dpr);
+    const expectedH = Math.floor(rect.height * dpr);
+    
+    if (canvas.width !== expectedW || canvas.height !== expectedH) {
+        canvas.width = expectedW;
+        canvas.height = expectedH;
+    }
+    
+    ctx.save();
     ctx.scale(dpr, dpr);
     
     const w = rect.width;
@@ -386,14 +392,14 @@ function renderAiChartLoop() {
     
     aiChartPhase += 0.03;
     
-    if (aiChartData.length === 0) {
-        // No wavy line anymore, just empty background
-    } else {
+    if (aiChartData.length > 0) {
         const paddingY = 25;
-        const paddingX = 15;
+        const paddingX = 10;
         const count = aiChartData.length;
         const spacing = (w - paddingX*2) / count;
-        const candleWidth = Math.max(3, spacing * 0.7);
+        // Make sure candleWidth is an odd number or pixel-perfect to avoid subpixel blur
+        let candleWidth = Math.max(1, Math.floor(spacing * 0.6));
+        if (candleWidth % 2 === 0) candleWidth -= 1; // odd width helps centering 1px wicks
         
         let minP = Infinity, maxP = -Infinity;
         aiChartData.forEach(c => {
@@ -408,7 +414,7 @@ function renderAiChartLoop() {
         ctx.strokeStyle = 'rgba(255,255,255,0.05)';
         ctx.lineWidth = 1;
         for(let i=1; i<4; i++) {
-            let y = paddingY + (h - paddingY*2) * (i/4);
+            let y = Math.floor(paddingY + (h - paddingY*2) * (i/4)) + 0.5;
             ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
         }
         
@@ -421,11 +427,11 @@ function renderAiChartLoop() {
             if(i===0) ctx.moveTo(cx, cy);
             else ctx.lineTo(cx, cy);
         });
-        ctx.strokeStyle = 'rgba(139,92,246,0.3)';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(139,92,246,0.5)';
+        ctx.lineWidth = 1.5;
         ctx.lineJoin = 'round';
-        ctx.shadowColor = 'rgba(139,92,246,0.6)';
-        ctx.shadowBlur = 12;
+        ctx.shadowColor = 'rgba(139,92,246,0.4)';
+        ctx.shadowBlur = 6;
         ctx.stroke();
         ctx.shadowBlur = 0;
         
@@ -435,31 +441,29 @@ function renderAiChartLoop() {
             const swayY = Math.sin(aiChartPhase + i*0.5) * 2;
             const swayX = Math.sin(aiChartPhase*0.8 + i*0.3) * 0.5;
             
-            const x = paddingX + i * spacing + (spacing - candleWidth)/2 + swayX;
-            const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
-            const yLow = paddingY + (maxP - c.low) * scaleY + swayY;
-            const yOpen = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
-            let bodyH = Math.abs(c.close - c.open) * scaleY;
-            if(bodyH < 2) bodyH = 2; // minimum body height
+            // Math.floor for crisp rendering, + 0.5 for 1px line stroke
+            const cx = Math.floor(paddingX + i * spacing + spacing/2 + swayX) + 0.5;
+            const x = Math.floor(cx - candleWidth/2);
             
-            const color = isBull ? '#0ea5e9' : '#d946ef'; // cyan for bull, magenta for bear
-            const glow = isBull ? 'rgba(14,165,233,0.6)' : 'rgba(217,70,239,0.6)';
+            const yHigh = Math.floor(paddingY + (maxP - c.high) * scaleY + swayY) + 0.5;
+            const yLow = Math.floor(paddingY + (maxP - c.low) * scaleY + swayY) + 0.5;
+            const yOpen = Math.floor(paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY);
+            let bodyH = Math.max(2, Math.floor(Math.abs(c.close - c.open) * scaleY));
             
-            ctx.shadowColor = glow;
-            ctx.shadowBlur = 8;
+            const color = isBull ? '#0ea5e9' : '#d946ef'; 
             
             ctx.strokeStyle = color;
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1;
             ctx.beginPath();
-            ctx.moveTo(x + candleWidth/2, yHigh);
-            ctx.lineTo(x + candleWidth/2, yLow);
+            ctx.moveTo(cx, yHigh);
+            ctx.lineTo(cx, yLow);
             ctx.stroke();
             
             ctx.fillStyle = color;
             ctx.fillRect(x, yOpen, candleWidth, bodyH);
         });
-        ctx.shadowBlur = 0;
     }
     
+    ctx.restore();
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
 }

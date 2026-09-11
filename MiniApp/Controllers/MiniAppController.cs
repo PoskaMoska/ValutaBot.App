@@ -289,9 +289,9 @@ public static partial class MiniAppController
                 string clean = ValutaBot.MiniApp.AssetSanitizer.Sanitize(asset);
                 DayOfWeek day = DateTime.UtcNow.DayOfWeek;
                 string symbol = ValutaBot.MiniApp.AssetSanitizer.MapSymbolByDayOfWeek(clean, day);
-                var ohlc = await fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, asset, 20);
+                var ohlc = await fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, asset, 40);
                 var payload = (ohlc ?? Array.Empty<OhlcCandle>())
-                    .TakeLast(20)
+                    .TakeLast(40)
                     .Select(c => new
                     {
                         open = c.Open,
