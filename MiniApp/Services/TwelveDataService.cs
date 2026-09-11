@@ -30,8 +30,17 @@ public static partial class TwelveDataService
     public static string GetApiKey()
     {
         string envKey = Environment.GetEnvironmentVariable("TwelveDataApiKey");
-        _apiKey ??= !string.IsNullOrWhiteSpace(envKey) ? envKey : "3e0d610500f0414282d471471f59504e";
-        return _apiKey;
+        if (!string.IsNullOrWhiteSpace(envKey))
+        {
+            _apiKey = envKey;
+            return _apiKey;
+        }
+        // No hardcoded fallback: API keys must come from the TwelveDataApiKey
+        // environment variable (Railway dashboard / shell). Returning empty —
+        // callers already handle API failures via ExchangeUnavailableException.
+        if (string.IsNullOrWhiteSpace(_apiKey))
+            BotLogger.Warn("[TwelveData] TwelveDataApiKey env var is not set — market data fetch will fail.");
+        return _apiKey ?? "";
     }
 
     public static async Task<(double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles)?> FetchCandlesAsync(string rawAsset, string interval, int limit = 100, int cacheTtlSeconds = 45)

@@ -17,7 +17,6 @@ namespace ValutaBot.App.MiniApp.Backtesting
         private const string CacheDir      = "Logs/backtest_cache";
         private const int    PageSize      = 5000;
         private const string DefaultSymbol = "EUR/USD";
-        private const string DefaultApiKey = "3e0d610500f0414282d471471f59504e";
 
         private static readonly JsonSerializerOptions _jsonOpts = new()
         {
@@ -42,7 +41,9 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 return cached == null ? Array.Empty<MiniAppController.OhlcCandle>() : ToCandleArray(cached);
             }
 
-            string apiKey = Environment.GetEnvironmentVariable("TwelveDataApiKey") ?? DefaultApiKey;
+            string apiKey = Environment.GetEnvironmentVariable("TwelveDataApiKey") ?? "";
+            if (string.IsNullOrWhiteSpace(apiKey))
+                throw new InvalidOperationException("TwelveDataApiKey env var is not set — backtest data load requires it.");
             Console.WriteLine($"[Loader] Загружаю {totalCandles} свечей {symbol} ({interval}) из TwelveData...");
 
             var all     = new List<CachedOhlc>(totalCandles);

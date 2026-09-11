@@ -182,8 +182,8 @@ public static class TwelveDataWebSocketStream
                 _lastTickTime = DateTime.UtcNow;
                 _wsIsAlive = true;
 
-                // Push to accumulator for 5s candles
-                RealtimeTickCollector.OnPriceUpdate(cleanSym, price);
+                // Push to accumulator for 5s candles (async continuous save per-tick, no timer flush dependency)
+                _ = RealtimeTickCollector.OnPriceUpdateAsync(cleanSym, price);
             }
         }
         catch { /* Ignore parsing errors on ping/heartbeat messages */ }

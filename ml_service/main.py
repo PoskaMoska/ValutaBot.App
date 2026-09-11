@@ -250,6 +250,8 @@ class PredictResponse(BaseModel):
     accuracy: Optional[float] = None
     auc: Optional[float] = None
     n_train: Optional[int] = None
+    variance_estimate: Optional[float] = None   # B6: predicted uncertainty [0,1], higher = less reliable
+    raw_confidence: Optional[float] = None       # B6: confidence before variance-based dampening
 
 
 class TrainRequest(BaseModel):
@@ -488,19 +490,15 @@ def predict(req: PredictRequest):
     candle_dicts = _candles_to_dicts(req.candles)
     mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
     
-    # Determine current market regime
+    # Determine current market regime using GMM
     regime = "ALL"
     try:
         from features import build_features
+        from model import get_regime_router
         feats = build_features(candle_dicts, mtf_candle_dicts)
-        if not feats.empty and 'adx' in feats.columns:
-            current_adx = feats['adx'].iloc[-1]
-            if current_adx < 20.0:
-                regime = "FLAT"
-            elif current_adx < 40.0:
-                regime = "TREND"
-            else:
-                regime = "CHAOS"
+        if not feats.empty:
+            router = get_regime_router(req.symbol, interval)
+            regime = router.predict_live(feats.iloc[[-1]])
     except Exception as e:
         log.error(f"[Predict] Failed to calc regime, fallback to ALL: {e}")
 
@@ -520,6 +518,20 @@ def predict(req: PredictRequest):
 
     direction, confidence, version = predictor.predict(candle_dicts, mtf_candle_dicts)
 
+    # B6: Predictive Variance Model — estimate how uncertain this prediction is
+    # given the current feature state, and dampen confidence accordingly.
+    raw_confidence = confidence
+    variance_estimate = None
+    try:
+        from model import get_variance_predictor
+        var_predictor = get_variance_predictor(req.symbol, interval, regime)
+        variance_estimate = var_predictor.predict_variance(candle_dicts, mtf_candle_dicts)
+        # Dampen confidence toward 0.5 proportionally to estimated uncertainty.
+        # variance_estimate=0 -> no change; variance_estimate=1 -> fully neutral.
+        confidence = 0.5 + (confidence - 0.5) * (1.0 - variance_estimate)
+    except Exception as e:
+        log.warning(f"[Predict] VariancePredictor failed, using raw confidence: {e}")
+
     meta = predictor._meta
     return PredictResponse(
         direction=direction,
@@ -528,7 +540,8 @@ def predict(req: PredictRequest):
         accuracy=round(meta.accuracy, 4) if meta else None,
         auc=round(meta.auc, 4) if meta else None,
         n_train=meta.n_train if meta else None,
-
+        variance_estimate=round(variance_estimate, 4) if variance_estimate is not None else None,
+        raw_confidence=round(raw_confidence, 4),
     )
 
 
@@ -573,6 +586,61 @@ def _background_train(symbol: str, interval: str, candles: Optional[list] = None
         predictor = _get_predictor(symbol, interval, regime)
         report = predictor.train(candles, mtf_candles)
         log.info(f"[BG Train] Done {regime}: {report}")
+
+
+# ── D11: Shadow Challenger endpoints ──────────────────────────────────────
+
+class ChallengerTrainRequest(BaseModel):
+    symbol: str
+    interval: str
+    regime: str = "ALL"   # which regime-specific predictor gets a challenger
+
+
+@app.post("/challenger/train")
+def challenger_train(req: ChallengerTrainRequest, background_tasks: BackgroundTasks):
+    """Start background training of a shadow challenger model (D11).
+
+    Production model is untouched. The challenger will be scored against
+    production on every subsequent /feedback until it either proves
+    statistically superior (auto-promotion) or is replaced by a newer challenger.
+    """
+    interval = _normalize_interval(req.interval)
+    predictor = _get_predictor(req.symbol, interval, req.regime)
+
+    def _run():
+        try:
+            report = predictor.train_challenger()
+            log.info(f"[ShadowChallenger] Background challenger train done: {report}")
+        except Exception as e:
+            log.error(f"[ShadowChallenger] Background challenger train failed: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "challenger-training-started", "symbol": req.symbol,
+            "interval": interval, "regime": req.regime}
+
+
+@app.get("/challenger/status")
+def challenger_status(symbol: str, interval: str, regime: str = "ALL"):
+    """Shadow A/B test stats: production vs challenger win rates over real outcomes."""
+    normalized = _normalize_interval(interval)
+    predictor = _get_predictor(symbol, normalized, regime)
+    with predictor._challenger_lock:
+        has_challenger = predictor._challenger_model is not None
+        shadow_log = list(predictor._shadow_log)
+    n = len(shadow_log)
+    if n == 0:
+        return {"has_challenger": has_challenger, "n_shadow_samples": 0}
+    prod_wins = sum(1 for p, _ in shadow_log if p)
+    chal_wins = sum(1 for _, c in shadow_log if c)
+    return {
+        "has_challenger": has_challenger,
+        "n_shadow_samples": n,
+        "production_win_rate": round(prod_wins / n, 4),
+        "challenger_win_rate": round(chal_wins / n, 4),
+        "challenger_edge_pp": round((chal_wins - prod_wins) / n * 100, 2),
+    }
+
+# ── End Shadow Challenger endpoints ───────────────────────────────────────
 
 
 @app.post("/feedback")
@@ -632,15 +700,11 @@ def feedback(req: TrainFeedback):
         regime = "ALL"
         try:
             from features import build_features
+            from model import get_regime_router
             feats = build_features(recent_candles)
-            if not feats.empty and 'adx' in feats.columns:
-                current_adx = feats['adx'].iloc[-1]
-                if current_adx < 20.0:
-                    regime = "FLAT"
-                elif current_adx < 40.0:
-                    regime = "TREND"
-                else:
-                    regime = "CHAOS"
+            if not feats.empty:
+                router = get_regime_router(req.asset, norm_interval)
+                regime = router.predict_live(feats.iloc[[-1]])
         except Exception as e:
             log.error(f"[Feedback] Failed to calc regime, fallback to ALL: {e}")
             
@@ -652,6 +716,14 @@ def feedback(req: TrainFeedback):
             ok = predictor.partial_fit_online(recent_candles, mtf_candles, req.was_win, req.direction)
             if ok:
                 log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | win={req.was_win} | candles_at_entry={len(recent_candles)}")
+
+            # D11: Shadow Challenger — score production vs challenger on this real
+            # outcome without affecting live signals. Triggers promotion check
+            # internally if enough shadow samples have accumulated.
+            try:
+                predictor.evaluate_shadow(recent_candles, mtf_candles, req.was_win, req.direction)
+            except Exception as shadow_ex:
+                log.debug(f"[ShadowChallenger] evaluation skipped: {shadow_ex}")
             
         return {"status": "ok", "message": "Feedback saved. Local Tactician (SGD) updated instantly."}
 

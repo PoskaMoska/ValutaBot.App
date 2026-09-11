@@ -1,14 +1,15 @@
 using System;
 using System.Collections.Concurrent;
-using System.Threading;
 using System.Threading.Tasks;
+using Dapper;
 using ValutaBot.App.MiniApp.Data.Repositories;
+using ValutaBot.App.MiniApp.Data; // ADD: for DbConnectionFactory
 
 namespace ValutaBot.MiniApp
 {
     public static class RealtimeTickCollector
     {
-        private class CandleAccumulator 
+        private class CandleAccumulator
         {
             public double? Open { get; set; }
             public double High { get; set; } = double.MinValue;
@@ -37,46 +38,58 @@ namespace ValutaBot.MiniApp
             }
         }
         
+        // Real-time accumulators for current in-progress candles (used by GetRecentCandles for zero-lag)
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s5  = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s10 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s15 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s30 = new();
 
-        private static Timer? _s5Timer;
-        private static Timer? _s10Timer;
-        private static Timer? _s15Timer;
-        private static Timer? _s30Timer;
-        private static Timer? _pruneTimer;
-
-        public static void Initialize()
+        public static async Task InitializeAsync()
         {
-            DateTime now = DateTime.UtcNow;
-            
-            // W-24 FIX: async void lambdas in Timer crash the process on exception. Wrapped in safe task runner.
-            Action<ConcurrentDictionary<string, CandleAccumulator>, string> safeFlush = (dict, interval) =>
-            {
-                _ = Task.Run(async () => {
-                    try { await FlushAsync(dict, interval); }
-                    catch (Exception ex) { Console.WriteLine($"[TickCollector] Flush error {interval}: {ex.Message}"); }
-                });
-            };
-
-            int msToNext5s = Math.Max(1, 5000 - (now.Millisecond + (now.Second % 5) * 1000));
-            _s5Timer = new Timer(_ => safeFlush(_s5, "s5"), null, msToNext5s, 5000);
-
-            int msToNext10s = Math.Max(1, 10000 - (now.Millisecond + (now.Second % 10) * 1000));
-            _s10Timer = new Timer(_ => safeFlush(_s10, "s10"), null, msToNext10s, 10000);
-            
-            int msToNext15s = Math.Max(1, 15000 - (now.Millisecond + (now.Second % 15) * 1000));
-            _s15Timer = new Timer(_ => safeFlush(_s15, "s15"), null, msToNext15s, 15000);
-            
-            int msToNext30s = Math.Max(1, 30000 - (now.Millisecond + (now.Second % 30) * 1000));
-            _s30Timer = new Timer(_ => safeFlush(_s30, "s30"), null, msToNext30s, 30000);
-            
-            _pruneTimer = new Timer(async _ => await TickRepository.PruneOldCandlesAsync(14), null, TimeSpan.FromMinutes(1), TimeSpan.FromHours(12));
-            BotLogger.Info("[TickCollector] Initialized real-time subminute candle accumulation.");
+            BotLogger.Info("[TickCollector] Initialized continuous real-time subminute candle accumulation.");
         }
 
+        // Kept for backward compatibility with DbConnectionFactory.Initialize()
+        public static void Initialize()
+        {
+            InitializeAsync().GetAwaiter().GetResult();
+        }
+
+        // Continuous save: called on every price tick - saves directly to DB, eliminates timer/flush dependency
+        public static async Task SaveCandleAsync(string asset, string interval, double price)
+        {
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.OpenAsync();
+                
+                // Determine open_time grid-snapped to interval
+                long ticks = DateTime.UtcNow.Ticks;
+                long intervalTicks = interval switch
+                {
+                    "s5" => TimeSpan.FromSeconds(5).Ticks,
+                    "s10" => TimeSpan.FromSeconds(10).Ticks,
+                    "s15" => TimeSpan.FromSeconds(15).Ticks,
+                    "s30" => TimeSpan.FromSeconds(30).Ticks,
+                    _ => TimeSpan.FromSeconds(5).Ticks
+                };
+                var gridTime = new DateTime(ticks - (ticks % intervalTicks), DateTimeKind.Utc);
+                string openTimeStr = gridTime.ToString("o");
+
+                // Insert or ignore (upsert pattern - only first tick of each candle wins)
+                await conn.ExecuteAsync(@"
+                    INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
+                    VALUES (@Asset, @Interval, @OpenTime, @Open, @High, @Low, @Close, @Volume)
+                    ON CONFLICT (asset, interval, open_time) DO NOTHING;
+                ", new { Asset = asset, Interval = interval, OpenTime = openTimeStr, Open = price, High = price, Low = price, Close = price, Volume = 1 });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TickSync] Failed to save tick for {asset}/{interval}: {ex.Message}");
+            }
+        }
+
+        // Get recent candles from DB + live accumulator (live candle gives TA engine immediate reflexes)
         public static async Task<MiniAppController.OhlcCandle[]> GetRecentCandles(string asset, string interval, int limit)
         {
             try
@@ -96,7 +109,7 @@ namespace ValutaBot.MiniApp
                 ", new { Asset = cleanAsset, Interval = interval, Limit = limit })).ToList();
 
                 // FIX: Retrieve the live, unclosed candle from memory to eliminate the 2-5 second DB flush lag.
-                ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch 
+                ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch
                 {
                     "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, _ => null
                 };
@@ -142,7 +155,8 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        public static void OnPriceUpdate(string asset, double price)
+        // Continuous per-tick async save - eliminates dependency on timer-based flush and Friday DB falls
+        public static async Task OnPriceUpdateAsync(string asset, double price)
         {
             // FIX W-25: OTC ticks were silently dropped here, so no subminute candles were built
             // for EURUSD_OTC, GBPUSD_OTC etc. → SGD /feedback for OTC pairs always had empty candles.
@@ -150,81 +164,11 @@ namespace ValutaBot.MiniApp
             // which aligns with the model key used in training and feedback.
             string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
 
-            UpdateAccumulator(_s5,  cleanAsset, price, 5);
-            UpdateAccumulator(_s10, cleanAsset, price, 10);
-            UpdateAccumulator(_s15, cleanAsset, price, 15);
-            UpdateAccumulator(_s30, cleanAsset, price, 30);
-        }
-
-        private static void UpdateAccumulator(ConcurrentDictionary<string, CandleAccumulator> dict, string asset, double price, int intervalSeconds)
-        {
-            var acc = dict.GetOrAdd(asset, _ => {
-                // ROOT CAUSE FIX: Grid-Snap timestamp. Prevents IndicatorCache 'IsTimestampRewind' from falsely 
-                // detecting rewinds when merging with synthetic/REST candles.
-                long ticks = DateTime.UtcNow.Ticks;
-                long intervalTicks = TimeSpan.FromSeconds(intervalSeconds).Ticks;
-                var gridTime = new DateTime(ticks - (ticks % intervalTicks), DateTimeKind.Utc);
-                return new CandleAccumulator { OpenTime = gridTime };
-            });
-            lock (acc)
-            {
-                acc.AddTick(price);
-            }
-        }
-
-        private static async Task FlushAsync(ConcurrentDictionary<string, CandleAccumulator> dict, string intervalName)
-        {
-            int intervalSeconds = int.Parse(intervalName.Replace("s", ""));
-            DateTime now = DateTime.UtcNow;
-
-            foreach (var kvp in dict)
-            {
-                var asset = kvp.Key;
-                var acc = kvp.Value;
-                
-                double open, high, low, close;
-                DateTime openTime;
-                double tickVolume;
-
-                lock (acc)
-                {
-                    DateTime expectedNext = acc.OpenTime.AddSeconds(intervalSeconds);
-                    if ((now - expectedNext).TotalSeconds > intervalSeconds) 
-                    {
-                        long intervalTicks = TimeSpan.FromSeconds(intervalSeconds).Ticks;
-                        expectedNext = new DateTime(now.Ticks - (now.Ticks % intervalTicks), DateTimeKind.Utc);
-                    }
-
-                    if (acc.TickCount == 0 || !acc.Open.HasValue)
-                    {
-                        if (TwelveDataWebSocketStream.IsAlive &&
-                            ValutaBot.MiniApp.SignalTracker._livePrices.TryGetValue(asset, out double lastPrice))
-                        {
-                            open = lastPrice; high = lastPrice; low = lastPrice; close = lastPrice;
-                            openTime = acc.OpenTime;
-                            tickVolume = 0;
-                            acc.Reset(expectedNext);
-                            _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);
-                        }
-                        else
-                        {
-                            acc.Reset(expectedNext);
-                        }
-                        continue;
-                    }
-                    
-                    open = acc.Open.Value;
-                    high = acc.High;
-                    low = acc.Low;
-                    close = acc.Close;
-                    openTime = acc.OpenTime;
-                    tickVolume = acc.TickCount;
-                    
-                    acc.Reset(expectedNext);
-                }
-                
-                _ = TickRepository.SaveCandleAsync(asset, intervalName, openTime, open, high, low, close, tickVolume);
-            }
+            // Continuous async save per-tick (eliminates dependency on timer flush & Friday DB falls)
+            await SaveCandleAsync(cleanAsset, "s5", price);
+            await SaveCandleAsync(cleanAsset, "s10", price);
+            await SaveCandleAsync(cleanAsset, "s15", price);
+            await SaveCandleAsync(cleanAsset, "s30", price);
         }
     }
 }
