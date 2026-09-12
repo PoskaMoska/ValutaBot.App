@@ -88,6 +88,9 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             };
 
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord);
+            
+            // 🔥 DRIFT DETECTION 🔥
+            _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
 
             bool wasCorrect = record.WasCorrect ?? false;
             

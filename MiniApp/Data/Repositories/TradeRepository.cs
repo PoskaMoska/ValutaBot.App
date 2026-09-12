@@ -360,5 +360,18 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             ", new { Limit = limit });
             return rows.ToList();
         }
+        public static async Task<System.Collections.Generic.List<bool>> GetRecentOutcomesForAssetAsync(string asset, string timeframe, int limit = 20)
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool>();
+            using var conn = DbConnectionFactory.GetConnection();
+            var rows = await conn.QueryAsync<bool>(@"
+                SELECT was_win 
+                FROM trade_outcomes 
+                WHERE asset = @Asset AND timeframe = @Timeframe AND verified_at IS NOT NULL 
+                ORDER BY verified_at DESC 
+                LIMIT @Limit
+            ", new { Asset = asset, Timeframe = timeframe, Limit = limit });
+            return rows.ToList();
+        }
     }
 }
