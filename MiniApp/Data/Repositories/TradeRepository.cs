@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -262,11 +262,11 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             return result;
         }
 
-        // ── L2-FIX: Персистентность EMA-весов AutoCalibrationEngine ─────────────
+        // в”Ђв”Ђ L2-FIX: РџРµСЂСЃРёСЃС‚РµРЅС‚РЅРѕСЃС‚СЊ EMA-РІРµСЃРѕРІ AutoCalibrationEngine в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
         /// <summary>
-        /// Сохраняет EMA-состояние калибровщика в PostgreSQL.
-        /// Вызывается из TradeOutcomeTracker после каждой обработки сделки.
+        /// РЎРѕС…СЂР°РЅСЏРµС‚ EMA-СЃРѕСЃС‚РѕСЏРЅРёРµ РєР°Р»РёР±СЂРѕРІС‰РёРєР° РІ PostgreSQL.
+        /// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РёР· TradeOutcomeTracker РїРѕСЃР»Рµ РєР°Р¶РґРѕР№ РѕР±СЂР°Р±РѕС‚РєРё СЃРґРµР»РєРё.
         /// </summary>
         public static async Task SaveCalibrationStateAsync(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate)
         {
@@ -290,8 +290,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         }
 
         /// <summary>
-        /// Загружает сохранённые EMA-веса при старте бота.
-        /// Возвращает список записей для восстановления AutoCalibrationEngine._statsMap.
+        /// Р—Р°РіСЂСѓР¶Р°РµС‚ СЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ EMA-РІРµСЃР° РїСЂРё СЃС‚Р°СЂС‚Рµ Р±РѕС‚Р°.
+        /// Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє Р·Р°РїРёСЃРµР№ РґР»СЏ РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёСЏ AutoCalibrationEngine._statsMap.
         /// </summary>
         public static async Task<List<(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate)>> LoadCalibrationStateAsync()
         {
@@ -323,7 +323,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         }
 
         /// <summary>
-        /// Создаёт таблицу calibration_state если не существует.
+        /// РЎРѕР·РґР°С‘С‚ С‚Р°Р±Р»РёС†Сѓ calibration_state РµСЃР»Рё РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚.
         /// </summary>
         public static async Task EnsureCalibrationTableAsync()
         {
@@ -346,6 +346,19 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             {
                 BotLogger.Warn($"[TradeRepository] EnsureCalibrationTable notice: {ex.Message}");
             }
+        }
+        public static async Task<System.Collections.Generic.List<bool>> GetRecentOutcomesAsync(int limit = 10)
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool>();
+            using var conn = DbConnectionFactory.GetConnection();
+            var rows = await conn.QueryAsync<bool>(@"
+                SELECT was_win 
+                FROM trade_outcomes 
+                WHERE verified_at IS NOT NULL 
+                ORDER BY verified_at DESC 
+                LIMIT @Limit
+            ", new { Limit = limit });
+            return rows.ToList();
         }
     }
 }

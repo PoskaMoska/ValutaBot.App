@@ -114,6 +114,22 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     public async Task<object> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null)
     {
+        await ValutaBot.MiniApp.Services.CircuitBreakerService.CheckStateAsync();
+        if (ValutaBot.MiniApp.Services.CircuitBreakerService.IsHalted())
+        {
+            var reason = ValutaBot.MiniApp.Services.CircuitBreakerService.GetHaltedReason();
+            BotLogger.Warn($"[Orchestrator] Execution aborted for {asset}/{timeframe}. Reason: {reason}");
+            return new { 
+                action = "NEUTRAL", 
+                reason = "CIRCUIT_BREAKER_ACTIVE",
+                message = reason,
+                ta_score = 0,
+                of_score = 0,
+                smc_score = 0,
+                ml_prob = 0
+            };
+        }
+
         _conflictPenalty = 1.0;
         _asset = asset;
         _timeframe = timeframe;

@@ -147,6 +147,11 @@ export async function executeAnalysis() {
                 renderError(data.error, debugMsg);
                 return;
             }
+
+            if(data.reason === 'CIRCUIT_BREAKER_ACTIVE') {
+                renderError('⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ ⚠️', 'Сработал защитный предохранитель депозита (Circuit Breaker).\n' + data.message);
+                return;
+            }
             
             // Apply config to UI elements
             if (config) {
