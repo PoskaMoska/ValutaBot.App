@@ -79,28 +79,16 @@ public class PendingTradeVerificationService : BackgroundService
 
         if (!exitPrice.HasValue || exitPrice.Value <= 0)
         {
-            if (secondsOverdue > 120)
+            // FIX D-1: Removed duplicate null-check block that was dead code.
+            // Previous logic: first block handled >120 (discard) and <120 (wait) but left
+            // ==120 unhandled, falling through to a second block with a wrong >60 threshold.
+            // New logic: wait up to 120 seconds, then discard.
+            if (secondsOverdue >= 120)
             {
-                BotLogger.Warn($"[PendingVerifier] STALE trade {record.Id} ({record.Asset}/{record.Timeframe}): no DB candle, discarding.");
-                await TradeRepository.DeletePendingTradeAsync(record.Id);
-                return;
-            }
-            
-            if (secondsOverdue < 120) 
-            {
-                // Wait for the DB to populate the candle. 
-                // Do not use TwelveData prices[^1] as it introduces severe lookahead/lag bias.
-                return; 
-            }
-        }
-
-        if (!exitPrice.HasValue || exitPrice.Value <= 0)
-        {
-            if (secondsOverdue > 60)
-            {
-                BotLogger.Warn($"[PendingVerifier] No exit price for {record.Asset} id={record.Id}. Discarding.");
+                BotLogger.Warn($"[PendingVerifier] STALE trade {record.Id} ({record.Asset}/{record.Timeframe}): no DB candle after {secondsOverdue:F0}s, discarding.");
                 await TradeRepository.DeletePendingTradeAsync(record.Id);
             }
+            // else: still within 120s window — wait for next sweep cycle
             return;
         }
 

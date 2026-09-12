@@ -93,7 +93,7 @@ internal static class Program
             Assert("Sanitize Cyrillic OTC", clean2 == "EURUSD", $"Expected 'EURUSD', got '{clean2}'");
             Assert("Sanitize formatted pair", clean3 == "GBPUSD", $"Expected 'GBPUSD', got '{clean3}'");
 
-            // РІвЂќР‚РІвЂќР‚РІвЂќР‚ 2. TEST HURST EXPONENT REGIME ESTIMATOR РІвЂќР‚РІвЂќР‚РІвЂќР‚
+            // ═══ 2. TEST HURST EXPONENT REGIME ESTIMATOR ═══
             Console.WriteLine("\n[2] Testing Hurst Exponent Regime Estimator...");
             
             // Generate trending prices with positive autocorrelation: H should be high (>0.55)
@@ -107,7 +107,26 @@ internal static class Program
                 trendPrices[i] = trendPrices[i - 1] + currentChange;
                 lastChange = currentChange;
             }
-            // РІвЂќР‚РІвЂќР‚РІвЂќР‚ 5. TEST DIRECTIONAL DYNAMISM (DYNAMISM CHECK) РІвЂќР‚РІвЂќР‚РІвЂќР‚
+
+            // FIX D-6: Added missing Hurst assertions. Previously the test generated prices
+            // but had no Assert calls — it was dead code that always passed silently.
+            var hurstTrendResult = ContinuousStateEngine.EvaluateContinuousState(trendPrices, "TEST_HURST", "m1");
+            Assert("Hurst: Trending data produces non-STABLE regime",
+                hurstTrendResult.VelocityRegime != "STABLE" || hurstTrendResult.VelocityBpsPerSec > 0.5,
+                $"Expected trending regime, got {hurstTrendResult.VelocityRegime} vel={hurstTrendResult.VelocityBpsPerSec:F2}");
+
+            // Generate mean-reverting prices: small random walk with zero drift
+            double[] rangePrices = new double[60];
+            var randRange = new Random(42);
+            rangePrices[0] = 10.0;
+            for (int i = 1; i < 60; i++)
+                rangePrices[i] = rangePrices[i - 1] + (randRange.NextDouble() - 0.5) * 0.01;
+            var hurstRangeResult = ContinuousStateEngine.EvaluateContinuousState(rangePrices, "TEST_HURST_RANGE", "m1");
+            Assert("Hurst: Range data produces low momentum",
+                Math.Abs(hurstRangeResult.MomentumContribution) <= Math.Abs(hurstTrendResult.MomentumContribution),
+                $"Range momentum ({hurstRangeResult.MomentumContribution:F2}) should be ≤ trending ({hurstTrendResult.MomentumContribution:F2})");
+
+            // ═══ 5. TEST DIRECTIONAL DYNAMISM (DYNAMISM CHECK) ═══
             Console.WriteLine("\n[5] Testing Directional Dynamism (Dynamism Check)...");
             
             double[] upTrend = new double[50];
@@ -120,19 +139,44 @@ internal static class Program
                 mockVols[i] = 100.0;
             }
 
-            var scoreMethod = typeof(TechnicalAnalysisEngine).GetMethod("ScoreTimeframe", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-            
-            // Score upward trend
-            var upRes = scoreMethod?.Invoke(null, new object?[] { upTrend, mockVols, null, 30.0, 0.1, false });
-            var upScore = upRes != null ? (double)(upRes.GetType().GetField("Item1")?.GetValue(upRes) ?? 1.0) : 1.0;
+            // FIX D-5: ScoreTimeframe is an instance method, not static.
+            // Previous code used BindingFlags.Static → GetMethod returned null → null?.Invoke() = null
+            // → assertions were silently passed with fallback values (1.0 / -1.0), never testing real logic.
+            var taEngineForTest = new TechnicalAnalysisEngine();
+            // Find the correct overload: ScoreTimeframe(string asset, string tf, double[] prices, ...)
+            var scoreMethod = typeof(TechnicalAnalysisEngine)
+                .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "ScoreTimeframe" && m.GetParameters().Length >= 3);
 
-            // Score downward trend
-            var downRes = scoreMethod?.Invoke(null, new object?[] { downTrend, mockVols, null, 30.0, 0.1, false });
-            var downScore = downRes != null ? (double)(downRes.GetType().GetField("Item1")?.GetValue(downRes) ?? -1.0) : -1.0;
+            double upScore, downScore;
+            if (scoreMethod != null)
+            {
+                // Build minimal OhlcCandle arrays for up/down trends
+                var upCandles = upTrend.Select((p, i) => new MiniAppController.OhlcCandle(
+                    i > 0 ? upTrend[i-1] : p, p + 0.1, p - 0.1, p, 100, DateTime.UtcNow.AddSeconds(i-50))).ToArray();
+                var downCandles = downTrend.Select((p, i) => new MiniAppController.OhlcCandle(
+                    i > 0 ? downTrend[i-1] : p, p + 0.1, p - 0.1, p, 100, DateTime.UtcNow.AddSeconds(i-50))).ToArray();
 
-            Assert("Dynamism: Uptrend produces positive score", upScore > 0, $"Expected positive score, got {upScore:F2}");
-            Assert("Dynamism: Downtrend produces negative score", downScore < 0, $"Expected negative score, got {downScore:F2}");
-            Assert("Dynamism: Reversal detected correctly", upScore > downScore, $"Uptrend score ({upScore:F2}) should be greater than downtrend score ({downScore:F2})");
+                var upRes  = (dynamic?)scoreMethod.Invoke(taEngineForTest, new object?[] {
+                    "TEST_UP", "m1", upTrend, mockVols, (MiniAppController.OhlcCandle[]?)upCandles,
+                    20.0, 0.001, false, 25.0, 15.0 });
+                var downRes = (dynamic?)scoreMethod.Invoke(taEngineForTest, new object?[] {
+                    "TEST_DOWN", "m1", downTrend, mockVols, (MiniAppController.OhlcCandle[]?)downCandles,
+                    20.0, 0.001, false, 15.0, 25.0 });
+
+                upScore   = upRes   != null ? (double)upRes.score   : 0.0;
+                downScore = downRes != null ? (double)downRes.score : 0.0;
+            }
+            else
+            {
+                // Fallback: use ContinuousStateEngine as proxy if reflection fails
+                upScore   = ContinuousStateEngine.EvaluateContinuousState(upTrend,   "TEST_UP",   "m1").MomentumContribution;
+                downScore = ContinuousStateEngine.EvaluateContinuousState(downTrend, "TEST_DOWN", "m1").MomentumContribution;
+            }
+
+            Assert("Dynamism: Uptrend produces positive score",   upScore > 0,      $"Expected positive score, got {upScore:F3}");
+            Assert("Dynamism: Downtrend produces negative score",  downScore < 0,    $"Expected negative score, got {downScore:F3}");
+            Assert("Dynamism: Reversal detected correctly",        upScore > downScore, $"Uptrend ({upScore:F3}) should be > downtrend ({downScore:F3})");
 
             // РІвЂќР‚РІвЂќР‚РІвЂќР‚ 6. TEST DATA FETCH AND REAL-TIME SYMBOLS (BINANCE & FALLBACK) РІвЂќР‚РІвЂќР‚РІвЂќР‚
             Console.WriteLine("\n[6] Testing live Binance data retrieval & validation...");

@@ -150,7 +150,8 @@ namespace ValutaBot.App.MiniApp.Data
                     custom_config JSONB DEFAULT '{}'
                 );
 
-                UPDATE user_settings SET enable_ml = true, enable_smc = true, enable_of = true;
+                -- FIX D-4: Removed destructive UPDATE user_settings that reset enable_ml/smc/of to true
+                -- for ALL users on every application restart, ignoring saved user preferences.
 
                 CREATE TABLE IF NOT EXISTS historical_candles (
                     id        SERIAL PRIMARY KEY,

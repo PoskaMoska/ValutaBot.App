@@ -104,7 +104,7 @@ public static class OnlineMetaLearner
 
         _updateCounts.AddOrUpdate(key, 1, (_, c) => c + 1);
 
-        BotLogger.Debug($"[MetaLearner] {key} | LR={lr:F4} | error={error:F3} | w=[{w[0]:F2},{w[1]:F2},{w[2]:F2},{w[3]:F2},{w[4]:F2}]");
+        BotLogger.Info($"[MetaLearner] {key} | LR={lr:F4} | error={error:F3} | w=[{w[0]:F2},{w[1]:F2},{w[2]:F2},{w[3]:F2},{w[4]:F2}]");
 
         _ = SaveWeightsAsync();
     }
@@ -140,8 +140,15 @@ public static class OnlineMetaLearner
         }
     }
 
+    private static readonly SemaphoreSlim _saveLock = new(1, 1);
+
     private static async Task SaveWeightsAsync()
     {
+        // FIX P-3: Use SemaphoreSlim to prevent concurrent saves from racing,
+        // and write via a temp file + atomic rename so a crash mid-write
+        // cannot corrupt the existing meta_weights.json.
+        if (!await _saveLock.WaitAsync(0)) // non-blocking: skip if another save is already queued
+            return;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_savePath)!);
@@ -151,11 +158,17 @@ public static class OnlineMetaLearner
                 UpdateCounts = new Dictionary<string, int>(_updateCounts)
             };
             var json = JsonSerializer.Serialize(state);
-            await File.WriteAllTextAsync(_savePath, json);
+            string tmpPath = _savePath + ".tmp";
+            await File.WriteAllTextAsync(tmpPath, json);
+            File.Move(tmpPath, _savePath, overwrite: true); // atomic on same filesystem volume
         }
         catch (Exception ex)
         {
             BotLogger.Error("[MetaLearner] Failed to save weights", ex);
+        }
+        finally
+        {
+            _saveLock.Release();
         }
     }
 

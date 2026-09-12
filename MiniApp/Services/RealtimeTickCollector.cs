@@ -76,11 +76,17 @@ namespace ValutaBot.MiniApp
                 var gridTime = new DateTime(ticks - (ticks % intervalTicks), DateTimeKind.Utc);
                 string openTimeStr = gridTime.ToString("o");
 
-                // Insert or ignore (upsert pattern - only first tick of each candle wins)
+                // FIX D-2: DO UPDATE so every tick updates close/high/low.
+                // Previously DO NOTHING meant close_price = open_price (first tick only),
+                // causing the verifier to use open price as exit price → biased WIN/LOSS labels.
                 await conn.ExecuteAsync(@"
                     INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
                     VALUES (@Asset, @Interval, @OpenTime, @Open, @High, @Low, @Close, @Volume)
-                    ON CONFLICT (asset, interval, open_time) DO NOTHING;
+                    ON CONFLICT (asset, interval, open_time) DO UPDATE SET
+                        high_price  = GREATEST(subminute_candles.high_price,  EXCLUDED.close_price),
+                        low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.close_price),
+                        close_price = EXCLUDED.close_price,
+                        volume      = subminute_candles.volume + 1;
                 ", new { Asset = asset, Interval = interval, OpenTime = openTimeStr, Open = price, High = price, Low = price, Close = price, Volume = 1 });
             }
             catch (Exception ex)
@@ -169,6 +175,32 @@ namespace ValutaBot.MiniApp
             await SaveCandleAsync(cleanAsset, "s10", price);
             await SaveCandleAsync(cleanAsset, "s15", price);
             await SaveCandleAsync(cleanAsset, "s30", price);
+
+            // FIX D-3: Also update the in-memory live accumulator so GetRecentCandles
+            // can append the current open candle without waiting for DB flush.
+            // Previously OnPriceUpdateAsync only wrote to DB, leaving _s5/_s10/_s15/_s30 always empty.
+            long nowTicks = DateTime.UtcNow.Ticks;
+            UpdateAccumulator(_s5,  cleanAsset, price, nowTicks, TimeSpan.FromSeconds(5).Ticks);
+            UpdateAccumulator(_s10, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(10).Ticks);
+            UpdateAccumulator(_s15, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(15).Ticks);
+            UpdateAccumulator(_s30, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(30).Ticks);
+        }
+
+        private static void UpdateAccumulator(
+            ConcurrentDictionary<string, CandleAccumulator> dict,
+            string asset, double price, long nowTicks, long intervalTicks)
+        {
+            var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
+            var acc = dict.GetOrAdd(asset, _ => new CandleAccumulator());
+            lock (acc)
+            {
+                // New candle interval started — reset the accumulator
+                if (acc.OpenTime != openTime && acc.OpenTime != default)
+                    acc.Reset(openTime);
+                else if (acc.OpenTime == default)
+                    acc.Reset(openTime);
+                acc.AddTick(price);
+            }
         }
     }
 }

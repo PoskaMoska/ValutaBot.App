@@ -408,47 +408,71 @@ function renderAiChartLoop() {
         const range = maxP - minP || 1;
         const scaleY = (h - paddingY * 2) / range;
         
-        // Compute midY of chart to pass waves THROUGH candles
-        const midY = h / 2;
+        // --- Build bottom-contour points from candles (one Y per candle) ---
+        // Use the "low" of each candle as the bottom contour reference
+        const contourPts = aiChartData.map((c, i) => ({
+            x: paddingX + i * spacing + spacing / 2,
+            y: paddingY + (maxP - c.low) * scaleY
+        }));
         
-        // --- Wave 1 (Magenta) - weaves through chart middle ---
-        ctx.beginPath();
-        for (let i = 0; i <= w; i += 4) {
-            const wy = midY + Math.sin(i * 0.012 - aiChartPhase) * 35
-                             + Math.cos(i * 0.007 + aiChartPhase * 1.3) * 20;
-            if (i === 0) ctx.moveTo(i, wy); else ctx.lineTo(i, wy);
+        // Smoothed wave: for each pixel X, interpolate between neighboring contour points
+        // then add gentle animated drift below the low
+        const waveOffset = 18; // how far below the low to float the wave (px)
+        const waveDrift = 10;  // amplitude of the live oscillation
+        
+        // Build a smoothed Y array for the wave at pixel resolution
+        const wavePoints = [];
+        for (let px = 0; px <= w; px += 3) {
+            // Find which candle segment we're in
+            let segY = h - paddingY; // default to bottom if out of range
+            if (contourPts.length >= 2) {
+                // Binary-search adjacent candle pair
+                let ci = 0;
+                for (let k = 0; k < contourPts.length - 1; k++) {
+                    if (px >= contourPts[k].x && px <= contourPts[k + 1].x) { ci = k; break; }
+                    if (px > contourPts[contourPts.length - 1].x) ci = contourPts.length - 2;
+                }
+                const p0 = contourPts[Math.max(0, ci - 1)];
+                const p1 = contourPts[ci];
+                const p2 = contourPts[Math.min(contourPts.length - 1, ci + 1)];
+                const p3 = contourPts[Math.min(contourPts.length - 1, ci + 2)];
+                // Catmull-Rom interpolation for smooth curve
+                const t = p1.x === p2.x ? 0 : (px - p1.x) / (p2.x - p1.x);
+                const t2 = t * t, t3 = t2 * t;
+                segY = 0.5 * ((2 * p1.y) +
+                    (-p0.y + p2.y) * t +
+                    (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 +
+                    (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3);
+            }
+            // Shift below contour + gentle oscillation
+            const wy = segY + waveOffset + Math.sin(px * 0.02 - aiChartPhase * 1.5) * waveDrift;
+            wavePoints.push({ x: px, y: wy });
         }
-        ctx.strokeStyle = 'rgba(200, 0, 255, 0.55)';
-        ctx.lineWidth = 2;
-        ctx.shadowColor = 'rgba(200, 0, 255, 0.8)';
-        ctx.shadowBlur = 14;
-        ctx.stroke();
         
-        // --- Wave 2 (Cyan) - slightly offset phase ---
+        // Draw filled area under the wave (gradient fill)
         ctx.beginPath();
-        for (let i = 0; i <= w; i += 4) {
-            const wy = midY + Math.cos(i * 0.01 + aiChartPhase * 0.9) * 28
-                             + Math.sin(i * 0.018 - aiChartPhase * 1.5) * 15;
-            if (i === 0) ctx.moveTo(i, wy); else ctx.lineTo(i, wy);
-        }
-        ctx.strokeStyle = 'rgba(0, 220, 255, 0.55)';
-        ctx.lineWidth = 2;
-        ctx.shadowColor = 'rgba(0, 220, 255, 0.8)';
-        ctx.shadowBlur = 14;
-        ctx.stroke();
+        ctx.moveTo(wavePoints[0].x, h);
+        wavePoints.forEach(p => ctx.lineTo(p.x, p.y));
+        ctx.lineTo(wavePoints[wavePoints.length - 1].x, h);
+        ctx.closePath();
+        const areaGrad = ctx.createLinearGradient(0, 0, 0, h);
+        areaGrad.addColorStop(0, 'rgba(139, 92, 246, 0.0)');
+        areaGrad.addColorStop(1, 'rgba(139, 92, 246, 0.18)');
+        ctx.fillStyle = areaGrad;
+        ctx.fill();
         
+        // Draw the wave line itself
+        ctx.beginPath();
+        wavePoints.forEach((p, idx) => {
+            if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        });
+        ctx.strokeStyle = 'rgba(139, 92, 246, 0.75)';
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'round';
+        ctx.shadowColor = 'rgba(139, 92, 246, 0.9)';
+        ctx.shadowBlur = 10;
+        ctx.stroke();
         ctx.shadowBlur = 0;
-        
-        // --- Floating particles ---
-        for (let i = 0; i < 8; i++) {
-            const px = ((aiChartPhase * 22 * (i + 1)) % (w + 20)) - 10;
-            const py = midY + Math.sin(aiChartPhase * 0.7 + i * 1.2) * 50;
-            const alpha = 0.3 + Math.sin(aiChartPhase + i) * 0.2;
-            ctx.fillStyle = i % 2 === 0 ? `rgba(0,220,255,${alpha})` : `rgba(200,0,255,${alpha})`;
-            ctx.beginPath();
-            ctx.arc(px, py, i % 3 === 0 ? 2 : 1, 0, Math.PI * 2);
-            ctx.fill();
-        }
         
         // --- Candles (drawn on top of waves) ---
         aiChartData.forEach((c, i) => {
