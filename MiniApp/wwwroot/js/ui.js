@@ -366,6 +366,10 @@ function renderAiChartLoop() {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     
+    // Apply 3D perspective to match the cinematic angle
+    canvas.style.transform = 'perspective(800px) rotateX(10deg) rotateY(-5deg) scale(1.05)';
+    canvas.style.transformOrigin = 'center center';
+    
     const rect = canvas.parentElement.getBoundingClientRect();
     if(rect.width === 0) {
         aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
@@ -387,35 +391,38 @@ function renderAiChartLoop() {
     const h = rect.height;
     
     // 1. Deep dark background
-    ctx.fillStyle = '#090a15';
+    ctx.fillStyle = '#060713';
     ctx.fillRect(0, 0, w, h);
     
-    // 2. Soft, massive glowing floor (like the reference)
-    const floorGrad = ctx.createLinearGradient(0, h * 0.5, 0, h);
-    floorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
-    floorGrad.addColorStop(0.6, 'rgba(184, 41, 255, 0.15)');
-    floorGrad.addColorStop(1, 'rgba(0, 179, 255, 0.2)');
+    // 2. Cinematic Floor Glow (huge, soft)
+    const floorGrad = ctx.createRadialGradient(w/2, h, 0, w/2, h, w*0.8);
+    floorGrad.addColorStop(0, 'rgba(184, 41, 255, 0.25)');
+    floorGrad.addColorStop(0.5, 'rgba(0, 179, 255, 0.1)');
+    floorGrad.addColorStop(1, 'rgba(6, 7, 19, 0)');
     ctx.fillStyle = floorGrad;
-    ctx.fillRect(0, h * 0.5, w, h * 0.5);
+    ctx.fillRect(0, h * 0.4, w, h * 0.6);
     
-    // 3. Background grid dots (very faint)
-    ctx.fillStyle = 'rgba(255,255,255,0.03)';
-    for(let gx = w*0.05; gx < w; gx += w*0.1) {
-        for(let gy = h*0.1; gy < h*0.9; gy += 15) {
-            ctx.fillRect(gx, gy, 1, 3);
-        }
+    // 3. Grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.02)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for(let gx = 0; gx < w; gx += 40) {
+        ctx.moveTo(gx, 0); ctx.lineTo(gx, h);
     }
+    for(let gy = 0; gy < h; gy += 40) {
+        ctx.moveTo(0, gy); ctx.lineTo(w, gy);
+    }
+    ctx.stroke();
     
-    aiChartPhase += 0.02; // smooth animation speed
+    aiChartPhase += 0.02; 
     
     if (aiChartData.length > 0) {
-        const paddingY = 40;
+        const paddingY = 60;
         const paddingX = 20;
         const count = aiChartData.length;
         const spacing = (w - paddingX * 2) / count;
         
-        let candleWidth = Math.max(3, Math.floor(spacing * 0.55));
-        if (candleWidth % 2 === 0) candleWidth += 1;
+        let candleWidth = Math.max(4, Math.floor(spacing * 0.5));
         
         let minP = Infinity, maxP = -Infinity;
         aiChartData.forEach(c => {
@@ -427,108 +434,129 @@ function renderAiChartLoop() {
         
         const midY = h / 2;
         
+        // Function to draw true neon lines
+        const drawNeonLine = (points, color, glowColor) => {
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            // Use quadratic curves for perfect smoothness instead of rigid lines
+            for (let i = 1; i < points.length - 2; i++) {
+                const xc = (points[i].x + points[i + 1].x) / 2;
+                const yc = (points[i].y + points[i + 1].y) / 2;
+                ctx.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+            }
+            ctx.lineTo(points[points.length-1].x, points[points.length-1].y);
+            
+            // Outer huge glow
+            ctx.strokeStyle = glowColor;
+            ctx.lineWidth = 8;
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 20;
+            ctx.stroke();
+            
+            // Middle glow
+            ctx.lineWidth = 4;
+            ctx.shadowBlur = 10;
+            ctx.stroke();
+            
+            // Bright core
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.shadowBlur = 0;
+            ctx.stroke();
+        };
+        
         // --- Flowing Wave 1 (Magenta) ---
-        ctx.beginPath();
-        for (let px = 0; px <= w; px += 4) {
-            const wy = midY + Math.sin(px * 0.01 - aiChartPhase * 1.2) * 35
-                            + Math.cos(px * 0.005 + aiChartPhase) * 20;
-            if (px === 0) ctx.moveTo(px, wy); else ctx.lineTo(px, wy);
+        const wave1 = [];
+        for (let px = 0; px <= w + 20; px += 20) {
+            const wy = midY + Math.sin(px * 0.008 - aiChartPhase * 1.2) * 45
+                            + Math.cos(px * 0.004 + aiChartPhase) * 25;
+            wave1.push({x: px, y: wy});
         }
-        const magGrad = ctx.createLinearGradient(0, 0, w, 0);
-        magGrad.addColorStop(0, 'rgba(217, 0, 255, 0)');
-        magGrad.addColorStop(0.2, 'rgba(217, 0, 255, 0.8)');
-        magGrad.addColorStop(0.8, 'rgba(217, 0, 255, 0.8)');
-        magGrad.addColorStop(1, 'rgba(217, 0, 255, 0)');
-        ctx.strokeStyle = magGrad;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = 'rgba(217, 0, 255, 0.9)';
-        ctx.shadowBlur = 12;
-        ctx.stroke();
+        drawNeonLine(wave1, '#ffa3ff', 'rgba(217, 0, 255, 0.8)');
         
         // --- Flowing Wave 2 (Cyan) ---
-        ctx.beginPath();
-        for (let px = 0; px <= w; px += 4) {
-            const wy = midY + Math.cos(px * 0.012 + aiChartPhase * 0.8) * 25
-                            + Math.sin(px * 0.007 - aiChartPhase * 1.5) * 15;
-            if (px === 0) ctx.moveTo(px, wy); else ctx.lineTo(px, wy);
+        const wave2 = [];
+        for (let px = 0; px <= w + 20; px += 20) {
+            const wy = midY + Math.cos(px * 0.01 + aiChartPhase * 0.8) * 35
+                            + Math.sin(px * 0.006 - aiChartPhase * 1.5) * 20;
+            wave2.push({x: px, y: wy});
         }
-        const cyanGrad = ctx.createLinearGradient(0, 0, w, 0);
-        cyanGrad.addColorStop(0, 'rgba(0, 179, 255, 0)');
-        cyanGrad.addColorStop(0.2, 'rgba(0, 179, 255, 0.8)');
-        cyanGrad.addColorStop(0.8, 'rgba(0, 179, 255, 0.8)');
-        cyanGrad.addColorStop(1, 'rgba(0, 179, 255, 0)');
-        ctx.strokeStyle = cyanGrad;
-        ctx.lineWidth = 1.5;
-        ctx.shadowColor = 'rgba(0, 179, 255, 0.9)';
-        ctx.shadowBlur = 12;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
+        drawNeonLine(wave2, '#a3efff', 'rgba(0, 179, 255, 0.8)');
         
         // --- Candles ---
         aiChartData.forEach((c, i) => {
             const isBull = c.close >= c.open;
-            // Float animation to make it alive
-            const swayY = Math.sin(aiChartPhase * 2 + i * 0.5) * 2;
+            const swayY = Math.sin(aiChartPhase * 2 + i * 0.5) * 3;
             
-            const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
-            const x = Math.floor(cx - candleWidth / 2);
+            const cx = paddingX + i * spacing + spacing / 2;
+            const x = cx - candleWidth / 2;
             
             const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
             const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
             const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
             let bodyH = Math.abs(c.close - c.open) * scaleY;
-            if (bodyH < 3) bodyH = 3;
+            if (bodyH < 4) bodyH = 4;
             
-            const color = isBull ? '#00b3ff' : '#d900ff';
-            const glowColor = isBull ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
+            const coreColor = isBull ? '#b3f0ff' : '#fab3ff';
+            const glowColor = isBull ? 'rgba(0,179,255,0.9)' : 'rgba(217,0,255,0.9)';
+            const bodyColor = isBull ? '#00a3ff' : '#d900ff';
             
-            // Wick
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 1;
-            ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 6;
+            // True neon wick
             ctx.beginPath();
-            ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
-            ctx.lineTo(cx, Math.floor(yLow) + 0.5);
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-            
-            // Body
-            const bodyGrad = ctx.createLinearGradient(x, yTop, x + candleWidth, yTop);
-            if (isBull) {
-                bodyGrad.addColorStop(0, '#0077ff');
-                bodyGrad.addColorStop(0.5, '#00b3ff');
-                bodyGrad.addColorStop(1, '#0077ff');
-            } else {
-                bodyGrad.addColorStop(0, '#9900ff');
-                bodyGrad.addColorStop(0.5, '#d900ff');
-                bodyGrad.addColorStop(1, '#9900ff');
-            }
-            
-            ctx.fillStyle = bodyGrad;
+            ctx.moveTo(cx, yHigh);
+            ctx.lineTo(cx, yLow);
+            ctx.strokeStyle = glowColor;
+            ctx.lineWidth = 4;
             ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 10;
-            ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+            ctx.shadowBlur = 15;
+            ctx.stroke();
+            
+            ctx.strokeStyle = coreColor;
+            ctx.lineWidth = 1.5;
             ctx.shadowBlur = 0;
+            ctx.stroke();
+            
+            // True neon body
+            ctx.fillStyle = bodyColor;
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 20;
+            // Draw body with slight rounding (using standard rect but blur makes it soft)
+            ctx.fillRect(x, yTop, candleWidth, bodyH);
+            
+            // Draw bright core of the body
+            ctx.fillStyle = coreColor;
+            ctx.shadowBlur = 0;
+            ctx.fillRect(x + candleWidth*0.25, yTop, candleWidth*0.5, bodyH);
         });
         
         // --- Flying arrows ---
         for (let i = 0; i < 3; i++) {
             const isUp = i % 2 === 0;
-            const ax = ((aiChartPhase * 25 * (i + 1) + w*i*0.3) % (w + 40)) - 20;
+            const ax = ((aiChartPhase * 35 * (i + 1) + w*i*0.3) % (w + 40)) - 20;
             const ay = (h * 0.2) + Math.sin(aiChartPhase * 1.5 + i) * 20 + i*30;
-            ctx.fillStyle = isUp ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
-            ctx.shadowColor = ctx.fillStyle;
-            ctx.shadowBlur = 8;
+            
+            const glowColor = isUp ? 'rgba(0,179,255,0.9)' : 'rgba(217,0,255,0.9)';
+            const coreColor = isUp ? '#b3f0ff' : '#fab3ff';
+            
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 15;
+            ctx.strokeStyle = glowColor;
+            ctx.lineWidth = 4;
+            ctx.lineJoin = 'round';
+            
             ctx.beginPath();
             if (isUp) {
-                ctx.moveTo(ax, ay); ctx.lineTo(ax - 4, ay + 6); ctx.lineTo(ax + 4, ay + 6);
+                ctx.moveTo(ax - 5, ay + 6); ctx.lineTo(ax, ay); ctx.lineTo(ax + 5, ay + 6);
             } else {
-                ctx.moveTo(ax, ay + 6); ctx.lineTo(ax - 4, ay); ctx.lineTo(ax + 4, ay);
+                ctx.moveTo(ax - 5, ay); ctx.lineTo(ax, ay + 6); ctx.lineTo(ax + 5, ay);
             }
-            ctx.fill();
+            ctx.stroke();
+            
+            ctx.strokeStyle = coreColor;
+            ctx.lineWidth = 1.5;
+            ctx.shadowBlur = 0;
+            ctx.stroke();
         }
-        ctx.shadowBlur = 0;
     }
     
     ctx.restore();
