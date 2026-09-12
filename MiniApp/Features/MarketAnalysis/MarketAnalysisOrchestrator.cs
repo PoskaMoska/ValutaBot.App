@@ -659,23 +659,32 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         string orderFlowDir = _orderFlowResult.ScoreContribution > 0 ? "BUY" : _orderFlowResult.ScoreContribution < 0 ? "PUT" : "NEUTRAL";
 
         // FIX: Record ALL signals, including NEUTRAL.
-        // Skipping NEUTRAL signals causes Survivorship Bias. The model needs to know when 
-        // the market was ambiguous and what happened next, so it can learn to output NEUTRAL
-        // appropriately rather than forcing a random BUY/PUT.
-        await SignalTracker.RecordPredictionAsync(
-            finalDirection, _asset, _timeframe, _currentLivePrice,
-            expiryCandles: timeoutResult.TimeoutCandles,
-            timeframeSecs: timeframeSec, isForex: _isForex,
-            sourceDirections: new Dictionary<string, string> {
-                ["LIGHTGBM"] = _lgbmDirection, ["SKENDER_MATH"] = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
-                ["SMC"] = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL", ["ORDERFLOW"] = orderFlowDir,
-                ["NATIVE_ML"] = "NEUTRAL"
-            },
-            taScore: consensus.TaScore,
-            ofScore: consensus.OfScore,
-            smcScore: consensus.SmcScore,
-            mlProb: consensus.MlProb
-        );
+        // Skipping NEUTRAL signals causes Survivorship Bias.
+        // Moved to background thread (fire-and-forget) to remove DB write latency from T4 Consensus, saving ~500ms.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await SignalTracker.RecordPredictionAsync(
+                    finalDirection, _asset, _timeframe, _currentLivePrice,
+                    expiryCandles: timeoutResult.TimeoutCandles,
+                    timeframeSecs: timeframeSec, isForex: _isForex,
+                    sourceDirections: new Dictionary<string, string> {
+                        ["LIGHTGBM"] = _lgbmDirection, ["SKENDER_MATH"] = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
+                        ["SMC"] = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL", ["ORDERFLOW"] = orderFlowDir,
+                        ["NATIVE_ML"] = "NEUTRAL"
+                    },
+                    taScore: consensus.TaScore,
+                    ofScore: consensus.OfScore,
+                    smcScore: consensus.SmcScore,
+                    mlProb: consensus.MlProb
+                );
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Error($"[Tracker] Background save failed for {_asset}/{_timeframe}", ex);
+            }
+        });
 
         // РџР°СЂР°Р»Р»РµР»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє С‚СЂС‘С… РЅРµР·Р°РІРёСЃРёРјС‹С… DB-Р·Р°РїСЂРѕСЃРѕРІ РІРјРµСЃС‚Рѕ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕРіРѕ.
         // Р­РєРѕРЅРѕРјРёСЏ: ~2вЂ“3x latency РїСЂРё РєР°Р¶РґРѕРј РІС‹Р·РѕРІРµ (СѓСЃС‚СЂР°РЅСЏРµС‚ sequential await chain).

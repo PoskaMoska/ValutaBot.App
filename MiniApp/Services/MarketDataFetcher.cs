@@ -205,7 +205,22 @@ public class MarketDataFetcher
         if (dbSymbol == "GBPJPY") dbSymbol = "USDCHF"; // Fallback proxy
 
         int m1Needed = limit;
-        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase)) m1Needed = (limit / 12) + 2;
+
+        // FIX (2026-09-13): For sub-minute intervals, the old formula (limit/12)+2 was too aggressive.
+        // Example: limit=40 → m1Needed=5 → ~60 s5 candles synthesized → after index slicing only 10-12 remain.
+        // TechnicalAnalysisEngine requires 14 minimum → Confluence 3D threw exceptions on every OTC weekend request.
+        //
+        // New formula: for sub-minute, produce (limit+10) sub-minute candles after synthesis,
+        // providing headroom for the time-alignment slicing. Each m1 synthesizes 12 s5 candles.
+        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
+        {
+
+            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
+            // We synthesize 12 s5 per m1, then aggregate. Need enough m1 so after aggregation+slicing we have limit+10 margin.
+            int subCandlesPerM1 = 12 / groupSize; // s5→12, s10→6, s15→4, s30→2
+            m1Needed = Math.Max(10, (int)Math.Ceiling((double)(limit + 10) / subCandlesPerM1));
+        }
+
         else if (rawInterval.StartsWith("m") && int.TryParse(rawInterval.Substring(1), out int m)) m1Needed = limit * m;
         else if (rawInterval.StartsWith("h") && int.TryParse(rawInterval.Substring(1), out int h)) m1Needed = limit * h * 60;
 

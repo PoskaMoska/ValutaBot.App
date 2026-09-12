@@ -134,9 +134,13 @@ public class ConfluenceMatrixEngine(
     /// </summary>
     private string ScoreDirection(double[] prices, double[] volumes, string tf, string asset = "global")
     {
-        if (prices == null || prices.Length < 10) 
+        if (prices == null || prices.Length < 14)
         {
-            throw new Exception($"ОТКАЗ API: Получено {(prices == null ? 0 : prices.Length)} свечей для матрицы (нужно мин 10).");
+            // Graceful degradation: not enough candles for TA (RSI/ADX need 14 minimum).
+            // Return NEUTRAL instead of throwing — Confluence will count this TF as non-directional.
+            // This is the correct behavior for OTC weekend sub-minute timeframes with limited history.
+            BotLogger.Info($"[Confluence 3D] Not enough candles for {asset}/{tf} ({prices?.Length ?? 0}/14) — returning NEUTRAL.");
+            return "NEUTRAL";
         }
 
         double avgDiff = 0;
