@@ -490,37 +490,34 @@ function renderAiChartLoop() {
             let bodyH = Math.abs(c.close - c.open) * scaleY;
             if (bodyH < 3) bodyH = 3;
             
-            const color = isBull ? '#00b3ff' : '#9b5de5'; // Softer purple like the screenshot
+            const color = isBull ? '#00b3ff' : '#9b5de5'; 
             const glowColor = isBull ? 'rgba(0,179,255,0.6)' : 'rgba(155,93,229,0.6)';
             
-            // 1. Draw Wick FIRST (so it goes behind the translucent body)
+            // 1. Draw Wick (Solid line, drawn first so it hides behind the body)
             ctx.strokeStyle = color;
-            ctx.lineWidth = 2; // slightly thicker wick
+            ctx.lineWidth = 1.5; 
             ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 4;
+            ctx.shadowBlur = 6;
             ctx.beginPath();
             ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
             ctx.lineTo(cx, Math.floor(yLow) + 0.5);
             ctx.stroke();
             ctx.shadowBlur = 0;
             
-            // 2. Draw Translucent Rounded Body
+            // 2. Draw Solid Opaque Body
             ctx.fillStyle = color;
             ctx.shadowColor = glowColor;
             ctx.shadowBlur = 10;
-            ctx.globalAlpha = 0.65; // translucent so the wick inside is visible!
             
             ctx.beginPath();
-            const radius = Math.min(4, candleWidth / 2);
+            const radius = 2; // Small fixed radius so it stays a square/block, not a pill
             if (ctx.roundRect) {
                 ctx.roundRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH), radius);
             } else {
-                // Fallback for very old browsers
                 ctx.rect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
             }
             ctx.fill();
             
-            ctx.globalAlpha = 1.0;
             ctx.shadowBlur = 0;
         });
     }
