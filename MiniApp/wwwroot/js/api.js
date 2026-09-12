@@ -1,5 +1,5 @@
-import { tg, currentAsset, currentTf, getCustomInitData } from './main.js';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js';
+import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260912_1';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js?v=20260912_1';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
