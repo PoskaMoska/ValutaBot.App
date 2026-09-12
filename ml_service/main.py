@@ -18,11 +18,17 @@ import threading
 import sqlite3
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from model import ForexPredictor, TF_MAP, is_forex_symbol
+
+_API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
+
+def verify_secret(x_internal_secret: str = Header(None)):
+    if x_internal_secret != _API_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid Internal Secret")
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -180,6 +186,7 @@ def _send_weekly_summary(results: list):
             resp = req_lib.post(
                 f"{_BOT_BASE_URL}/internal/notify-admins",
                 json={"message": message, "parse_mode": "HTML"},
+                headers={"X-Internal-Secret": _API_SECRET},
                 timeout=10
             )
             log.info(f"[WeeklyRetrain] Notification sent: {resp.status_code}")
@@ -478,7 +485,7 @@ def list_models():
 _live_candles_cache = {}
 _cache_lock = threading.Lock()
 
-@app.post("/predict", response_model=PredictResponse)
+@app.post("/predict", response_model=PredictResponse, dependencies=[Depends(verify_secret)])
 def predict(req: PredictRequest):
     if len(req.candles) < 60:
         raise HTTPException(
@@ -562,7 +569,7 @@ def predict(req: PredictRequest):
     )
 
 
-@app.post("/train", response_model=TrainResponse)
+@app.post("/train", response_model=TrainResponse, dependencies=[Depends(verify_secret)])
 def train(req: TrainRequest, background_tasks: BackgroundTasks):
     interval = _normalize_interval(req.interval)
     candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
@@ -575,7 +582,7 @@ def train(req: TrainRequest, background_tasks: BackgroundTasks):
     )
 
 
-@app.post("/train/sync", response_model=TrainResponse)
+@app.post("/train/sync", response_model=TrainResponse, dependencies=[Depends(verify_secret)])
 def train_sync(req: TrainRequest):
     """Blocking train (useful for testing / initial setup)."""
     interval = _normalize_interval(req.interval)
@@ -613,7 +620,7 @@ class ChallengerTrainRequest(BaseModel):
     regime: str = "ALL"   # which regime-specific predictor gets a challenger
 
 
-@app.post("/challenger/train")
+@app.post("/challenger/train", dependencies=[Depends(verify_secret)])
 def challenger_train(req: ChallengerTrainRequest, background_tasks: BackgroundTasks):
     """Start background training of a shadow challenger model (D11).
 
@@ -660,7 +667,7 @@ def challenger_status(symbol: str, interval: str, regime: str = "ALL"):
 # ── End Shadow Challenger endpoints ───────────────────────────────────────
 
 
-@app.post("/feedback")
+@app.post("/feedback", dependencies=[Depends(verify_secret)])
 def feedback(req: TrainFeedback):
     """
     Online Reinforcement Learning Endpoint.

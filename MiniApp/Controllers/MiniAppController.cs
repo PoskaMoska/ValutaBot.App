@@ -101,29 +101,28 @@ public static partial class MiniAppController
         });
         builder.Services.AddHttpClient("TwelveData").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
-        builder.Services.AddHttpClient("MLPythonService").AddStandardResilienceHandler(options =>
+        builder.Services.AddHttpClient("MLPythonService", client => 
+        {
+            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret");
+        }).AddStandardResilienceHandler(options =>
         {
             options.Retry.MaxRetryAttempts = 1;
             options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(botSettings.FastFailTimeoutSeconds);
             options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(botSettings.FastFailTimeoutSeconds + 1);
-            // Circuit Breaker: РѕС‚РєСЂС‹РІР°РµС‚СЃСЏ РїРѕСЃР»Рµ 3 РѕС‚РєР°Р·РѕРІ РїРѕРґСЂСЏРґ, Р·Р°РєСЂС‹РІР°РµС‚СЃСЏ С‡РµСЂРµР· 30 СЃРµРєСѓРЅРґ.
-            // Р”Рѕ СЌС‚РѕРіРѕ С„РёРєСЃР°: РґРµС„РѕР»С‚РЅС‹Р№ РїРѕСЂРѕРі = 10 РѕС‚РєР°Р·РѕРІ, С‡С‚Рѕ РїСЂРё 10 РїРѕР»СЊР·РѕРІР°С‚РµР»СЏС… = 10 СЃРµРєСѓРЅРґ РѕР¶РёРґР°РЅРёСЏ.
             options.CircuitBreaker.SamplingDuration          = TimeSpan.FromSeconds(15);
             options.CircuitBreaker.MinimumThroughput         = 3;
-            options.CircuitBreaker.FailureRatio              = 0.5;  // 50% РѕС‚РєР°Р·РѕРІ РІ РѕРєРЅРµ = РѕС‚РєСЂС‹С‚СЊ
+            options.CircuitBreaker.FailureRatio              = 0.5;
             options.CircuitBreaker.BreakDuration             = TimeSpan.FromSeconds(30);
         });
         builder.Services.AddHttpClient("Telegram", client => 
         {
-            client.Timeout = TimeSpan.FromSeconds(60); // Must be longer than getUpdates timeout=30
+            client.Timeout = TimeSpan.FromSeconds(60);
         });
 
-        // FIX C-15: dedicated long-running client for /train/sync WITHOUT Polly.
-        // The regular "MLPythonService" client has Polly AttemptTimeout ~5-10s which always
-        // killed global retraining (30-300s). This client bypasses Polly entirely.
         builder.Services.AddHttpClient("MLPythonLongRunning", client =>
         {
             client.Timeout = TimeSpan.FromMinutes(12);
+            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret");
         });
 
         builder.Services.AddRateLimiter(options =>
@@ -291,6 +290,10 @@ public static partial class MiniAppController
 
         app.MapGet("/api/chart-ohlc", async Task<IResult> (HttpContext context, string? asset, string? timeframe, ValutaBot.MiniApp.MarketDataFetcher fetcher) =>
         {
+            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
+            if (!isAuthorized)
+                return Results.Json(new { error = authError }, statusCode: 401);
+
             if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(timeframe))
                 return Results.Json(Array.Empty<OhlcCandle>());
             try
@@ -323,13 +326,12 @@ public static partial class MiniAppController
         // в”Ђв”Ђ Internal endpoint for ML service в†’ Telegram admin notifications в”Ђв”Ђ
         app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
         {
-            // Only allow calls from localhost or Railway internal network
-            var remoteIp = context.Connection.RemoteIpAddress?.ToString() ?? "";
-            bool isInternal = remoteIp.StartsWith("127.") || remoteIp.StartsWith("::1")
-                           || remoteIp.StartsWith("10.") || remoteIp.StartsWith("172.")
-                           || remoteIp.StartsWith("::ffff:127.");
-            if (!isInternal)
+            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret";
+            if (!context.Request.Headers.TryGetValue("X-Internal-Secret", out var providedSecret) || providedSecret != expectedSecret)
+            {
+                BotLogger.Warn($"[Security] Blocked unauthorized access to /notify-admins from {context.Connection.RemoteIpAddress}");
                 return Results.Json(new { error = "Forbidden" }, statusCode: 403);
+            }
 
             try
             {
