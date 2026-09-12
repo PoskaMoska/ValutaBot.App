@@ -1,5 +1,4 @@
-using System;
-using System.Diagnostics;
+﻿using System;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,7 +8,7 @@ namespace ValutaBot.MiniApp;
 /// <summary>
 /// Динамический измеритель задержки (RTT) до сервера рыночных данных.
 ///
-/// Периодически пингует API-эндпоинт Binance и сохраняет скользящее среднее RTT.
+/// Периодически пингует TwelveData API и сохраняет скользящее среднее RTT.
 /// Результат используется фронтендом для компенсации сетевой задержки при
 /// открытии опционной сделки (Pre-execution latency compensation).
 ///
@@ -26,11 +25,8 @@ public static class LatencyProbe
     // Минимальное упреждение (не менее 200ms даже при нулевом RTT).
     private const int MinOffsetMs = 200;
 
-    // Количество последних замеров для скользящего среднего (EMA-сглаживание).
+    // Количество последних замеров для скользящего среднего.
     private const int SampleWindow = 8;
-
-    // Целевой эндпоинт для пинга — легковесный эндпоинт без данных.
-    private const string PingUrl = "https://api.binance.com/api/v3/ping";
 
     private static readonly double[] _samples = new double[SampleWindow];
     private static int _sampleIndex = 0;
@@ -79,21 +75,59 @@ public static class LatencyProbe
     }
 
     /// <summary>
-    /// Выполняет единичный замер RTT до Binance API.
+    /// Выполняет единичный замер RTT до TwelveData API.
     /// Использует среднее из 3 последовательных запросов для стабилизации результата.
+    ///
+    /// FIX 2 (2026-09-13): Replaced Binance stub (always 200ms hardcoded) with a real HTTP
+    /// probe to https://api.twelvedata.com (root — no API key required, no quota consumed).
+    /// On failure: keeps the last known RTT instead of silently resetting to 200ms,
+    /// so SendAtOffsetMs stays meaningful even during temporary network blips.
     /// </summary>
-        public static async Task MeasureAsync(IHttpClientFactory? factory)
+    public static async Task MeasureAsync(IHttpClientFactory? factory)
     {
-        // --- BINANCE DISABLED GLOBALLY ---
-        // As per user request, Binance is disabled everywhere.
-        // We will just simulate a fixed fake ping to keep math stable, 
-        // without actually sending HTTP requests to Binance.
-        await Task.Delay(1); // minimal async footprint
-        AddSample(200.0);    // simulate 200ms RTT
+        const string PingTarget = "https://api.twelvedata.com"; // root — lightweight, no auth needed
+        const int    Attempts   = 3;
+        const int    TimeoutMs  = 2000;
+
+        double totalMs  = 0;
+        int    succeeded = 0;
+
+        for (int i = 0; i < Attempts; i++)
+        {
+            try
+            {
+                HttpClient client = factory != null
+                    ? factory.CreateClient("LatencyProbe")
+                    : new HttpClient { Timeout = TimeSpan.FromMilliseconds(TimeoutMs) };
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                await client.GetAsync(new Uri(PingTarget));
+                sw.Stop();
+
+                totalMs += sw.Elapsed.TotalMilliseconds;
+                succeeded++;
+            }
+            catch
+            {
+                // Network blip — this attempt doesn't contribute to the average.
+            }
+        }
+
+        if (succeeded > 0)
+        {
+            double measured = totalMs / succeeded;
+            AddSample(measured);
+            BotLogger.Info($"[LatencyProbe] RTT to TwelveData: {measured:F0}ms (avg of {succeeded}/{Attempts} probes). SendAtOffset: {SendAtOffsetMs}ms");
+        }
+        else
+        {
+            // All attempts failed: keep the last known RTT (never reset to a fake value).
+            BotLogger.Warn($"[LatencyProbe] All {Attempts} pings failed. Keeping last RTT: {LastRttMs:F0}ms.");
+        }
     }
 
     /// <summary>
-    /// Добавляет новый замер в скользящее окно и пересчитывает EMA-среднее.
+    /// Добавляет новый замер в скользящее окно и пересчитывает среднее.
     /// Использует ring buffer для O(1) операции без аллокаций.
     /// </summary>
     private static void AddSample(double rttMs)
@@ -110,4 +144,3 @@ public static class LatencyProbe
         }
     }
 }
-

@@ -47,76 +47,159 @@ public static class MLPythonService
         }
     }
 
+    private static CancellationTokenSource? _watchdogCts;
+
     private static void EnsureLocalPythonServiceRunning()
     {
         Task.Run(async () =>
         {
             try
             {
-                using var testClient = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
+                using var testClient = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
                 var res = await testClient.GetAsync(new Uri($"{_baseUrl}/health"));
                 if (res.IsSuccessStatusCode)
                 {
                     BotLogger.Info("[MLPython] Local LightGBM service is active.");
+                    StartPythonWatchdog();
                     return;
                 }
             }
             catch
             {
-                // Not running yet -> try launching
+                // Not running yet → try launching
             }
 
-            try
-            {
-                string mlDir = Path.Combine(Directory.GetCurrentDirectory(), "ml_service");
-                string mainScript = Path.Combine(mlDir, "main.py");
-
-                if (!File.Exists(mainScript))
-                {
-                    mlDir = Path.Combine(AppContext.BaseDirectory, "ml_service");
-                    mainScript = Path.Combine(mlDir, "main.py");
-                }
-
-                if (File.Exists(mainScript))
-                {
-                    BotLogger.Info("[MLPython] Auto-starting Python LightGBM microservice...");
-                    bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = isWindows ? "py" : "python3",
-                        Arguments = $"\"{mainScript}\"",
-                        WorkingDirectory = mlDir,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    
-                    _mlProcess = Process.Start(psi);
-                    if (_mlProcess != null)
-                    {
-                        BotLogger.Info($"[MLPython] Python LightGBM service started in background (PID: {_mlProcess.Id})!");
-                        
-                        // FIX: Ensure Python process is killed when C# app exits to prevent OOM / Zombie leaks
-                        AppDomain.CurrentDomain.ProcessExit += (sender, args) =>
-                        {
-                            try
-                            {
-                                if (_mlProcess != null && !_mlProcess.HasExited)
-                                {
-                                    BotLogger.Info($"[MLPython] Terminating background Python service (PID: {_mlProcess.Id})...");
-                                    _mlProcess.Kill();
-                                }
-                            }
-                            catch { /* Ignore kill errors during shutdown */ }
-                        };
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Warn($"[MLPython] Local auto-start notice: {ex.Message}");
-            }
+            LaunchPythonProcess();
+            StartPythonWatchdog();
         });
     }
+
+    private static void LaunchPythonProcess()
+    {
+        try
+        {
+            string mlDir = Path.Combine(Directory.GetCurrentDirectory(), "ml_service");
+            string mainScript = Path.Combine(mlDir, "main.py");
+
+            if (!File.Exists(mainScript))
+            {
+                mlDir = Path.Combine(AppContext.BaseDirectory, "ml_service");
+                mainScript = Path.Combine(mlDir, "main.py");
+            }
+
+            if (File.Exists(mainScript))
+            {
+                BotLogger.Info("[MLPython] Auto-starting Python LightGBM microservice...");
+                bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                    System.Runtime.InteropServices.OSPlatform.Windows);
+                var psi = new ProcessStartInfo
+                {
+                    FileName         = isWindows ? "py" : "python3",
+                    Arguments        = $"\"{mainScript}\"",
+                    WorkingDirectory = mlDir,
+                    UseShellExecute  = false,
+                    CreateNoWindow   = true
+                };
+
+                _mlProcess = Process.Start(psi);
+                if (_mlProcess != null)
+                {
+                    BotLogger.Info($"[MLPython] Python service started (PID: {_mlProcess.Id}).");
+
+                    // FIX: Ensure Python process is killed when C# app exits.
+                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                    {
+                        try
+                        {
+                            if (_mlProcess != null && !_mlProcess.HasExited)
+                            {
+                                BotLogger.Info($"[MLPython] Terminating Python service (PID: {_mlProcess.Id})...");
+                                _mlProcess.Kill();
+                            }
+                        }
+                        catch { /* Ignore kill errors during shutdown */ }
+                    };
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[MLPython] Local auto-start notice: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// FIX 3 (2026-09-13): Background watchdog that pings /health every 60s.
+    /// After 3 consecutive failures, kills the stale Python process and relaunches it.
+    /// Prevents silent ML degradation when Python crashes mid-session.
+    /// Only runs for localhost — on Railway, the container orchestrator handles restarts.
+    /// </summary>
+    private static void StartPythonWatchdog()
+    {
+        _watchdogCts?.Cancel();
+        _watchdogCts = new CancellationTokenSource();
+        var token = _watchdogCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            const int CheckIntervalSeconds  = 60;
+            const int HealthTimeoutSeconds  = 5;
+            const int MaxConsecutiveFails   = 3;
+            const int RestartCooldownMs     = 8_000; // Wait for Python to bind port
+
+            int consecutiveFails = 0;
+
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(CheckIntervalSeconds));
+            while (!token.IsCancellationRequested)
+            {
+                try { await timer.WaitForNextTickAsync(token); }
+                catch (OperationCanceledException) { break; }
+
+                try
+                {
+                    using var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(HealthTimeoutSeconds) };
+                    var resp = await hc.GetAsync(new Uri($"{_baseUrl}/health"), token);
+
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        if (consecutiveFails > 0)
+                            BotLogger.Info($"[MLPython Watchdog] Service recovered after {consecutiveFails} failed check(s).");
+                        consecutiveFails = 0;
+                    }
+                    else
+                    {
+                        consecutiveFails++;
+                        BotLogger.Warn($"[MLPython Watchdog] Health check returned {(int)resp.StatusCode} ({consecutiveFails}/{MaxConsecutiveFails}).");
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch
+                {
+                    consecutiveFails++;
+                    BotLogger.Warn($"[MLPython Watchdog] Health check failed ({consecutiveFails}/{MaxConsecutiveFails}).");
+                }
+
+                if (consecutiveFails >= MaxConsecutiveFails)
+                {
+                    BotLogger.Warn($"[MLPython Watchdog] {MaxConsecutiveFails} consecutive failures — restarting Python service.");
+                    consecutiveFails = 0;
+
+                    // Kill stale process
+                    try
+                    {
+                        if (_mlProcess != null && !_mlProcess.HasExited)
+                            _mlProcess.Kill();
+                    }
+                    catch { /* best-effort */ }
+
+                    await Task.Delay(1000, token); // brief pause before relaunch
+                    LaunchPythonProcess();
+                    await Task.Delay(RestartCooldownMs, token); // wait for port binding
+                }
+            }
+        }, token);
+    }
+
 
     private static string MapSymbol(string symbol, bool isForex)
     {

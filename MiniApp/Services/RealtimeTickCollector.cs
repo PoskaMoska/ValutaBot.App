@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -49,7 +49,20 @@ namespace ValutaBot.MiniApp
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s15 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s30 = new();
 
-        private static readonly Channel<TickEvent> _tickChannel = Channel.CreateUnbounded<TickEvent>();
+        // FIX 4 (2026-09-13): Bounded channel prevents unbounded memory growth during DB outages.
+        // With CreateUnbounded, a PostgreSQL outage at ~100 ticks/sec fills ~30k events in 5min → OOM.
+        // DropOldest: gaps in subminute_candles are acceptable; OOM is not.
+        private static readonly Channel<TickEvent> _tickChannel = Channel.CreateBounded<TickEvent>(
+            new BoundedChannelOptions(10_000)
+            {
+                FullMode     = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,   // only ProcessTickQueueAsync reads
+                SingleWriter = false   // multiple WS ticks write concurrently
+            });
+
+        private static int _droppedTickCount = 0;
+        private static DateTime _lastDropWarningAt = DateTime.MinValue;
+
         private static int _isInitialized = 0;
 
         public static async Task InitializeAsync()
@@ -205,8 +218,19 @@ namespace ValutaBot.MiniApp
         private static void QueueTick(string asset, string interval, double price, long nowTicks, long intervalTicks)
         {
             var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
-            _tickChannel.Writer.TryWrite(new TickEvent(asset, interval, price, openTime));
+            if (!_tickChannel.Writer.TryWrite(new TickEvent(asset, interval, price, openTime)))
+            {
+                // DropOldest policy means TryWrite succeeds by evicting; if it returns false,
+                // the channel writer is completed (shutdown). Track for diagnostics.
+                System.Threading.Interlocked.Increment(ref _droppedTickCount);
+                if ((DateTime.UtcNow - _lastDropWarningAt).TotalSeconds >= 30)
+                {
+                    _lastDropWarningAt = DateTime.UtcNow;
+                    BotLogger.Warn($"[TickCollector] Channel full — ticks being dropped. Dropped so far: {_droppedTickCount}. DB may be lagging.");
+                }
+            }
         }
+
 
         private static void UpdateAccumulator(
             ConcurrentDictionary<string, CandleAccumulator> dict,

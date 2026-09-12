@@ -169,6 +169,16 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_hist_candles_asset
                     ON historical_candles(asset, interval, open_time);
 
+                -- FIX 1: Persist CircuitBreaker halt state across restarts.
+                -- Without this, _haltedUntil resets to null on every process restart,
+                -- causing the bot to resume trading immediately after a crash/redeploy.
+                CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                    id          INTEGER PRIMARY KEY DEFAULT 1,
+                    halted_until TEXT NOT NULL,
+                    reason      TEXT NOT NULL,
+                    created_at  TEXT NOT NULL
+                );
+
                 ALTER TABLE allowed_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';
                 ALTER TABLE all_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';
             ");
@@ -178,6 +188,11 @@ namespace ValutaBot.App.MiniApp.Data
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();
             RealtimeTickCollector.Initialize();
+            
+            // FIX 1: Restore any active CircuitBreaker halt from DB.
+            // Must run after table creation and after TradeOutcomeTracker is ready.
+            await ValutaBot.MiniApp.Services.CircuitBreakerService.LoadFromDbAsync();
         }
+
     }
 }
