@@ -58,13 +58,12 @@ public class PendingTradeVerificationService : BackgroundService
                 SELECT close_price as Close
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
-                  AND open_time >= @Start AND open_time < @End
+                  AND open_time >= @Start
                 ORDER BY open_time ASC LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
-                Start = targetStart.ToString("O"), 
-                End = record.VerifyAt.ToString("O") 
+                Start = targetStart.ToString("O")
             });
 
             if (candle != null)

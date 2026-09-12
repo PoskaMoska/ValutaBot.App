@@ -303,6 +303,8 @@ public static class MLPythonService
         string timeframe,
         bool wasWin,
         double entryPrice,
+        double exitPrice,
+        string direction,
         DateTime? entryTime = null,
         bool isForex = false)
     {
@@ -315,8 +317,10 @@ public static class MLPythonService
             {
                 asset = binanceSymbol,
                 timeframe = timeframe,
-                was_win = wasWin,
                 entry_price = entryPrice,
+                exit_price = exitPrice,
+                direction = direction,
+                was_win = wasWin,
                 is_forex = isForex,
                 timestamp = (entryTime ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
             };
@@ -330,6 +334,11 @@ public static class MLPythonService
                 var responseBody = await response.Content.ReadAsStringAsync();
                 string winStr = wasWin ? "WIN" : "LOSS";
                 BotLogger.Info($"[AI Feedback Detector] Feedback sent for {asset}/{timeframe} -> {winStr}. Python Response: {responseBody}");
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                BotLogger.Warn($"[MLPython] Feedback rejected: {(int)response.StatusCode}. Details: {errorBody}");
             }
         }
         catch (Polly.CircuitBreaker.BrokenCircuitException) { }

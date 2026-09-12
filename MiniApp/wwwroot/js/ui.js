@@ -399,11 +399,13 @@ function renderAiChartLoop() {
     aiChartPhase += 0.018;
     
     if (aiChartData.length > 0) {
-        const paddingY = 25;
+        const paddingY = Math.floor(h * 0.25); // huge padding so candles are confined to the center and not overly tall
         const paddingX = 15;
         const count = aiChartData.length;
         const spacing = (w - paddingX * 2) / count;
-        let candleWidth = Math.max(5, Math.floor(spacing * 0.75));
+        
+        // Thinner, realistic candles
+        let candleWidth = Math.max(3, Math.floor(spacing * 0.5));
         if (candleWidth % 2 === 0) candleWidth += 1;
         
         let minP = Infinity, maxP = -Infinity;
@@ -415,24 +417,18 @@ function renderAiChartLoop() {
         const scaleY = (h - paddingY * 2) / range;
         
         // --- Build bottom-contour points from candles (one Y per candle) ---
-        // Use the "low" of each candle as the bottom contour reference
         const contourPts = aiChartData.map((c, i) => ({
             x: paddingX + i * spacing + spacing / 2,
             y: paddingY + (maxP - c.low) * scaleY
         }));
         
-        // Smoothed wave: for each pixel X, interpolate between neighboring contour points
-        // then add gentle animated drift below the low
-        const waveOffset = 15; // how far below the low to float the wave (px)
-        const waveDrift = 3;  // reduce live oscillation amplitude
+        const waveOffset = 25; 
+        const waveDrift = 3;  
         
-        // Build a smoothed Y array for the wave at pixel resolution
         const wavePoints = [];
         for (let px = 0; px <= w; px += 3) {
-            // Find which candle segment we're in
             let segY = h - paddingY; 
             if (contourPts.length >= 2) {
-                // Clamp px to the bounds of the candles so the line extends horizontally at the edges
                 const clampedPx = Math.max(contourPts[0].x, Math.min(px, contourPts[contourPts.length - 1].x));
                 let ci = 0;
                 for (let k = 0; k < contourPts.length - 1; k++) {
@@ -449,18 +445,15 @@ function renderAiChartLoop() {
                     (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 +
                     (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3);
             }
-            // Shift below contour + gentle oscillation
             const wy = segY + waveOffset + Math.sin(px * 0.015 - aiChartPhase) * waveDrift;
             wavePoints.push({ x: px, y: wy });
         }
         
-        // Draw the wave line only (no fill)
         ctx.beginPath();
         wavePoints.forEach((p, idx) => {
             if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
         });
         
-        // Create a gradient so the line fades out at the left and right edges
         const lineGrad = ctx.createLinearGradient(0, 0, w, 0);
         lineGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
         lineGrad.addColorStop(0.1, 'rgba(184, 41, 255, 0.6)');
@@ -468,17 +461,16 @@ function renderAiChartLoop() {
         lineGrad.addColorStop(1, 'rgba(184, 41, 255, 0)');
         
         ctx.strokeStyle = lineGrad;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1;
         ctx.lineJoin = 'round';
-        ctx.shadowColor = 'rgba(184, 41, 255, 0.9)';
-        ctx.shadowBlur = 12;
+        ctx.shadowColor = 'rgba(184, 41, 255, 0.7)';
+        ctx.shadowBlur = 3;
         ctx.stroke();
         ctx.shadowBlur = 0;
         
         // --- Candles (drawn on top of waves) ---
         aiChartData.forEach((c, i) => {
             const isBull = c.close >= c.open;
-            // Very subtle float — barely perceptible
             const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
             
             const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
@@ -488,35 +480,28 @@ function renderAiChartLoop() {
             const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
             const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
             let bodyH = Math.abs(c.close - c.open) * scaleY;
-            if (bodyH < 3) bodyH = 3;
+            if (bodyH < 2) bodyH = 2; // minimum height 2px for readability
             
             const color = isBull ? '#00b3ff' : '#9b5de5'; 
-            const glowColor = isBull ? 'rgba(0,179,255,0.6)' : 'rgba(155,93,229,0.6)';
+            const glowColor = isBull ? 'rgba(0,179,255,0.7)' : 'rgba(155,93,229,0.7)';
             
-            // 1. Draw Wick (Solid line, drawn first so it hides behind the body)
+            // 1. Draw Wick (Solid line, crisp)
             ctx.strokeStyle = color;
-            ctx.lineWidth = 1.5; 
+            ctx.lineWidth = 1; 
             ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 6;
+            ctx.shadowBlur = 5;
             ctx.beginPath();
             ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
             ctx.lineTo(cx, Math.floor(yLow) + 0.5);
             ctx.stroke();
             ctx.shadowBlur = 0;
             
-            // 2. Draw Solid Opaque Body
+            // 2. Draw Solid Opaque Body (Sharp rectangles)
             ctx.fillStyle = color;
             ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 10;
+            ctx.shadowBlur = 6;
             
-            ctx.beginPath();
-            const radius = 2; // Small fixed radius so it stays a square/block, not a pill
-            if (ctx.roundRect) {
-                ctx.roundRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH), radius);
-            } else {
-                ctx.rect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
-            }
-            ctx.fill();
+            ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
             
             ctx.shadowBlur = 0;
         });

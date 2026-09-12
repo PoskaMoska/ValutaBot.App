@@ -161,7 +161,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                         smcState.BosDirection == direction);
                         
                     // ONLINE REINFORCEMENT LEARNING FOR ML (Скармливаем исход нейросети)
-                    await MLPythonService.SendFeedbackAsync(Asset, timeframe, isWin, currentPrice, null, true);
+                    await MLPythonService.SendFeedbackAsync(Asset, timeframe, isWin, currentPrice, exitPrice, direction, null, true);
 
                     wfOn.RecordTradeOutcome(Asset, timeframe, isWin);
 

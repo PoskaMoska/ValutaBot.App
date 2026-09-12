@@ -191,6 +191,8 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                         record.Timeframe,
                         isWin,
                         record.EntryPrice,
+                        exitPriceVal,
+                        record.Direction,
                         record.CreatedAt,
                         record.IsForex
                     );
