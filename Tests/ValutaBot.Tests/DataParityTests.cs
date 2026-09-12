@@ -17,14 +17,15 @@ namespace ValutaBot.Tests
             var baseTime = DateTimeOffset.UtcNow.AddMinutes(-5);
             for (int i = 0; i < 5; i++)
             {
-                candles[i] = new MiniAppController.OhlcCandle
-                {
-                    Timestamp = baseTime.AddMinutes(i).UtcDateTime,
-                    Open = 1.1000m + (i * 0.0001m),
-                    High = 1.1005m + (i * 0.0001m),
-                    Low = 1.0995m + (i * 0.0001m),
-                    Close = 1.1002m + (i * 0.0001m)
-                };
+                // record OhlcCandle(double Open, double High, double Low, double Close, double Volume, DateTime Timestamp)
+                candles[i] = new MiniAppController.OhlcCandle(
+                    1.1000 + (i * 0.0001), // Open
+                    1.1005 + (i * 0.0001), // High
+                    1.0995 + (i * 0.0001), // Low
+                    1.1002 + (i * 0.0001), // Close
+                    100.0, // Volume
+                    baseTime.AddMinutes(i).UtcDateTime // Timestamp
+                );
             }
 
             // 2. Act
@@ -35,7 +36,7 @@ namespace ValutaBot.Tests
                 high = c.High,
                 low = c.Low,
                 close = c.Close,
-                volume = 100
+                volume = c.Volume
             }).ToArray();
 
             var payload = new
