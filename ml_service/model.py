@@ -29,6 +29,7 @@ try:
     from sklearn.metrics import accuracy_score, roc_auc_score
     from sklearn.mixture import GaussianMixture
     from sklearn.decomposition import PCA
+    from sklearn.isotonic import IsotonicRegression
     HAS_LGBM = True
 except ImportError:
     HAS_LGBM = False
@@ -55,7 +56,7 @@ TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "3"))
 RETRAIN_INTERVAL_H = int(os.environ.get("RETRAIN_INTERVAL_H", "168")) # 1 неделя
 SGD_WEIGHT_MAX = float(os.environ.get("SGD_WEIGHT_MAX", "0.05")) # 5% вклад онлайн-обучения
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "100000"))  # Global Strategist window
-MIN_CONFIDENCE = 0.50  # below → NEUTRAL
+MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.50"))  # below → NEUTRAL
 
 BINANCE_BASE = "https://api.binance.com"
 
@@ -248,7 +249,10 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
             ORDER BY OpenTime DESC 
             LIMIT ?
         '''
-        df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
         conn.close()
         
         # DataFrame is fetched descending, we reverse it to ascending time order
@@ -272,7 +276,10 @@ def _query_historical_candles_db(symbol: str, norm_interval: str, limit: int) ->
                 ORDER BY open_time DESC
                 LIMIT %s
             """
-            df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', UserWarning)
+                df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
             conn.close()
             if not df.empty:
                 return df
@@ -333,7 +340,7 @@ def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Di
                 df_1m = df_1m.iloc[::-1].copy()
                 
                 try:
-                    df_1m['openTime'] = pd.to_datetime(df_1m['openTime'], utc=True)
+                    df_1m['openTime'] = pd.to_datetime(df_1m['openTime'], utc=True, format='mixed')
                     df_1m.set_index('openTime', inplace=True)
                     
                     rule = norm_interval
@@ -397,7 +404,7 @@ TF_MAP = {
     "1m": "1m", "2m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h",
 }
 
-LGBM_PARAMS = {
+LGBM_PARAMS_STANDARD = {
     "objective": "binary",
     "metric": "auc",
     "n_estimators": 500,
@@ -410,15 +417,33 @@ LGBM_PARAMS = {
     "bagging_freq": 5,
     "lambda_l1": 0.5,
     "lambda_l2": 1.0,
-    # FIX: Prevent directional bias from class imbalance.
-    # When training data covers a trending period (e.g. 70% of candles go DOWN),
-    # without this the model learns to always predict PUT and gets high accuracy
-    # without any real pattern recognition. is_unbalance forces it to learn
-    # patterns from BOTH directions equally.
     "is_unbalance": True,
     "min_split_gain": 0.01,
     "verbose": -1,
 }
+
+LGBM_PARAMS_SUBMINUTE = {
+    "objective": "binary",
+    "metric": "auc",
+    "n_estimators": 300,
+    "learning_rate": 0.05,
+    "max_depth": 4,
+    "num_leaves": 15,
+    "min_child_samples": 50,
+    "feature_fraction": 0.6,
+    "bagging_fraction": 0.6,
+    "bagging_freq": 3,
+    "lambda_l1": 1.0,
+    "lambda_l2": 2.0,
+    "is_unbalance": True,
+    "min_split_gain": 0.01,
+    "verbose": -1,
+}
+
+def get_lgbm_params(interval: str) -> dict:
+    if interval.lower().startswith('s'):
+        return LGBM_PARAMS_SUBMINUTE
+    return LGBM_PARAMS_STANDARD
 
 
 
@@ -535,12 +560,13 @@ def get_regime_router(symbol: str, interval: str) -> RegimeRouter:
 class ModelMeta:
     """Metadata stored alongside each model file."""
     def __init__(self, accuracy: float, auc: float, n_train: int,
-                 trained_at: float, version: str):
+                 trained_at: float, version: str, calibrator=None):
         self.accuracy = accuracy
         self.auc = auc
         self.n_train = n_train
         self.trained_at = trained_at
         self.version = version
+        self.calibrator = calibrator
 
 
 class ForexPredictor:
@@ -640,6 +666,8 @@ class ForexPredictor:
 
             # Tier 1: LightGBM (Global Strategist)
             prob_lgbm = float(model.predict_proba(X_arr_lgbm)[0, 1])
+            if meta and getattr(meta, 'calibrator', None) is not None:
+                prob_lgbm = float(meta.calibrator.predict([prob_lgbm])[0])
 
             # Tier 2: SGD (Local Tactician) — blend if available
             # Bug3 fix: dynamic weight 0%→30% based on real trade count (prevents noise at low sample count)
@@ -786,10 +814,14 @@ class ForexPredictor:
     def _shadow_predict_prob(self, X_arr: np.ndarray) -> Optional[float]:
         with self._challenger_lock:
             model = self._challenger_model
+            meta = self._challenger_meta
         if model is None:
             return None
         try:
-            return float(model.predict_proba(X_arr)[0, 1])
+            prob = float(model.predict_proba(X_arr)[0, 1])
+            if meta and getattr(meta, 'calibrator', None) is not None:
+                prob = float(meta.calibrator.predict([prob])[0])
+            return prob
         except Exception:
             return None
 
@@ -808,6 +840,7 @@ class ForexPredictor:
         with self._lock:
             prod_model = self._model
             prod_embedder = self._embedder
+            prod_meta = getattr(self, '_meta', None)
 
         if prod_model is None:
             return
@@ -826,6 +859,8 @@ class ForexPredictor:
             X_arr_prod, _ = self._with_context_embedding(
                 X_last_base, mtf_candles, prod_model, prod_embedder)
             prod_prob = float(prod_model.predict_proba(X_arr_prod)[0, 1])
+            if prod_meta and getattr(prod_meta, 'calibrator', None) is not None:
+                prod_prob = float(prod_meta.calibrator.predict([prod_prob])[0])
             prod_correct = (prod_prob >= 0.5) == actual_up
 
             with self._challenger_lock:
@@ -833,6 +868,7 @@ class ForexPredictor:
                     return
                 chal_model = self._challenger_model
                 chal_embedder = self._challenger_embedder
+                chal_meta = self._challenger_meta
             # Challenger likewise gets its OWN embedding space applied.
             X_arr_chal, _ = self._with_context_embedding(
                 X_last_base, mtf_candles, chal_model, chal_embedder)
@@ -840,6 +876,8 @@ class ForexPredictor:
                 if self._challenger_model is None:
                     return
                 chal_prob = float(chal_model.predict_proba(X_arr_chal)[0, 1])
+                if chal_meta and getattr(chal_meta, 'calibrator', None) is not None:
+                    chal_prob = float(chal_meta.calibrator.predict([chal_prob])[0])
                 chal_correct = (chal_prob >= 0.5) == actual_up
                 self._shadow_log.append((prod_correct, chal_correct))
 
@@ -890,11 +928,17 @@ class ForexPredictor:
 
     # ── End Shadow Challenger Pipeline ──────────────────────────────────────
 
-    def partial_fit_online(self, candles: List[Dict], mtf_candles: Optional[List[Dict]], was_win: bool, direction: str) -> bool:
+    def partial_fit_online(self, candles: List[Dict], mtf_candles: Optional[List[Dict]], was_win: bool, direction: str, prob_lgbm: Optional[float] = None) -> bool:
         """
         Tier 2 (Local Tactician): Update SGDClassifier with a single real trade outcome.
         Called immediately after a trade closes. Executes in <1ms.
         Returns True if update succeeded.
+
+        prob_lgbm: the raw LightGBM probability at trade entry time (0.0–1.0).
+        Used to compute confidence-weighted sample_weight: a trade where LightGBM
+        was very confident (prob=0.85) but lost carries more learning signal than
+        one where LightGBM was barely above threshold (prob=0.51).
+        sample_weight = 0.5 + |prob_lgbm - 0.5| × 1.0  → range [0.5, 1.0]
         """
         if not HAS_LGBM:
             return False
@@ -906,14 +950,41 @@ class ForexPredictor:
             X_last = feats.iloc[[-1]].values.astype(np.float32)
 
             # Derive label from real outcome
-            # WIN + BUY  в†’ price went up   в†’ label 1
-            # WIN + PUT  в†’ price went down  в†’ label 0
-            # LOSS + BUY в†’ price went down  в†’ label 0
-            # LOSS + PUT в†’ price went up    в†’ label 1
+            # WIN + BUY  → price went up   → label 1
+            # WIN + PUT  → price went down  → label 0
+            # LOSS + BUY → price went down  → label 0
+            # LOSS + PUT → price went up    → label 1
             if direction.upper() == "BUY":
                 y = np.array([1 if was_win else 0])
             else:
                 y = np.array([0 if was_win else 1])
+
+            # Auto-derive prob_lgbm from the current production model if not supplied.
+            # This gives us the LightGBM confidence at the time features were built —
+            # a good proxy for confidence at actual trade entry.
+            if prob_lgbm is None:
+                try:
+                    with self._lock:
+                        _m = self._model
+                        _meta = self._meta
+                        _emb = self._embedder
+                    if _m is not None:
+                        X_lgbm, _ = self._with_context_embedding(feats.iloc[[-1]], mtf_candles, _m, _emb)
+                        raw_p = float(_m.predict_proba(X_lgbm)[0, 1])
+                        if _meta and getattr(_meta, 'calibrator', None) is not None:
+                            raw_p = float(_meta.calibrator.predict([raw_p])[0])
+                        prob_lgbm = raw_p
+                except Exception:
+                    pass  # graceful fallback — sample_weight stays None
+
+            # Confidence-weighted sample_weight.
+            # When LightGBM was certain and wrong → strong correction signal.
+            # When LightGBM was near 0.5 → weak signal (noise region).
+            if prob_lgbm is not None:
+                lgbm_confidence = abs(prob_lgbm - 0.5)  # [0.0, 0.5]
+                sample_w = np.array([0.5 + lgbm_confidence])  # [0.5, 1.0]
+            else:
+                sample_w = None
 
             with self._online_lock:
                 if self._online_model is None:
@@ -924,22 +995,23 @@ class ForexPredictor:
                         random_state=42,
                         warm_start=True,
                     )
-                self._online_model.partial_fit(X_last, y, classes=self._online_classes)
+                self._online_model.partial_fit(X_last, y, classes=self._online_classes, sample_weight=sample_w)
                 self._sgd_update_count += 1  # Bug3 fix: track update count
                 online_model = self._online_model
                 sgd_count = self._sgd_update_count
 
-                # FIX Race Condition: СЃРѕС…СЂР°РЅРµРЅРёРµ Р’РќРЈРўР Р Р»РѕРєР° С‡РµСЂРµР· Р°С‚РѕРјР°СЂРЅСѓСЋ Р·Р°РїРёСЃСЊ.
-                # Р Р°РЅСЊС€Рµ joblib.dump Р±С‹Р» РІРЅРµ with-Р±Р»РѕРєР° в†’ РїР°СЂР°Р»Р»РµР»СЊРЅС‹Рµ /feedback
-                # РјРѕРіР»Рё РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ РїРёСЃР°С‚СЊ РІ РѕРґРёРЅ .pkl в†’ Corrupted Pickle.
-                # РџР°С‚С‚РµСЂРЅ: СЃРЅР°С‡Р°Р»Р° РІРѕ РІСЂРµРјРµРЅРЅС‹Р№ С„Р°Р№Р», Р·Р°С‚РµРј os.replace (Р°С‚РѕРјР°СЂРЅРѕ).
+                # FIX Race Condition: сохранение ВНУТРИ лока через атомарную запись.
+                # Ранее joblib.dump был вне with-блока → параллельные /feedback
+                # могли одновременно писать в один .pkl → Corrupted Pickle.
+                # Паттерн: сначала во временный файл, затем os.replace (атомарно).
                 sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
                 SGD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
                 tmp_path = sgd_path.with_suffix(".tmp")
                 joblib.dump({"model": online_model, "count": sgd_count}, tmp_path)
                 os.replace(tmp_path, sgd_path)
 
-            log.info(f"[SGD] partial_fit done for {self._key} | dir={direction} win={was_win} | label={y[0]} | total_updates={sgd_count}")
+            sw_val = float(sample_w[0]) if sample_w is not None else 1.0
+            log.info(f"[SGD] partial_fit done for {self._key} | dir={direction} win={was_win} | label={y[0]} | sample_weight={sw_val:.2f} | total_updates={sgd_count}")
             return True
 
         except Exception as e:
@@ -1222,12 +1294,13 @@ class ForexPredictor:
             # of training variance on in-sample errors of the final model
             # (which memorized the training data and looks falsely certain).
             oof_feat_parts, oof_err_parts = [], []
+            oof_probs, oof_y = [], []
 
             for train_idx, val_idx in tscv.split(X):
                 X_tr, X_val = X[train_idx], X[val_idx]
                 y_tr, y_val = y[train_idx], y[val_idx]
 
-                m = lgb.LGBMClassifier(**LGBM_PARAMS)
+                m = lgb.LGBMClassifier(**get_lgbm_params(self.interval))
                 m.fit(
                     X_tr, y_tr,
                     sample_weight=sample_weights[train_idx],
@@ -1247,12 +1320,25 @@ class ForexPredictor:
                 # feats.iloc[val_idx] recovers the matching feature rows.
                 oof_feat_parts.append(feats.iloc[val_idx])
                 oof_err_parts.append(np.abs(probs - y_val))
+                oof_probs.append(probs)
+                oof_y.append(y_val)
 
             avg_acc = float(np.mean(val_accs))
             avg_auc = float(np.mean(val_aucs))
 
+            # Train probability calibrator on OOF predictions
+            calibrator = None
+            if len(oof_probs) > 0:
+                try:
+                    oof_probs_all = np.concatenate(oof_probs)
+                    oof_y_all = np.concatenate(oof_y)
+                    calibrator = IsotonicRegression(out_of_bounds='clip')
+                    calibrator.fit(oof_probs_all, oof_y_all)
+                except Exception as e:
+                    log.warning(f"Probability calibration failed: {e}")
+
             # Final model on all data
-            final_model = lgb.LGBMClassifier(**LGBM_PARAMS)
+            final_model = lgb.LGBMClassifier(**get_lgbm_params(self.interval))
             final_model.fit(X, y, sample_weight=sample_weights)
 
             version = f"lgbm-v1-{self._key}-{int(time.time())}"
@@ -1262,6 +1348,7 @@ class ForexPredictor:
                 n_train=len(X),
                 trained_at=time.time(),
                 version=version,
+                calibrator=calibrator
             )
 
             if _challenger_mode:

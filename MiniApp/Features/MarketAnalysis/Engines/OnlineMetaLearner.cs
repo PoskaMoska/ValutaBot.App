@@ -9,12 +9,22 @@ namespace ValutaBot.MiniApp;
 /// <summary>
 /// Sub-millisecond Online Logistic Regression for dynamic signal weighting.
 /// Learns in real-time which signals (TA, SMC, OF, ML) are currently working best.
+///
+/// Improvements:
+/// - Adaptive Learning Rate: LR(t) = LR₀ / (1 + decay * t) — aggressive at start, conservative later.
+/// - Weight Decay (Temporal Forgetting): each update decays all weights by 0.1%,
+///   preventing stale knowledge from dominating (rho = 0.999 per update).
+/// - Negative weights allowed: if a signal systematically inverts outcomes,
+///   its weight correctly goes negative (inverse correlation is valid information).
 /// </summary>
 public static class OnlineMetaLearner
 {
     private static readonly ConcurrentDictionary<string, double[]> _weights = new();
+    private static readonly ConcurrentDictionary<string, int> _updateCounts = new();
     private static readonly string _savePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "meta_weights.json");
-    private const double LearningRate = 0.05;
+    private const double InitialLearningRate = 0.10;  // higher start — faster initial learning
+    private const double LrDecay             = 0.002; // LR halves after ~500 updates
+    private const double WeightDecay         = 0.999; // each update forgets 0.1% of old knowledge
 
     static OnlineMetaLearner()
     {
@@ -26,6 +36,12 @@ public static class OnlineMetaLearner
     private static double[] GetOrCreateWeights(string key)
     {
         return _weights.GetOrAdd(key, _ => new double[] { 0.0, 1.0, 1.0, 1.0, 1.0 }); // [Bias, TA, OF, SMC, ML]
+    }
+
+    private static double GetLearningRate(string key)
+    {
+        int t = _updateCounts.GetOrAdd(key, 0);
+        return InitialLearningRate / (1.0 + LrDecay * t);
     }
 
     /// <summary>
@@ -44,6 +60,7 @@ public static class OnlineMetaLearner
 
     /// <summary>
     /// Performs a single stochastic gradient descent (SGD) step using log-loss.
+    /// Uses adaptive learning rate and weight decay for temporal forgetting.
     /// </summary>
     public static void PartialFit(string asset, string timeframe, double ta, double of, double smc, double ml, bool wasWin, string direction)
     {
@@ -52,26 +69,42 @@ public static class OnlineMetaLearner
         // Ground truth: 1.0 if market went UP, 0.0 if market went DOWN.
         double y = (direction == "BUY" && wasWin) || (direction == "PUT" && !wasWin) ? 1.0 : 0.0;
 
-        var w = GetOrCreateWeights(GetKey(asset, timeframe));
-        double p = Predict(asset, timeframe, ta, of, smc, ml);
+        string key = GetKey(asset, timeframe);
+        var w  = GetOrCreateWeights(key);
+        double lr = GetLearningRate(key);
+
+        double p     = Predict(asset, timeframe, ta, of, smc, ml);
         double error = y - p;
 
-        // Update weights: W = W + LR * Error * X
-        w[0] += LearningRate * error * 1.0; // Bias
-        w[1] = Math.Max(0.0, w[1] + LearningRate * error * ta);  // Restrict to positive correlation
-        w[2] = Math.Max(0.0, w[2] + LearningRate * error * of);
-        w[3] = Math.Max(0.0, w[3] + LearningRate * error * smc);
-        w[4] = Math.Max(0.0, w[4] + LearningRate * error * ml);
+        // Weight Decay (Temporal Forgetting): multiply ALL weights by rho before update.
+        // This exponentially down-weights knowledge learned long ago, so the model
+        // stays responsive to the current market regime without manual resets.
+        for (int i = 0; i < w.Length; i++) w[i] *= WeightDecay;
 
-        // Normalize weights to prevent explosive growth (L1 norm = 4.0)
-        double sum = w[1] + w[2] + w[3] + w[4];
+        // SGD update: W = W + LR(t) * Error * X
+        // Note: Math.Max(0.0) removed — negative weights are allowed.
+        // If a signal systematically predicts the opposite, negative weight IS the correct adaptation.
+        w[0] += lr * error * 1.0; // Bias (no decay — bias is structural)
+        w[1] += lr * error * ta;  // TA weight
+        w[2] += lr * error * of;  // OrderFlow weight
+        w[3] += lr * error * smc; // SMC weight
+        w[4] += lr * error * ml;  // ML weight
+
+        // Soft normalization: keep L1 norm of signal weights near 4.0 to prevent
+        // explosive growth, but only when sum significantly exceeds the target.
+        double sum = Math.Abs(w[1]) + Math.Abs(w[2]) + Math.Abs(w[3]) + Math.Abs(w[4]);
         if (sum > 4.0)
         {
-            w[1] = (w[1] / sum) * 4.0;
-            w[2] = (w[2] / sum) * 4.0;
-            w[3] = (w[3] / sum) * 4.0;
-            w[4] = (w[4] / sum) * 4.0;
+            double scale = 4.0 / sum;
+            w[1] *= scale;
+            w[2] *= scale;
+            w[3] *= scale;
+            w[4] *= scale;
         }
+
+        _updateCounts.AddOrUpdate(key, 1, (_, c) => c + 1);
+
+        BotLogger.Debug($"[MetaLearner] {key} | LR={lr:F4} | error={error:F3} | w=[{w[0]:F2},{w[1]:F2},{w[2]:F2},{w[3]:F2},{w[4]:F2}]");
 
         _ = SaveWeightsAsync();
     }
@@ -83,10 +116,21 @@ public static class OnlineMetaLearner
             if (File.Exists(_savePath))
             {
                 var json = File.ReadAllText(_savePath);
-                var dict = JsonSerializer.Deserialize<ConcurrentDictionary<string, double[]>>(json);
-                if (dict != null)
+                // Try new format first (MetaLearnerState with Weights + UpdateCounts).
+                var state = JsonSerializer.Deserialize<MetaLearnerState>(json);
+                if (state?.Weights != null)
                 {
-                    foreach (var kvp in dict) _weights[kvp.Key] = kvp.Value;
+                    foreach (var kvp in state.Weights) _weights[kvp.Key] = kvp.Value;
+                    if (state.UpdateCounts != null)
+                        foreach (var kvp in state.UpdateCounts) _updateCounts[kvp.Key] = kvp.Value;
+                    return;
+                }
+                // Backward compat: old format was a flat Dictionary<string, double[]>.
+                var legacy = JsonSerializer.Deserialize<Dictionary<string, double[]>>(json);
+                if (legacy != null)
+                {
+                    foreach (var kvp in legacy) _weights[kvp.Key] = kvp.Value;
+                    BotLogger.Info("[MetaLearner] Migrated from legacy flat weights format. UpdateCounts reset to 0.");
                 }
             }
         }
@@ -101,13 +145,24 @@ public static class OnlineMetaLearner
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_savePath)!);
-            var json = JsonSerializer.Serialize(_weights);
+            var state = new MetaLearnerState
+            {
+                Weights      = new Dictionary<string, double[]>(_weights),
+                UpdateCounts = new Dictionary<string, int>(_updateCounts)
+            };
+            var json = JsonSerializer.Serialize(state);
             await File.WriteAllTextAsync(_savePath, json);
         }
         catch (Exception ex)
         {
             BotLogger.Error("[MetaLearner] Failed to save weights", ex);
         }
+    }
+
+    private sealed class MetaLearnerState
+    {
+        public Dictionary<string, double[]>? Weights      { get; set; }
+        public Dictionary<string, int>?      UpdateCounts { get; set; }
     }
 }
 

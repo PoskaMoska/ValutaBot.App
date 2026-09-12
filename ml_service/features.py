@@ -378,24 +378,23 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
 
     # ─── Time / Session (sinusoidal encoding so hour=23 is close to hour=0) ───
     if 'opentime' in df.columns:
-        def get_hour(ts):
-            if pd.isna(ts) or ts == 0: return 0.0
-            if isinstance(ts, str):
-                if ts.isdigit():
-                    ts = int(ts)
-                else:
-                    try:
-                        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                    except ValueError:
-                        dt = pd.to_datetime(ts)
-                    return dt.hour + dt.minute / 60.0
-                
-            # convert from milliseconds if necessary
-            if ts > 1e11: ts = ts / 1000.0
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            return dt.hour + dt.minute / 60.0
-        
-        hours = df['opentime'].apply(get_hour)
+        # Fast vectorized datetime parsing
+        try:
+            dts = pd.to_datetime(df['opentime'], utc=True, format='mixed')
+            hours = dts.dt.hour + dts.dt.minute / 60.0
+        except Exception:
+            # Fallback if mixed parsing fails
+            def get_hour(ts):
+                if pd.isna(ts) or ts == 0: return 0.0
+                if isinstance(ts, str):
+                    if ts.isdigit(): ts = int(ts)
+                    else:
+                        try: return pd.to_datetime(ts).hour + pd.to_datetime(ts).minute / 60.0
+                        except Exception: return 0.0
+                if ts > 1e11: ts = ts / 1000.0
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                return dt.hour + dt.minute / 60.0
+            hours = df['opentime'].apply(get_hour)
         feats['hour_sin'] = np.sin(2 * np.pi * hours / 24.0)
         feats['hour_cos'] = np.cos(2 * np.pi * hours / 24.0)
     else:

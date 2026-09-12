@@ -522,20 +522,31 @@ public class ConfluenceMatrixEngine(
         string candidateDir = "NEUTRAL";
         double finalConfidenceScore = 0.0;
         
-        if (metaProb > 0.52)
+        // IDEA-F02: Signal Veto System (Явное обнаружение конфликта ML vs TA)
+        bool vetoed = false;
+        if ((mlProbRaw > 0.65 && taScoreRaw < -0.3) || (mlProbRaw < -0.65 && taScoreRaw > 0.3))
         {
-            candidateDir = "BUY";
-            finalConfidenceScore = (metaProb - 0.5) * 2.0; // scale [0.5, 1.0] -> [0.0, 1.0]
+            BotLogger.Warn($"[Signal Veto] Conflict detected for {asset}/{timeframe}. ML={mlProbRaw:F2}, TA={taScoreRaw:F2}. Vetoing signal to NEUTRAL.");
+            vetoed = true;
         }
-        else if (metaProb < 0.48)
+
+        if (!vetoed)
         {
-            candidateDir = "PUT";
-            finalConfidenceScore = (0.5 - metaProb) * 2.0; // scale [0.0, 0.5] -> [1.0, 0.0]
-        }
-        else
-        {
-            candidateDir = "NEUTRAL";
-            finalConfidenceScore = 0.0;
+            if (metaProb > 0.52)
+            {
+                candidateDir = "BUY";
+                finalConfidenceScore = (metaProb - 0.5) * 2.0; // scale [0.5, 1.0] -> [0.0, 1.0]
+            }
+            else if (metaProb < 0.48)
+            {
+                candidateDir = "PUT";
+                finalConfidenceScore = (0.5 - metaProb) * 2.0; // scale [0.0, 0.5] -> [1.0, 0.0]
+            }
+            else
+            {
+                candidateDir = "NEUTRAL";
+                finalConfidenceScore = 0.0;
+            }
         }
 
         // 5. Final Decision & Market Session Awareness
