@@ -408,42 +408,8 @@ function renderAiChartLoop() {
         let candleWidth = Math.max(3, Math.floor(spacing * 0.5));
         if (candleWidth % 2 === 0) candleWidth += 1;
         
-        // --- Aesthetic Normalizer: Fix garbage backend data (huge wicks, tiny bodies) ---
-        // This ensures the chart always looks like a textbook, beautiful candlestick chart
-        let sanitizedData = aiChartData.map((c, i) => {
-            let o = c.open;
-            let cl = c.close;
-            
-            // Inject a synthetic macro-trend so the chart flows naturally up and down,
-            // overriding the perfectly flat "tick" data returned by the offline weekend database.
-            let macroTrend = Math.sin(i * 0.25) * (0.0008 * o);
-            let microTrend = Math.cos(i * 0.6) * (0.0003 * o);
-            o += macroTrend + microTrend;
-            cl += macroTrend + microTrend;
-            
-            // Add microscopic noise to prevent completely flat dojis
-            let noise = (Math.sin(i * 77.7) * 0.00005) * o;
-            cl += noise;
-            
-            let body = Math.abs(cl - o);
-            // If body is still too small, give it a minimum thickness
-            if (body < o * 0.00002) {
-                cl += (o * 0.00002);
-                body = Math.abs(cl - o);
-            }
-            
-            // Force wicks to be realistically proportional to the body (0.5x to 1.5x the body size)
-            let topWick = body * (0.5 + Math.abs(Math.sin(i * 3.14)) * 1.0);
-            let bottomWick = body * (0.5 + Math.abs(Math.cos(i * 3.14)) * 1.0);
-            
-            let h = Math.max(o, cl) + topWick;
-            let l = Math.min(o, cl) - bottomWick;
-            
-            return { open: o, close: cl, high: h, low: l };
-        });
-        
         let minP = Infinity, maxP = -Infinity;
-        sanitizedData.forEach(c => {
+        aiChartData.forEach(c => {
             if (c.low < minP) minP = c.low;
             if (c.high > maxP) maxP = c.high;
         });
@@ -451,7 +417,7 @@ function renderAiChartLoop() {
         const scaleY = (h - paddingY * 2) / range;
         
         // --- Build bottom-contour points from candles (one Y per candle) ---
-        const contourPts = sanitizedData.map((c, i) => ({
+        const contourPts = aiChartData.map((c, i) => ({
             x: paddingX + i * spacing + spacing / 2,
             y: paddingY + (maxP - c.low) * scaleY
         }));
@@ -503,7 +469,7 @@ function renderAiChartLoop() {
         ctx.shadowBlur = 0;
         
         // --- Candles (drawn on top of waves) ---
-        sanitizedData.forEach((c, i) => {
+        aiChartData.forEach((c, i) => {
             const isBull = c.close >= c.open;
             const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
             
