@@ -444,7 +444,7 @@ function renderAiChartLoop() {
             const px = ((aiChartPhase * 22 * (i + 1)) % (w + 20)) - 10;
             const py = midY + Math.sin(aiChartPhase * 0.7 + i * 1.2) * 50;
             const alpha = 0.3 + Math.sin(aiChartPhase + i) * 0.2;
-            ctx.fillStyle = i % 2 === 0 ? gba(0,220,255,\)\ : gba(200,0,255,\)\;
+            ctx.fillStyle = i % 2 === 0 ? `rgba(0,220,255,${alpha})` : `rgba(200,0,255,${alpha})`;
             ctx.beginPath();
             ctx.arc(px, py, i % 3 === 0 ? 2 : 1, 0, Math.PI * 2);
             ctx.fill();
