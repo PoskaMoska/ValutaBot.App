@@ -219,7 +219,16 @@ public static partial class MiniAppController
 
 
 
+        // FIX: /api/time was called by frontend (syncTime in api.js) but never registered.
+        // Every page load produced a 404, leaving timeOffset=0 and disabling clock-drift compensation.
+        app.MapGet("/api/time", (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+            return Results.Ok(new { t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+        });
+
         app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe) =>
+
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
             var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
