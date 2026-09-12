@@ -385,19 +385,32 @@ function renderAiChartLoop() {
     
     const w = rect.width;
     const h = rect.height;
-    const floorY = h * 0.85; // the virtual floor for reflection
     
-    // Background
-    ctx.fillStyle = '#0b0d1f';
+    // 1. Deep dark background
+    ctx.fillStyle = '#090a15';
     ctx.fillRect(0, 0, w, h);
     
-    aiChartPhase += 0.015;
+    // 2. Soft, massive glowing floor (like the reference)
+    const floorGrad = ctx.createLinearGradient(0, h * 0.5, 0, h);
+    floorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
+    floorGrad.addColorStop(0.6, 'rgba(184, 41, 255, 0.15)');
+    floorGrad.addColorStop(1, 'rgba(0, 179, 255, 0.2)');
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(0, h * 0.5, w, h * 0.5);
+    
+    // 3. Background grid dots (very faint)
+    ctx.fillStyle = 'rgba(255,255,255,0.03)';
+    for(let gx = w*0.05; gx < w; gx += w*0.1) {
+        for(let gy = h*0.1; gy < h*0.9; gy += 15) {
+            ctx.fillRect(gx, gy, 1, 3);
+        }
+    }
+    
+    aiChartPhase += 0.02; // smooth animation speed
     
     if (aiChartData.length > 0) {
-        // We compress the chart a bit to leave room for the reflection at the bottom
-        const paddingY = 30;
-        const paddingX = 15;
-        const chartH = floorY; // chart fits in the top 85%
+        const paddingY = 40;
+        const paddingX = 20;
         const count = aiChartData.length;
         const spacing = (w - paddingX * 2) / count;
         
@@ -410,124 +423,112 @@ function renderAiChartLoop() {
             if (c.high > maxP) maxP = c.high;
         });
         const range = maxP - minP || 1;
-        const scaleY = (chartH - paddingY * 2) / range;
+        const scaleY = (h - paddingY * 2) / range;
         
-        const contourPts = aiChartData.map((c, i) => ({
-            x: paddingX + i * spacing + spacing / 2,
-            y: paddingY + (maxP - c.low) * scaleY
-        }));
+        const midY = h / 2;
         
-        const waveOffset = 15; 
-        const waveDrift = 3;  
-        
-        const wavePoints = [];
-        for (let px = 0; px <= w; px += 3) {
-            let segY = chartH - paddingY; 
-            if (contourPts.length >= 2) {
-                const clampedPx = Math.max(contourPts[0].x, Math.min(px, contourPts[contourPts.length - 1].x));
-                let ci = 0;
-                for (let k = 0; k < contourPts.length - 1; k++) {
-                    if (clampedPx >= contourPts[k].x && clampedPx <= contourPts[k + 1].x) { ci = k; break; }
-                }
-                const p0 = contourPts[Math.max(0, ci - 1)];
-                const p1 = contourPts[ci];
-                const p2 = contourPts[Math.min(contourPts.length - 1, ci + 1)];
-                const p3 = contourPts[Math.min(contourPts.length - 1, ci + 2)];
-                const t = p1.x === p2.x ? 0 : (clampedPx - p1.x) / (p2.x - p1.x);
-                const t2 = t * t, t3 = t2 * t;
-                segY = 0.5 * ((2 * p1.y) +
-                    (-p0.y + p2.y) * t +
-                    (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 +
-                    (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3);
-            }
-            const wy = segY + waveOffset + Math.sin(px * 0.015 - aiChartPhase) * waveDrift;
-            wavePoints.push({ x: px, y: wy });
+        // --- Flowing Wave 1 (Magenta) ---
+        ctx.beginPath();
+        for (let px = 0; px <= w; px += 4) {
+            const wy = midY + Math.sin(px * 0.01 - aiChartPhase * 1.2) * 35
+                            + Math.cos(px * 0.005 + aiChartPhase) * 20;
+            if (px === 0) ctx.moveTo(px, wy); else ctx.lineTo(px, wy);
         }
+        const magGrad = ctx.createLinearGradient(0, 0, w, 0);
+        magGrad.addColorStop(0, 'rgba(217, 0, 255, 0)');
+        magGrad.addColorStop(0.2, 'rgba(217, 0, 255, 0.8)');
+        magGrad.addColorStop(0.8, 'rgba(217, 0, 255, 0.8)');
+        magGrad.addColorStop(1, 'rgba(217, 0, 255, 0)');
+        ctx.strokeStyle = magGrad;
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = 'rgba(217, 0, 255, 0.9)';
+        ctx.shadowBlur = 12;
+        ctx.stroke();
         
-        function drawElements(isReflection) {
-            // Wave
-            ctx.beginPath();
-            wavePoints.forEach((p, idx) => {
-                if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-            });
-            const lineGrad = ctx.createLinearGradient(0, 0, w, 0);
-            lineGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
-            lineGrad.addColorStop(0.1, isReflection ? 'rgba(184, 41, 255, 0.4)' : 'rgba(184, 41, 255, 0.6)');
-            lineGrad.addColorStop(0.9, isReflection ? 'rgba(184, 41, 255, 0.4)' : 'rgba(184, 41, 255, 0.6)');
-            lineGrad.addColorStop(1, 'rgba(184, 41, 255, 0)');
+        // --- Flowing Wave 2 (Cyan) ---
+        ctx.beginPath();
+        for (let px = 0; px <= w; px += 4) {
+            const wy = midY + Math.cos(px * 0.012 + aiChartPhase * 0.8) * 25
+                            + Math.sin(px * 0.007 - aiChartPhase * 1.5) * 15;
+            if (px === 0) ctx.moveTo(px, wy); else ctx.lineTo(px, wy);
+        }
+        const cyanGrad = ctx.createLinearGradient(0, 0, w, 0);
+        cyanGrad.addColorStop(0, 'rgba(0, 179, 255, 0)');
+        cyanGrad.addColorStop(0.2, 'rgba(0, 179, 255, 0.8)');
+        cyanGrad.addColorStop(0.8, 'rgba(0, 179, 255, 0.8)');
+        cyanGrad.addColorStop(1, 'rgba(0, 179, 255, 0)');
+        ctx.strokeStyle = cyanGrad;
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = 'rgba(0, 179, 255, 0.9)';
+        ctx.shadowBlur = 12;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        
+        // --- Candles ---
+        aiChartData.forEach((c, i) => {
+            const isBull = c.close >= c.open;
+            // Float animation to make it alive
+            const swayY = Math.sin(aiChartPhase * 2 + i * 0.5) * 2;
             
-            ctx.strokeStyle = lineGrad;
-            ctx.lineWidth = 1.5;
-            ctx.lineJoin = 'round';
-            ctx.shadowColor = isReflection ? 'transparent' : 'rgba(184, 41, 255, 0.9)';
-            ctx.shadowBlur = isReflection ? 0 : 12;
+            const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
+            const x = Math.floor(cx - candleWidth / 2);
+            
+            const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
+            const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
+            const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
+            let bodyH = Math.abs(c.close - c.open) * scaleY;
+            if (bodyH < 3) bodyH = 3;
+            
+            const color = isBull ? '#00b3ff' : '#d900ff';
+            const glowColor = isBull ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
+            
+            // Wick
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 6;
+            ctx.beginPath();
+            ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
+            ctx.lineTo(cx, Math.floor(yLow) + 0.5);
             ctx.stroke();
             ctx.shadowBlur = 0;
             
-            // Candles
-            aiChartData.forEach((c, i) => {
-                const isBull = c.close >= c.open;
-                const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
-                
-                const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
-                const x = Math.floor(cx - candleWidth / 2);
-                
-                const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
-                const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
-                const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
-                let bodyH = Math.abs(c.close - c.open) * scaleY;
-                if (bodyH < 3) bodyH = 3;
-                
-                const color = isBull ? '#00b3ff' : '#d900ff';
-                const glowColor = isBull ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
-                
-                ctx.strokeStyle = color;
-                ctx.lineWidth = 1;
-                ctx.shadowColor = isReflection ? 'transparent' : glowColor;
-                ctx.shadowBlur = isReflection ? 0 : 8;
-                ctx.beginPath();
-                ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
-                ctx.lineTo(cx, Math.floor(yLow) + 0.5);
-                ctx.stroke();
-                ctx.shadowBlur = 0;
-                
-                ctx.fillStyle = color;
-                ctx.shadowColor = isReflection ? 'transparent' : glowColor;
-                ctx.shadowBlur = isReflection ? 0 : 12;
-                
-                if (isReflection) {
-                    ctx.globalAlpha = 0.35; // Dim the reflection
-                }
-                ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
-                ctx.globalAlpha = 1.0;
-                ctx.shadowBlur = 0;
-            });
+            // Body
+            const bodyGrad = ctx.createLinearGradient(x, yTop, x + candleWidth, yTop);
+            if (isBull) {
+                bodyGrad.addColorStop(0, '#0077ff');
+                bodyGrad.addColorStop(0.5, '#00b3ff');
+                bodyGrad.addColorStop(1, '#0077ff');
+            } else {
+                bodyGrad.addColorStop(0, '#9900ff');
+                bodyGrad.addColorStop(0.5, '#d900ff');
+                bodyGrad.addColorStop(1, '#9900ff');
+            }
+            
+            ctx.fillStyle = bodyGrad;
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 10;
+            ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+            ctx.shadowBlur = 0;
+        });
+        
+        // --- Flying arrows ---
+        for (let i = 0; i < 3; i++) {
+            const isUp = i % 2 === 0;
+            const ax = ((aiChartPhase * 25 * (i + 1) + w*i*0.3) % (w + 40)) - 20;
+            const ay = (h * 0.2) + Math.sin(aiChartPhase * 1.5 + i) * 20 + i*30;
+            ctx.fillStyle = isUp ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
+            ctx.shadowColor = ctx.fillStyle;
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            if (isUp) {
+                ctx.moveTo(ax, ay); ctx.lineTo(ax - 4, ay + 6); ctx.lineTo(ax + 4, ay + 6);
+            } else {
+                ctx.moveTo(ax, ay + 6); ctx.lineTo(ax - 4, ay); ctx.lineTo(ax + 4, ay);
+            }
+            ctx.fill();
         }
-        
-        // 1. Draw Reflection
-        ctx.save();
-        ctx.translate(0, floorY * 2);
-        ctx.scale(1, -1);
-        drawElements(true);
-        ctx.restore();
-        
-        // Fade out the reflection with a dark gradient over it
-        const fadeGrad = ctx.createLinearGradient(0, floorY, 0, h);
-        fadeGrad.addColorStop(0, 'rgba(11, 13, 31, 0.1)'); // almost transparent near floor
-        fadeGrad.addColorStop(1, 'rgba(11, 13, 31, 1.0)'); // solid background color at bottom
-        ctx.fillStyle = fadeGrad;
-        ctx.fillRect(0, floorY, w, h - floorY);
-        
-        // Optional: draw a faint floor line
-        ctx.beginPath();
-        ctx.moveTo(0, floorY);
-        ctx.lineTo(w, floorY);
-        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        
-        // 2. Draw Normal Chart
-        drawElements(false);
+        ctx.shadowBlur = 0;
     }
     
     ctx.restore();
