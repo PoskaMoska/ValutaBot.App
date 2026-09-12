@@ -50,9 +50,9 @@ namespace ValutaBot.Tests
             var json = JsonSerializer.Serialize(payload);
 
             // 3. Assert
-            Assert.Contains(""symbol":"EURUSD"", json);
-            Assert.Contains(""openTime"", json);
-            Assert.Contains(""open"", json);
+            Assert.Contains("\"symbol\":\"EURUSD\"", json);
+            Assert.Contains("\"openTime\"", json);
+            Assert.Contains("\"open\"", json);
             
             // Validate that openTime is an integer (unix timestamp)
             var deserialized = JsonDocument.Parse(json);
