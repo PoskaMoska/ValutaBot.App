@@ -10,6 +10,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
+    private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     
     private readonly MarketDataFetcher _fetcher;
     private readonly IRiskGatekeeper _riskGatekeeper;
@@ -295,7 +296,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         bool isOtcAsset = _asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
         if (!isOtcAsset)
         {
-            _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
+            var closedCandles = _ohlcCandles != null && _ohlcCandles.Length > 1 
+                ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
+                : (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
+            _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, closedCandles, _currentLivePrice);
             BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
         }
         else
@@ -446,13 +450,21 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
                                         // await TelegramBotService.SendMessageToAdmins(report); // Disabled per user request
 
-                                        string logDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                                        System.IO.Directory.CreateDirectory(logDir);
-                                        string logFile = System.IO.Path.Combine(logDir, "ml_global_retrain.csv");
-                                        bool writeHeader = !System.IO.File.Exists(logFile);
-                                        using var writer = new System.IO.StreamWriter(logFile, append: true);
-                                        if (writeHeader) await writer.WriteLineAsync("Timestamp,Asset,OldVersion,NewVersion,Accuracy,Auc,NTrain");
-                                        await writer.WriteLineAsync($"{DateTime.UtcNow:O},{_asset},{oldVer},{_prediction.ModelVersion},{_prediction.Accuracy},{_prediction.Auc},{_prediction.NTrain}");
+                                        await _csvSemaphore.WaitAsync();
+                                        try
+                                        {
+                                            string logDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+                                            System.IO.Directory.CreateDirectory(logDir);
+                                            string logFile = System.IO.Path.Combine(logDir, "ml_global_retrain.csv");
+                                            bool writeHeader = !System.IO.File.Exists(logFile);
+                                            using var writer = new System.IO.StreamWriter(logFile, append: true);
+                                            if (writeHeader) await writer.WriteLineAsync("Timestamp,Asset,OldVersion,NewVersion,Accuracy,Auc,NTrain");
+                                            await writer.WriteLineAsync($"{DateTime.UtcNow:O},{_asset},{oldVer},{_prediction.ModelVersion},{_prediction.Accuracy},{_prediction.Auc},{_prediction.NTrain}");
+                                        }
+                                        finally
+                                        {
+                                            _csvSemaphore.Release();
+                                        }
                                     }
                                     catch (Exception tEx)
                                     {
@@ -497,10 +509,16 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     private async Task EvaluateTechnicalIndicatorsAsync()
     {
-        (_mainAdx, _mainPdi, _mainMdi) = _ohlcCandles != null ? _mathEngine.ComputeTrueAdx(_asset, _timeframe, _ohlcCandles) : (20.0, 0.0, 0.0);
-        _mainAtr = _ohlcCandles != null ? _mathEngine.ComputeAtr(_asset, _timeframe, _ohlcCandles) : 0;
+        var closedCandles = _ohlcCandles != null && _ohlcCandles.Length > 1 
+            ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
+            : (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
+        var closedPrices = closedCandles.Select(c => c.Close).ToArray();
+        var closedVolumes = closedCandles.Select(c => c.Volume).ToArray();
 
-        _mainResult = _marketAnalyzer.ScoreTimeframe(_asset, _timeframe, _mainPrices, _mainVolumes ?? Array.Empty<double>(), candles: _ohlcCandles, adxOverride: _mainAdx, atrOverride: _mainAtr, isForex: _isForex, pdiOverride: _mainPdi, mdiOverride: _mainMdi);
+        (_mainAdx, _mainPdi, _mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(_asset, _timeframe, closedCandles) : (20.0, 0.0, 0.0);
+        _mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(_asset, _timeframe, closedCandles) : 0;
+
+        _mainResult = _marketAnalyzer.ScoreTimeframe(_asset, _timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: _mainAdx, atrOverride: _mainAtr, isForex: _isForex, pdiOverride: _mainPdi, mdiOverride: _mainMdi);
 
 
         if (_higherResultData != null)

@@ -408,8 +408,25 @@ function renderAiChartLoop() {
         let candleWidth = Math.max(3, Math.floor(spacing * 0.5));
         if (candleWidth % 2 === 0) candleWidth += 1;
         
+        // --- Apply Heikin-Ashi Transformation for beautiful, smooth, realistic candles ---
+        let haData = [];
+        for (let i = 0; i < aiChartData.length; i++) {
+            const curr = aiChartData[i];
+            const haClose = (curr.open + curr.high + curr.low + curr.close) / 4;
+            let haOpen;
+            if (i === 0) {
+                haOpen = (curr.open + curr.close) / 2;
+            } else {
+                const prev = haData[i - 1];
+                haOpen = (prev.open + prev.close) / 2;
+            }
+            const haHigh = Math.max(curr.high, haOpen, haClose);
+            const haLow = Math.min(curr.low, haOpen, haClose);
+            haData.push({ open: haOpen, high: haHigh, low: haLow, close: haClose });
+        }
+        
         let minP = Infinity, maxP = -Infinity;
-        aiChartData.forEach(c => {
+        haData.forEach(c => {
             if (c.low < minP) minP = c.low;
             if (c.high > maxP) maxP = c.high;
         });
@@ -417,7 +434,7 @@ function renderAiChartLoop() {
         const scaleY = (h - paddingY * 2) / range;
         
         // --- Build bottom-contour points from candles (one Y per candle) ---
-        const contourPts = aiChartData.map((c, i) => ({
+        const contourPts = haData.map((c, i) => ({
             x: paddingX + i * spacing + spacing / 2,
             y: paddingY + (maxP - c.low) * scaleY
         }));
@@ -469,7 +486,7 @@ function renderAiChartLoop() {
         ctx.shadowBlur = 0;
         
         // --- Candles (drawn on top of waves) ---
-        aiChartData.forEach((c, i) => {
+        haData.forEach((c, i) => {
             const isBull = c.close >= c.open;
             const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
             
