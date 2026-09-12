@@ -396,15 +396,6 @@ function renderAiChartLoop() {
     ctx.fillStyle = floorGrad;
     ctx.fillRect(0, h * 0.6, w, h * 0.4);
     
-    // Background dotted vertical lines
-    ctx.fillStyle = 'rgba(255,255,255,0.03)';
-    for(let gx = w*0.1; gx < w; gx += w*0.15) {
-        for(let gy = h*0.1; gy < h*0.9; gy += 15) {
-            ctx.fillRect(gx, gy, 1, 3);
-        }
-    }
-
-    
     aiChartPhase += 0.018;
     
     if (aiChartData.length > 0) {
@@ -520,28 +511,6 @@ function renderAiChartLoop() {
             ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
             ctx.shadowBlur = 0;
         });
-
-        // --- Flying arrows ---
-        for (let i = 0; i < 3; i++) {
-            const isUp = i % 2 === 0;
-            const ax = ((aiChartPhase * 25 * (i + 1) + w*i*0.3) % (w + 40)) - 20;
-            const ay = (h * 0.2) + Math.sin(aiChartPhase * 1.5 + i) * 20 + i*40;
-            ctx.fillStyle = isUp ? 'rgba(0,179,255,0.7)' : 'rgba(217,0,255,0.7)';
-            ctx.shadowColor = ctx.fillStyle;
-            ctx.shadowBlur = 8;
-            ctx.beginPath();
-            if (isUp) {
-                ctx.moveTo(ax, ay);
-                ctx.lineTo(ax - 4, ay + 6);
-                ctx.lineTo(ax + 4, ay + 6);
-            } else {
-                ctx.moveTo(ax, ay + 6);
-                ctx.lineTo(ax - 4, ay);
-                ctx.lineTo(ax + 4, ay);
-            }
-            ctx.fill();
-        }
-        ctx.shadowBlur = 0;
     }
 
     ctx.restore();
