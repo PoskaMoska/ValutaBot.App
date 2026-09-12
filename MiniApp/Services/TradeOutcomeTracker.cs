@@ -185,15 +185,14 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             {
                 try
                 {
-                    await MLPythonService.RecordOnlineTradeOutcomeAsync(
+                    bool isWin = wasCorrect;
+                    await MLPythonService.SendFeedbackAsync(
                         record.Asset,
                         record.Timeframe,
+                        isWin,
                         record.EntryPrice,
-                        exitPriceVal,
-                        record.Direction,
-                        wasCorrect,
-                        AssetSanitizer.IsForexAsset(record.Asset),
-                        record.CreatedAt
+                        record.CreatedAt,
+                        record.IsForex
                     );
                 }
                 catch (Exception mlEx)

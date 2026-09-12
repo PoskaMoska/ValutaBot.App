@@ -5,7 +5,7 @@ namespace ValutaBot.MiniApp
 {
     [JsonSourceGenerationOptions(NumberHandling = JsonNumberHandling.AllowReadingFromString, PropertyNameCaseInsensitive = true)]
     [JsonSerializable(typeof(double[][]))]
-    [JsonSerializable(typeof(global::ValutaBot.MiniApp.MLPythonService.PredictResponseDto))]
+    [JsonSerializable(typeof(global::ValutaBot.MiniApp.MLPythonService.MLPythonPrediction))]
     [JsonSerializable(typeof(Dictionary<string, string>))]
     [JsonSerializable(typeof(global::ValutaBot.MiniApp.TwelveDataService.TwelveDataResponse))]
     [JsonSerializable(typeof(global::ValutaBot.MiniApp.TwelveDataService.TwelveDataPriceResponse))]

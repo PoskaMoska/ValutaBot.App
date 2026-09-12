@@ -46,7 +46,7 @@ namespace ValutaBot.MiniApp
                             if (candles != null && candles.Length > 0)
                             {
                                 bool isForex = !asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
-                                bool success = await MLPythonService.ForceTrainGlobalAsync(asset, timeframe, candles, isForex);
+                                bool success = await MLPythonService.ForceTrainGlobalAsync(asset, timeframe, isForex);
                                 if (!success) BotLogger.Warn($"[DriftDetector] Failed to Auto-Retrain {asset}/{timeframe}. Cooldown active.");
                             }
                         }

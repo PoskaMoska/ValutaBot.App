@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -84,7 +84,7 @@ public static class MLPythonService
                     var psi = new ProcessStartInfo
                     {
                         FileName = isWindows ? "py" : "python3",
-                        Arguments = $"\"{mainScript}\""",
+                        Arguments = $"\"{mainScript}\"",
                         WorkingDirectory = mlDir,
                         UseShellExecute = false,
                         CreateNoWindow = true

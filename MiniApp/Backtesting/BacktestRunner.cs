@@ -47,7 +47,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
 
             // ── Глобальное переобучение ML перед тестом ──────────────────────
             Console.WriteLine($"[BacktestRunner] Запуск глобального переобучения на {total} свечах...");
-            await MLPythonService.ForceTrainGlobalAsync(Asset, timeframe, candles, isForex: true);
+            await MLPythonService.ForceTrainGlobalAsync(Asset, timeframe, isForex: true);
 
             // ── Walk-forward цикл ─────────────────────────────────────────────
             int processed = 0;
@@ -161,7 +161,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                         smcState.BosDirection == direction);
                         
                     // ONLINE REINFORCEMENT LEARNING FOR ML (Скармливаем исход нейросети)
-                    await MLPythonService.RecordOnlineTradeOutcomeAsync(Asset, timeframe, currentPrice, exitPrice, direction, isWin, true);
+                    await MLPythonService.SendFeedbackAsync(Asset, timeframe, isWin, currentPrice, null, true);
 
                     wfOn.RecordTradeOutcome(Asset, timeframe, isWin);
 
