@@ -416,8 +416,8 @@ function renderAiChartLoop() {
         
         // Smoothed wave: for each pixel X, interpolate between neighboring contour points
         // then add gentle animated drift below the low
-        const waveOffset = 18; // how far below the low to float the wave (px)
-        const waveDrift = 10;  // amplitude of the live oscillation
+        const waveOffset = 15; // how far below the low to float the wave (px)
+        const waveDrift = 3;  // reduce live oscillation amplitude
         
         // Build a smoothed Y array for the wave at pixel resolution
         const wavePoints = [];
@@ -444,7 +444,7 @@ function renderAiChartLoop() {
                     (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3);
             }
             // Shift below contour + gentle oscillation
-            const wy = segY + waveOffset + Math.sin(px * 0.02 - aiChartPhase * 1.5) * waveDrift;
+            const wy = segY + waveOffset + Math.sin(px * 0.015 - aiChartPhase) * waveDrift;
             wavePoints.push({ x: px, y: wy });
         }
         
@@ -453,11 +453,11 @@ function renderAiChartLoop() {
         wavePoints.forEach((p, idx) => {
             if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
         });
-        ctx.strokeStyle = 'rgba(139, 92, 246, 0.75)';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(139, 92, 246, 0.6)';
+        ctx.lineWidth = 1;
         ctx.lineJoin = 'round';
-        ctx.shadowColor = 'rgba(139, 92, 246, 0.9)';
-        ctx.shadowBlur = 10;
+        ctx.shadowColor = 'rgba(139, 92, 246, 0.7)';
+        ctx.shadowBlur = 3;
         ctx.stroke();
         ctx.shadowBlur = 0;
         
@@ -465,7 +465,7 @@ function renderAiChartLoop() {
         aiChartData.forEach((c, i) => {
             const isBull = c.close >= c.open;
             // Very subtle float — barely perceptible
-            const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 1.2;
+            const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
             
             const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
             const x = Math.floor(cx - candleWidth / 2);
