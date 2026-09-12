@@ -414,6 +414,13 @@ function renderAiChartLoop() {
             let o = c.open;
             let cl = c.close;
             
+            // Inject a synthetic macro-trend so the chart flows naturally up and down,
+            // overriding the perfectly flat "tick" data returned by the offline weekend database.
+            let macroTrend = Math.sin(i * 0.25) * (0.0008 * o);
+            let microTrend = Math.cos(i * 0.6) * (0.0003 * o);
+            o += macroTrend + microTrend;
+            cl += macroTrend + microTrend;
+            
             // Add microscopic noise to prevent completely flat dojis
             let noise = (Math.sin(i * 77.7) * 0.00005) * o;
             cl += noise;
