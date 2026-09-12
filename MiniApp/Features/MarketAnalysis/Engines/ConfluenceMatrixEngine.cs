@@ -530,17 +530,28 @@ public class ConfluenceMatrixEngine(
             vetoed = true;
         }
 
+        // 5. Final Decision & Market Session Awareness
+        
+        // FIX: The Meta-Learner (metaProb) bypassed the MTF conflict penalty, AutoCalibration, and FearGreed 
+        // which were applied to totalScore. We blend them here to ensure all systems influence the final result.
+        
+        // Convert scoreMath [-1.0, 1.0] to a probability [0.0, 1.0]
+        double mathProb = (scoreMath + 1.0) / 2.0;
+        
+        // Blend ML Meta-Learner with the Mathematical Consensus Matrix (70% ML, 30% Math)
+        double blendedProb = (metaProb * 0.70) + (mathProb * 0.30);
+        
         if (!vetoed)
         {
-            if (metaProb > 0.52)
+            if (blendedProb > 0.52)
             {
                 candidateDir = "BUY";
-                finalConfidenceScore = (metaProb - 0.5) * 2.0; // scale [0.5, 1.0] -> [0.0, 1.0]
+                finalConfidenceScore = (blendedProb - 0.5) * 2.0;
             }
-            else if (metaProb < 0.48)
+            else if (blendedProb < 0.48)
             {
                 candidateDir = "PUT";
-                finalConfidenceScore = (0.5 - metaProb) * 2.0; // scale [0.0, 0.5] -> [1.0, 0.0]
+                finalConfidenceScore = (0.5 - blendedProb) * 2.0;
             }
             else
             {
@@ -549,8 +560,10 @@ public class ConfluenceMatrixEngine(
             }
         }
 
-        // 5. Final Decision & Market Session Awareness
         double absWeightedScore = finalConfidenceScore;
+        
+        // Apply conflict penalty globally to the final confidence (so MTF conflict actually lowers probability)
+        absWeightedScore *= conflictPenalty;
         
         // Внедрение интеллекта сессий (Market Session Modifier)
         double sessionMultiplier = 1.0;

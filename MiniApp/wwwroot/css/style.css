@@ -1,4 +1,4 @@
-﻿
+
         @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600;700;800&family=Unbounded:wght@600;700;800;900&display=swap');
         :root {
             --bg: #03010c;
@@ -647,6 +647,7 @@
         .exp-body { position: absolute; left: 15%; right: 15%; min-width: 4px; border-radius: 1.5px; }
         .exp-bull { background: #00e676; box-shadow: 0 0 6px rgba(0,230,118,0.35); }
         .exp-bear { background: #ff1744; box-shadow: 0 0 6px rgba(255,23,68,0.35); }
+        .exp-neutral { background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); }
         .exp-candle.forming .exp-body, .exp-candle.forming .exp-wick { animation: expPulse 1.6s ease-in-out infinite; }
         @keyframes expPulse {
             0%, 100% { opacity: 1; }

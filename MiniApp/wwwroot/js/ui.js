@@ -110,8 +110,6 @@ export function renderExpiryCandles(containerId, ohlc, count) {
     const y = (p) => span < 1e-12 ? H / 2 : 2 + ((hi - p) / span) * (H - 4);
 
     container.innerHTML = tail.map((k, i) => {
-        const bull = k.c >= k.o;
-        const cls = bull ? 'exp-bull' : 'exp-bear';
         const yH = y(k.h), yL = y(k.l);
         const yO = y(k.o), yC = y(k.c);
         const bodyTop = Math.min(yO, yC);
@@ -119,6 +117,7 @@ export function renderExpiryCandles(containerId, ohlc, count) {
         const forming = i === tail.length - 1 ? ' forming' : '';
         const wickStyle = `top:${yH.toFixed(1)}px;height:${Math.max(1, yL - yH).toFixed(1)}px`;
         const bodyStyle = `top:${bodyTop.toFixed(1)}px;height:${bodyH.toFixed(1)}px`;
+        const cls = 'exp-neutral';
         return `<div class='exp-candle${forming}'><div class='exp-wick ${cls}' style='${wickStyle}'></div><div class='exp-body ${cls}' style='${bodyStyle}'></div></div>`;
     }).join('');
 }
@@ -449,19 +448,7 @@ function renderAiChartLoop() {
             wavePoints.push({ x: px, y: wy });
         }
         
-        // Draw filled area under the wave (gradient fill)
-        ctx.beginPath();
-        ctx.moveTo(wavePoints[0].x, h);
-        wavePoints.forEach(p => ctx.lineTo(p.x, p.y));
-        ctx.lineTo(wavePoints[wavePoints.length - 1].x, h);
-        ctx.closePath();
-        const areaGrad = ctx.createLinearGradient(0, 0, 0, h);
-        areaGrad.addColorStop(0, 'rgba(139, 92, 246, 0.0)');
-        areaGrad.addColorStop(1, 'rgba(139, 92, 246, 0.18)');
-        ctx.fillStyle = areaGrad;
-        ctx.fill();
-        
-        // Draw the wave line itself
+        // Draw the wave line only (no fill)
         ctx.beginPath();
         wavePoints.forEach((p, idx) => {
             if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
