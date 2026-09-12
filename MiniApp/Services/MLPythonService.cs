@@ -1,8 +1,13 @@
+﻿using System;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Tasks;
+
 namespace ValutaBot.MiniApp;
 
 /// <summary>
@@ -12,26 +17,23 @@ namespace ValutaBot.MiniApp;
 /// </summary>
 public static class MLPythonService
 {
-     // Timeout managed by Polly
     private static string _baseUrl = string.Empty;
     private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
-// ── Result type ────────────────────────────────────────────────────────
+    private static Process? _mlProcess; // Track to prevent zombie leaks
 
     public record MLPythonPrediction(
-        string Direction,       // "BUY" | "PUT" | "NEUTRAL"
-        double Confidence,      // 0.0 – 1.0
-        string ModelVersion,    // e.g. "lgbm-v1-BTCUSDT_1m-1720000000"
-        double? Accuracy,       // CV accuracy (null if model not yet trained)
-        double? Auc,            // CV AUC-ROC
-        int? NTrain             // number of candles used for training
+        string Direction,
+        double Confidence,
+        string ModelVersion,
+        double? Accuracy,
+        double? Auc,
+        int? NTrain
     );
-
-    // ── Init ───────────────────────────────────────────────────────────────
 
     public static void Init(string? baseUrl)
     {
         _baseUrl = (baseUrl ?? string.Empty).TrimEnd('/');
-if (!string.IsNullOrWhiteSpace(_baseUrl))
+        if (!string.IsNullOrWhiteSpace(_baseUrl))
         {
             BotLogger.Info($"[MLPython] Service URL: {_baseUrl}");
             if (_baseUrl.Contains("localhost") || _baseUrl.Contains("127.0.0.1"))
@@ -79,16 +81,34 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
                 {
                     BotLogger.Info("[MLPython] Auto-starting Python LightGBM microservice...");
                     bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
-                    var psi = new System.Diagnostics.ProcessStartInfo
+                    var psi = new ProcessStartInfo
                     {
                         FileName = isWindows ? "py" : "python3",
-                        Arguments = $"\"{mainScript}\"",
+                        Arguments = $"\"{mainScript}\""",
                         WorkingDirectory = mlDir,
                         UseShellExecute = false,
                         CreateNoWindow = true
                     };
-                    System.Diagnostics.Process.Start(psi);
-                    BotLogger.Info("[MLPython] Python LightGBM service started in background!");
+                    
+                    _mlProcess = Process.Start(psi);
+                    if (_mlProcess != null)
+                    {
+                        BotLogger.Info($"[MLPython] Python LightGBM service started in background (PID: {_mlProcess.Id})!");
+                        
+                        // FIX: Ensure Python process is killed when C# app exits to prevent OOM / Zombie leaks
+                        AppDomain.CurrentDomain.ProcessExit += (sender, args) =>
+                        {
+                            try
+                            {
+                                if (_mlProcess != null && !_mlProcess.HasExited)
+                                {
+                                    BotLogger.Info($"[MLPython] Terminating background Python service (PID: {_mlProcess.Id})...");
+                                    _mlProcess.Kill();
+                                }
+                            }
+                            catch { /* Ignore kill errors during shutdown */ }
+                        };
+                    }
                 }
             }
             catch (Exception ex)
@@ -98,12 +118,19 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
         });
     }
 
-    // ── Public API ─────────────────────────────────────────────────────────
+    private static string MapSymbol(string symbol, bool isForex)
+    {
+        if (!isForex)
+            return symbol.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+        
+        string baseSym = symbol.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+        if (baseSym.Length == 6 && !baseSym.EndsWith("USDT"))
+        {
+            return baseSym;
+        }
+        return baseSym;
+    }
 
-    /// <summary>
-    /// Send candles to the Python ML service and receive a direction prediction.
-    /// Returns null if the service is unavailable or disabled.
-    /// </summary>
     public static async Task<MLPythonPrediction?> PredictAsync(
         string symbol,
         string interval,
@@ -116,10 +143,7 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
 
         try
         {
-            // Map ValutaBot asset name to Binance-style symbol
             var binanceSymbol = MapSymbol(symbol, isForex);
-
-            // Build request payload
             var candleList = candles.Select(c => new
             {
                 openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
@@ -128,104 +152,94 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
                 low = c.Low,
                 close = c.Close,
                 volume = c.Volume
-            }).ToArray();
+            }).ToList();
 
-            var mtfCandleList = mtfCandles?.Select(c => new
+            object payload;
+            if (mtfCandles != null && mtfCandles.Length > 0)
             {
-                openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
-                open = c.Open,
-                high = c.High,
-                low = c.Low,
-                close = c.Close,
-                volume = c.Volume
-            }).ToArray();
+                var mtfList = mtfCandles.Select(c => new
+                {
+                    openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
+                    open = c.Open,
+                    high = c.High,
+                    low = c.Low,
+                    close = c.Close,
+                    volume = c.Volume
+                }).ToList();
 
-            var payload = new
+                payload = new { symbol = binanceSymbol, interval = interval, candles = candleList, is_forex = isForex, mtf_candles = mtfList };
+            }
+            else
             {
-                symbol = binanceSymbol,
-                interval = interval,
-                candles = candleList,
-                mtf_candles = mtfCandleList,
-                is_forex = isForex
-            };
+                payload = new { symbol = binanceSymbol, interval = interval, candles = candleList, is_forex = isForex };
+            }
 
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
             var response = await MiniAppController.HttpFactory!.CreateClient("MLPythonService").PostAsync(new Uri($"{_baseUrl}/predict"), content);
-
-            if (!response.IsSuccessStatusCode)
+            
+            if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
             {
-                BotLogger.Warn($"[MLPython] Non-OK response: {(int)response.StatusCode}");
                 return null;
             }
-
-            var body = await response.Content.ReadAsStringAsync();
-            var result = JsonSerializer.Deserialize<PredictResponseDto>(body, _jsonOptions);
-
-            if (result == null)
+            if (!response.IsSuccessStatusCode)
+            {
                 return null;
-
-            BotLogger.Info($"[MLPython] {binanceSymbol}/{interval} → {result.Direction} " +
-                           $"conf={result.Confidence:F2} model={result.ModelVersion}");
-
-            return new MLPythonPrediction(
-                Direction:    result.Direction ?? "NEUTRAL",
-                Confidence:   result.Confidence,
-                ModelVersion: result.ModelVersion ?? "unknown",
-                Accuracy:     result.Accuracy,
-                Auc:          result.Auc,
-                NTrain:       result.NTrain
-            );
+            }
+            
+            var responseBody = await response.Content.ReadAsStringAsync();
+            var result = JsonSerializer.Deserialize<MLPythonPrediction>(responseBody, _jsonOptions);
+            
+            if (result != null && result.Direction != "NEUTRAL")
+            {
+                BotLogger.Info($"[MLPython] {binanceSymbol}/{interval} -> {result.Direction} (Conf: {result.Confidence:F2}) [v:{result.ModelVersion}]");
+                return new MLPythonPrediction(
+                    Direction:    result.Direction,
+                    Confidence:   result.Confidence,
+                    ModelVersion: result.ModelVersion,
+                    Accuracy:     result.Accuracy,
+                    Auc:          result.Auc,
+                    NTrain:       result.NTrain
+                );
+            }
+            return null;
         }
         catch (Polly.CircuitBreaker.BrokenCircuitException)
         {
-            // Circuit is open, requests are failing fast. Suppress to avoid log spam on every tick.
             return null; 
         }
         catch (Exception ex)
         {
-            // Fallback for any other pipeline failure (like timeout when circuit is half-open or closed)
             BotLogger.Warn($"[MLPython] Pipeline execution failed: {ex.Message}");
             return null;
         }
     }
 
-    /// <summary>
-    /// Sends real verified trade outcome (Win/Loss) to Python ML service for online reinforcement learning.
-    /// </summary>
-    public static async Task RecordOnlineTradeOutcomeAsync(
+    public static async Task SendFeedbackAsync(
         string asset,
         string timeframe,
-        double entryPrice,
-        double exitPrice,
-        string direction,
         bool wasWin,
-        bool isForex = false,
-        DateTime? entryTime = null)
+        double entryPrice,
+        DateTime? entryTime = null,
+        bool isForex = false)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl)) return;
-
+        
         try
         {
             var binanceSymbol = MapSymbol(asset, isForex);
             var payload = new
             {
                 asset = binanceSymbol,
-                timeframe,
-                entry_price = entryPrice,
-                exit_price = exitPrice,
-                direction,
+                timeframe = timeframe,
                 was_win = wasWin,
+                entry_price = entryPrice,
                 is_forex = isForex,
-                // FIX W-22: format "o" generates 7 fractional digits (e.g. .1234567Z).
-                // Python 3.10 fromisoformat() only supports max 6 → ValueError → SGD skipped.
                 timestamp = (entryTime ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
             };
 
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            
             var response = await MiniAppController.HttpFactory!.CreateClient("MLPythonService").PostAsync(new Uri($"{_baseUrl}/feedback"), content);
             
             if (response.IsSuccessStatusCode)
@@ -235,64 +249,36 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
                 BotLogger.Info($"[AI Feedback Detector] Feedback sent for {asset}/{timeframe} -> {winStr}. Python Response: {responseBody}");
             }
         }
-        catch (Polly.CircuitBreaker.BrokenCircuitException)
-        {
-            // Circuit is open, suppress log
-        }
+        catch (Polly.CircuitBreaker.BrokenCircuitException) { }
         catch (Exception ex)
         {
             BotLogger.Warn($"[MLPython] Online RL feedback notice: {ex.Message}");
         }
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Forces global batch training on the provided historical candles via /train/sync.
-    /// </summary>
-    public static async Task<bool> ForceTrainGlobalAsync(
-        string asset,
-        string interval,
-        MiniAppController.OhlcCandle[] history,
-        bool isForex = false)
+    public static async Task<bool> ForceTrainGlobalAsync(string asset, string timeframe, bool isForex = false, int limit = 2000)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl)) return false;
-
         try
         {
             var binanceSymbol = MapSymbol(asset, isForex);
-            var candleList = history.Select(c => new
-            {
-                openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
-                open = c.Open,
-                high = c.High,
-                low = c.Low,
-                close = c.Close,
-                volume = c.Volume
-            }).ToArray();
-
             var payload = new
             {
-                symbol = binanceSymbol,
-                interval = interval,
-                candles = candleList,
-                is_forex = isForex
+                asset = binanceSymbol,
+                timeframe = timeframe,
+                is_forex = isForex,
+                limit = limit
             };
-
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            // FIX C-15: client.Timeout on a Polly-backed IHttpClientFactory client is ignored —
-            // Polly's AttemptTimeout (~5-10s) fires first, killing every /train/sync request.
-            // Solution: use a dedicated "MLPythonLongRunning" client registered WITHOUT Polly.
-            // This client has a 12-minute timeout, safe for global retraining (typ. 30-300s).
-            var client = MiniAppController.HttpFactory!.CreateClient("MLPythonLongRunning");
-
-            var response = await client.PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
             
+            // Use long-running client bypassing Polly short timeouts
+            var response = await MiniAppController.HttpFactory!.CreateClient("MLPythonLongRunning")
+                                .PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
+
             if (response.IsSuccessStatusCode)
             {
-                BotLogger.Info($"[MLPython] Global Batch Retraining completed for {asset}/{interval} on {history.Length} candles.");
+                BotLogger.Info($"[MLPython] Global Batch Retraining SUCCESS for {asset}/{timeframe}.");
                 return true;
             }
             else
@@ -307,53 +293,4 @@ if (!string.IsNullOrWhiteSpace(_baseUrl))
             return false;
         }
     }
-
-    /// <summary>
-    /// Map ValutaBot internal symbol to Binance-style uppercase symbol.
-    /// Forex pairs are returned as-is (service handles them gracefully).
-    /// </summary>
-    private static string MapSymbol(string asset, bool isForex)
-    {
-        if (isForex)
-        {
-            // For forex, use EURUSD-style (Python service uses it as a key for model storage)
-            var clean = asset.Replace("/", "").Replace(" ", "").Replace("OTC", "")
-                        .Replace("otc", "").Trim().ToUpperInvariant();
-            
-            // If it's a weekend OTC pair, train a separate independent model
-            if (asset.Contains("OTC", StringComparison.OrdinalIgnoreCase))
-            {
-                return clean + "_OTC";
-            }
-            return clean;
-        }
-
-        return asset.ToUpperInvariant() switch
-        {
-            "BTC" or "BITCOIN"  => "BTCUSDT",
-            "ETH" or "ETHEREUM" => "ETHUSDT",
-            "SOL" or "SOLANA"   => "SOLUSDT",
-            "BNB"               => "BNBUSDT",
-            "XRP"               => "XRPUSDT",
-            "ADA"               => "ADAUSDT",
-            "DOGE"              => "DOGEUSDT",
-            _                   => asset.ToUpperInvariant().EndsWith("USDT")
-                                       ? asset.ToUpperInvariant()
-                                       : asset.ToUpperInvariant() + "USDT"
-        };
-    }
-
-    // ── DTO ────────────────────────────────────────────────────────────────
-
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812:Avoid uninstantiated internal classes", Justification = "Instantiated by System.Text.Json deserialization")]
-    internal class PredictResponseDto
-    {
-        [JsonPropertyName("direction")]    public string?  Direction    { get; set; }
-        [JsonPropertyName("confidence")]   public double   Confidence   { get; set; }
-        [JsonPropertyName("model_version")]public string?  ModelVersion { get; set; }
-        [JsonPropertyName("accuracy")]     public double?  Accuracy     { get; set; }
-        [JsonPropertyName("auc")]          public double?  Auc          { get; set; }
-        [JsonPropertyName("n_train")]      public int?     NTrain       { get; set; }
-    }
 }
-

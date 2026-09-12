@@ -283,7 +283,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         double shortVol = StandardDeviationScalar(returns.Slice(20, 5));
         double longVol = StandardDeviationScalar(returns.Slice(0, 20));
 
-        if (longVol < 1e-10) return 1.0;
+        if (longVol < 1e-5) return 1.0;
         return shortVol / longVol;
     }
 
