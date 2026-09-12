@@ -410,17 +410,22 @@ function renderAiChartLoop() {
         
         let minP = Infinity, maxP = -Infinity;
         aiChartData.forEach(c => {
-            if (c.low < minP) minP = c.low;
-            if (c.high > maxP) maxP = c.high;
+            const trueLow = Math.min(c.low, c.open, c.close);
+            const trueHigh = Math.max(c.high, c.open, c.close);
+            if (trueLow < minP) minP = trueLow;
+            if (trueHigh > maxP) maxP = trueHigh;
         });
         const range = maxP - minP || 1;
         const scaleY = (h - paddingY * 2) / range;
         
         // --- Build bottom-contour points from candles (one Y per candle) ---
-        const contourPts = aiChartData.map((c, i) => ({
-            x: paddingX + i * spacing + spacing / 2,
-            y: paddingY + (maxP - c.low) * scaleY
-        }));
+        const contourPts = aiChartData.map((c, i) => {
+            const trueLow = Math.min(c.low, c.open, c.close);
+            return {
+                x: paddingX + i * spacing + spacing / 2,
+                y: paddingY + (maxP - trueLow) * scaleY
+            };
+        });
         
         const waveOffset = 25; 
         const waveDrift = 3;  
