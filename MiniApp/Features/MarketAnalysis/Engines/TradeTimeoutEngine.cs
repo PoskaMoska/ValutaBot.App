@@ -1,12 +1,7 @@
-using System;
+﻿using System;
 
 namespace ValutaBot.MiniApp;
 
-/// <summary>
-/// Trade Timeout Engine.
-/// Calculates optimal candle count based on volatility/SMC,
-/// then converts to human-readable expiry time (e.g. "1:40", "2 мин").
-/// </summary>
 public class TradeTimeoutEngine : ITradeTimeoutEngine
 {
     public record TimeoutResult(
@@ -51,7 +46,7 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         bool isSubMinute = tfSeconds < 60;
 
         int baseCandles = 3;
-        string dynamicReason = "Базовая экспирация (3 свечи).";
+        string dynamicReason = "Стандартный рынок (3 свечи).";
 
         double lastPrice = currentPrice > 0 ? currentPrice : 1.0;
         double normalizedAtr = atr / lastPrice;
@@ -63,35 +58,44 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         bool isDeadMarket = atr > 0 && normalizedAtr < deadMarketThreshold;
         bool isZeroAtr = atr <= 0;
 
-        if (smc.HasOrderBlock || smc.HasFvg || volRatio > 1.5)
+        if (volRatio > 1.5)
         {
-            dynamicReason = smc.HasOrderBlock || smc.HasFvg 
-                ? "SMC сигнал (OB/FVG) или высокий импульс."
-                : "Высокая волатильность.";
+            baseCandles = 2;
+            dynamicReason = "Высокая волатильность -> Ускорение (2 свечи).";
         }
         else if (isZeroAtr || isDeadMarket)
         {
-            dynamicReason = "Мертвый рынок (критическое сжатие).";
+            baseCandles = 4;
+            dynamicReason = "Мертвый рынок -> Замедление (4 свечи).";
+        }
+        else if (smc.HasOrderBlock || smc.HasFvg)
+        {
+            baseCandles = 3;
+            dynamicReason = "SMC паттерн (OB/FVG) -> Стандарт (3 свечи).";
         }
         else if (volRatio < 0.8)
         {
-            dynamicReason = "Низкая волатильность (широкий флэт).";
+            baseCandles = 3;
+            dynamicReason = "Низкая волатильность -> Стандарт (3 свечи).";
         }
 
-        // Sub-minute floor logic (Защита от тикового шума)
-        int minCandles = timeframe.ToLower() switch
+        // Sub-minute floor logic
+        if (isSubMinute)
         {
-            "s5"  => 4, // 20 секунд минимум
-            "s10" => 3, // 30 секунд минимум
-            "s15" => 3, // 45 секунд минимум
-            "s30" => 2, // 60 секунд минимум
-            _     => 3  // FIX: Force to 3 candles to perfectly align with ML TARGET_HORIZON_CANDLES
-        };
+            int minCandles = timeframe.ToLower() switch
+            {
+                "s5"  => 4, // 20 sec min
+                "s10" => 3, // 30 sec min
+                "s15" => 3, // 45 sec min
+                "s30" => 2, // 60 sec min
+                _     => 2
+            };
 
-        if (baseCandles < minCandles)
-        {
-            dynamicReason += $" | Floor: защита от шума, минимум {minCandles} свечей для {timeframe}.";
-            baseCandles = minCandles;
+            if (baseCandles < minCandles)
+            {
+                dynamicReason += $" | Floor: минимум {minCandles} свечи для {timeframe}.";
+                baseCandles = minCandles;
+            }
         }
 
         int totalSeconds = baseCandles * tfSeconds;

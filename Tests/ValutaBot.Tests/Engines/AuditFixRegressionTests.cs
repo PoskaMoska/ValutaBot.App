@@ -129,7 +129,7 @@ namespace ValutaBot.Tests.Engines
                 smc: smcResult, currentPrice: 1.1);
 
             _out.WriteLine($"[W-18] ZeroATR -> {result.TimeoutCandles} candles: {result.Reasoning}");
-            Assert.Equal(3, result.TimeoutCandles);
+            Assert.Equal(4, result.TimeoutCandles);
         }
 
         [Fact]
