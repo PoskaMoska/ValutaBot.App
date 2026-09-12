@@ -385,24 +385,22 @@ function renderAiChartLoop() {
     
     const w = rect.width;
     const h = rect.height;
+    const floorY = h * 0.85; // the virtual floor for reflection
     
+    // Background
     ctx.fillStyle = '#0b0d1f';
     ctx.fillRect(0, 0, w, h);
     
-    // Deep Floor reflection
-    const floorGrad = ctx.createLinearGradient(0, h * 0.6, 0, h);
-    floorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
-    floorGrad.addColorStop(1, 'rgba(184, 41, 255, 0.15)');
-    ctx.fillStyle = floorGrad;
-    ctx.fillRect(0, h * 0.6, w, h * 0.4);
-    
-    aiChartPhase += 0.018;
+    aiChartPhase += 0.015;
     
     if (aiChartData.length > 0) {
-        const paddingY = 25;
+        // We compress the chart a bit to leave room for the reflection at the bottom
+        const paddingY = 30;
         const paddingX = 15;
+        const chartH = floorY; // chart fits in the top 85%
         const count = aiChartData.length;
         const spacing = (w - paddingX * 2) / count;
+        
         let candleWidth = Math.max(3, Math.floor(spacing * 0.55));
         if (candleWidth % 2 === 0) candleWidth += 1;
         
@@ -412,27 +410,20 @@ function renderAiChartLoop() {
             if (c.high > maxP) maxP = c.high;
         });
         const range = maxP - minP || 1;
-        const scaleY = (h - paddingY * 2) / range;
+        const scaleY = (chartH - paddingY * 2) / range;
         
-        // --- Build bottom-contour points from candles (one Y per candle) ---
-        // Use the "low" of each candle as the bottom contour reference
         const contourPts = aiChartData.map((c, i) => ({
             x: paddingX + i * spacing + spacing / 2,
             y: paddingY + (maxP - c.low) * scaleY
         }));
         
-        // Smoothed wave: for each pixel X, interpolate between neighboring contour points
-        // then add gentle animated drift below the low
-        const waveOffset = 15; // how far below the low to float the wave (px)
-        const waveDrift = 3;  // reduce live oscillation amplitude
+        const waveOffset = 15; 
+        const waveDrift = 3;  
         
-        // Build a smoothed Y array for the wave at pixel resolution
         const wavePoints = [];
         for (let px = 0; px <= w; px += 3) {
-            // Find which candle segment we're in
-            let segY = h - paddingY; 
+            let segY = chartH - paddingY; 
             if (contourPts.length >= 2) {
-                // Clamp px to the bounds of the candles so the line extends horizontally at the edges
                 const clampedPx = Math.max(contourPts[0].x, Math.min(px, contourPts[contourPts.length - 1].x));
                 let ci = 0;
                 for (let k = 0; k < contourPts.length - 1; k++) {
@@ -449,70 +440,96 @@ function renderAiChartLoop() {
                     (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 +
                     (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3);
             }
-            // Shift below contour + gentle oscillation
             const wy = segY + waveOffset + Math.sin(px * 0.015 - aiChartPhase) * waveDrift;
             wavePoints.push({ x: px, y: wy });
         }
         
-        // Draw the wave line only (no fill)
-        ctx.beginPath();
-        wavePoints.forEach((p, idx) => {
-            if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-        });
-        
-        // Create a gradient so the line fades out at the left and right edges
-        const lineGrad = ctx.createLinearGradient(0, 0, w, 0);
-        lineGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
-        lineGrad.addColorStop(0.1, 'rgba(184, 41, 255, 0.6)');
-        lineGrad.addColorStop(0.9, 'rgba(184, 41, 255, 0.6)');
-        lineGrad.addColorStop(1, 'rgba(184, 41, 255, 0)');
-        
-        ctx.strokeStyle = lineGrad;
-        ctx.lineWidth = 1.5;
-        ctx.lineJoin = 'round';
-        ctx.shadowColor = 'rgba(184, 41, 255, 0.9)';
-        ctx.shadowBlur = 12;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-        
-        // --- Candles (drawn on top of waves) ---
-        aiChartData.forEach((c, i) => {
-            const isBull = c.close >= c.open;
-            // Very subtle float — barely perceptible
-            const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
-            
-            const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
-            const x = Math.floor(cx - candleWidth / 2);
-            
-            const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
-            const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
-            const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
-            let bodyH = Math.abs(c.close - c.open) * scaleY;
-            if (bodyH < 3) bodyH = 3;
-            
-            const color = isBull ? '#00b3ff' : '#d900ff';
-            const glowColor = isBull ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
-            
-            // Wick — thin, sharp
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 1;
-            ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 8;
+        function drawElements(isReflection) {
+            // Wave
             ctx.beginPath();
-            ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
-            ctx.lineTo(cx, Math.floor(yLow) + 0.5);
+            wavePoints.forEach((p, idx) => {
+                if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+            });
+            const lineGrad = ctx.createLinearGradient(0, 0, w, 0);
+            lineGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
+            lineGrad.addColorStop(0.1, isReflection ? 'rgba(184, 41, 255, 0.4)' : 'rgba(184, 41, 255, 0.6)');
+            lineGrad.addColorStop(0.9, isReflection ? 'rgba(184, 41, 255, 0.4)' : 'rgba(184, 41, 255, 0.6)');
+            lineGrad.addColorStop(1, 'rgba(184, 41, 255, 0)');
+            
+            ctx.strokeStyle = lineGrad;
+            ctx.lineWidth = 1.5;
+            ctx.lineJoin = 'round';
+            ctx.shadowColor = isReflection ? 'transparent' : 'rgba(184, 41, 255, 0.9)';
+            ctx.shadowBlur = isReflection ? 0 : 12;
             ctx.stroke();
             ctx.shadowBlur = 0;
             
-            // Body — solid fill, moderate glow
-            ctx.fillStyle = color;
-            ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 12;
-            ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
-            ctx.shadowBlur = 0;
-        });
+            // Candles
+            aiChartData.forEach((c, i) => {
+                const isBull = c.close >= c.open;
+                const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
+                
+                const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
+                const x = Math.floor(cx - candleWidth / 2);
+                
+                const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
+                const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
+                const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
+                let bodyH = Math.abs(c.close - c.open) * scaleY;
+                if (bodyH < 3) bodyH = 3;
+                
+                const color = isBull ? '#00b3ff' : '#d900ff';
+                const glowColor = isBull ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
+                
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.shadowColor = isReflection ? 'transparent' : glowColor;
+                ctx.shadowBlur = isReflection ? 0 : 8;
+                ctx.beginPath();
+                ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
+                ctx.lineTo(cx, Math.floor(yLow) + 0.5);
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                
+                ctx.fillStyle = color;
+                ctx.shadowColor = isReflection ? 'transparent' : glowColor;
+                ctx.shadowBlur = isReflection ? 0 : 12;
+                
+                if (isReflection) {
+                    ctx.globalAlpha = 0.35; // Dim the reflection
+                }
+                ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+                ctx.globalAlpha = 1.0;
+                ctx.shadowBlur = 0;
+            });
+        }
+        
+        // 1. Draw Reflection
+        ctx.save();
+        ctx.translate(0, floorY * 2);
+        ctx.scale(1, -1);
+        drawElements(true);
+        ctx.restore();
+        
+        // Fade out the reflection with a dark gradient over it
+        const fadeGrad = ctx.createLinearGradient(0, floorY, 0, h);
+        fadeGrad.addColorStop(0, 'rgba(11, 13, 31, 0.1)'); // almost transparent near floor
+        fadeGrad.addColorStop(1, 'rgba(11, 13, 31, 1.0)'); // solid background color at bottom
+        ctx.fillStyle = fadeGrad;
+        ctx.fillRect(0, floorY, w, h - floorY);
+        
+        // Optional: draw a faint floor line
+        ctx.beginPath();
+        ctx.moveTo(0, floorY);
+        ctx.lineTo(w, floorY);
+        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        
+        // 2. Draw Normal Chart
+        drawElements(false);
     }
-
+    
     ctx.restore();
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
 }
