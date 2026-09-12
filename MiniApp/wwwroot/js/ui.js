@@ -453,7 +453,15 @@ function renderAiChartLoop() {
         wavePoints.forEach((p, idx) => {
             if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
         });
-        ctx.strokeStyle = 'rgba(139, 92, 246, 0.6)';
+        
+        // Create a gradient so the line fades out at the left and right edges
+        const lineGrad = ctx.createLinearGradient(0, 0, w, 0);
+        lineGrad.addColorStop(0, 'rgba(139, 92, 246, 0)');
+        lineGrad.addColorStop(0.1, 'rgba(139, 92, 246, 0.6)');
+        lineGrad.addColorStop(0.9, 'rgba(139, 92, 246, 0.6)');
+        lineGrad.addColorStop(1, 'rgba(139, 92, 246, 0)');
+        
+        ctx.strokeStyle = lineGrad;
         ctx.lineWidth = 1;
         ctx.lineJoin = 'round';
         ctx.shadowColor = 'rgba(139, 92, 246, 0.7)';
