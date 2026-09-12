@@ -403,7 +403,7 @@ function renderAiChartLoop() {
         const paddingX = 15;
         const count = aiChartData.length;
         const spacing = (w - paddingX * 2) / count;
-        let candleWidth = Math.max(3, Math.floor(spacing * 0.55));
+        let candleWidth = Math.max(5, Math.floor(spacing * 0.75));
         if (candleWidth % 2 === 0) candleWidth += 1;
         
         let minP = Infinity, maxP = -Infinity;
@@ -490,25 +490,37 @@ function renderAiChartLoop() {
             let bodyH = Math.abs(c.close - c.open) * scaleY;
             if (bodyH < 3) bodyH = 3;
             
-            const color = isBull ? '#00b3ff' : '#d900ff';
-            const glowColor = isBull ? 'rgba(0,179,255,0.8)' : 'rgba(217,0,255,0.8)';
+            const color = isBull ? '#00b3ff' : '#9b5de5'; // Softer purple like the screenshot
+            const glowColor = isBull ? 'rgba(0,179,255,0.6)' : 'rgba(155,93,229,0.6)';
             
-            // Wick — thin, sharp
+            // 1. Draw Wick FIRST (so it goes behind the translucent body)
             ctx.strokeStyle = color;
-            ctx.lineWidth = 1;
+            ctx.lineWidth = 2; // slightly thicker wick
             ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 8;
+            ctx.shadowBlur = 4;
             ctx.beginPath();
             ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
             ctx.lineTo(cx, Math.floor(yLow) + 0.5);
             ctx.stroke();
             ctx.shadowBlur = 0;
             
-            // Body — solid fill, moderate glow
+            // 2. Draw Translucent Rounded Body
             ctx.fillStyle = color;
             ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 12;
-            ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+            ctx.shadowBlur = 10;
+            ctx.globalAlpha = 0.65; // translucent so the wick inside is visible!
+            
+            ctx.beginPath();
+            const radius = Math.min(4, candleWidth / 2);
+            if (ctx.roundRect) {
+                ctx.roundRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH), radius);
+            } else {
+                // Fallback for very old browsers
+                ctx.rect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+            }
+            ctx.fill();
+            
+            ctx.globalAlpha = 1.0;
             ctx.shadowBlur = 0;
         });
     }
