@@ -423,20 +423,19 @@ function renderAiChartLoop() {
         const wavePoints = [];
         for (let px = 0; px <= w; px += 3) {
             // Find which candle segment we're in
-            let segY = h - paddingY; // default to bottom if out of range
+            let segY = h - paddingY; 
             if (contourPts.length >= 2) {
-                // Binary-search adjacent candle pair
+                // Clamp px to the bounds of the candles so the line extends horizontally at the edges
+                const clampedPx = Math.max(contourPts[0].x, Math.min(px, contourPts[contourPts.length - 1].x));
                 let ci = 0;
                 for (let k = 0; k < contourPts.length - 1; k++) {
-                    if (px >= contourPts[k].x && px <= contourPts[k + 1].x) { ci = k; break; }
-                    if (px > contourPts[contourPts.length - 1].x) ci = contourPts.length - 2;
+                    if (clampedPx >= contourPts[k].x && clampedPx <= contourPts[k + 1].x) { ci = k; break; }
                 }
                 const p0 = contourPts[Math.max(0, ci - 1)];
                 const p1 = contourPts[ci];
                 const p2 = contourPts[Math.min(contourPts.length - 1, ci + 1)];
                 const p3 = contourPts[Math.min(contourPts.length - 1, ci + 2)];
-                // Catmull-Rom interpolation for smooth curve
-                const t = p1.x === p2.x ? 0 : (px - p1.x) / (p2.x - p1.x);
+                const t = p1.x === p2.x ? 0 : (clampedPx - p1.x) / (p2.x - p1.x);
                 const t2 = t * t, t3 = t2 * t;
                 segY = 0.5 * ((2 * p1.y) +
                     (-p0.y + p2.y) * t +
