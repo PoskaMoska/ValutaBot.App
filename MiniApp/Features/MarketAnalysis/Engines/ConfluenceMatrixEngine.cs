@@ -493,8 +493,7 @@ public class ConfluenceMatrixEngine(
         // FearGreedService существовал, но нигде не вызывался в матрице решений.
         // Только для крипто (isForex=false); для forex возвращает contribution=0.0.
         // Максимальный вклад ±0.08 (масштабированный с оригинального ±0.12).
-        bool isForexAsset = !asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL")
-                         && !asset.Contains("XRP") && !asset.Contains("BNB");
+        bool isForexAsset = AssetSanitizer.IsForexAsset(AssetSanitizer.Sanitize(asset));
         try
         {
             var fg = await ValutaBot.App.MiniApp.Services.FearGreedService.GetAsync(isForexAsset);
