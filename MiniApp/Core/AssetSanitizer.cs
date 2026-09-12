@@ -12,8 +12,8 @@ public static class AssetSanitizer
     {
         if (string.IsNullOrWhiteSpace(asset)) return "EURUSD";
         return asset.ToUpperInvariant()
-            .Replace("ОТС", "OTC") // Replace Cyrillic OTC
-            .Replace("отс", "OTC")
+            .Replace("ОТК", "") // Replace Cyrillic OTC
+            .Replace("ОТС", "")
             .Replace("OTC", "")
             .Replace(" ", "")
             .Replace("/", "")

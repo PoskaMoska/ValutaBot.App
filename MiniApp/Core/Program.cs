@@ -143,36 +143,17 @@ internal static class Program
             // Previous code used BindingFlags.Static → GetMethod returned null → null?.Invoke() = null
             // → assertions were silently passed with fallback values (1.0 / -1.0), never testing real logic.
             var taEngineForTest = new TechnicalAnalysisEngine();
-            // Find the correct overload: ScoreTimeframe(string asset, string tf, double[] prices, ...)
-            var scoreMethod = typeof(TechnicalAnalysisEngine)
-                .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
-                .FirstOrDefault(m => m.Name == "ScoreTimeframe" && m.GetParameters().Length >= 3);
-
-            double upScore, downScore;
-            if (scoreMethod != null)
-            {
-                // Build minimal OhlcCandle arrays for up/down trends
-                var upCandles = upTrend.Select((p, i) => new MiniAppController.OhlcCandle(
-                    i > 0 ? upTrend[i-1] : p, p + 0.1, p - 0.1, p, 100, DateTime.UtcNow.AddSeconds(i-50))).ToArray();
-                var downCandles = downTrend.Select((p, i) => new MiniAppController.OhlcCandle(
-                    i > 0 ? downTrend[i-1] : p, p + 0.1, p - 0.1, p, 100, DateTime.UtcNow.AddSeconds(i-50))).ToArray();
-
-                var upRes  = (dynamic?)scoreMethod.Invoke(taEngineForTest, new object?[] {
-                    "TEST_UP", "m1", upTrend, mockVols, (MiniAppController.OhlcCandle[]?)upCandles,
-                    20.0, 0.001, false, 25.0, 15.0 });
-                var downRes = (dynamic?)scoreMethod.Invoke(taEngineForTest, new object?[] {
-                    "TEST_DOWN", "m1", downTrend, mockVols, (MiniAppController.OhlcCandle[]?)downCandles,
-                    20.0, 0.001, false, 15.0, 25.0 });
-
-                upScore   = upRes   != null ? (double)upRes.score   : 0.0;
-                downScore = downRes != null ? (double)downRes.score : 0.0;
-            }
-            else
-            {
-                // Fallback: use ContinuousStateEngine as proxy if reflection fails
-                upScore   = ContinuousStateEngine.EvaluateContinuousState(upTrend,   "TEST_UP",   "m1").MomentumContribution;
-                downScore = ContinuousStateEngine.EvaluateContinuousState(downTrend, "TEST_DOWN", "m1").MomentumContribution;
-            }
+            
+            var upCandles = upTrend.Select((p, i) => new MiniAppController.OhlcCandle(
+                i > 0 ? upTrend[i-1] : p, p + 0.1, p - 0.1, p, 100, DateTime.UtcNow.AddSeconds(i-50))).ToArray();
+            var downCandles = downTrend.Select((p, i) => new MiniAppController.OhlcCandle(
+                i > 0 ? downTrend[i-1] : p, p + 0.1, p - 0.1, p, 100, DateTime.UtcNow.AddSeconds(i-50))).ToArray();
+            
+            var upRes = taEngineForTest.ScoreTimeframe("TEST_UP", "m1", upTrend, mockVols, upCandles, 20.0, 0.001, false, 25.0, 15.0);
+            var downRes = taEngineForTest.ScoreTimeframe("TEST_DOWN", "m1", downTrend, mockVols, downCandles, 20.0, 0.001, false, 15.0, 25.0);
+            
+            double upScore = upRes.score;
+            double downScore = downRes.score;
 
             Assert("Dynamism: Uptrend produces positive score",   upScore > 0,      $"Expected positive score, got {upScore:F3}");
             Assert("Dynamism: Downtrend produces negative score",  downScore < 0,    $"Expected negative score, got {downScore:F3}");
