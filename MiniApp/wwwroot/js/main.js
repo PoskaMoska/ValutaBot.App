@@ -1,5 +1,5 @@
-import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20260912_1';
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20260912_1';
+import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20260913_1';
+import { switchResultTab, updateTrafficLight } from './ui.js?v=20260913_1';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {

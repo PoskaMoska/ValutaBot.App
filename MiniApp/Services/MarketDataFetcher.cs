@@ -102,8 +102,9 @@ public class MarketDataFetcher
         string cleanAsset = AssetSanitizer.Sanitize(assetToFetch);
         if (cleanAsset.Length == 6) cleanAsset = $"{cleanAsset.Substring(0, 3)}/{cleanAsset.Substring(3, 3)}";
 
-        // If weekend + OTC -> Use offline database
-        if (IsWeekendNow() && isOtc)
+        // FIX: PocketOption OTC charts are completely decoupled algorithmic pairs.
+        // We MUST use the offline synthetic database for ALL OTC requests, regardless of whether it is a weekend.
+        if (isOtc)
         {
             return await FetchOtcHistoricalAsync(assetToFetch, rawInterval, limit);
         }

@@ -203,10 +203,10 @@ public static class MLPythonService
 
     private static string MapSymbol(string symbol, bool isForex)
     {
+        string baseSym = symbol.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "").Replace(" OTC", "");
         if (!isForex)
-            return symbol.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+            return baseSym;
         
-        string baseSym = symbol.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
         if (baseSym.Length == 6 && !baseSym.EndsWith("USDT"))
         {
             return baseSym;

@@ -111,16 +111,21 @@ public class ConfluenceMatrixEngine(
         Resolve3DTimeframes(string tf) =>
         tf.ToLower() switch
         {
-            // Sub-minute fixes: The horizon is 5 candles.
-            // Micro captures 1-2 candles, Primary is the timeframe itself, Macro captures 3x-5x the horizon.
-            "s5"                                     => ("s5",  "s15", "m1"),
-            "s10"                                    => ("s5",  "s10", "s30"),
+            // FIX PRIORITY-1: Align the 3D Timeframe Matrix with MarketDataFetcher.HigherTf()
+            // This is required so the 1-fetch pre-loaded primaryCandles and macroCandles in Evaluate4DMatrixAsync
+            // exactly match the primaryTf and macroTf here. Otherwise, the Doppelganger Bug occurs, evaluating e.g. s5 twice.
+            "s5"                                     => ("s3",  "s5",  "m1"),
+            "s10"                                    => ("s5",  "s10", "m1"),
             "s15"                                    => ("s5",  "s15", "m1"),
             "s30"                                    => ("s15", "s30", "m1"),
             "m1"                                     => ("s30", "m1",  "m5"),
             "m2" or "m3"                             => ("m1",  "m3",  "m15"),
             "m5"                                     => ("m1",  "m5",  "m15"),
             "m15"                                    => ("m5",  "m15", "h1"),
+            "m30"                                    => ("m15", "m30", "h1"),
+            "h1"                                     => ("m30", "h1",  "h4"),
+            "h4"                                     => ("h1",  "h4",  "d1"),
+            "d1"                                     => ("h4",  "d1",  "w1"),
             _                                        => ("s30", "m1",  "m5")
         };
 
@@ -239,49 +244,68 @@ public class ConfluenceMatrixEngine(
     }
 
 
-    // FIX PRIORITY-1: Перегрузка принимает уже загруженные primary+macro свечи из Orchestrator'а.
-    // Только microTF требует отдельного fetch (1 HTTP-запрос вместо 3).
-    // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min).
+    // FIX PRIORITY-1: Перегрузка принимает уже загруженные current+higher свечи из Orchestrator'а.
+    // Умно маппит их на слоты (micro/primary/macro) и делает 1 HTTP-запрос для недостающего таймфрейма.
+    // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min) и Doppelganger Bug.
     public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
         string asset,
         string primaryTimeframe,
         bool isForex = false,
         string? binanceSymbol = null,
-        MiniAppController.OhlcCandle[]? primaryCandles = null,
-        double[]? primaryPrices = null,
-        double[]? primaryVolumes = null,
-        MiniAppController.OhlcCandle[]? macroCandles = null,
-        double[]? macroPrices = null,
-        double[]? macroVolumes = null)
+        MiniAppController.OhlcCandle[]? currentCandles = null,
+        double[]? currentPrices = null,
+        double[]? currentVolumes = null,
+        MiniAppController.OhlcCandle[]? higherCandles = null,
+        double[]? higherPrices = null,
+        double[]? higherVolumes = null)
     {
-        // Если pre-loaded данные не переданы — откат на старый метод с тремя fetch
-        if (primaryCandles == null || primaryPrices == null ||
-            primaryCandles.Length < 10 || primaryPrices.Length < 10 ||
-            macroCandles == null || macroPrices == null ||
-            macroCandles.Length < 10 || macroPrices.Length < 10)
+        if (currentCandles == null || currentPrices == null ||
+            currentCandles.Length < 10 || currentPrices.Length < 10 ||
+            higherCandles == null || higherPrices == null ||
+            higherCandles.Length < 10 || higherPrices.Length < 10)
         {
             BotLogger.Info($"[Confluence 3D] Pre-loaded candles missing or too short for {asset}/{primaryTimeframe} — falling back to 3-fetch mode.");
             return await Evaluate4DMatrixAsync(asset, primaryTimeframe, isForex, binanceSymbol);
         }
 
         var (microTf, primaryTf, macroTf) = Resolve3DTimeframes(primaryTimeframe);
+        string currentTf = primaryTimeframe.ToLower();
+        string hTf = fetcher.HigherTf(currentTf)?.ToLower() ?? "";
 
         try
         {
-            // FIX: Только 1 fetch вместо 3 — только microTF получаем по HTTP.
-            // Primary и macro уже загружены Orchestrator'ом.
-            // Используем limit=50 (синхронизировано с основным запросом, было 40 — разный ключ кэша).
-            var (microPricesRaw, microVolumesRaw) = await fetcher.FetchBinanceWithFallback(
-                binanceSymbol, microTf, asset, 50);
+            string dirMicro = "NEUTRAL";
+            string dirPrimary = "NEUTRAL";
+            string dirMacro = "NEUTRAL";
 
-            string dirMicro   = ScoreDirection(microPricesRaw, microVolumesRaw, microTf, asset);
+            // Helper to process a TF: either use pre-loaded, or fetch via HTTP
+            async Task<string> ProcessTf(string targetTf)
+            {
+                if (targetTf == currentTf)
+                {
+                    return ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), targetTf, asset);
+                }
+                else if (targetTf == hTf)
+                {
+                    return ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), targetTf, asset);
+                }
+                else
+                {
+                    // Fetch missing TF
+                    var (pricesRaw, volsRaw) = await fetcher.FetchBinanceWithFallback(binanceSymbol, targetTf, asset, 50);
+                    // FIX ROOT CAUSE: Train-Serve Skew in 4D Matrix.
+                    // Drop the unclosed live candle, just like TA and ML do, to prevent massive indicators skew.
+                    if (pricesRaw.Length > 1) {
+                        pricesRaw = pricesRaw.Take(pricesRaw.Length - 1).ToArray();
+                        volsRaw = volsRaw.Take(volsRaw.Length - 1).ToArray();
+                    }
+                    return ScoreDirection(pricesRaw, volsRaw, targetTf, asset);
+                }
+            }
 
-            // FIX PRIORITY-4: Используем реальный OHLC вместо синтетического avgDiff±0.5
-            string dirPrimary = ScoreDirectionFromCandles(
-                primaryCandles, primaryPrices, primaryVolumes ?? Array.Empty<double>(), primaryTf, asset);
-            string dirMacro   = ScoreDirectionFromCandles(
-                macroCandles, macroPrices, macroVolumes ?? Array.Empty<double>(), macroTf, asset);
-
+            dirMicro = await ProcessTf(microTf);
+            dirPrimary = await ProcessTf(primaryTf);
+            dirMacro = await ProcessTf(macroTf);
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -314,9 +338,9 @@ public class ConfluenceMatrixEngine(
                 _       => "\ud83d\udcca СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
-            string summary = $"\u2022 \U0001f3af 3D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch]";
+            string summary = $"\u2022 \U0001f3af 3D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch smart]";
 
-            BotLogger.Info($"[Confluence 3D] {asset}/{primaryTimeframe} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup} | Saved 2 API calls");
+            BotLogger.Info($"[Confluence 3D] {asset}/{primaryTimeframe} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup} | Smart 1-fetch");
 
             return new ConfluenceMatrixResult(
                 ConfluenceRatio:      confluenceRatio,
@@ -331,7 +355,6 @@ public class ConfluenceMatrixEngine(
         catch (Exception ex)
         {
             BotLogger.Error($"[Confluence 3D] Error in 1-fetch mode for {asset}", ex);
-            // Откат на 3-fetch режим при ошибке
             return await Evaluate4DMatrixAsync(asset, primaryTimeframe, isForex, binanceSymbol);
         }
     }

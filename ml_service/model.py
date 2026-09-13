@@ -1067,20 +1067,18 @@ class ForexPredictor:
                     if self.interval.startswith("s"):
                         candles = _fetch_local_sqlite(self.symbol, self.interval, target_candles)
                         if len(candles) < 150:
-                            # FIXED: Never use synthetic interpolation вЂ” it produces fake ~78% accuracy
-                            # by learning the sine-wave generator pattern instead of real market dynamics.
-                            # Instead, train on 5000 REAL 1-minute candles as a proxy.
-                            # A model trained on genuine price action is FAR more honest (expect ~52-56% accuracy)
-                            # and will generalize to real sub-minute patterns much better.
                             log.warning(
                                 f"[Train] Not enough real ticks for {self._key} (found {len(candles)}). "
-                                f"Using real 1m candles as proxy (no synthetic interpolation)."
+                                f"Fetching 1m proxy and interpolating to match inference timeframe."
                             )
                             candles = _fetch_historical_candles(self.symbol, "1m", 5000)
                             if len(candles) < 150 and is_forex_symbol(self.symbol):
                                 candles = self._fetch_twelvedata(5000)  # Real 1m data API fallback
+                                
                             if len(candles) > 0:
-                                log.info(f"[Train] Proxy-1m training for {self._key} on {len(candles)} real candles.")
+                                from model import _interpolate_subminute
+                                candles = _interpolate_subminute(candles, self.interval)
+                                log.info(f"[Train] Proxy-1m interpolated training for {self._key} on {len(candles)} {self.interval} candles.")
                             else:
                                 log.error(f"[Train] Could not fetch real 1m data for {self._key}. Skipping.")
                     else:

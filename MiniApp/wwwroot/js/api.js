@@ -1,5 +1,5 @@
-import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260912_1';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js?v=20260912_1';
+import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260913_1';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js?v=20260913_1';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -371,22 +371,22 @@ export async function executeAnalysis() {
 
                     // Formatting helper
                     const formatDir = (dir, conf) => {
-                        if (dir === 'BUY') return `<span style='color:#10b981'>🟩 ВВЕРХ${conf ? ` (${conf}%)` : ''}</span>`;
-                        if (dir === 'PUT') return `<span style='color:#ef4444'>🟥 ВНИЗ${conf ? ` (${conf}%)` : ''}</span>`;
-                        return `<span style='color:var(--subtext)'>🟨 НЕЙТРАЛЬНО</span>`;
+                        if (dir === 'BUY') return `<span style='color:#10b981; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg> ВВЕРХ${conf ? ` (${conf}%)` : ''}</span>`;
+                        if (dir === 'PUT') return `<span style='color:#ef4444; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg> ВНИЗ${conf ? ` (${conf}%)` : ''}</span>`;
+                        return `<span style='color:var(--subtext); display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg> НЕЙТРАЛЬНО</span>`;
                     };
 
                     const rMl = document.getElementById('radarMl');
                     if (rMl) rMl.innerHTML = formatDir(data.lgbmDirection, data.lgbmConfidence);
 
                     const rSmc = document.getElementById('radarSmc');
-                    if (rSmc) rSmc.innerHTML = formatDir(data.smcDirection);
+                    if (rSmc) rSmc.innerHTML = formatDir(data.smcDirection, data.smcConfidence);
 
                     const rOf = document.getElementById('radarOf');
-                    if (rOf) rOf.innerHTML = formatDir(data.ofDirection);
+                    if (rOf) rOf.innerHTML = formatDir(data.ofDirection, data.ofConfidence);
 
                     const rTa = document.getElementById('radarTa');
-                    if (rTa) rTa.innerHTML = formatDir(data.taDirection);
+                    if (rTa) rTa.innerHTML = formatDir(data.taDirection, data.taConfidence);
                 } else {
                     rCard.style.display = 'none';
                 }

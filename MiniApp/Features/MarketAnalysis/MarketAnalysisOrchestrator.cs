@@ -225,9 +225,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
 
         _tfLower = _timeframe.ToLower().Trim();
-        _limit = 100;
-        if (_tfLower == "s10" || _tfLower == "s15" || _tfLower == "s30") _limit = 130;
-        else if (_tfLower == "m1" || _tfLower == "m2" || _tfLower == "m3" || _tfLower == "m5") _limit = 150;
+        _limit = 120;
+        if (_tfLower == "s5" || _tfLower == "s10" || _tfLower == "s15" || _tfLower == "s30") _limit = 160;
+        else if (_tfLower == "m1" || _tfLower == "m2" || _tfLower == "m3" || _tfLower == "m5") _limit = 160;
         else if (_tfLower == "m15" || _tfLower == "m30" || _tfLower == "h1") _limit = 200;
 
         _useMultiTf = true;
@@ -598,13 +598,24 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         // FIX PRIORITY-1: Передаём уже загруженные свечи в Evaluate4DMatrixAsync.
         // Экономит 2 HTTP-запроса к TwelveData, решая проблему Rate Limit.
-        double[] higherPrices = _higherOhlcCandles?.Select(c => c.Close).ToArray() ?? Array.Empty<double>();
-        double[] higherVolumes = _higherOhlcCandles?.Select(c => c.Volume).ToArray() ?? Array.Empty<double>();
+        // FIX ROOT CAUSE: Train-Serve Skew. Pass closed candles (without the live forming candle)
+        // just like we do for TA and ML, to prevent artificial indicator conflict.
+        var closedHigherCandles = _higherOhlcCandles != null && _higherOhlcCandles.Length > 1 
+            ? _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray() 
+            : (_higherOhlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
+        double[] higherPrices = closedHigherCandles.Select(c => c.Close).ToArray();
+        double[] higherVolumes = closedHigherCandles.Select(c => c.Volume).ToArray();
+
+        var closedMainCandles = _ohlcCandles != null && _ohlcCandles.Length > 1 
+            ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
+            : (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
+        double[] closedMainPrices = closedMainCandles.Select(c => c.Close).ToArray();
+        double[] closedMainVolumes = closedMainCandles.Select(c => c.Volume).ToArray();
 
         var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(
             _asset, _timeframe, _isForex, _symbol,
-            _ohlcCandles, _mainPrices, _mainVolumes,
-            _higherOhlcCandles, higherPrices, higherVolumes);
+            closedMainCandles, closedMainPrices, closedMainVolumes,
+            closedHigherCandles, higherPrices, higherVolumes);
 
                 int consecutiveLosses = TradeOutcomeTracker.GetConsecutiveLosses(_asset, _timeframe);
         double volRatio = _marketAnalyzer.CalculateVolatilityRatio(_mainPrices);
@@ -788,8 +799,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmAccuracy = _lgbmAccuracy.HasValue ? Math.Round(_lgbmAccuracy.Value * 100, 1) : (double?)null,
             lgbmModelVersion = _lgbmModelVersion,
             smcDirection = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL",
+            smcConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.SmcScore) * 100, 0), 50, 99),
             taDirection = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
+            taConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.TaScore) * 100, 0), 50, 99),
             ofDirection = orderFlowDir,
+            ofConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.OfScore) * 100, 0), 50, 99),
             newsSentiment = "Neutral", // Removed old logic
             newsScore = 0.0,
             newsSummary = "",

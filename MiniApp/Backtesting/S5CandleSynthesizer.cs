@@ -85,7 +85,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                         High: h,
                         Low: l,
                         Close: c,
-                        Volume: 0,
+                        Volume: m1.Volume / SubCandlesPerMinute,
                         Timestamp: subDt);
                         
                     prevClose = c;
