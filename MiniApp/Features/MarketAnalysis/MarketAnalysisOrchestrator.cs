@@ -41,9 +41,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private double _currentLivePrice;
     private string _mainOhlcKey = "";
     private MiniAppController.OhlcCandle[]? _ohlcCandles;
+    private MiniAppController.OhlcCandle[]? _closedOhlcCandles;
+    private double[] _closedMainPrices = Array.Empty<double>();
+    private double[] _closedMainVolumes = Array.Empty<double>();
     private MiniAppController.OhlcCandle[]? _higherOhlcCandles;
     private (double[] prices, double[] volumes)? _higherResultData;
-    private (double[] prices, double[] volumes)? _lowerResultData;
     
     private readonly object _penaltyLock = new object();
     private double _conflictPenalty = 1.0;
@@ -244,6 +246,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             BotLogger.Warn($"[Orchestrator] Data unavailable for {_asset} ({_timeframe}).");
             _mainPrices = Array.Empty<double>();
             _mainVolumes = Array.Empty<double>();
+            _closedOhlcCandles = Array.Empty<MiniAppController.OhlcCandle>();
+            _closedMainPrices = Array.Empty<double>();
+            _closedMainVolumes = Array.Empty<double>();
         }
         else
         {
@@ -253,6 +258,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             }
             _mainPrices = _ohlcCandles.Select(c => c.Close).ToArray();
             _mainVolumes = _ohlcCandles.Select(c => c.Volume).ToArray();
+            
+            // Unify Data Boundary: Pre-slice the closed historical candles
+            // This prevents engines from independently (and sometimes incorrectly) discarding the live forming candle
+            _closedOhlcCandles = _ohlcCandles.Length > 1 ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() : _ohlcCandles;
+            _closedMainPrices = _closedOhlcCandles.Select(c => c.Close).ToArray();
+            _closedMainVolumes = _closedOhlcCandles.Select(c => c.Volume).ToArray();
         }
 
         if (_higherTf != null)
@@ -271,8 +282,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         {
             _higherResultData = null;
         }
-
-        _lowerResultData = null; // Unused
 
         if (_mainPrices != null && _mainPrices.Length > 0)
         {
@@ -296,10 +305,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         bool isOtcAsset = _asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
         if (!isOtcAsset)
         {
-            var closedCandles = _ohlcCandles != null && _ohlcCandles.Length > 1 
-                ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
-                : (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
-            _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, closedCandles, _currentLivePrice);
+            _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _closedOhlcCandles!, _currentLivePrice);
             BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
         }
         else
@@ -377,7 +383,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 // Sending an incomplete candle to ML models trained on fully closed candles causes 
                 // massive Train-Serve Skew (e.g., volume and oscillators are artificially low).
                 // The ML model MUST operate on the latest fully CLOSED candle.
-                var mlCandles = _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray();
+                var mlCandles = _closedOhlcCandles!;
 
                 _prediction = await MLPythonService.PredictAsync(_asset, _timeframe, mlCandles, _isForex, higherOhlcForMl);
                 if (_prediction != null)
@@ -417,7 +423,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     {
                         string cacheKey = $"{_asset}_{_timeframe}";
                         string currentVer = _prediction.ModelVersion;
-                        string oldVer = "";
+                        string? oldVer = "";
                         bool versionChanged = false;
                         
                         if (_lastSeenModelVersions.TryGetValue(cacheKey, out oldVer))
@@ -509,16 +515,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
     private async Task EvaluateTechnicalIndicatorsAsync()
     {
-        var closedCandles = _ohlcCandles != null && _ohlcCandles.Length > 1 
-            ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
-            : (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
-        var closedPrices = closedCandles.Select(c => c.Close).ToArray();
-        var closedVolumes = closedCandles.Select(c => c.Volume).ToArray();
+        (_mainAdx, _mainPdi, _mainMdi) = _closedOhlcCandles!.Length > 0 ? _mathEngine.ComputeTrueAdx(_asset, _timeframe, _closedOhlcCandles) : (20.0, 0.0, 0.0);
+        _mainAtr = _closedOhlcCandles.Length > 0 ? _mathEngine.ComputeAtr(_asset, _timeframe, _closedOhlcCandles) : 0;
 
-        (_mainAdx, _mainPdi, _mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(_asset, _timeframe, closedCandles) : (20.0, 0.0, 0.0);
-        _mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(_asset, _timeframe, closedCandles) : 0;
-
-        _mainResult = _marketAnalyzer.ScoreTimeframe(_asset, _timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: _mainAdx, atrOverride: _mainAtr, isForex: _isForex, pdiOverride: _mainPdi, mdiOverride: _mainMdi);
+        _mainResult = _marketAnalyzer.ScoreTimeframe(_asset, _timeframe, _closedMainPrices, _closedMainVolumes, candles: _closedOhlcCandles, adxOverride: _mainAdx, atrOverride: _mainAtr, isForex: _isForex, pdiOverride: _mainPdi, mdiOverride: _mainMdi);
 
 
         if (_higherResultData != null)
@@ -578,15 +578,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         double[] higherPrices = closedHigherCandles.Select(c => c.Close).ToArray();
         double[] higherVolumes = closedHigherCandles.Select(c => c.Volume).ToArray();
 
-        var closedMainCandles = _ohlcCandles != null && _ohlcCandles.Length > 1 
-            ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() 
-            : (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
-        double[] closedMainPrices = closedMainCandles.Select(c => c.Close).ToArray();
-        double[] closedMainVolumes = closedMainCandles.Select(c => c.Volume).ToArray();
-
         var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(
             _asset, _timeframe, _isForex, _symbol,
-            closedMainCandles, closedMainPrices, closedMainVolumes,
+            _closedOhlcCandles!, _closedMainPrices, _closedMainVolumes,
             closedHigherCandles, higherPrices, higherVolumes);
 
                 int consecutiveLosses = TradeOutcomeTracker.GetConsecutiveLosses(_asset, _timeframe);
@@ -754,10 +748,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 .TakeLast(80)
                 .Select(c => new
                 {
-                    o = Math.Round(c.Open, 5),
-                    h = Math.Round(c.High, 5),
-                    l = Math.Round(c.Low, 5),
-                    c = Math.Round(c.Close, 5),
+                    o = Math.Round(c.Open, 8),
+                    h = Math.Round(c.High, 8),
+                    l = Math.Round(c.Low, 8),
+                    c = Math.Round(c.Close, 8),
                     v = Math.Round(c.Volume, 2)
                 })
                 .ToArray(),
@@ -770,12 +764,21 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmConfidence = Math.Round(_lgbmConfidence * 100, 0),
             lgbmAccuracy = _lgbmAccuracy.HasValue ? Math.Round(_lgbmAccuracy.Value * 100, 1) : (double?)null,
             lgbmModelVersion = _lgbmModelVersion,
-            smcDirection = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL",
-            smcConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.SmcScore) * 100, 0), 50, 99),
+            smcDirection = 
+                (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 
+                (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : 
+                (smcSignal.OrderBlockType ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.OrderBlockType ?? "").Contains("BEARISH") ? "PUT" : 
+                (smcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
+                "NEUTRAL",
+            smcConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.SmcScore) * 100, 0), 0, 100),
             taDirection = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
-            taConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.TaScore) * 100, 0), 50, 99),
+            taConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.TaScore) * 100, 0), 0, 100),
             ofDirection = orderFlowDir,
-            ofConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.OfScore) * 100, 0), 50, 99),
+            ofConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.OfScore) * 100, 0), 0, 100),
             newsSentiment = "Neutral", // Removed old logic
             newsScore = 0.0,
             newsSummary = "",

@@ -57,7 +57,7 @@ public static class OrderFlowEngine
             scoreContribution = 0.30;
             desc = "Дивергенция (Скрытые покупки)";
         }
-        else if (deltaRatio > 1.8 && Math.Abs(priceDeltaBps) < 0.05)
+        else if ((deltaRatio > 1.8 || deltaRatio < 0.55) && Math.Abs(priceDeltaBps) < 0.05)
         {
             state = "Ловушка (Спуфинг)";
             scoreContribution = 0;

@@ -174,6 +174,13 @@ export async function executeAnalysis() {
             const isRepeat = lastSignalKey !== null && signalKey === lastSignalKey;
             lastSignalKey = signalKey;
 
+            const resDirLabel = document.getElementById('resDirLabel');
+            if (resDirLabel) {
+                resDirLabel.innerHTML = isRepeat 
+                    ? 'Направление <span title="Сигнал не изменился" style="font-size:10px;opacity:0.8">🔄</span>'
+                    : 'Направление';
+            }
+
             if (data.direction === 'BUY') {
                 resDir.innerHTML = 'ВВЕРХ';
                 resDir.style.color = '#00e676';

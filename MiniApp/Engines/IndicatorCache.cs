@@ -126,9 +126,8 @@ internal sealed class IndicatorCache
     private static bool IsStale(CacheState s)
     {
         var now = DateTime.UtcNow;
-        // Trigger 1: New trading day (UTC midnight) — day-to-day market regime change
-        if (s.LastFullReset.Date < now.Date) return true;
-        // Trigger 2: 4-hour threshold — within-session contamination (cold-start synthetic → real ticks)
+        // FIX: Removed UTC midnight hard-reset to fix the "First bet of the day loses" (Cold Start) bug.
+        // Trigger: 4-hour threshold — within-session contamination (cold-start synthetic → real ticks)
         if ((now - s.LastFullReset).TotalHours > MaxCacheAgeHours) return true;
         return false;
     }

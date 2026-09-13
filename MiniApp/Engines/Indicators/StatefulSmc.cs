@@ -59,7 +59,10 @@ public class StatefulSmc
 
         lock (_lockObj)
         {
-            for (int i = 2; i < candles.Length - 1; i++)
+            // FIX M-07: Process up to candles.Length to include the most recently closed candle.
+            // Previously `i < candles.Length - 1` double-stripped the latest candle, meaning
+            // Order Blocks and FVGs were recognized with a 1-candle lag.
+            for (int i = 2; i < candles.Length; i++)
             {
                 var c = candles[i];
                 if (c.Timestamp <= _lastProcessedTime && _lastProcessedTime != default)
@@ -245,9 +248,12 @@ public class StatefulSmc
             (f.IsBullish  && c.Low  <= f.Bottom) ||
             (!f.IsBullish && c.High >= f.Top));
 
+        // FIX: Order Blocks are invalidated only when price closes beyond their extreme.
+        // Previously they were removed on the first touch (c.Low <= o.Top), erasing them
+        // right before they could act as support/resistance.
         _activeObs.RemoveAll(o =>
-            (o.IsBullish  && c.Low  <= o.Top) ||
-            (!o.IsBullish && c.High >= o.Bottom));
+            (o.IsBullish  && c.Close < o.Bottom) ||
+            (!o.IsBullish && c.Close > o.Top));
     }
 
     public (bool hasBullishFvg, bool hasBearishFvg, FvgZone? nearestFvg) GetNearestFvg(double currentPrice)

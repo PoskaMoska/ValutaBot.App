@@ -29,7 +29,7 @@ public static partial class TwelveDataService
 
     public static string GetApiKey()
     {
-        string envKey = Environment.GetEnvironmentVariable("TwelveDataApiKey");
+        string? envKey = Environment.GetEnvironmentVariable("TwelveDataApiKey");
         if (!string.IsNullOrWhiteSpace(envKey))
         {
             _apiKey = envKey;
@@ -53,7 +53,12 @@ public static partial class TwelveDataService
         if (cacheTtlSeconds > 0 && _memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) cachedData))
         {
             BotLogger.Info($"[TwelveData] Using IMemoryCache data for {rawAsset} ({interval})");
-            return cachedData;
+            int take = Math.Min(limit, cachedData.prices.Length);
+            return (
+                cachedData.prices.TakeLast(take).ToArray(),
+                cachedData.volumes.TakeLast(take).ToArray(),
+                cachedData.candles.TakeLast(take).ToArray()
+            );
         }
 
         string apiKey = GetApiKey();
@@ -65,7 +70,12 @@ public static partial class TwelveDataService
             if (_memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) lastData))
             {
                 BotLogger.Info($"[TwelveData] Rate limit safety triggered. Serving IMemoryCache for {rawAsset} ({interval}).");
-                return lastData;
+                int take = Math.Min(limit, lastData.prices.Length);
+                return (
+                    lastData.prices.TakeLast(take).ToArray(),
+                    lastData.volumes.TakeLast(take).ToArray(),
+                    lastData.candles.TakeLast(take).ToArray()
+                );
             }
             BotLogger.Warn($"[TwelveData] Rate limit safety triggered, but no cache exists for {rawAsset} ({interval})!");
             return null;
@@ -77,7 +87,8 @@ public static partial class TwelveDataService
             string tdInterval = ConvertInterval(interval) ?? "";
             if (string.IsNullOrEmpty(symbol) || string.IsNullOrEmpty(tdInterval)) return null;
 
-            string url = $"https://api.twelvedata.com/time_series?symbol={Uri.EscapeDataString(symbol)}&interval={tdInterval}&outputsize={limit}&timezone=UTC&apikey={apiKey}";
+            int fetchLimit = Math.Max(limit, 200);
+            string url = $"https://api.twelvedata.com/time_series?symbol={Uri.EscapeDataString(symbol)}&interval={tdInterval}&outputsize={fetchLimit}&timezone=UTC&apikey={apiKey}";
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.UserAgent.ParseAdd("ValutaBot/1.0");
 
@@ -96,7 +107,12 @@ public static partial class TwelveDataService
                 if (_memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) lastData))
                 {
                     BotLogger.Warn($"[TwelveData] No values in response, serving IMemoryCache for {rawAsset}");
-                    return lastData;
+                    int take = Math.Min(limit, lastData.prices.Length);
+                    return (
+                        lastData.prices.TakeLast(take).ToArray(),
+                        lastData.volumes.TakeLast(take).ToArray(),
+                        lastData.candles.TakeLast(take).ToArray()
+                    );
                 }
                 return null;
             }
@@ -108,7 +124,12 @@ public static partial class TwelveDataService
                 if (_memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) lastData))
                 {
                     BotLogger.Warn($"[TwelveData] Too few candles ({count}), serving IMemoryCache for {rawAsset}");
-                    return lastData;
+                    int take = Math.Min(limit, lastData.prices.Length);
+                    return (
+                        lastData.prices.TakeLast(take).ToArray(),
+                        lastData.volumes.TakeLast(take).ToArray(),
+                        lastData.candles.TakeLast(take).ToArray()
+                    );
                 }
                 return null;
             }
@@ -141,7 +162,12 @@ public static partial class TwelveDataService
             if (_memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) lastData))
             {
                 BotLogger.Info($"[TwelveData] Serving IMemoryCache fallback data for {rawAsset}");
-                return lastData;
+                int take = Math.Min(limit, lastData.prices.Length);
+                return (
+                    lastData.prices.TakeLast(take).ToArray(),
+                    lastData.volumes.TakeLast(take).ToArray(),
+                    lastData.candles.TakeLast(take).ToArray()
+                );
             }
             return null;
         }

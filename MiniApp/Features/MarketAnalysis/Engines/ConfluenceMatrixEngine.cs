@@ -18,8 +18,7 @@ public record ConfluenceMatrixResult(
 
 public class ConfluenceMatrixEngine(
     MarketDataFetcher fetcher,
-    IMarketAnalyzer marketAnalyzer,
-    Microsoft.Extensions.Options.IOptions<TradingBotSettings>? options = null) : IConfluenceMatrixEngine
+    IMarketAnalyzer marketAnalyzer) : IConfluenceMatrixEngine
 {
     // в”Ђв”Ђ 4D Matrix в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
@@ -33,19 +32,24 @@ public class ConfluenceMatrixEngine(
 
         try
         {
-            var microTask   = fetcher.FetchBinanceWithFallback(binanceSymbol, microTf,   asset, 40);
-            var primaryTask = fetcher.FetchBinanceWithFallback(binanceSymbol, primaryTf, asset, 40);
-            var macroTask   = fetcher.FetchBinanceWithFallback(binanceSymbol, macroTf,   asset, 40);
+            var microTask   = fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, microTf,   asset, 40);
+            var primaryTask = fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, primaryTf, asset, 40);
+            var macroTask   = fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, macroTf,   asset, 40);
 
             await Task.WhenAll(microTask, primaryTask, macroTask);
 
-            var (microPrices,   microVolumes)   = await microTask;
-            var (primaryPrices, primaryVolumes) = await primaryTask;
-            var (macroPrices,   macroVolumes)   = await macroTask;
+            var microCandles   = await microTask;
+            var primaryCandles = await primaryTask;
+            var macroCandles   = await macroTask;
+            
+            // Drop unclosed candles to prevent Train-Serve Skew
+            if (microCandles.Length > 1) microCandles = microCandles.Take(microCandles.Length - 1).ToArray();
+            if (primaryCandles.Length > 1) primaryCandles = primaryCandles.Take(primaryCandles.Length - 1).ToArray();
+            if (macroCandles.Length > 1) macroCandles = macroCandles.Take(macroCandles.Length - 1).ToArray();
 
-            string dirMicro   = ScoreDirection(microPrices,   microVolumes, microTf, asset);
-            string dirPrimary = ScoreDirection(primaryPrices, primaryVolumes, primaryTf, asset);
-            string dirMacro   = ScoreDirection(macroPrices,   macroVolumes, macroTf, asset);
+            string dirMicro   = ScoreDirectionFromCandles(microCandles, microCandles.Select(c => c.Close).ToArray(), microCandles.Select(c => c.Volume).ToArray(), microTf, asset);
+            string dirPrimary = ScoreDirectionFromCandles(primaryCandles, primaryCandles.Select(c => c.Close).ToArray(), primaryCandles.Select(c => c.Volume).ToArray(), primaryTf, asset);
+            string dirMacro   = ScoreDirectionFromCandles(macroCandles, macroCandles.Select(c => c.Close).ToArray(), macroCandles.Select(c => c.Volume).ToArray(), macroTf, asset);
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -114,7 +118,7 @@ public class ConfluenceMatrixEngine(
             // FIX PRIORITY-1: Align the 3D Timeframe Matrix with MarketDataFetcher.HigherTf()
             // This is required so the 1-fetch pre-loaded primaryCandles and macroCandles in Evaluate4DMatrixAsync
             // exactly match the primaryTf and macroTf here. Otherwise, the Doppelganger Bug occurs, evaluating e.g. s5 twice.
-            "s5"                                     => ("s3",  "s5",  "m1"),
+            "s5"                                     => ("s5",  "s10", "m1"),
             "s10"                                    => ("s5",  "s10", "m1"),
             "s15"                                    => ("s5",  "s15", "m1"),
             "s30"                                    => ("s15", "s30", "m1"),
@@ -137,77 +141,6 @@ public class ConfluenceMatrixEngine(
     /// candles.Length == 0 &lt; 14 в†’ always return score=0.0 в†’ always "NEUTRAL".
     /// Now constructs a real OhlcCandle[] from price/volume arrays.
     /// </summary>
-    private string ScoreDirection(double[] prices, double[] volumes, string tf, string asset = "global")
-    {
-        if (prices == null || prices.Length < 14)
-        {
-            // Graceful degradation: not enough candles for TA (RSI/ADX need 14 minimum).
-            // Return NEUTRAL instead of throwing — Confluence will count this TF as non-directional.
-            // This is the correct behavior for OTC weekend sub-minute timeframes with limited history.
-            BotLogger.Info($"[Confluence 3D] Not enough candles for {asset}/{tf} ({prices?.Length ?? 0}/14) — returning NEUTRAL.");
-            return "NEUTRAL";
-        }
-
-        double avgDiff = 0;
-        if (prices.Length > 1) {
-            for (int k = 1; k < prices.Length; k++) avgDiff += Math.Abs(prices[k] - prices[k - 1]);
-            avgDiff /= (prices.Length - 1);
-        }
-        if (avgDiff == 0) avgDiff = prices[0] * 0.0001;
-
-        // ArrayPool: вместо new OhlcCandle[n] (4 аллокации на запрос) берём буфер из пула.
-        var candles = ArrayPool<MiniAppController.OhlcCandle>.Shared.Rent(prices.Length);
-        try
-        {
-            // FIX C-2: Use the correct timeframe step for synthetic timestamps.
-            // Previously AddMinutes(i) always used 1-minute steps, making H1 candles
-            // appear to span 40 minutes instead of 40 hours — invalidating all time-based indicators.
-            int tfSeconds = tf.ToLower() switch
-            {
-                "s3"  => 3,  "s5"  => 5,  "s10" => 10, "s15" => 15, "s30" => 30,
-                "m1"  => 60, "m2"  => 120, "m3" => 180, "m5" => 300,
-                "m15" => 900, "m30" => 1800,
-                "h1"  => 3600, "h4" => 14400, "d1" => 86400,
-                _ => 60
-            };
-            var baseTime = DateTime.UtcNow.AddSeconds(-(long)(prices.Length - 1) * tfSeconds);
-            for (int i = 0; i < prices.Length; i++)
-            {
-                double v = volumes != null && i < volumes.Length ? volumes[i] : 1.0;
-                double open = i > 0 ? prices[i - 1] : prices[i];
-                double close = prices[i];
-                double high = Math.Max(open, close) + avgDiff * 0.5;
-                double low = Math.Min(open, close) - avgDiff * 0.5;
-
-                // OhlcCandle is a positional record: (Open, High, Low, Close, Volume, Timestamp)
-                candles[i] = new MiniAppController.OhlcCandle(
-                    open, high, low, close,
-                    v,
-                    baseTime.AddSeconds((long)i * tfSeconds)
-                );
-            }
-
-            // FIX ROOT CAUSE #3: Include asset in cache key so different assets don't share
-            // indicator state inside ConfluenceMatrix. Previously "4dmatrix_{tf}" was the same
-            // for EUR/USD and GBP/USD analysed concurrently → cross-asset RSI/HMA bleeding.
-            var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
-                $"4dmatrix_{asset}_{tf}", tf, prices,
-                volumes: volumes,
-                candles: candles.AsSpan(0, prices.Length)
-            );
-
-            // Порог поднят с ±0.10 до ±0.20: при шкале [-1, +1] прежний порог 0.10
-            // классифицировал ~80% шумового рынка как направленный сигнал (BUY/PUT).
-            return score > 0.20 ? "BUY" : score < -0.20 ? "PUT" : "NEUTRAL";
-        }
-        finally
-        {
-            ArrayPool<MiniAppController.OhlcCandle>.Shared.Return(candles);
-        }
-    }
-
-
-    // FIX PRIORITY-4: Скоринг направления на основе реальных OhlcCandle[] (из Orchestrator'а).
     // В отличие от ScoreDirection (который строил OHLC синтетически из avgDiff±0.5),
     // этот метод передаёт реальные High/Low свечей → ATR/ADX корректны → нет шума ±12%.
     private string ScoreDirectionFromCandles(
@@ -292,14 +225,14 @@ public class ConfluenceMatrixEngine(
                 else
                 {
                     // Fetch missing TF
-                    var (pricesRaw, volsRaw) = await fetcher.FetchBinanceWithFallback(binanceSymbol, targetTf, asset, 50);
-                    // FIX ROOT CAUSE: Train-Serve Skew in 4D Matrix.
+                    var candlesRaw = await fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, targetTf, asset, 50);
                     // Drop the unclosed live candle, just like TA and ML do, to prevent massive indicators skew.
-                    if (pricesRaw.Length > 1) {
-                        pricesRaw = pricesRaw.Take(pricesRaw.Length - 1).ToArray();
-                        volsRaw = volsRaw.Take(volsRaw.Length - 1).ToArray();
+                    if (candlesRaw.Length > 1) {
+                        candlesRaw = candlesRaw.Take(candlesRaw.Length - 1).ToArray();
                     }
-                    return ScoreDirection(pricesRaw, volsRaw, targetTf, asset);
+                    var pricesRaw = candlesRaw.Select(c => c.Close).ToArray();
+                    var volsRaw = candlesRaw.Select(c => c.Volume).ToArray();
+                    return ScoreDirectionFromCandles(candlesRaw, pricesRaw, volsRaw, targetTf, asset);
                 }
             }
 

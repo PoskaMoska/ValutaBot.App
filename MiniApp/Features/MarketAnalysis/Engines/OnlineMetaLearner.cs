@@ -71,15 +71,24 @@ public static class OnlineMetaLearner
 
         string key = GetKey(asset, timeframe);
         var w  = GetOrCreateWeights(key);
-        double lr = GetLearningRate(key);
+        
+        bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
+        double penaltyMultiplier = isSubMinute ? 2.0 : 4.0;
+        double lossDecay         = isSubMinute ? 0.95 : 0.85;
+
+        // Asymmetric Learning: adapt faster on losses to break losing streaks instantly.
+        // Uses timeframe dampener to prevent overreacting to sub-minute market noise.
+        double baseLr = GetLearningRate(key);
+        double lr = !wasWin ? baseLr * penaltyMultiplier : baseLr;
 
         double p     = Predict(asset, timeframe, ta, of, smc, ml);
         double error = y - p;
 
-        // Weight Decay (Temporal Forgetting): multiply ALL weights by rho before update.
-        // This exponentially down-weights knowledge learned long ago, so the model
-        // stays responsive to the current market regime without manual resets.
-        for (int i = 0; i < w.Length; i++) w[i] *= WeightDecay;
+        // Asymmetric Weight Decay (Temporal Forgetting):
+        // If we lost, burn memory (5% for sub-minute, 15% for normal) to forget the old regime.
+        // If we won, use standard smooth decay (0.999).
+        double currentDecay = !wasWin ? lossDecay : WeightDecay;
+        for (int i = 0; i < w.Length; i++) w[i] *= currentDecay;
 
         // SGD update: W = W + LR(t) * Error * X
         // Note: Math.Max(0.0) removed — negative weights are allowed.

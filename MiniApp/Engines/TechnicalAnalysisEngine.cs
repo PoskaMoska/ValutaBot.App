@@ -223,8 +223,16 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
     {
         if (prices.Length < 15) return new GatekeeperResult(false, "Недостаточно данных цены для проверки Gatekeeper", 0, 0);
 
-        double atr = candles.Length >= 15 ? ComputeAtr(asset, timeframe, candles) : 0;
-        var (adx, _, _) = candles.Length >= 15 ? ComputeTrueAdx(asset, timeframe, candles) : (20.0, 0, 0);
+        // FIX ROOT CAUSE: Shared Cache Poisoning. 
+        // Gatekeeper used to pass `candles` (which included the live forming candle) to ComputeAtr.
+        // This caused the IndicatorCache to advance its permanent state up to the last closed candle.
+        // Later, EvaluateTechnicalIndicatorsAsync passed `closedCandles` (without the live candle) to ComputeAtr.
+        // The cache's "live overlay" logic would then apply the last closed candle AGAIN on top of the permanent state,
+        // resulting in double-counting the last closed candle and permanently warping ADX and ATR.
+        var closedCandles = candles.Length > 1 ? candles.Slice(0, candles.Length - 1) : candles;
+        
+        double atr = closedCandles.Length >= 15 ? ComputeAtr(asset, timeframe, closedCandles) : 0;
+        var (adx, _, _) = closedCandles.Length >= 15 ? ComputeTrueAdx(asset, timeframe, closedCandles) : (20.0, 0, 0);
 
         double minPrice = double.MaxValue;
         double maxPrice = double.MinValue;

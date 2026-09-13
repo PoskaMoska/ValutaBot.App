@@ -24,7 +24,7 @@ public class StatefulOrderFlow
 
     public double CumulativeVolumeDelta
     {
-        get { lock (_lockObj) { return _cumulativeVolumeDelta; } }
+        get { lock (_lockObj) { return _cumulativeVolumeDelta + (_openBuyVolume - _openSellVolume); } }
     }
 
     // The DeltaRatio is calculated over the short-term window (12 candles), as it reflects immediate momentum

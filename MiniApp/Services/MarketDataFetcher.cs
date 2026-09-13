@@ -203,7 +203,6 @@ public class MarketDataFetcher
     private async Task<MiniAppController.OhlcCandle[]> FetchOtcHistoricalAsync(string asset, string rawInterval, int limit)
     {
         string dbSymbol = asset.Replace("/", "").Replace("OTC", "").Trim().ToUpper();
-        if (dbSymbol == "GBPJPY") dbSymbol = "USDCHF"; // Fallback proxy
 
         int m1Needed = limit;
 
@@ -240,11 +239,7 @@ public class MarketDataFetcher
         var m1Candles = rows.Select(r => new MiniAppController.OhlcCandle(Convert.ToDouble(r.open), Convert.ToDouble(r.high), Convert.ToDouble(r.low), Convert.ToDouble(r.close), Convert.ToDouble(r.volume), default(DateTime))).ToArray();
         if (m1Candles.Length < m1Needed)
         {
-            var fallbackRows = await conn.QueryAsync<dynamic>(@"
-                SELECT open, high, low, close, volume
-                FROM historical_candles WHERE asset = 'EURUSD' ORDER BY open_time ASC LIMIT @Limit OFFSET @Offset
-            ", new { Limit = m1Needed, Offset = offset });
-            m1Candles = fallbackRows.Select(r => new MiniAppController.OhlcCandle(Convert.ToDouble(r.open), Convert.ToDouble(r.high), Convert.ToDouble(r.low), Convert.ToDouble(r.close), Convert.ToDouble(r.volume), default(DateTime))).ToArray();
+            throw new ExchangeUnavailableException("Insufficient Data", $"⚠️ Недостаточно исторических данных для OTC актива {dbSymbol}. Ожидалось {m1Needed}, найдено {m1Candles.Length}.");
         }
 
         MiniAppController.OhlcCandle[] finalCandles;

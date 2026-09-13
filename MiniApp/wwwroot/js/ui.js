@@ -42,6 +42,7 @@ export function clearResults() {
     safeSetText('resProb', '--%');
     safeSetStyle('resProb', 'color', 'var(--accent)');
     safeSetText('resProbFact', '');
+    safeSetText('resDirLabel', 'Направление');
     safeSetText('resDir', '--');
     safeSetStyle('resDir', 'color', 'var(--subtext)');
     safeSetText('resDur', '--');

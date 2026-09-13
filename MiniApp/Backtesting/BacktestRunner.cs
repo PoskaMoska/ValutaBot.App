@@ -69,34 +69,43 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 double currentPrice = ohlcSpan[WindowSize - 1].Close;
                 DateTime timestamp  = ohlcSpan[WindowSize - 1].Timestamp;
 
+                // ── Strip "Live" Candle for Strict Train-Serve Equivalency ──
+                var closedOhlcSpan = ohlcSpan.Slice(0, WindowSize - 1);
+                var closedPrices = closePrices.AsSpan(0, WindowSize - 1);
+                var closedVolumes = volumes.AsSpan(0, WindowSize - 1);
+
                 // ── TA Engine ────────────────────────────────────────────────
                 var (taScore, taConf, rsiVal, hmaVal, volStr, atrVal) =
                     taEngine.ScoreTimeframe(Asset, timeframe,
-                        closePrices.AsSpan(), volumes.AsSpan(), ohlcSpan);
+                        closedPrices, closedVolumes, closedOhlcSpan);
 
                 // ── SMC Engine ───────────────────────────────────────────────
-                var smcState = taEngine.GetSmcState(Asset, timeframe, ohlcSpan, currentPrice);
+                var smcState = taEngine.GetSmcState(Asset, timeframe, closedOhlcSpan, currentPrice);
 
                 // ── OrderFlow Engine ─────────────────────────────────────────
-                var ofResult = OrderFlowEngine.AnalyzeOrderFlow(Asset, timeframe, ohlcSpan, currentPrice);
+                var ofResult = OrderFlowEngine.AnalyzeOrderFlow(Asset, timeframe, closedOhlcSpan, currentPrice);
 
                 // ── ContinuousState Engine ───────────────────────────────────
                 var stateResult = ContinuousStateEngine.EvaluateContinuousState(
-                    closePrices.AsSpan(), Asset, timeframe);
+                    closedPrices, Asset, timeframe);
 
                 // ── ML (LightGBM) ─────────────────
                 var mlDir  = "NEUTRAL";
                 var mlConf = 0.5;
-                var mlPred = await MLPythonService.PredictAsync(Asset, timeframe, ohlcSpan.ToArray(), isForex: true);
+                var closedOhlcArray = closedOhlcSpan.ToArray();
+                var closedPricesArray = closedPrices.ToArray();
+                var closedVolumesArray = closedVolumes.ToArray();
+                
+                var mlPred = await MLPythonService.PredictAsync(Asset, timeframe, closedOhlcArray, isForex: true);
                 if (mlPred != null)
                 {
                     mlDir = mlPred.Direction;
                     mlConf = mlPred.Confidence;
                 }
 
-                // ── Детектируем режим рынка и Веса (Adaptive Ensemble) ──────────────
-                double volRatio = taEngine.CalculateVolatilityRatio(closePrices.AsSpan());
-                var regime = calibOn.DetectMarketRegime(20, volRatio, rsiVal, closePrices.AsSpan());
+                // Adaptive Ensemble
+                double volRatio = taEngine.CalculateVolatilityRatio(closedPricesArray);
+                var regime = calibOn.DetectMarketRegime(20, volRatio, rsiVal, closedPricesArray);
                 string regimeName = regime.ToString();
 
                 double wTA   = calibOn.GetCalibratedRegimeWeight("TechAnalysis", Asset, timeframe, regime);

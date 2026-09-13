@@ -32,12 +32,24 @@ public class PendingTradeVerificationService : BackgroundService
 
         if (expired.Count == 0) return;
 
+        var semaphore = new SemaphoreSlim(20);
+        var tasks = new List<Task>();
+
         foreach (var record in expired)
         {
             if (ct.IsCancellationRequested) break;
-            try { await VerifyTradeAsync(record); }
-            catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Failed to verify {record.Id}: {ex.Message}"); }
+            
+            tasks.Add(Task.Run(async () =>
+            {
+                await semaphore.WaitAsync(ct);
+                try { await VerifyTradeAsync(record); }
+                catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Failed to verify {record.Id}: {ex.Message}"); }
+                finally { semaphore.Release(); }
+            }, ct));
         }
+        
+        try { await Task.WhenAll(tasks); }
+        catch (OperationCanceledException) { }
     }
 
     private static async Task VerifyTradeAsync(SignalTracker.PredictionRecord record)

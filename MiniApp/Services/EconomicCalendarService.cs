@@ -112,7 +112,7 @@ public static class EconomicCalendarService
 
     private static async Task<List<EconomicEvent>> FetchFromTwelveDataAsync()
     {
-        string apiKey = System.Environment.GetEnvironmentVariable("TwelveDataApiKey");
+        string? apiKey = System.Environment.GetEnvironmentVariable("TwelveDataApiKey");
         
         if (string.IsNullOrEmpty(apiKey))
         {

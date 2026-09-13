@@ -165,12 +165,18 @@ namespace ValutaBot.MiniApp
                     liveAcc = acc;
                 }
 
+                if (liveAcc != null)
+                {
+                    string liveOpenTimeStr = liveAcc.OpenTime.ToString("o");
+                    records.RemoveAll(r => (string)r.OpenTime == liveOpenTimeStr);
+                }
+
                 int totalCount = records.Count + (liveAcc != null ? 1 : 0);
                 int resultSize = Math.Min(limit, totalCount);
                 var result = new MiniAppController.OhlcCandle[resultSize];
                 
                 int resultIdx = 0;
-                int dbRecordsToTake = liveAcc != null ? Math.Min(records.Count, limit - 1) : Math.Min(records.Count, limit);
+                int dbRecordsToTake = Math.Min(records.Count, resultSize - (liveAcc != null ? 1 : 0));
                 
                 for (int i = dbRecordsToTake - 1; i >= 0; i--)
                 {
@@ -183,8 +189,11 @@ namespace ValutaBot.MiniApp
                 {
                     lock (liveAcc)
                     {
-                        result[resultIdx] = new MiniAppController.OhlcCandle(
-                            liveAcc.Open.Value, liveAcc.High, liveAcc.Low, liveAcc.Close, liveAcc.TickCount, liveAcc.OpenTime);
+                        if (liveAcc.Open.HasValue)
+                        {
+                            result[resultIdx] = new MiniAppController.OhlcCandle(
+                                liveAcc.Open.Value, liveAcc.High, liveAcc.Low, liveAcc.Close, liveAcc.TickCount, liveAcc.OpenTime);
+                        }
                     }
                 }
 
