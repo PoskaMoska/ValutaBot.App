@@ -1,5 +1,5 @@
-import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260913_1';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js?v=20260913_1';
+import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260913_2';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js?v=20260913_2';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -105,7 +105,11 @@ export async function executeAnalysis() {
         showAiChart(currentAsset, currentTf);
 
         // Fetch early OHLC specifically for the animated chart during the analysis phase
-        fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}`)
+        fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}`, {
+            headers: {
+                'X-Telegram-Init-Data': tg && tg.initData ? tg.initData : getCustomInitData()
+            }
+        })
             .then(r => r.json())
             .then(ohlc => {
                 if (ohlc && ohlc.length) {
@@ -171,15 +175,11 @@ export async function executeAnalysis() {
             lastSignalKey = signalKey;
 
             if (data.direction === 'BUY') {
-                resDir.innerHTML = isRepeat
-                    ? 'ВВЕРХ <span title="Сигнал не изменился" style="font-size:13px;opacity:0.7">🔄</span>'
-                    : 'ВВЕРХ';
+                resDir.innerHTML = 'ВВЕРХ';
                 resDir.style.color = '#00e676';
                 sphere.classList.add('buy-signal');
             } else if (data.direction === 'PUT') {
-                resDir.innerHTML = isRepeat
-                    ? 'ВНИЗ <span title="Сигнал не изменился" style="font-size:13px;opacity:0.7">🔄</span>'
-                    : 'ВНИЗ';
+                resDir.innerHTML = 'ВНИЗ';
                 resDir.style.color = '#ff1744';
                 sphere.classList.add('put-signal');
             } else {

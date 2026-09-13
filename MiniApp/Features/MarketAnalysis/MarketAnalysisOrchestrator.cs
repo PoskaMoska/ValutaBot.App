@@ -523,47 +523,19 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         if (_higherResultData != null)
         {
-            MiniAppController.OhlcCandle[]? higherOhlc = null;
-            if (_higherTf != null)
-            {
-                try
-                {
-                    higherOhlc = _higherOhlcCandles?.ToArray();
-                    if (higherOhlc == null || higherOhlc.Length == 0)
-                    {
-                        BotLogger.Warn($"[Orchestrator] No OTC candles for {_asset} ({_higherTf}) — using synthetic OHLC from higher prices.");
-                        higherOhlc = _higherResultData.Value.prices.Select(p => new MiniAppController.OhlcCandle(p, p, p, p, 0)).ToArray();
-                    }
-                    else
-                    {
-                        var lastH = higherOhlc[^1];
-                        if (lastH.Timestamp < DateTime.UtcNow.AddSeconds(-_fetcher.TimeframeSeconds(_higherTf)))
-                        {
-                            var synthetic = new MiniAppController.OhlcCandle(_currentLivePrice, _currentLivePrice, _currentLivePrice, _currentLivePrice, 0, DateTime.UtcNow);
-                            higherOhlc = higherOhlc.Append(synthetic).ToArray();
-                        }
-                        else
-                        {
-                            double newHigh = Math.Max(lastH.High, _currentLivePrice);
-                            double newLow = Math.Min(lastH.Low, _currentLivePrice);
-                            higherOhlc[^1] = lastH with { High = newHigh, Low = newLow, Close = _currentLivePrice };
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    BotLogger.Warn($"[Analysis] Failed to fetch higher TF OHLC candles: {ex.Message}");
-                    higherOhlc = _higherResultData.Value.prices.Select(p => new MiniAppController.OhlcCandle(p, p, p, p, 0)).ToArray();
-                }
-            }
+            var closedHigherCandles = _higherOhlcCandles != null && _higherOhlcCandles.Length > 1 
+                ? _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray() 
+                : (_higherOhlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
+            
+            var closedHigherPrices = closedHigherCandles.Select(c => c.Close).ToArray();
+            var closedHigherVolumes = closedHigherCandles.Select(c => c.Volume).ToArray();
 
             // NOTE: MTF SMC ValidateMtfSmcAlignment был перенесён в AnalyzeCoreMechanicsAsync
             // чтобы устранить гонку данных по _smcResult (Task.WhenAll race condition fix).
 
-            var (hAdx, hPdi, hMdi) = higherOhlc != null ? _mathEngine.ComputeTrueAdx(_asset, _higherTf ?? "", higherOhlc) : (20.0, 0.0, 0.0);
-            double hAtr = higherOhlc != null ? _mathEngine.ComputeAtr(_asset, _higherTf ?? "", higherOhlc) : 0;
-            var higherResult = _marketAnalyzer.ScoreTimeframe(_asset, _higherTf ?? "", _higherResultData.Value.prices, _higherResultData.Value.volumes ?? Array.Empty<double>(), candles: higherOhlc, adxOverride: hAdx, atrOverride: hAtr, isForex: _isForex, pdiOverride: hPdi, mdiOverride: hMdi);
-
+            var (hAdx, hPdi, hMdi) = closedHigherCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(_asset, _higherTf ?? "", closedHigherCandles) : (20.0, 0.0, 0.0);
+            double hAtr = closedHigherCandles.Length > 0 ? _mathEngine.ComputeAtr(_asset, _higherTf ?? "", closedHigherCandles) : 0;
+            var higherResult = _marketAnalyzer.ScoreTimeframe(_asset, _higherTf ?? "", closedHigherPrices, closedHigherVolumes, candles: closedHigherCandles, adxOverride: hAdx, atrOverride: hAtr, isForex: _isForex, pdiOverride: hPdi, mdiOverride: hMdi);
 
             lock (_penaltyLock)
             {
