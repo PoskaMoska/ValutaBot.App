@@ -407,12 +407,12 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
 
     # в”Ђв”Ђ MTF Integration (Multi-Timeframe) в”Ђв”Ђ
     if mtf_candles and len(mtf_candles) > 10 and 'opentime' in df.columns:
-        df['opentime_dt'] = df['opentime'].apply(_parse_to_datetime)
+        df['opentime_dt'] = df['opentime'].apply(_parse_to_datetime).astype('datetime64[ns, UTC]')
         
         df_mtf = pd.DataFrame(mtf_candles)
         df_mtf.columns = [col.lower() for col in df_mtf.columns]
         if 'opentime' in df_mtf.columns:
-            df_mtf['opentime_dt'] = df_mtf['opentime'].apply(_parse_to_datetime)
+            df_mtf['opentime_dt'] = df_mtf['opentime'].apply(_parse_to_datetime).astype('datetime64[ns, UTC]')
             
             # Calculate MTF indicators
             df_mtf['mtf_ema50'] = ta.trend.ema_indicator(df_mtf['close'].astype(float), window=50)
