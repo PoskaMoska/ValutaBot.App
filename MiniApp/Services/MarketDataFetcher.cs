@@ -82,26 +82,33 @@ public class MarketDataFetcher
     public virtual async Task<MiniAppController.OhlcCandle[]> FetchOhlcWithFallbackAsync(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         string assetToFetch = originalAsset ?? symbol ?? "EUR/USD";
-        bool isOtc = assetToFetch.Contains("OTC", StringComparison.OrdinalIgnoreCase);
         
         string cleanAsset = AssetSanitizer.Sanitize(assetToFetch);
         if (cleanAsset.Length == 6) cleanAsset = $"{cleanAsset.Substring(0, 3)}/{cleanAsset.Substring(3, 3)}";
 
         bool isWeekend = IsWeekendNow();
+        bool isOtcRequested = assetToFetch.Contains("OTC", StringComparison.OrdinalIgnoreCase);
 
-        // КРИТИЧЕСКАЯ ЗАЩИТА: Брокерские OTC графики (например на Pocket Option) алгоритмические.
-        // Они не имеют ничего общего с реальным рынком.
-        if (isOtc && !isWeekend)
-        {
-            BotLogger.Warn($"[MarketDataFetcher] Blocked OTC request for {assetToFetch} during weekday.");
-            throw new ExchangeUnavailableException("OTC Blocked on Weekdays", "⚠️ В будние дни торгуйте реальными парами! График OTC генерируется брокером и не совпадает с реальным межбанковским рынком (100% слив).");
-        }
-
+        // SMART ROUTING: 
+        // Если выходные - всегда отдаем локальную базу (исторические свечи).
         if (isWeekend)
         {
             BotLogger.Info($"[SmartRouting] Weekend detected. Routing {assetToFetch} to local historical DB as {cleanAsset}.");
             return await FetchOtcHistoricalAsync(cleanAsset, rawInterval, limit);
         }
+
+        // Если будние дни, но пользователь целенаправленно нажал на пару "OTC":
+        // Генерируем блокирующую ошибку, чтобы предотвратить расхождение графиков (рассинхронизацию бота и брокера).
+        if (isOtcRequested)
+        {
+            BotLogger.Warn($"[SmartRouting] User requested {assetToFetch} on a weekday. Blocked to prevent synthetic chart mismatch.");
+            throw new ExchangeUnavailableException(
+                "Synthetic OTC Mismatch", 
+                $"⚠️ ОШИБКА: Вы выбрали пару {assetToFetch} в будний день. Графики OTC у брокера в будние дни генерируются искусственно алгоритмом брокера и не совпадают с реальным рынком. Бот анализирует настоящий рынок. Пожалуйста, выберите обычную пару (без приставки OTC), чтобы не потерять депозит из-за расхождения графиков!"
+            );
+        }
+
+        // Если будние дни и актив реальный - идем за живыми котировками (TwelveData / Live DB).
 
         // For sub-minute timeframes, first try live ticks from the DB
         if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
