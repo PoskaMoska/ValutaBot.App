@@ -481,13 +481,10 @@ public class ConfluenceMatrixEngine(
         string candidateDir = "NEUTRAL";
         double finalConfidenceScore = 0.0;
         
-        // IDEA-F02: Signal Veto System (Явное обнаружение конфликта ML vs TA)
+        // IDEA-F02: Signal Veto System (Conflict resolution ML vs TA)
+        // VETO SYSTEM DISABLED BY USER REQUEST. 
+        // ML is now the primary driver (70% blend weight) and will naturally overpower TA.
         bool vetoed = false;
-        if ((mlProbRaw > 0.65 && taScoreRaw < -0.3) || (mlProbRaw < -0.65 && taScoreRaw > 0.3))
-        {
-            BotLogger.Warn($"[Signal Veto] Conflict detected for {asset}/{timeframe}. ML={mlProbRaw:F2}, TA={taScoreRaw:F2}. Vetoing signal to NEUTRAL.");
-            vetoed = true;
-        }
 
         // 5. Final Decision & Market Session Awareness
         
