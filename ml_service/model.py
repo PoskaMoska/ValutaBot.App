@@ -34,7 +34,7 @@ try:
 except ImportError:
     HAS_LGBM = False
 
-from features import build_features, _parse_to_datetime
+from features import build_features, _parse_timestamps_vectorized
 
 log = logging.getLogger("predictor")
 
@@ -1139,8 +1139,9 @@ class ForexPredictor:
             try:
                 # Get the last timestamp (youngest) in the dataset
                 if "openTime" in candles[-1] and candles[-1]["openTime"]:
-                    max_time = _parse_to_datetime(candles[-1]["openTime"])
-                    timestamps = pd.Series([_parse_to_datetime(cl.get("openTime", 0)) for cl in candles])
+                    timestamps_raw = pd.Series([cl.get("openTime", 0) for cl in candles])
+                    timestamps = _parse_timestamps_vectorized(timestamps_raw)
+                    max_time = timestamps.iloc[-1]
                     age_hours = (max_time - timestamps).dt.total_seconds() / 3600.0
                 else:
                     age_hours = np.linspace(len(candles), 0, len(candles)) / 60.0 # fallback
@@ -1897,7 +1898,7 @@ def _to_epoch_seconds(ts) -> float:
             if v > 1e11:
                 v /= 1000.0
             return v
-        dt = _parse_to_datetime(ts)
+        dt = _parse_timestamps_vectorized(pd.Series([ts])).iloc[0]
         if dt is None or pd.isna(dt):
             return float("nan")
         return float(dt.timestamp())
