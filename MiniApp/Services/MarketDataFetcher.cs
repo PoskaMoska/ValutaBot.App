@@ -69,19 +69,6 @@ public class MarketDataFetcher
                (dayOfWeek == DayOfWeek.Sunday && utcNow.Hour < 22);
     }
 
-    private void CheckWeekendClosure(string asset, bool isOtc)
-    {
-        if (isOtc) return;
-
-        if (IsWeekendNow())
-        {
-            throw new MarketClosedException(
-                "Weekend Market Closed",
-                "⚠️ Рынок Форекс закрыт на выходные (Пт 22:00 - Вс 22:00 UTC)."
-            );
-        }
-    }
-
     public int TimeframeSeconds(string rawInterval)
     {
         string t = rawInterval.ToLower();
@@ -95,24 +82,27 @@ public class MarketDataFetcher
     public virtual async Task<MiniAppController.OhlcCandle[]> FetchOhlcWithFallbackAsync(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         string assetToFetch = originalAsset ?? symbol ?? "EUR/USD";
-        bool isOtc = assetToFetch.Contains("OTC", StringComparison.OrdinalIgnoreCase);
         
-        CheckWeekendClosure(assetToFetch, isOtc);
-
         string cleanAsset = AssetSanitizer.Sanitize(assetToFetch);
         if (cleanAsset.Length == 6) cleanAsset = $"{cleanAsset.Substring(0, 3)}/{cleanAsset.Substring(3, 3)}";
 
-        // FIX: PocketOption OTC charts are completely decoupled algorithmic pairs.
-        // We MUST use the offline synthetic database for ALL OTC requests, regardless of whether it is a weekend.
-        if (isOtc)
+        bool isWeekend = IsWeekendNow();
+
+        // SMART ROUTING: 
+        // Если выходные - всегда отдаем локальную базу (исторические свечи).
+        if (isWeekend)
         {
-            return await FetchOtcHistoricalAsync(assetToFetch, rawInterval, limit);
+            BotLogger.Info($"[SmartRouting] Weekend detected. Routing {assetToFetch} to local historical DB as {cleanAsset}.");
+            return await FetchOtcHistoricalAsync(cleanAsset, rawInterval, limit);
         }
+
+        // Если будние дни - всегда идем за живыми котировками (TwelveData / Live DB).
+        // Приставка OTC игнорируется, берем чистый тикер (cleanAsset).
 
         // For sub-minute timeframes, first try live ticks from the DB
         if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
         {
-            string cleanKey = AssetSanitizer.Sanitize(assetToFetch).Replace("/", "").ToUpper();
+            string cleanKey = cleanAsset.Replace("/", "").ToUpper();
             var liveCandles = await RealtimeTickCollector.GetRecentCandles(cleanKey, rawInterval, limit);
 
             if (liveCandles.Length >= limit)
@@ -245,7 +235,7 @@ public class MarketDataFetcher
             WHERE asset = @Asset
             ORDER BY open_time ASC
             LIMIT @Limit OFFSET @Offset
-         ", new { Asset = dbSymbol, Limit = m1Needed, Offset = offset });
+          ", new { Asset = dbSymbol, Limit = m1Needed, Offset = offset });
 
         var m1Candles = rows.Select(r => new MiniAppController.OhlcCandle(Convert.ToDouble(r.open), Convert.ToDouble(r.high), Convert.ToDouble(r.low), Convert.ToDouble(r.close), Convert.ToDouble(r.volume), default(DateTime))).ToArray();
         if (m1Candles.Length < m1Needed)
