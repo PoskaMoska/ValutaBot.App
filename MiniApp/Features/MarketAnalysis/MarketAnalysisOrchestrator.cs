@@ -60,7 +60,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private double? _lgbmAccuracy = null;
     private MLPythonService.MLPythonPrediction? _prediction;
     private ContinuousStateResult? _continuousState;
-    // llmReport Р±РѕР»СЊС€Рµ РЅРµ С…СЂР°РЅРёС‚СЃСЏ РєР°Рє РїРѕР»Рµ вЂ” РіРµРЅРµСЂРёСЂСѓРµС‚СЃСЏ inline РІ BuildFinalConsensusAsync.
+    // llmReport  убрали из свойств, теперь это inline в BuildFinalConsensusAsync.
     
     private double _mainAdx, _mainPdi, _mainMdi, _mainAtr;
     private (double score, double confidence, double rsiVal, double emaVal, double volStrengthVal, double atrVal) _mainResult;
@@ -139,23 +139,23 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _timeframe = timeframe;
         _userSettings = userSettings;
 
-        // в”Ђв”Ђ Profiling: Р·Р°РјРµСЂ РІСЂРµРјРµРЅРё РєР°Р¶РґРѕРіРѕ СЌС‚Р°РїР° РїР°Р№РїР»Р°Р№РЅР° в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        // Внутреннее Profiling: Замеряем каждый этап (Fetch, Gatekeeper, Math/ML, Matrix)
         var swTotal = System.Diagnostics.Stopwatch.StartNew();
         var swStage = System.Diagnostics.Stopwatch.StartNew();
 
         try
         {
-            // T0 в†’ T1: РїРѕР»СѓС‡РµРЅРёРµ СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С…
+            // T0 -> T1: Загрузка базовых и старших данных (TwelveData + Cache)
             await InitializeDataAsync();
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T1 DataFetch: {swStage.ElapsedMilliseconds}ms");
             swStage.Restart();
 
             if (_mainPrices == null || _mainPrices.Length == 0)
             {
-                throw new Exception("РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… РґР»СЏ Р°РЅР°Р»РёР·Р°. Р‘РёСЂР¶Р° РёР»Рё РїСЂРѕРІР°Р№РґРµСЂ РІРµСЂРЅСѓР»Рё РїСѓСЃС‚РѕР№ СЂРµР·СѓР»СЊС‚Р°С‚.");
+                throw new Exception("Не удалось получить данные. API брокера временно недоступен или лимит запросов исчерпан. Пожалуйста, повторите попытку через минуту.");
             }
 
-            // T1 в†’ T2: Gatekeeper + ContinuousState
+            // T1 -> T2: Gatekeeper + ContinuousState
             var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(_asset, _timeframe, _mainPrices, _ohlcCandles);
             if (!gatekeeper.IsTradeable)
             {
@@ -167,7 +167,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T2 Gatekeeper+State: {swStage.ElapsedMilliseconds}ms");
             swStage.Restart();
 
-            // T2 в†’ T3: РїР°СЂР°Р»Р»РµР»СЊРЅС‹Р№ Р±Р»РѕРє (Mechanics + TA + ML)
+            // T2 -> T3: Параллельное вычисление (Mechanics + TA + ML)
             var mechanicsTask = AnalyzeCoreMechanicsAsync();
             var techTask = EvaluateTechnicalIndicatorsAsync();
             var mlTask = FetchMachineLearningAsync();
@@ -176,8 +176,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T3 Parallel(Mechanics+TA+ML): {swStage.ElapsedMilliseconds}ms");
             swStage.Restart();
 
-            // T3 в†’ T4: С„РёРЅР°Р»СЊРЅС‹Р№ РєРѕРЅСЃРµРЅСЃСѓСЃ + DB (GenerateLlmReport СѓР±СЂР°РЅ РєР°Рє РѕС‚РґРµР»СЊРЅС‹Р№ СЌС‚Р°Рї вЂ”
-            // СЌС‚Рѕ Р±С‹Р»Р° С‡РёСЃС‚Р°СЏ СЃС‚СЂРѕРєРѕРІР°СЏ РєРѕРЅРєР°С‚РµРЅР°С†РёСЏ, РЅРµ LLM-РІС‹Р·РѕРІ, РІСЃС‚СЂРѕРµРЅР° РІ BuildFinalConsensusAsync)
+            // T3 -> T4: Финальный Матричный Консенсус + DB (GenerateLlmReport отключен в угоду скорости)
+            // (Синхронно: Консенсус, Ожидание LLM-отчета, Сохранение БД, Возврат результата)
             var result = await BuildFinalConsensusAsync();
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T4 Consensus+DB: {swStage.ElapsedMilliseconds}ms");
             BotLogger.Info($"[Timing] {_asset}/{_timeframe} | TOTAL: {swTotal.ElapsedMilliseconds}ms");
@@ -191,14 +191,14 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         catch (ExchangeUnavailableException exEx)
         {
-            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms вЂ” ExchangeUnavailable");
+            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms из-за ExchangeUnavailable");
             MiniAppController.LastExceptionMessage = exEx.ToString();
             BotLogger.Warn($"[Analysis] Exchange unavailable for asset {_asset}: {exEx.Message}");
             throw;
         }
         catch (Exception ex)
         {
-            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms вЂ” {ex.GetType().Name}");
+            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms из-за {ex.GetType().Name}");
             MiniAppController.LastExceptionMessage = ex.ToString();
             BotLogger.Error($"[Analysis] Analysis failed for asset {_asset} on {_timeframe}", ex);
             throw;
@@ -215,7 +215,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _isForex = AssetSanitizer.IsForexAsset(_clean);
         _isMajor = _symbol == "BTCUSDT" || _symbol == "ETHUSDT" || _symbol == "SOLUSDT";
 
-        // ── Economic Calendar Guard ──────────────────────────────────────────
+        // ├── Economic Calendar Guard ────────────────────────────────
         // Check BEFORE any HTTP calls to avoid wasting TwelveData credits.
         // Fail-open: if the calendar API is unavailable, analysis continues normally.
         var newsBlock = await EconomicCalendarService.GetBlockingEventAsync(_asset);
@@ -261,7 +261,16 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             
             // Unify Data Boundary: Pre-slice the closed historical candles
             // This prevents engines from independently (and sometimes incorrectly) discarding the live forming candle
-            _closedOhlcCandles = _ohlcCandles.Length > 1 ? _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray() : _ohlcCandles;
+            if (_ohlcCandles.Length > 1)
+            {
+                int intervalSecs = _fetcher.TimeframeSeconds(_timeframe);
+                bool isClosed = _ohlcCandles[^1].Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
+                _closedOhlcCandles = isClosed ? _ohlcCandles : _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray();
+            }
+            else
+            {
+                _closedOhlcCandles = _ohlcCandles;
+            }
             _closedMainPrices = _closedOhlcCandles.Select(c => c.Close).ToArray();
             _closedMainVolumes = _closedOhlcCandles.Select(c => c.Volume).ToArray();
         }
@@ -317,7 +326,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         // FIX Race Condition: MTF SMC выравнивание перенесено сюда из EvaluateTechnicalIndicatorsAsync.
         // Ранее ValidateMtfSmcAlignment читал _smcResult из параллельного Task (Task.WhenAll),
-        // без гарантии порядка — _smcResult мог быть ещё не записан → гонка данных.
+        // без гарантии порядка — _smcResult мог быть ещё не записан -> гонка данных.
         // Теперь выравнивание выполняется строго ПОСЛЕ записи _smcResult в этом же методе.
         if (_higherResultData != null && _higherTf != null)
         {
@@ -374,7 +383,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     try {
                         if (_higherOhlcCandles != null && _higherOhlcCandles.Length > 0)
                         {
-                            higherOhlcForMl = _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray();
+                            int hSecs = _fetcher.TimeframeSeconds(_higherTf ?? "");
+                            bool hIsClosed = _higherOhlcCandles[^1].Timestamp.AddSeconds(hSecs) <= DateTime.UtcNow;
+                            higherOhlcForMl = hIsClosed ? _higherOhlcCandles : _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray();
                         }
                     } catch (Exception) { /* ignore */ }
                 }
@@ -418,7 +429,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                         _lgbmConfidence = 0.5;
                     }
 
-                    // ✨ ML Telemetry: Global Retraining ✨
+                    // 🎯 ML Telemetry: Global Retraining 🎯
                     if (!string.IsNullOrEmpty(_prediction.ModelVersion))
                     {
                         string cacheKey = $"{_asset}_{_timeframe}";
@@ -485,18 +496,18 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             catch (Exception ex) 
             { 
                 Console.WriteLine($"[Python ML Warning] {ex.GetType().Name}: {ex.Message}");
-                // _llmReport СѓРґР°Р»С‘РЅ вЂ” РѕС‚С‡С‘С‚ РіРµРЅРµСЂРёСЂСѓРµС‚СЃСЏ inline РІ BuildLlmSummary
+                // _llmReport Сгенерирован в отдельном процессе, поэтому не падаем
             }
         }
     }
 
-    // GenerateLlmReport СѓРґР°Р»С‘РЅ РєР°Рє РѕС‚РґРµР»СЊРЅС‹Р№ pipeline-СЌС‚Р°Рї T4.
-    // Р‘С‹Р» РїРµСЂРµРёРјРµРЅРѕРІР°РЅ РІ BuildLlmSummary Рё РІСЃС‚СЂРѕРµРЅ РІ BuildFinalConsensusAsync.
-    // LlmReportingService вЂ” С‡РёСЃС‚Р°СЏ СЃС‚СЂРѕРєРѕРІР°СЏ РєРѕРЅРєР°С‚РµРЅР°С†РёСЏ, РЅРµ LLM-РІС‹Р·РѕРІ.
+    // GenerateLlmReport Сгенерирован inline.
+    // Вызывается в BuildFinalConsensusAsync.
+    // LlmReportingService возвращает форматированный ответ.
     private string BuildLlmSummary()
     {
         if (_ohlcCandles == null || _ohlcCandles.Length < 60)
-            return "вљ пёЏ РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… РґР»СЏ РѕС‚С‡С‘С‚Р°.";
+            return "Недостаточно данных для генерации отчета.";
         try
         {
             var llmService = new ValutaBot.App.MiniApp.Services.LlmReportingService();
@@ -508,7 +519,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         catch (Exception ex)
         {
-            return $"вљ пёЏ РћС€РёР±РєР° РіРµРЅРµСЂР°С†РёРё РѕС‚С‡С‘С‚Р°: {ex.Message}";
+            return $"Ошибка генерации отчета: {ex.Message}";
         }
     }
 
@@ -524,13 +535,13 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (_higherResultData != null)
         {
             var closedHigherCandles = _higherOhlcCandles != null && _higherOhlcCandles.Length > 1 
-                ? _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray() 
+                ? (_higherOhlcCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(_higherTf ?? "")) <= DateTime.UtcNow ? _higherOhlcCandles : _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray()) 
                 : (_higherOhlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
             
             var closedHigherPrices = closedHigherCandles.Select(c => c.Close).ToArray();
             var closedHigherVolumes = closedHigherCandles.Select(c => c.Volume).ToArray();
 
-            // NOTE: MTF SMC ValidateMtfSmcAlignment был перенесён в AnalyzeCoreMechanicsAsync
+            // NOTE: MTF SMC ValidateMtfSmcAlignment был перенесен в AnalyzeCoreMechanicsAsync
             // чтобы устранить гонку данных по _smcResult (Task.WhenAll race condition fix).
 
             var (hAdx, hPdi, hMdi) = closedHigherCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(_asset, _higherTf ?? "", closedHigherCandles) : (20.0, 0.0, 0.0);
@@ -568,12 +579,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         
         var stateSignal = new StateSignal(_continuousState?.VelocityRegime ?? "UNKNOWN", _continuousState?.VelocityBpsPerSec ?? 0, _continuousState?.MomentumContribution ?? 0);
 
-        // FIX PRIORITY-1: Передаём уже загруженные свечи в Evaluate4DMatrixAsync.
+        // FIX PRIORITY-1: Передаем уже загрязненные свечи в Evaluate4DMatrixAsync.
         // Экономит 2 HTTP-запроса к TwelveData, решая проблему Rate Limit.
         // FIX ROOT CAUSE: Train-Serve Skew. Pass closed candles (without the live forming candle)
         // just like we do for TA and ML, to prevent artificial indicator conflict.
         var closedHigherCandles = _higherOhlcCandles != null && _higherOhlcCandles.Length > 1 
-            ? _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray() 
+            ? (_higherOhlcCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(_higherTf ?? "")) <= DateTime.UtcNow ? _higherOhlcCandles : _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray()) 
             : (_higherOhlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
         double[] higherPrices = closedHigherCandles.Select(c => c.Close).ToArray();
         double[] higherVolumes = closedHigherCandles.Select(c => c.Volume).ToArray();
@@ -583,7 +594,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             _closedOhlcCandles!, _closedMainPrices, _closedMainVolumes,
             closedHigherCandles, higherPrices, higherVolumes);
 
-                int consecutiveLosses = TradeOutcomeTracker.GetConsecutiveLosses(_asset, _timeframe);
+        int consecutiveLosses = TradeOutcomeTracker.GetConsecutiveLosses(_asset, _timeframe);
         double volRatio = _marketAnalyzer.CalculateVolatilityRatio(_mainPrices);
         var consensus = await _cmEngine.EvaluateMatrixAsync(
             _asset, _timeframe, isSubMinute, _conflictPenalty, 
@@ -604,8 +615,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             adaptiveReasoning = "⚠️ Рынок нестабилен (серия убытков), ИИ перестраивается. Торгуйте осторожно! | " + adaptiveReasoning;
         }
 
-        // Р—Р°РјРµРЅР° Monte Carlo (O(1000)) РЅР° С‚СЂРё Р·Р°РєСЂС‹С‚С‹Рµ С„РѕСЂРјСѓР»С‹ (O(1)).
-        // Р РµР·СѓР»СЊС‚Р°С‚ РјР°С‚РµРјР°С‚РёС‡РµСЃРєРё РёРґРµРЅС‚РёС‡РµРЅ РїСЂРё Р±РёРЅР°СЂРЅРѕР№ СЃС‚СЂСѓРєС‚СѓСЂРµ РІС‹РїР»Р°С‚.
+        // Р—Р°РїСѓСЃРє Monte Carlo (O(1000) СЃРёРјСѓР»СЏС†РёР№)
+        // Р Р°СЃС‡РµС‚ РљРµР»Р»Рё РґР»СЏ РѕРїС‚РёРјРёР·Р°С†РёРё СЂР°Р·РјРµСЂР° СЃС‚Р°РІРєРё
         MonteCarloResult mcResult;
         if (finalDirection == "NEUTRAL")
         {
@@ -617,16 +628,16 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             double p = Math.Clamp(finalProbability / 100.0, 0.35, 0.95);
             double q = 1.0 - p;
 
-            // 1. Expected Value: EV = p Г— Payout в€’ q Г— 1.0
+            // 1. Expected Value: EV = p * Payout - q * 1.0
             double evRatio   = (p * Payout) - (q * 1.0);
             double evPct     = Math.Round(evRatio * 100.0, 1);
 
-            // 2. Fractional Kelly Criterion (25% Kelly РґР»СЏ РєРѕРЅСЃРµСЂРІР°С‚РёРІРЅРѕРіРѕ СѓРїСЂР°РІР»РµРЅРёСЏ РєР°РїРёС‚Р°Р»РѕРј)
+            // 2. Fractional Kelly Criterion (25% Kelly РґР»СЏ СЃРЅРёР¶РµРЅРёСЏ РІРѕР»Р°С‚РёР»СЊРЅРѕСЃС‚Рё РєР°РїРёС‚Р°Р»Р°)
             double fullKelly      = (p * Payout - q) / Payout;
             double fractionalKelly = Math.Clamp(fullKelly * 0.25, 0.0, 0.05);
             double kellyRiskPct   = Math.Round(fractionalKelly * 100.0, 1);
 
-            // 3. Success rate = РЅР°РїСЂСЏРјСѓСЋ РёР· РІРµСЂРѕСЏС‚РЅРѕСЃС‚Рё (Р±РµР· СЃРёРјСѓР»СЏС†РёРё)
+            // 3. Success rate = РІРµСЂРѕСЏС‚РЅРѕСЃС‚СЊ РёР· РјР°С‚СЂРёС†С‹ (СЃ СѓС‡РµС‚РѕРј С€СѓРјР° Рё СЃРјРµС‰РµРЅРёР№)
             int syntheticIterations  = 1000;
             int syntheticSuccessCount = (int)Math.Round(p * syntheticIterations);
 
@@ -638,7 +649,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 ? $"{kellyRiskPct:F1}% - {Math.Min(kellyRiskPct + 0.5, 5.0):F1}% of Capital"
                 : "0% (Do not trade, low edge)";
 
-            string summary = $"Direct Formula (O(1)): {syntheticSuccessCount}/{syntheticIterations} est. | EV: {(evPct > 0 ? "+" : " ")}{evPct:F1}% | Kelly Risk: {kellyRiskPct:F1}%";
+            string summary = $"Direct Formula (O(1)): {syntheticSuccessCount}/{syntheticIterations} est. | EV: {(evPct > 0 ? "+" : "")}{evPct:F1}% | Kelly Risk: {kellyRiskPct:F1}%";
 
             mcResult = new MonteCarloResult(
                 syntheticIterations,
@@ -681,8 +692,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             }
         });
 
-        // РџР°СЂР°Р»Р»РµР»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє С‚СЂС‘С… РЅРµР·Р°РІРёСЃРёРјС‹С… DB-Р·Р°РїСЂРѕСЃРѕРІ РІРјРµСЃС‚Рѕ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕРіРѕ.
-        // Р­РєРѕРЅРѕРјРёСЏ: ~2вЂ“3x latency РїСЂРё РєР°Р¶РґРѕРј РІС‹Р·РѕРІРµ (СѓСЃС‚СЂР°РЅСЏРµС‚ sequential await chain).
+        // РЎС‚Р°С‚РёСЃС‚РёРєР° (Р°СЃРёРЅС…СЂРѕРЅРЅРѕ, Р±РµР· Р±Р»РѕРєРёСЂРѕРІРєРё)
+        // Р­С‚Рѕ СѓСЃРєРѕСЂСЏРµС‚ T4 Consensus, С‚.Рє. Р·Р°РїСЂРѕСЃС‹ РІ Р‘Р” РІС‹РїРѕР»РЅСЏСЋС‚СЃСЏ РїР°СЂР°Р»Р»РµР»СЊРЅРѕ.
         var overallStatsTask    = SignalTracker.GetOverallStatsAsync();
         var assetStatsTask      = SignalTracker.GetStatsAsync(_asset, _timeframe);
         var pendingCountTask    = SignalTracker.GetPendingCountAsync();
@@ -695,15 +706,15 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
 
         // Market Weather Widget calculations
-        string uiMarketSession = "ВНЕБИРЖЕВЫЕ (OTC)";
+        string uiMarketSession = "ВНЕБИРЖЕВАЯ (OTC)";
         if (!_asset.Contains("BTC") && !_asset.Contains("ETH") && !_asset.Contains("SOL") && !_asset.Contains("OTC"))
         {
             int h = DateTime.UtcNow.Hour;
-            if (h >= 21 || h < 2) uiMarketSession = "НОЧЬ (Тихий рынок)";
-            else if (h >= 2 && h < 8) uiMarketSession = "АЗИЯ (Пила)";
-            else if (h >= 8 && h < 13) uiMarketSession = "ЛОНДОН (Начало)";
-            else if (h >= 13 && h < 17) uiMarketSession = "НЬЮ-ЙОРК (Объемы)";
-            else if (h >= 17 && h < 21) uiMarketSession = "НЬЮ-ЙОРК (Вечер)";
+            if (h >= 21 || h < 2) uiMarketSession = "Ночь (Тихий рынок)";
+            else if (h >= 2 && h < 8) uiMarketSession = "Азия (Пила)";
+            else if (h >= 8 && h < 13) uiMarketSession = "Лондон (Начало)";
+            else if (h >= 13 && h < 17) uiMarketSession = "Нью-Йорк (Объемы)";
+            else if (h >= 17 && h < 21) uiMarketSession = "Нью-Йорк (Вечер)";
         }
         else if (_asset.Contains("BTC") || _asset.Contains("ETH") || _asset.Contains("SOL"))
         {
@@ -797,10 +808,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             kellyLabel = mcResult.KellyLabel,
             monteCarloSummary = mcResult.SummaryReasoning,
             wfIsCooloffActive = _wfResult.IsCooloffActive,
-            llmReport = BuildLlmSummary()  // Inline: Р±РѕР»СЊС€Рµ РЅРµ РѕС‚РґРµР»СЊРЅС‹Р№ T4 СЌС‚Р°Рї РїР°Р№РїР»Р°Р№РЅР°
+            llmReport = BuildLlmSummary()  // Inline:  генерация LLM отчета
         };
     }
 }
-
-
-
