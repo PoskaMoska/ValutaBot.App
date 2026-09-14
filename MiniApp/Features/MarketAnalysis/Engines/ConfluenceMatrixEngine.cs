@@ -20,8 +20,8 @@ public class ConfluenceMatrixEngine(
     MarketDataFetcher fetcher,
     IMarketAnalyzer marketAnalyzer) : IConfluenceMatrixEngine
 {
-    // в”Ђв”Ђ 4D Matrix в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-
+    // 4D Matrix
+    
     public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
         string asset,
         string primaryTimeframe,
@@ -65,24 +65,24 @@ public class ConfluenceMatrixEngine(
 
             double confluenceRatio = Math.Round(maxAgree / 3.0, 2);
             string dominantDir     = buyCount == putCount ? "NEUTRAL"
-                                   : buyCount > putCount ? "BUY" : "PUT";
+                                     : buyCount > putCount ? "BUY" : "PUT";
             bool isGoldenSetup     = confluenceRatio >= 0.99;
 
             int boost = confluenceRatio switch
             {
-                >= 0.99 => 12,
-                >= 0.65 => 6,
+                >= 0.99 => 15,
+                >= 0.65 => 7,
                 _       => 0
             };
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "\u2b50 ⭐ ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
-                >= 0.65 => "\u26a1 ⚡ СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
-                _       => "\ud83d\udcca СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
+                >= 0.99 => "⭐ ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "⚡ СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "📉 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
-            string summary = $"\u2022 \U0001f3af 3D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label}";
+            string summary = $"• 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label}";
 
             BotLogger.Info($"[Confluence 3D] {asset} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup}");
 
@@ -118,19 +118,19 @@ public class ConfluenceMatrixEngine(
             // FIX PRIORITY-1: Align the 3D Timeframe Matrix with MarketDataFetcher.HigherTf()
             // This is required so the 1-fetch pre-loaded primaryCandles and macroCandles in Evaluate4DMatrixAsync
             // exactly match the primaryTf and macroTf here. Otherwise, the Doppelganger Bug occurs, evaluating e.g. s5 twice.
-            "s5"                                     => ("s5",  "s10", "m1"),
-            "s10"                                    => ("s5",  "s10", "m1"),
-            "s15"                                    => ("s5",  "s15", "m1"),
-            "s30"                                    => ("s15", "s30", "m1"),
-            "m1"                                     => ("s30", "m1",  "m5"),
-            "m2" or "m3"                             => ("m1",  "m3",  "m15"),
-            "m5"                                     => ("m1",  "m5",  "m15"),
-            "m15"                                    => ("m5",  "m15", "h1"),
-            "m30"                                    => ("m15", "m30", "h1"),
-            "h1"                                     => ("m30", "h1",  "h4"),
-            "h4"                                     => ("h1",  "h4",  "d1"),
-            "d1"                                     => ("h4",  "d1",  "w1"),
-            _                                        => ("s30", "m1",  "m5")
+            "s5"                            => ("s5",  "s10", "m1"),
+            "s10"                           => ("s5",  "s10", "m1"),
+            "s15"                           => ("s5",  "s15", "m1"),
+            "s30"                           => ("s15", "s30", "m1"),
+            "m1"                            => ("s30", "m1",  "m5"),
+            "m2" or "m3"                    => ("m1",  "m3",  "m15"),
+            "m5"                            => ("m1",  "m5",  "m15"),
+            "m15"                           => ("m5",  "m15", "h1"),
+            "m30"                           => ("m15", "m30", "h1"),
+            "h1"                            => ("m30", "h1",  "h4"),
+            "h4"                            => ("h1",  "h4",  "d1"),
+            "d1"                            => ("h4",  "d1",  "w1"),
+            _                               => ("s30", "m1",  "m5")
         };
 
     /// <summary>
@@ -138,11 +138,11 @@ public class ConfluenceMatrixEngine(
     /// TechnicalAnalysisEngine pipeline (HMA, ConnorsRSI, ADX, Volume).
     ///
     /// FIX: Previously passed candles=null to ScoreTimeframe, which caused
-    /// candles.Length == 0 &lt; 14 в†’ always return score=0.0 в†’ always "NEUTRAL".
+    /// candles.Length == 0 < 14 always return score=0.0 always "NEUTRAL".
     /// Now constructs a real OhlcCandle[] from price/volume arrays.
     /// </summary>
-    // В отличие от ScoreDirection (который строил OHLC синтетически из avgDiff±0.5),
-    // этот метод передаёт реальные High/Low свечей → ATR/ADX корректны → нет шума ±12%.
+    // В отличие от ScoreDirection (который строго OHLC-синтетичный и дает avgDiff±0.5),
+    // этот метод передаёт реальные High/Low свечи → ATR/ADX корректны → нет шума ±12%.
     private string ScoreDirectionFromCandles(
         MiniAppController.OhlcCandle[] ohlcCandles,
         double[] prices,
@@ -177,7 +177,7 @@ public class ConfluenceMatrixEngine(
     }
 
 
-    // FIX PRIORITY-1: Перегрузка принимает уже загруженные current+higher свечи из Orchestrator'а.
+    // FIX PRIORITY-1: Перегрузка принимающая уже загруженные current+higher свечи из Orchestrator'а.
     // Умно маппит их на слоты (micro/primary/macro) и делает 1 HTTP-запрос для недостающего таймфрейма.
     // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min) и Doppelganger Bug.
     public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
@@ -254,24 +254,24 @@ public class ConfluenceMatrixEngine(
 
             double confluenceRatio = Math.Round(maxAgree / 3.0, 2);
             string dominantDir     = buyCount == putCount ? "NEUTRAL"
-                                   : buyCount > putCount ? "BUY" : "PUT";
+                                     : buyCount > putCount ? "BUY" : "PUT";
             bool isGoldenSetup     = confluenceRatio >= 0.99;
 
             int boost = confluenceRatio switch
             {
-                >= 0.99 => 12,
-                >= 0.65 => 6,
+                >= 0.99 => 15,
+                >= 0.65 => 7,
                 _       => 0
             };
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "\u2b50 ⭐ ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
-                >= 0.65 => "\u26a1 ⚡ СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
-                _       => "\ud83d\udcca СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
+                >= 0.99 => "⭐ ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "⚡ СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "📉 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
-            string summary = $"\u2022 \U0001f3af 3D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch smart]";
+            string summary = $"• 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch smart]";
 
             BotLogger.Info($"[Confluence 3D] {asset}/{primaryTimeframe} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup} | Smart 1-fetch");
 
@@ -292,8 +292,8 @@ public class ConfluenceMatrixEngine(
         }
     }
 
-    // в”Ђв”Ђ Unified Matrix Evaluation в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-
+    // Unified Matrix Evaluation
+    
     /// <summary>
     /// Merges TA, SMC, Orderflow, ML, and Multi-Timeframe into a final decision.
     /// </summary>
@@ -343,15 +343,15 @@ public class ConfluenceMatrixEngine(
             totalWeight     += ofWeight;
         }
 
-        // 2. Velocity / Continuous State (Leading — микро-ускорение цены)
+        // 2. Velocity / Continuous State (Leading — микро-ускорения цены)
         // AUDIT FIX: только включаем в totalWeight если contribution ненулевой (>= 0.03).
         // При STABLE (contribution=0) добавление stateWeight в знаменатель лишь разбавляет TA и OF.
         double stateWeight  = await SignalTracker.GetSignalWeightAsync("VelocityState", 1.0);
         if (Math.Abs(stateSignal.MomentumContribution) >= 0.03)
         {
-            totalScore         += stateSignal.MomentumContribution * stateWeight;
-            totalConfidence    += 55.0 * stateWeight;
-            totalWeight        += stateWeight;
+            totalScore        += stateSignal.MomentumContribution * stateWeight;
+            totalConfidence   += 55.0 * stateWeight;
+            totalWeight       += stateWeight;
         }
         else
         {
@@ -398,8 +398,8 @@ public class ConfluenceMatrixEngine(
         if (Math.Abs(finalSmcScore) > 0.1 && !isSubMinute)
         {
             // FIX W-20: dynamic normalization — max score depends on active weights
-            // AUDIT FIX: SMC полностью отключён на sub-minute (s5/s10/s15/s30).
-            // BOS, FVG, OrderBlock — институциональные концепции для H1/H4/D1.
+            // AUDIT FIX: SMC полностью отключен на sub-minute (s5/s10/s15/s30).
+            // BOS, FVG, OrderBlock — институциональные концепции для H1/H4.
             // На 5-секундных свечах это статистический шум, загрязняющий скоринг.
             double maxPossibleSmc = (trendWeight * 4.0) + (reversionWeight * 2.0);
             double normSmcScore   = maxPossibleSmc > 0 ? finalSmcScore / maxPossibleSmc : 0;
@@ -424,10 +424,10 @@ public class ConfluenceMatrixEngine(
         // Apply conflict penalty globally to the normalized score
         totalScore *= conflictPenalty;
 
-        // FIX PRIORITY-5: AutoCalibrationEngine мультипликатор применяется ТОЛЬКО к TA-компоненту.
+        // FIX PRIORITY-5: AutoCalibrationEngine мультипликатор применялся к TA-компоненту.
         // Ранее он применялся ко всему totalScore ПОСЛЕ нормализации — это создавало feedback loop:
-        // серия потерь → мультипликатор < 1 → весь score сжимается → больше NEUTRAL → нет данных
-        // для восстановления → мультипликатор не растёт → замкнутый круг.
+        // серия потерь -> мультипликатор < 1 -> весь score сжимается -> больше NEUTRAL -> нет данных
+        // для восстановления -> мультипликатор не растёт -> замкнутый круг.
         // Теперь: мы масштабируем только вклад TA (taScoreOverride уже добавлен в totalScore через
         // taWeight, поэтому корректируем постфактум как добавочный delta-term).
         if (TradeOutcomeTracker.CalibrationEngine is AutoCalibrationEngine calibEngine)
@@ -445,7 +445,7 @@ public class ConfluenceMatrixEngine(
             BotLogger.Info($"[AutoCalib] Regime={regime}, Multiplier={regimeMultiplier:F2}x → scaled={scaledMultiplier:F2}x, taFraction={taFraction:F2}, adjustedScore={totalScore:F3}");
         }
 
-        // AUDIT FIX: FearGreed — добавляем контрарный вклад для крипто-пар.
+        // AUDIT FIX: FearGreed — добавлена контрарная вкладка для крипто-пар.
         // FearGreedService существовал, но нигде не вызывался в матрице решений.
         // Только для крипто (isForex=false); для forex возвращает contribution=0.0.
         // Максимальный вклад ±0.08 (масштабированный с оригинального ±0.12).
@@ -473,7 +473,7 @@ public class ConfluenceMatrixEngine(
         double taScoreRaw = taSignal.Score;
         double ofScoreRaw = ofSignal.ScoreContribution;
         double smcScoreRaw = finalSmcScore;
-        double mlProbRaw = (mlSignal.Direction == "BUY") ? mlSignal.Confidence : (mlSignal.Direction == "PUT") ? -mlSignal.Confidence : 0;
+        double mlProbRaw = (mlSignal.Direction == "BUY") ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? -mlSignal.Confidence : 0);
 
         // Query the Logistic Regression Meta-Learner
         double metaProb = OnlineMetaLearner.Predict(asset, timeframe, taScoreRaw, ofScoreRaw, smcScoreRaw, mlProbRaw);
@@ -481,39 +481,33 @@ public class ConfluenceMatrixEngine(
         string candidateDir = "NEUTRAL";
         double finalConfidenceScore = 0.0;
         
-        // IDEA-F02: Signal Veto System (Conflict resolution ML vs TA)
-        // VETO SYSTEM DISABLED BY USER REQUEST. 
-        // ML is now the primary driver (70% blend weight) and will naturally overpower TA.
-        bool vetoed = false;
-
         // 5. Final Decision & Market Session Awareness
-        
-        // FIX: The Meta-Learner (metaProb) bypassed the MTF conflict penalty, AutoCalibration, and FearGreed 
-        // which were applied to totalScore. We blend them here to ensure all systems influence the final result.
         
         // Convert scoreMath [-1.0, 1.0] to a probability [0.0, 1.0]
         double mathProb = (scoreMath + 1.0) / 2.0;
         
-        // Blend ML Meta-Learner with the Mathematical Consensus Matrix (70% ML, 30% Math)
-        double blendedProb = (metaProb * 0.70) + (mathProb * 0.30);
+        // FIX PRIORITY-1: Rebalanced ML vs Math blend. 
+        // Previously (70% ML / 30% Math) gave ML absolute veto power, which is dangerous in Binary Options 
+        // if order flow or momentum is strongly against it. Now we enforce a strict 50/50 consensus.
+        double blendedProb = (metaProb * 0.50) + (mathProb * 0.50);
         
-        if (!vetoed)
+        // FIX PRIORITY-2: Hardened entry threshold. 
+        // 0.52 was only 52%, which is precisely the breakeven line for 92% payout (1 / 1.92 = 52.08%).
+        // We raised it to 55% to provide a definitive 3% EV buffer above market noise.
+        if (blendedProb >= 0.55)
         {
-            if (blendedProb > 0.52)
-            {
-                candidateDir = "BUY";
-                finalConfidenceScore = (blendedProb - 0.5) * 2.0;
-            }
-            else if (blendedProb < 0.48)
-            {
-                candidateDir = "PUT";
-                finalConfidenceScore = (0.5 - blendedProb) * 2.0;
-            }
-            else
-            {
-                candidateDir = "NEUTRAL";
-                finalConfidenceScore = 0.0;
-            }
+            candidateDir = "BUY";
+            finalConfidenceScore = (blendedProb - 0.5) * 2.0;
+        }
+        else if (blendedProb <= 0.45)
+        {
+            candidateDir = "PUT";
+            finalConfidenceScore = (0.5 - blendedProb) * 2.0;
+        }
+        else
+        {
+            candidateDir = "NEUTRAL";
+            finalConfidenceScore = 0.0;
         }
 
         double absWeightedScore = finalConfidenceScore;
@@ -521,7 +515,7 @@ public class ConfluenceMatrixEngine(
         // Apply conflict penalty globally to the final confidence (so MTF conflict actually lowers probability)
         absWeightedScore *= conflictPenalty;
         
-        // Внедрение интеллекта сессий (Market Session Modifier)
+        // Внедрение интеллектуального сессионного множителя (Market Session Modifier)
         double sessionMultiplier = 1.0;
         string sessionName = "DEFAULT";
         bool isOtcAsset = asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
@@ -555,17 +549,19 @@ public class ConfluenceMatrixEngine(
         }
 
         // MTF Golden Boost — only when 4D dominant direction EXPLICITLY matches candidateDir.
-        // FIX W-16: removed || "NEUTRAL" condition — neutral MTF must not boost confidence.
         if (candidateDir != "NEUTRAL"
             && mtfResult.ProbabilityBoost > 0
             && mtfResult.DominantDirection == candidateDir)
         {
-            probability = Math.Clamp(probability + mtfResult.ProbabilityBoost, 55, 95);
+            // FIX PRIORITY-3: Bayesian Conditional Probability Shift.
+            // Previously, a flat arithmetic +12% artificially inflated weak noise (e.g. 52% + 12% = 64%).
+            // Now, we scale the boost by the remaining uncertainty. 
+            // Example: Base prob = 55%, Boost = 15%. Shift = (100 - 55) * 0.15 = 6.75%. New Prob = 61.75%.
+            double remainingUncertainty = 100.0 - probability;
+            double bayesianShift = remainingUncertainty * (mtfResult.ProbabilityBoost / 100.0);
+            
+            probability = (int)Math.Clamp(Math.Round(probability + bayesianShift), 55, 95);
         }
-
-        // Probability filter removed: bot always gives a signal.
-        // User sees the probability % and decides whether to trade.
-        // Low probability signals are shown as-is with their confidence level.
 
         // 6. Reasoning text
         string modelAccText = mlSignal.Accuracy.HasValue
@@ -573,24 +569,24 @@ public class ConfluenceMatrixEngine(
             : "";
 
         string smcText = !string.IsNullOrEmpty(smcSignal.Reasoning)
-            ? $"\u2022 \U0001f6e1\ufe0f SMC Структура: {smcSignal.Reasoning}"
-            : "\u2022 \U0001f6e1\ufe0f SMC Структура: недостаточно данных";
+            ? $"• 🏛️ SMC Структура: {smcSignal.Reasoning}"
+            : "• 🏛️ SMC Структура: недостаточно данных";
 
         string flowText = !string.IsNullOrEmpty(ofSignal.Description)
-            ? $"\u2022 \U0001f30a Order Flow & CVD: {ofSignal.Description}"
-            : "\u2022 \U0001f30a Order Flow & CVD: нет выраженных объемов";
+            ? $"• 🌊 Order Flow & CVD: {ofSignal.Description}"
+            : "• 🌊 Order Flow & CVD: нет выраженных объемов";
 
         string lgbmText = !string.IsNullOrEmpty(mlSignal.Direction) && mlSignal.Direction != "NEUTRAL"
-            ? $"\u2022 \u26a1 Нейросеть (LightGBM): {(mlSignal.Direction == "BUY" ? "ВВЕРХ \u2b06" : "ВНИЗ \u2b07")} ({Math.Round(mlSignal.Confidence * 100)}% уверенности){modelAccText}"
+            ? $"• ⚡ Нейросеть (LightGBM): {(mlSignal.Direction == "BUY" ? "ВВЕРХ ⬆" : "ВНИЗ ⬇")} ({Math.Round(mlSignal.Confidence * 100)}% уверенности){modelAccText}"
             : (mlSignal.ModelVersion == "disabled"
-                ? $"\u2022 \u26a1 Нейросеть (LightGBM): Отключена пользователем"
+                ? $"• ⚡ Нейросеть (LightGBM): Отключена пользователем"
                 : mlSignal.ModelVersion == "forex-only"
-                    ? $"\u2022 \u26a1 Нейросеть (LightGBM): Недоступно для крипто"
+                    ? $"• ⚡ Нейросеть (LightGBM): Недоступна для крипты"
                     : mlSignal.ModelVersion == "not-trained"
-                        ? $"\u2022 \u26a1 Нейросеть (LightGBM): Модель обучается (зайдет через пару минут)"
+                        ? $"• ⚡ Нейросеть (LightGBM): Модель обучается (зайдите через пару минут)"
                         : mlSignal.ModelVersion == "offline"
-                            ? $"\u2022 \u26a1 Нейросеть (LightGBM): Сервис недоступен (Оффлайн)"
-                            : $"\u2022 \u26a1 Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
+                            ? $"• ⚡ Нейросеть (LightGBM): Сервер недоступен (Оффлайн)"
+                            : $"• ⚡ Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
 
         string combinedReasoning = $"{smcText}\n{flowText}\n{lgbmText}";
 
@@ -604,7 +600,3 @@ public class ConfluenceMatrixEngine(
     }
 
 }
-
-
-
-
