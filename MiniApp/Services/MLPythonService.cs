@@ -3,9 +3,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ValutaBot.MiniApp;
@@ -20,6 +22,64 @@ public static class MLPythonService
     private static string _baseUrl = string.Empty;
     private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
     private static Process? _mlProcess; // Track to prevent zombie leaks
+
+    // --- HFT Transport Optimization ---
+    private static readonly HttpClient _fastHttpClient;
+
+    static MLPythonService()
+    {
+        var handler = new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+            MaxConnectionsPerServer = 50 
+        };
+        
+        _fastHttpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5) // Fast fail
+        };
+        _fastHttpClient.DefaultRequestHeaders.ConnectionClose = false; 
+        
+        string secret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret";
+        _fastHttpClient.DefaultRequestHeaders.Add("X-Internal-Secret", secret);
+    }
+
+    public class MarketDataColumnar
+    {
+        public long[] openTime { get; set; } = Array.Empty<long>();
+        public double[] open { get; set; } = Array.Empty<double>();
+        public double[] high { get; set; } = Array.Empty<double>();
+        public double[] low { get; set; } = Array.Empty<double>();
+        public double[] close { get; set; } = Array.Empty<double>();
+        public double[] volume { get; set; } = Array.Empty<double>();
+    }
+
+    private static MarketDataColumnar ToColumnar(System.Collections.Generic.IList<MiniAppController.OhlcCandle> candles)
+    {
+        int count = candles.Count;
+        var columnar = new MarketDataColumnar
+        {
+            openTime = new long[count],
+            open = new double[count],
+            high = new double[count],
+            low = new double[count],
+            close = new double[count],
+            volume = new double[count]
+        };
+
+        for (int i = 0; i < count; i++)
+        {
+            var c = candles[i];
+            columnar.openTime[i] = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds();
+            columnar.open[i] = c.Open;
+            columnar.high[i] = c.High;
+            columnar.low[i] = c.Low;
+            columnar.close[i] = c.Close;
+            columnar.volume[i] = c.Volume;
+        }
+        
+        return columnar;
+    }
 
     public record MLPythonPrediction(
         string Direction,
@@ -66,7 +126,7 @@ public static class MLPythonService
             }
             catch
             {
-                // Not running yet → try launching
+                // Not running yet -> try launching
             }
 
             LaunchPythonProcess();
@@ -227,39 +287,18 @@ public static class MLPythonService
         try
         {
             var binanceSymbol = MapSymbol(symbol, isForex);
-            var candleList = candles.Select(c => new
-            {
-                openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
-                open = c.Open,
-                high = c.High,
-                low = c.Low,
-                close = c.Close,
-                volume = c.Volume
-            }).ToList();
+            var columnarCandles = ToColumnar(candles);
+            MarketDataColumnar? columnarMtf = mtfCandles != null && mtfCandles.Length > 0 ? ToColumnar(mtfCandles) : null;
 
-            object payload;
-            if (mtfCandles != null && mtfCandles.Length > 0)
-            {
-                var mtfList = mtfCandles.Select(c => new
-                {
-                    openTime = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds(),
-                    open = c.Open,
-                    high = c.High,
-                    low = c.Low,
-                    close = c.Close,
-                    volume = c.Volume
-                }).ToList();
+            object payload = columnarMtf != null 
+                ? new { symbol = binanceSymbol, interval = interval, candles = columnarCandles, is_forex = isForex, mtf_candles = columnarMtf }
+                : new { symbol = binanceSymbol, interval = interval, candles = columnarCandles, is_forex = isForex };
 
-                payload = new { symbol = binanceSymbol, interval = interval, candles = candleList, is_forex = isForex, mtf_candles = mtfList };
-            }
-            else
-            {
-                payload = new { symbol = binanceSymbol, interval = interval, candles = candleList, is_forex = isForex };
-            }
+            byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(payload);
+            using var content = new ByteArrayContent(jsonBytes);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = await MiniAppController.HttpFactory!.CreateClient("MLPythonService").PostAsync(new Uri($"{_baseUrl}/predict"), content);
+            var response = await _fastHttpClient.PostAsync(new Uri($"{_baseUrl}/predict"), content);
             
             if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
             {
@@ -322,7 +361,7 @@ public static class MLPythonService
                 direction = direction,
                 was_win = wasWin,
                 is_forex = isForex,
-                timestamp = (entryTime ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ")
+                timestamp = (entryTime ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
             };
 
             var json = JsonSerializer.Serialize(payload);
@@ -366,7 +405,7 @@ public static class MLPythonService
             
             // Use long-running client bypassing Polly short timeouts
             var response = await MiniAppController.HttpFactory!.CreateClient("MLPythonLongRunning")
-                                .PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
+                                        .PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
 
             if (response.IsSuccessStatusCode)
             {
