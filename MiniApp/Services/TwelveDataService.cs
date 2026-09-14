@@ -153,7 +153,7 @@ public static partial class TwelveDataService
                 _memoryCache.Set(key, (prices, volumes, ohlc), TimeSpan.FromSeconds(cacheTtlSeconds));
             }
             BotLogger.Info($"[TwelveData] Successfully fetched {prices.Length} candles for {symbol} ({interval})");
-            return (prices, volumes, ohlc);
+            return (prices.ToArray(), volumes.ToArray(), ohlc.ToArray());
         }
         catch (JsonException jsonEx)
         {
@@ -178,7 +178,11 @@ public static partial class TwelveDataService
             if (_memoryCache.TryGetValue(key, out (double[] prices, double[] volumes, MiniAppController.OhlcCandle[] candles) lastData))
             {
                 BotLogger.Info($"[TwelveData] Serving IMemoryCache fallback data for {rawAsset}");
-                return lastData;
+                return (
+                    lastData.prices.ToArray(),
+                    lastData.volumes.ToArray(),
+                    lastData.candles.ToArray()
+                );
             }
             return null;
         }
