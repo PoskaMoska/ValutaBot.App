@@ -256,6 +256,7 @@ public static partial class MiniAppController
                 double confidence = 0.5;
                 double variance = 0.0;
                 double volatility = 1.0; // Fail-safe pass
+                bool isMlOverruled = false;
                 
                 try 
                 {
@@ -300,6 +301,26 @@ public static partial class MiniAppController
                         else if (root.TryGetProperty("AtrNorm", out var an1)) volatility = an1.GetDouble();
                         else if (root.TryGetProperty("atrNorm", out var an2)) volatility = an2.GetDouble();
                     }
+
+                    string overallDir = "";
+                    if (root.TryGetProperty("Action", out var actProp)) overallDir = actProp.GetString() ?? "";
+                    else if (root.TryGetProperty("Direction", out var dirProp)) overallDir = dirProp.GetString() ?? "";
+                    else if (root.TryGetProperty("action", out var actProp2)) overallDir = actProp2.GetString() ?? "";
+                    else if (root.TryGetProperty("direction", out var dirProp2)) overallDir = dirProp2.GetString() ?? "";
+
+                    string mlDir = "";
+                    if (mlNode.ValueKind == JsonValueKind.Object)
+                    {
+                        if (mlNode.TryGetProperty("Direction", out var mDir)) mlDir = mDir.GetString() ?? "";
+                        else if (mlNode.TryGetProperty("direction", out var mDir2)) mlDir = mDir2.GetString() ?? "";
+                    }
+
+                    if (!string.IsNullOrEmpty(overallDir) && overallDir != "NEUTRAL" &&
+                        !string.IsNullOrEmpty(mlDir) && mlDir != "NEUTRAL" &&
+                        !string.Equals(overallDir, mlDir, StringComparison.OrdinalIgnoreCase))
+                    {
+                        isMlOverruled = true;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -339,6 +360,11 @@ public static partial class MiniAppController
                         volatility_filter_passed = volFilterPassed,
                         variance_penalty = variance,
                         volatility_value = volatility
+                    },
+                    ui_flags = new 
+                    {
+                        is_ml_overruled = isMlOverruled,
+                        warning_message = isMlOverruled ? "⚠️ Консенсус (TA+OF) перевесил сигнал Нейросети" : ""
                     },
                     // Pre-execution latency compensation:
                     latency_ms = (int)Math.Round(LatencyProbe.LastRttMs),
