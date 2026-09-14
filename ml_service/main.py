@@ -2,10 +2,10 @@
 FastAPI ML microservice — LightGBM Forex/Crypto direction predictor.
 
 Endpoints:
-  GET  /health       → service status + model list
-  POST /predict      → predict next candle direction
-  POST /train        → train/retrain a model
-  GET  /models       → list all loaded models
+  GET  /health       -> service status + model list
+  POST /predict      -> predict next candle direction
+  POST /train        -> train/retrain a model
+  GET  /models       -> list all loaded models
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ import threading
 import sqlite3
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
+import orjson
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -30,7 +31,9 @@ def verify_secret(x_internal_secret: str = Header(None)):
     if x_internal_secret != _API_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid Internal Secret")
 
-# ── Logging ────────────────────────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ Logging                                                                │
+# └────────────────────────────────────────────────────────────────────────┘
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -86,7 +89,9 @@ async def lifespan(app: FastAPI):
     yield
 
 
-# ── Weekly Global Retrain ───────────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ Weekly Global Retrain                                                  │
+# └────────────────────────────────────────────────────────────────────────┘
 
 WEEKLY_RETRAIN_INTERVAL_H = int(os.getenv("WEEKLY_RETRAIN_INTERVAL_H", "168"))  # 7 days
 _BOT_BASE_URL = os.getenv("BOT_BASE_URL", "")   # e.g. https://valutatbot.railway.app
@@ -127,7 +132,7 @@ async def _weekly_global_retrain_loop():
                     
                     with predictor._lock:
                         meta = predictor._meta
-                    
+                        
                     age_h = (time.time() - meta.trained_at) / 3600 if meta else 9999
 
                     # Trigger if it's the Friday schedule window (and hasn't been trained in the last 24h)
@@ -194,7 +199,9 @@ def _send_weekly_summary(results: list):
             log.warning(f"[WeeklyRetrain] Could not send notification: {e}")
 
 
-# ── App ────────────────────────────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ App                                                                    │
+# └────────────────────────────────────────────────────────────────────────┘
 app = FastAPI(
     title="ValutaBot ML Service",
     description="LightGBM direction predictor for Forex/Crypto scalping",
@@ -208,7 +215,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Global model registry ──────────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ Global model registry                                                  │
+# └────────────────────────────────────────────────────────────────────────┘
 # key: "SYMBOL_interval"  (e.g. "BTCUSDT_1m")
 _predictors: Dict[str, ForexPredictor] = {}
 _registry_lock = threading.Lock()
@@ -226,12 +235,14 @@ def _get_predictor(symbol: str, interval: str, regime: str = "ALL") -> ForexPred
     with _registry_lock:
         if key not in _predictors:
             p = ForexPredictor(symbol, interval, regime)
-            p._try_load()          # load from disk if exists
+            p._try_load()         # load from disk if exists
             _predictors[key] = p
         return _predictors[key]
 
 
-# ── Request / Response schemas ─────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ Request / Response schemas                                             │
+# └────────────────────────────────────────────────────────────────────────┘
 
 class CandleItem(BaseModel):
     openTime: Optional[int] = None
@@ -243,16 +254,16 @@ class CandleItem(BaseModel):
 
 
 class PredictRequest(BaseModel):
-    symbol: str                         # e.g. "BTCUSDT" or "EURUSD"
-    interval: str                       # e.g. "1m" or "m5"
-    candles: List[CandleItem]           # OHLCV history, latest last
+    symbol: str                     # e.g. "BTCUSDT" or "EURUSD"
+    interval: str                   # e.g. "1m" or "m5"
+    candles: List[CandleItem]       # OHLCV history, latest last
     mtf_candles: Optional[List[CandleItem]] = None # Higher timeframe OHLCV
     is_forex: bool = False
 
 
 class PredictResponse(BaseModel):
-    direction: str                      # "BUY" | "PUT" | "NEUTRAL"
-    confidence: float                   # 0.0 – 1.0
+    direction: str                  # "BUY" | "PUT" | "NEUTRAL"
+    confidence: float               # 0.0 – 1.0
     model_version: str
     accuracy: Optional[float] = None
     auc: Optional[float] = None
@@ -288,10 +299,12 @@ class TrainFeedback(BaseModel):
     timestamp: str
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ Helpers                                                                │
+# └────────────────────────────────────────────────────────────────────────┘
 
 def _normalize_interval(interval: str) -> str:
-    """Unify interval string: 'm1'→'1m', '5m'→'5m', etc."""
+    """Unify interval string: 'm1'->'1m', '5m'->'5m', etc."""
     iv = interval.lower().strip()
     # Already canonical (Binance-style): "1m", "5m", "15m", "1h" etc.
     if iv in TF_MAP.values():
@@ -338,7 +351,7 @@ def _fetch_local_sqlite_main(symbol: str, interval: str, limit: int) -> list:
 
 def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, limit: int = 200) -> list:
     """
-    FIX #5: Читает свечи из БД строго ДО момента входа в сделку (entry_timestamp).
+    FIX #5: Читать свечи строго До момента входа (БЕЗ строго ДО момента входа (entry_timestamp).
     Это устраняет SGD Look-Ahead Bias.
     """
     import os
@@ -443,24 +456,24 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
             log.warning(f"[SGD] No candles before entry for {symbol}/{interval}. Fallback to recent.")
             return _fetch_local_sqlite_main(symbol, interval, limit)
 
-        # Переименуем колонки в нужный регистр, если надо, но выше алиасы уже заданы
+        # Переворачиваем колонки в нужный реверс, если не высшие алиасы уже заданы
         return df.iloc[::-1].to_dict(orient="records")
     except Exception as e:
         log.warning(f"[SGD] _fetch_candles_at_entry failed: {e}. Fallback to recent.")
         return _fetch_local_sqlite_main(symbol, interval, limit)
 
 
-
-
 def _candles_to_dicts(items: List[CandleItem]) -> List[dict]:
-    # FIX C-10: openTime was missing → features.py had no 'opentime' column →
+    # FIX C-10: openTime was missing -> features.py had no 'opentime' column ->
     # hour_sin/hour_cos were always 0.0 at inference (but real values during training).
     # This caused a permanent input space shift between train and inference.
     return [{"openTime": c.openTime, "open": c.open, "high": c.high, "low": c.low,
              "close": c.close, "volume": c.volume} for c in items]
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ Routes                                                                 │
+# └────────────────────────────────────────────────────────────────────────┘
 
 @app.get("/health")
 def health():
@@ -485,31 +498,42 @@ def list_models():
 _live_candles_cache = {}
 _cache_lock = threading.Lock()
 
-@app.post("/predict", response_model=PredictResponse, dependencies=[Depends(verify_secret)])
-def predict(req: PredictRequest):
-    if len(req.candles) < 60:
+@app.post("/predict", dependencies=[Depends(verify_secret)])
+async def predict(request: Request):
+    raw_body = await request.body()
+    data = orjson.loads(raw_body)
+    
+    symbol = data["symbol"]
+    interval_raw = data["interval"]
+    candles = data["candles"]
+    mtf_candles = data.get("mtf_candles")
+    is_forex = data.get("is_forex", False)
+
+    n_candles = len(candles.get("open", [])) if candles else 0
+    if n_candles < 60:
         raise HTTPException(
             status_code=422,
-            detail=f"Need at least 60 candles for reliable prediction, got {len(req.candles)}",
+            detail=f"Need at least 60 candles for reliable prediction, got {n_candles}",
         )
 
     # Forex-only policy: block crypto symbols
-    if not is_forex_symbol(req.symbol):
-        log.warning(f"[Predict] Blocked crypto symbol: {req.symbol}. Only forex is supported.")
-        return PredictResponse(
-            direction="NEUTRAL",
-            confidence=0.5,
-            model_version="forex-only",
-        )
+    if not is_forex_symbol(symbol):
+        log.warning(f"[Predict] Blocked crypto symbol: {symbol}. Only forex is supported.")
+        resp = {
+            "direction": "NEUTRAL",
+            "confidence": 0.5,
+            "model_version": "forex-only",
+        }
+        return Response(content=orjson.dumps(resp), media_type="application/json")
 
-    interval = _normalize_interval(req.interval)
+    interval = _normalize_interval(interval_raw)
     
     # Store truthful live candles for SGD feedback
     with _cache_lock:
-        _live_candles_cache[(req.symbol, interval)] = req.candles
+        _live_candles_cache[(symbol, interval)] = candles
 
-    candle_dicts = _candles_to_dicts(req.candles)
-    mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
+    candle_dicts = candles
+    mtf_candle_dicts = mtf_candles
     
     # Determine current market regime using GMM
     regime = "ALL"
@@ -518,24 +542,21 @@ def predict(req: PredictRequest):
         from model import get_regime_router
         feats = build_features(candle_dicts, mtf_candle_dicts)
         if not feats.empty:
-            router = get_regime_router(req.symbol, interval)
+            router = get_regime_router(symbol, interval)
             regime = router.predict_live(feats.iloc[-10:])
     except Exception as e:
         log.error(f"[Predict] Failed to calc regime, fallback to ALL: {e}")
 
-    predictor = _get_predictor(req.symbol, interval, regime)
+    predictor = _get_predictor(symbol, interval, regime)
 
     # Auto-train in background if model is missing.
-    # FIX: was `if model is None` — bare name `model` doesn't exist in this
-    # scope (NameError on EVERY /predict → HTTP 500 → C# fallback → ML forever
-    # NEUTRAL on all pairs/timeframes). Correct check is predictor._model.
     if predictor._model is None and not predictor.is_training:
         predictor.is_training = True
-        log.info(f"[Predict] Model missing for {req.symbol} ({interval}). Triggering background training.")
+        log.info(f"[Predict] Model missing for {symbol} ({interval}). Triggering background training.")
         import threading
         t = threading.Thread(
             target=_background_train, 
-            args=(req.symbol, interval, candle_dicts, mtf_candle_dicts), 
+            args=(symbol, interval, candle_dicts, mtf_candle_dicts), 
             daemon=True
         )
         t.start()
@@ -548,7 +569,7 @@ def predict(req: PredictRequest):
     variance_estimate = None
     try:
         from model import get_variance_predictor
-        var_predictor = get_variance_predictor(req.symbol, interval, regime)
+        var_predictor = get_variance_predictor(symbol, interval, regime)
         variance_estimate = var_predictor.predict_variance(candle_dicts, mtf_candle_dicts)
         # Dampen confidence toward 0.5 proportionally to estimated uncertainty.
         # variance_estimate=0 -> no change; variance_estimate=1 -> fully neutral.
@@ -557,16 +578,17 @@ def predict(req: PredictRequest):
         log.warning(f"[Predict] VariancePredictor failed, using raw confidence: {e}")
 
     meta = predictor._meta
-    return PredictResponse(
-        direction=direction,
-        confidence=round(confidence, 4),
-        model_version=version,
-        accuracy=round(meta.accuracy, 4) if meta else None,
-        auc=round(meta.auc, 4) if meta else None,
-        n_train=meta.n_train if meta else None,
-        variance_estimate=round(variance_estimate, 4) if variance_estimate is not None else None,
-        raw_confidence=round(raw_confidence, 4),
-    )
+    resp = {
+        "direction": direction,
+        "confidence": round(float(confidence), 4),
+        "model_version": version,
+        "accuracy": round(float(meta.accuracy), 4) if meta else None,
+        "auc": round(float(meta.auc), 4) if meta else None,
+        "n_train": meta.n_train if meta else None,
+        "variance_estimate": round(float(variance_estimate), 4) if variance_estimate is not None else None,
+        "raw_confidence": round(float(raw_confidence), 4),
+    }
+    return Response(content=orjson.dumps(resp), media_type="application/json")
 
 
 @app.post("/train", response_model=TrainResponse, dependencies=[Depends(verify_secret)])
@@ -612,7 +634,9 @@ def _background_train(symbol: str, interval: str, candles: Optional[list] = None
         log.info(f"[BG Train] Done {regime}: {report}")
 
 
-# ── D11: Shadow Challenger endpoints ──────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ D11: Shadow Challenger endpoints                                       │
+# └────────────────────────────────────────────────────────────────────────┘
 
 class ChallengerTrainRequest(BaseModel):
     symbol: str
@@ -664,7 +688,9 @@ def challenger_status(symbol: str, interval: str, regime: str = "ALL"):
         "challenger_edge_pp": round((chal_wins - prod_wins) / n * 100, 2),
     }
 
-# ── End Shadow Challenger endpoints ───────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ End Shadow Challenger endpoints                                        │
+# └────────────────────────────────────────────────────────────────────────┘
 
 
 @app.post("/feedback", dependencies=[Depends(verify_secret)])
@@ -718,7 +744,7 @@ def feedback(req: TrainFeedback):
         # Tier 2 (Local Tactician): instant SGD update — no heavy retrain
         norm_interval = _normalize_interval(req.timeframe)
 
-        # FIX #5: Берём свечи строго ДО момента входа (req.timestamp), а не из _live_candles_cache.
+        # FIX #5: Берем свечи строго ДО момента входа (req.timestamp), а не из _live_candles_cache.
         recent_candles = _fetch_candles_at_entry(req.asset, norm_interval, req.timestamp, limit=200)
 
         regime = "ALL"
@@ -756,9 +782,9 @@ def feedback(req: TrainFeedback):
         return {"status": "error", "message": str(e)}
 
 
-
-
-# ── Entry point ────────────────────────────────────────────────────────────
+# ┌────────────────────────────────────────────────────────────────────────┐
+# │ Entry point                                                            │
+# └────────────────────────────────────────────────────────────────────────┘
 
 if __name__ == "__main__":
     import uvicorn
