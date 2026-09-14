@@ -87,28 +87,21 @@ public class MarketDataFetcher
         if (cleanAsset.Length == 6) cleanAsset = $"{cleanAsset.Substring(0, 3)}/{cleanAsset.Substring(3, 3)}";
 
         bool isWeekend = IsWeekendNow();
-        bool isOtcRequested = assetToFetch.Contains("OTC", StringComparison.OrdinalIgnoreCase);
+        bool isOtc = assetToFetch.Contains("OTC", StringComparison.OrdinalIgnoreCase);
 
         // SMART ROUTING: 
-        // Если выходные - всегда отдаем локальную базу (исторические свечи).
-        if (isWeekend)
+        // Если выходные ИЛИ выбран OTC актив (брокерский синтетик), 
+        // мы ОБЯЗАНЫ отдавать локальную базу исторических/сдвинутых свечей.
+        // OTC котировки брокера НЕ совпадают с реальным межбанком.
+        // Если скормить живому рынку "EUR/USD OTC" мы получим нулевую корреляцию
+        // и слив депозита, так как бот будет анализировать график А, а торговать график Б.
+        if (isWeekend || isOtc)
         {
-            BotLogger.Info($"[SmartRouting] Weekend detected. Routing {assetToFetch} to local historical DB as {cleanAsset}.");
+            BotLogger.Info($"[SmartRouting] OTC or Weekend detected. Routing {assetToFetch} to local historical DB as {cleanAsset}.");
             return await FetchOtcHistoricalAsync(cleanAsset, rawInterval, limit);
         }
 
-        // Если будние дни, но пользователь целенаправленно нажал на пару "OTC":
-        // Генерируем блокирующую ошибку, чтобы предотвратить расхождение графиков (рассинхронизацию бота и брокера).
-        if (isOtcRequested)
-        {
-            BotLogger.Warn($"[SmartRouting] User requested {assetToFetch} on a weekday. Blocked to prevent synthetic chart mismatch.");
-            throw new ExchangeUnavailableException(
-                "Synthetic OTC Mismatch", 
-                $"⚠️ ОШИБКА: Вы выбрали пару {assetToFetch} в будний день. Графики OTC у брокера в будние дни генерируются искусственно алгоритмом брокера и не совпадают с реальным рынком. Бот анализирует настоящий рынок. Пожалуйста, выберите обычную пару (без приставки OTC), чтобы не потерять депозит из-за расхождения графиков!"
-            );
-        }
-
-        // Если будние дни и актив реальный - идем за живыми котировками (TwelveData / Live DB).
+        // Если будние дни и это НЕ OTC актив - всегда идем за живыми котировками (TwelveData / Live DB).
 
         // For sub-minute timeframes, first try live ticks from the DB
         if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
@@ -218,12 +211,21 @@ public class MarketDataFetcher
 
         int m1Needed = limit;
 
+        // FIX (2026-09-13): For sub-minute intervals, the old formula (limit/12)+2 was too aggressive.
+        // Example: limit=40 → m1Needed=5 → ~60 s5 candles synthesized → after index slicing only 10-12 remain.
+        // TechnicalAnalysisEngine requires 14 minimum → Confluence 3D threw exceptions on every OTC weekend request.
+        //
+        // New formula: for sub-minute, produce (limit+10) sub-minute candles after synthesis,
+        // providing headroom for the time-alignment slicing. Each m1 synthesizes 12 s5 candles.
         if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
         {
+
             int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
-            int subCandlesPerM1 = 12 / groupSize; 
+            // We synthesize 12 s5 per m1, then aggregate. Need enough m1 so after aggregation+slicing we have limit+10 margin.
+            int subCandlesPerM1 = 12 / groupSize; // s5→12, s10→6, s15→4, s30→2
             m1Needed = Math.Max(10, (int)Math.Ceiling((double)(limit + 10) / subCandlesPerM1));
         }
+
         else if (rawInterval.StartsWith("m") && int.TryParse(rawInterval.Substring(1), out int m)) m1Needed = limit * m;
         else if (rawInterval.StartsWith("h") && int.TryParse(rawInterval.Substring(1), out int h)) m1Needed = limit * h * 60;
 
@@ -275,6 +277,9 @@ public class MarketDataFetcher
         var now = DateTime.UtcNow;
         int intervalSeconds = TimeframeSeconds(rawInterval);
         
+        // FIX: Grid-snap the timestamp to the current interval.
+        // Prevents the "now" timestamp from drifting every second, which falsely triggers
+        // CountUnseen() in IndicatorCache and causes RSI/HMA to accumulate phantom states.
         long ticksPerInterval = TimeSpan.TicksPerSecond * intervalSeconds;
         if (ticksPerInterval > 0)
         {
