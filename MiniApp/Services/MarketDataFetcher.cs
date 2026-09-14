@@ -161,7 +161,7 @@ public class MarketDataFetcher
             if (liveCandles.Length > 0) return liveCandles;
 
             BotLogger.Warn($"[MarketDataFetcher] 1m cold-start data unavailable for {cleanAsset}.");
-            throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData). API лимит или недоступность.");
+            throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData). API лимит или недоступен.");
         }
 
         string interval = IntervalMap(rawInterval);
@@ -187,17 +187,28 @@ public class MarketDataFetcher
             if (candles.Length > 0 && TwelveDataWebSocketStream.TryGetLivePrice(cleanAsset, out double realPrice))
             {
                 var last = candles[^1];
-                candles[^1] = last with 
-                { 
-                    Close = realPrice, 
-                    High = Math.Max(last.High, realPrice), 
-                    Low = Math.Min(last.Low, realPrice) 
-                };
+                int intervalSecs = TimeframeSeconds(rawInterval);
+                bool isClosed = last.Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
+
+                if (isClosed)
+                {
+                    var synthetic = new MiniAppController.OhlcCandle(realPrice, realPrice, realPrice, realPrice, 0, last.Timestamp.AddSeconds(intervalSecs));
+                    candles = candles.Append(synthetic).ToArray();
+                }
+                else
+                {
+                    candles[^1] = last with 
+                    { 
+                        Close = realPrice, 
+                        High = Math.Max(last.High, realPrice), 
+                        Low = Math.Min(last.Low, realPrice) 
+                    };
+                }
             }
             return candles;
         }
 
-        throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData).");
+        throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData). API лимит или недоступен.");
     }
 
     private async Task<MiniAppController.OhlcCandle[]> FetchOtcHistoricalAsync(string asset, string rawInterval, int limit)
@@ -234,7 +245,7 @@ public class MarketDataFetcher
             WHERE asset = @Asset
             ORDER BY open_time ASC
             LIMIT @Limit OFFSET @Offset
-        ", new { Asset = dbSymbol, Limit = m1Needed, Offset = offset });
+         ", new { Asset = dbSymbol, Limit = m1Needed, Offset = offset });
 
         var m1Candles = rows.Select(r => new MiniAppController.OhlcCandle(Convert.ToDouble(r.open), Convert.ToDouble(r.high), Convert.ToDouble(r.low), Convert.ToDouble(r.close), Convert.ToDouble(r.volume), default(DateTime))).ToArray();
         if (m1Candles.Length < m1Needed)
@@ -312,8 +323,8 @@ public class MarketDataFetcher
 
             for (int j = i; j < i + groupSize; j++)
             {
-                if (candles[j].High > high)  high   = candles[j].High;
-                if (candles[j].Low  < low)   low    = candles[j].Low;
+                if (candles[j].High > high)   high   = candles[j].High;
+                if (candles[j].Low  < low)    low    = candles[j].Low;
                 volume += candles[j].Volume;
             }
             result.Add(new MiniAppController.OhlcCandle(open, high, low, close, volume, candles[i].Timestamp));
