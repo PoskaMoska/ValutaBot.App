@@ -30,8 +30,8 @@ public static partial class MiniAppController
 
     public static void Start(string[] args, int port = 5000)
     {
-        Console.WriteLine("=====================================================");
-        Console.WriteLine("[Live Core] TradeBE_bot вЂ” MiniApp Server");
+        Console.WriteLine("========================================");
+        Console.WriteLine("[Live Core] TradeBE_bot \"v\" MiniApp Server");
 
         string? envPort = Environment.GetEnvironmentVariable("PORT");
         if (!string.IsNullOrEmpty(envPort) && int.TryParse(envPort, out int parsedPort))
@@ -40,7 +40,7 @@ public static partial class MiniAppController
         }
 
         Console.WriteLine($"[+] Port: {port}");
-        Console.WriteLine("=====================================================");
+        Console.WriteLine("========================================");
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -88,7 +88,7 @@ public static partial class MiniAppController
                 .WithHeaders("X-Telegram-Init-Data", "Content-Type", "Accept"));
         });
         builder.Services.AddHostedService<TelegramBotService>();
-        // FIX #6: Верифицирует зависшие pending_trades при рестарте и каждые 60 сек.
+        // FIX #6: Verification of pending trades
         builder.Services.AddHostedService<PendingTradeVerificationService>();
         builder.Services.AddHostedService<HistoricalCandleAccumulatorService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
 
@@ -131,7 +131,7 @@ public static partial class MiniAppController
             options.OnRejected = async (context, token) =>
             {
                 context.HttpContext.Response.ContentType = "application/json; charset=utf-8";
-                await context.HttpContext.Response.WriteAsync("{\"error\":\"Р РЋР В»Р С‘РЎв‚¬Р С”Р С•Р С Р СР Р…Р С•Р С–Р С• Р В·Р В°Р С—РЎР‚Р С•РЎРѓР С•Р Р†. Р СџР С•Р Т‘Р С•Р В¶Р Т‘Р С‘РЎвЂљР Вµ Р Р…Р ВµРЎРѓР С”Р С•Р В»РЎРЉР С”Р С• РЎРѓР ВµР С”РЎС“Р Р…Р Т‘.\"}");
+                await context.HttpContext.Response.WriteAsync("{\"error\":\"Too many requests\"}");
             };
 
             options.AddPolicy("Global", context =>
@@ -175,7 +175,6 @@ public static partial class MiniAppController
         HttpFactory = app.Services.GetRequiredService<System.Net.Http.IHttpClientFactory>();
         Services    = app.Services;
 
-        // Р—Р°РїСѓСЃРєР°РµРј С„РѕРЅРѕРІС‹Р№ Р·РѕРЅРґ РёР·РјРµСЂРµРЅРёСЏ RTT РґРѕ Binance РґР»СЏ РґРёРЅР°РјРёС‡РµСЃРєРѕР№ РєРѕРјРїРµРЅСЃР°С†РёРё Р·Р°РґРµСЂР¶РєРё
         LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
         app.UseStaticFiles();
         app.UseCors("AllowMiniApp");
@@ -209,7 +208,7 @@ public static partial class MiniAppController
                         xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
                         xhr.onreadystatechange = function () { if (xhr.readyState === 4) { var url = new URL(window.location.href); url.searchParams.set('ngrok_passed', '1'); window.location.href = url.toString(); } };
                         xhr.send();
-                    </script></head><body style='background:#0d0e1e; display:flex; justify-content:center; align-items:center; height:100vh; color:#8a4bfb; font-family:sans-serif;'>Р вЂ”Р В°Р С–РЎР‚РЎС“Р В·Р С”Р В° РЎвЂљР ВµРЎР‚Р СР С‘Р Р…Р В°Р В»Р В°...</body></html>";
+                    </script></head><body style='background:#0d0e1e; display:flex; justify-content:center; align-items:center; height:100vh; color:#8a4bfb; font-family:sans-serif;'>Loading...</body></html>";
                 await context.Response.WriteAsync(bypassScript);
                 return;
             }
@@ -227,7 +226,6 @@ public static partial class MiniAppController
         });
 
         app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe) =>
-
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
             var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
@@ -254,6 +252,77 @@ public static partial class MiniAppController
                 
                 var result = await handler.Handle(query, context.RequestAborted);
                 
+                // --- VOLATILITY FILTER & KELLY SIZING ---
+                double confidence = 0.5;
+                double variance = 0.0;
+                double volatility = 1.0; // Fail-safe pass
+                
+                try 
+                {
+                    var resultJsonStr = JsonSerializer.Serialize(result);
+                    using var doc = JsonDocument.Parse(resultJsonStr);
+                    var root = doc.RootElement;
+                    
+                    JsonElement mlNode = default;
+                    if (root.TryGetProperty("MlAnalysis", out var n1)) mlNode = n1;
+                    else if (root.TryGetProperty("mlAnalysis", out var n2)) mlNode = n2;
+                    
+                    if (mlNode.ValueKind == JsonValueKind.Object)
+                    {
+                        if (mlNode.TryGetProperty("Confidence", out var c1)) confidence = c1.GetDouble();
+                        else if (mlNode.TryGetProperty("confidence", out var c2)) confidence = c2.GetDouble();
+                        
+                        if (mlNode.TryGetProperty("Variance", out var v1)) variance = v1.GetDouble();
+                        else if (mlNode.TryGetProperty("variance", out var v2)) variance = v2.GetDouble();
+                    }
+                    else
+                    {
+                        if (root.TryGetProperty("Confidence", out var c1)) confidence = c1.GetDouble();
+                        else if (root.TryGetProperty("confidence", out var c2)) confidence = c2.GetDouble();
+                        
+                        if (root.TryGetProperty("Variance", out var v1)) variance = v1.GetDouble();
+                        else if (root.TryGetProperty("variance", out var v2)) variance = v2.GetDouble();
+                    }
+                    
+                    JsonElement taNode = default;
+                    if (root.TryGetProperty("TechnicalAnalysis", out var t1)) taNode = t1;
+                    else if (root.TryGetProperty("technicalAnalysis", out var t2)) taNode = t2;
+                    
+                    if (taNode.ValueKind == JsonValueKind.Object)
+                    {
+                        if (taNode.TryGetProperty("Atr", out var a1)) volatility = a1.GetDouble();
+                        else if (taNode.TryGetProperty("atr", out var a2)) volatility = a2.GetDouble();
+                    }
+                    else
+                    {
+                        if (root.TryGetProperty("Atr", out var a1)) volatility = a1.GetDouble();
+                        else if (root.TryGetProperty("atr", out var a2)) volatility = a2.GetDouble();
+                        else if (root.TryGetProperty("AtrNorm", out var an1)) volatility = an1.GetDouble();
+                        else if (root.TryGetProperty("atrNorm", out var an2)) volatility = an2.GetDouble();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[KELLY] Error extracting metrics: {ex.Message}");
+                }
+                
+                // BO Kelly Criterion
+                double payout = 0.82; 
+                double q = 1.0 - confidence;
+                double kellyPct = confidence - (q / payout);
+                double fractionalKelly = kellyPct > 0 ? kellyPct * 0.5 : 0.0;
+                
+                // Adjust Kelly by Variance
+                double adjustedKelly = Math.Max(0, fractionalKelly * (1.0 - Math.Min(variance, 1.0)));
+                
+                // Volatility Filter
+                double minVolThreshold = 0.0001;
+                bool volFilterPassed = volatility >= minVolThreshold;
+                if (!volFilterPassed) 
+                {
+                    adjustedKelly = 0.0;
+                }
+                
                 // Add config and latency compensation data to the result for the frontend
                 var finalResult = new
                 {
@@ -264,9 +333,14 @@ public static partial class MiniAppController
                         smc = userSettings.EnableSmc,
                         of = userSettings.EnableOf
                     },
+                    risk_management = new
+                    {
+                        kelly_percentage = Math.Round(adjustedKelly * 100.0, 2),
+                        volatility_filter_passed = volFilterPassed,
+                        variance_penalty = variance,
+                        volatility_value = volatility
+                    },
                     // Pre-execution latency compensation:
-                    // Р¤СЂРѕРЅС‚РµРЅРґ РёСЃРїРѕР»СЊР·СѓРµС‚ СЌС‚Рё Р·РЅР°С‡РµРЅРёСЏ РґР»СЏ С‚Р°Р№РјРµСЂР° СѓРїСЂРµР¶РґРµРЅРёСЏ.
-                    // Р¤РѕСЂРјСѓР»Р°: РѕС‚РєСЂС‹С‚СЊ СЃРґРµР»РєСѓ Р·Р° send_at_offset_ms РґРѕ Р·Р°РєСЂС‹С‚РёСЏ СЃРІРµС‡Рё.
                     latency_ms = (int)Math.Round(LatencyProbe.LastRttMs),
                     send_at_offset_ms = LatencyProbe.SendAtOffsetMs
                 };
@@ -323,7 +397,7 @@ public static partial class MiniAppController
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
 
-        // в”Ђв”Ђ Internal endpoint for ML service в†’ Telegram admin notifications в”Ђв”Ђ
+        // Internal endpoint for ML service -> Telegram admin notifications
         app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
         {
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret";
@@ -363,7 +437,7 @@ public static partial class MiniAppController
             return Results.Json(fng);
         });
 
-        /* РІвЂќР‚РІвЂќР‚РІвЂќР‚ Postback Endpoint РІвЂќР‚РІвЂќР‚РІвЂќР‚ */
+        /* Postback Endpoint */
         app.MapGet("/api/postback", async Task<IResult> (HttpContext context) =>
         {
             var query = context.Request.Query;
@@ -398,17 +472,12 @@ public static partial class MiniAppController
                 return Results.BadRequest(new { success = false, error = "pocketId is required" });
             }
 
-            BotLogger.Info($"[Postback СЂСџвЂќвЂ™] Verified Postback: pocketId={pocketId}, chatId={chatId}, status={status}, deposit={deposit}");
+            BotLogger.Info($"[Postback] Verified Postback: pocketId={pocketId}, chatId={chatId}, status={status}, deposit={deposit}");
 
             await TelegramBotService.ProcessPostback(chatId, pocketId, status, deposit);
 
             return Results.Ok(new { success = true, message = "Postback processed successfully" });
         });
-
-
-
-
-        // Start background TwelveData WebSocket connection immediately to start accumulating ticks
 
         app.Run($"http://0.0.0.0:{port}");
     }
@@ -420,13 +489,6 @@ public static partial class MiniAppController
         "h1" => "m30", "h4" => "h1",
         "d1" => "h4", _ => null
     };
-
-
-
-    /* РІвЂќР‚РІвЂќР‚РІвЂќР‚ Indicators РІвЂќР‚РІвЂќР‚РІвЂќР‚ */
-    /* РІвЂќР‚РІвЂќР‚РІвЂќР‚ Fear & Greed Index РІвЂќР‚РІвЂќР‚РІвЂќР‚ */
-
-    
 
     private static async Task<object> GetFearGreedIndex()
     {
@@ -453,7 +515,3 @@ public static partial class MiniAppController
         }
     }
 }
-
-
-
-
