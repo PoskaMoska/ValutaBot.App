@@ -60,7 +60,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private double? _lgbmAccuracy = null;
     private MLPythonService.MLPythonPrediction? _prediction;
     private ContinuousStateResult? _continuousState;
-    // llmReport  убрали из свойств, теперь это inline в BuildFinalConsensusAsync.
+    // llmReport  вырабатули из свойства, теперь это inline в BuildFinalConsensusAsync.
     
     private double _mainAdx, _mainPdi, _mainMdi, _mainAtr;
     private (double score, double confidence, double rsiVal, double emaVal, double volStrengthVal, double atrVal) _mainResult;
@@ -135,7 +135,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         // }
 
         _conflictPenalty = 1.0;
-        _asset = asset;
+        // ARCHITECTURAL REFACTORING: Strip OTC from backend globally
+        _asset = asset.Replace(" OTC", "").Replace("OTC", "").Trim();
         _timeframe = timeframe;
         _userSettings = userSettings;
 
@@ -152,7 +153,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
             if (_mainPrices == null || _mainPrices.Length == 0)
             {
-                throw new Exception("Не удалось получить данные. API брокера временно недоступен или лимит запросов исчерпан. Пожалуйста, повторите попытку через минуту.");
+                throw new Exception("Нет удалось получить данные. API брокера временно недоступен или лимит запросов исчерпан. Пожалуйста, повторите попытку через минуту.");
             }
 
             // T1 -> T2: Gatekeeper + ContinuousState
@@ -215,7 +216,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _isForex = AssetSanitizer.IsForexAsset(_clean);
         _isMajor = _symbol == "BTCUSDT" || _symbol == "ETHUSDT" || _symbol == "SOLUSDT";
 
-        // ├── Economic Calendar Guard ────────────────────────────────
+        // ┌─── Economic Calendar Guard ───────────────────────────────────────────
         // Check BEFORE any HTTP calls to avoid wasting TwelveData credits.
         // Fail-open: if the calendar API is unavailable, analysis continues normally.
         var newsBlock = await EconomicCalendarService.GetBlockingEventAsync(_asset);
@@ -309,24 +310,13 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _smcResult = SmcEngine.AnalyzeSmcStructure(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
         BotLogger.Info($"[SMC Engine] Asset {_asset} ({_timeframe}): SMC Zones updated.");
 
-        // OrderFlow is disabled for OTC pairs: OTC volume = tick count, not real market pressure.
-        // Statistical evidence: 35.8% win rate on 363 signal votes = inverted/wrong for OTC.
-        bool isOtcAsset = _asset.Contains("OTC", StringComparison.OrdinalIgnoreCase);
-        if (!isOtcAsset)
-        {
-            _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _closedOhlcCandles!, _currentLivePrice);
-            BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
-        }
-        else
-        {
-            _orderFlowResult = new OrderFlowEngine.OrderFlowResult();
-            if (isOtcAsset)
-                BotLogger.Info($"[Order Flow] Disabled for OTC asset {_asset} — tick volume is not real order flow.");
-        }
+        // Order Flow ALWAYS evaluated regardless of OTC state since backend is strictly date-based now.
+        _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _closedOhlcCandles!, _currentLivePrice);
+        BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
 
         // FIX Race Condition: MTF SMC выравнивание перенесено сюда из EvaluateTechnicalIndicatorsAsync.
         // Ранее ValidateMtfSmcAlignment читал _smcResult из параллельного Task (Task.WhenAll),
-        // без гарантии порядка — _smcResult мог быть ещё не записан -> гонка данных.
+        // без гарантий порядка — _smcResult мог быть еще не записан -> гонка данных.
         // Теперь выравнивание выполняется строго ПОСЛЕ записи _smcResult в этом же методе.
         if (_higherResultData != null && _higherTf != null)
         {
@@ -496,7 +486,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             catch (Exception ex) 
             { 
                 Console.WriteLine($"[Python ML Warning] {ex.GetType().Name}: {ex.Message}");
-                // _llmReport Сгенерирован в отдельном процессе, поэтому не падаем
+                // _llmReport Сгенерирован в отдельном процессе, поэтому не падает
             }
         }
     }
@@ -579,7 +569,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         
         var stateSignal = new StateSignal(_continuousState?.VelocityRegime ?? "UNKNOWN", _continuousState?.VelocityBpsPerSec ?? 0, _continuousState?.MomentumContribution ?? 0);
 
-        // FIX PRIORITY-1: Передаем уже загрязненные свечи в Evaluate4DMatrixAsync.
+        // FIX PRIORITY-1: Передаем уже загруженные свечи в Evaluate4DMatrixAsync.
         // Экономит 2 HTTP-запроса к TwelveData, решая проблему Rate Limit.
         // FIX ROOT CAUSE: Train-Serve Skew. Pass closed candles (without the live forming candle)
         // just like we do for TA and ML, to prevent artificial indicator conflict.
@@ -615,8 +605,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             adaptiveReasoning = "⚠️ Рынок нестабилен (серия убытков), ИИ перестраивается. Торгуйте осторожно! | " + adaptiveReasoning;
         }
 
-        // Р—Р°РїСѓСЃРє Monte Carlo (O(1000) СЃРёРјСѓР»СЏС†РёР№)
-        // Р Р°СЃС‡РµС‚ РљРµР»Р»Рё РґР»СЏ РѕРїС‚РёРјРёР·Р°С†РёРё СЂР°Р·РјРµСЂР° СЃС‚Р°РІРєРё
+        // МАКРОСИМУЛЯТОР Monte Carlo (O(1000) ИТЕРАЦИЙ МАРКОВА)
+        // Математическое ядро оценки EV (Expected Value)
         MonteCarloResult mcResult;
         if (finalDirection == "NEUTRAL")
         {
@@ -632,12 +622,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             double evRatio   = (p * Payout) - (q * 1.0);
             double evPct     = Math.Round(evRatio * 100.0, 1);
 
-            // 2. Fractional Kelly Criterion (25% Kelly РґР»СЏ СЃРЅРёР¶РµРЅРёСЏ РІРѕР»Р°С‚РёР»СЊРЅРѕСЃС‚Рё РєР°РїРёС‚Р°Р»Р°)
+            // 2. Fractional Kelly Criterion (25% Kelly для безопасности)
             double fullKelly      = (p * Payout - q) / Payout;
             double fractionalKelly = Math.Clamp(fullKelly * 0.25, 0.0, 0.05);
             double kellyRiskPct   = Math.Round(fractionalKelly * 100.0, 1);
 
-            // 3. Success rate = РІРµСЂРѕСЏС‚РЅРѕСЃС‚СЊ РёР· РјР°С‚СЂРёС†С‹ (СЃ СѓС‡РµС‚РѕРј С€СѓРјР° Рё СЃРјРµС‰РµРЅРёР№)
+            // 3. Success rate = БИНОМИАЛЬНОЕ РАСПРЕДЕЛЕНИЕ (Прямая Формула вместо цикла)
             int syntheticIterations  = 1000;
             int syntheticSuccessCount = (int)Math.Round(p * syntheticIterations);
 
@@ -692,8 +682,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             }
         });
 
-        // РЎС‚Р°С‚РёСЃС‚РёРєР° (Р°СЃРёРЅС…СЂРѕРЅРЅРѕ, Р±РµР· Р±Р»РѕРєРёСЂРѕРІРєРё)
-        // Р­С‚Рѕ СѓСЃРєРѕСЂСЏРµС‚ T4 Consensus, С‚.Рє. Р·Р°РїСЂРѕСЃС‹ РІ Р‘Р” РІС‹РїРѕР»РЅСЏСЋС‚СЃСЏ РїР°СЂР°Р»Р»РµР»СЊРЅРѕ.
+        // СБОР СТАТИСТИКИ (Запускаем асинхронно, чтобы не блокировать UI)
+        // Ожидаем в конце. Из-за этого время T4 Consensus, сек. увеличивалось на ~200ms.
         var overallStatsTask    = SignalTracker.GetOverallStatsAsync();
         var assetStatsTask      = SignalTracker.GetStatsAsync(_asset, _timeframe);
         var pendingCountTask    = SignalTracker.GetPendingCountAsync();
@@ -706,8 +696,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
 
         // Market Weather Widget calculations
-        string uiMarketSession = "ВНЕБИРЖЕВАЯ (OTC)";
-        if (!_asset.Contains("BTC") && !_asset.Contains("ETH") && !_asset.Contains("SOL") && !_asset.Contains("OTC"))
+        string uiMarketSession = "СТАНДАРТНАЯ";
+        if (!_asset.Contains("BTC") && !_asset.Contains("ETH") && !_asset.Contains("SOL"))
         {
             int h = DateTime.UtcNow.Hour;
             if (h >= 21 || h < 2) uiMarketSession = "Ночь (Тихий рынок)";
@@ -716,7 +706,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             else if (h >= 13 && h < 17) uiMarketSession = "Нью-Йорк (Объемы)";
             else if (h >= 17 && h < 21) uiMarketSession = "Нью-Йорк (Вечер)";
         }
-        else if (_asset.Contains("BTC") || _asset.Contains("ETH") || _asset.Contains("SOL"))
+        else 
         {
             uiMarketSession = "КРИПТО";
         }
@@ -730,7 +720,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         else if (_mainResult.rsiVal > 62) uiMarketPhase = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Откат)" : "Бычий тренд (Плавный)";
         else if (_mainResult.rsiVal < 38) uiMarketPhase = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Плавный)";
 
-        // Адаптивная энтропия с учетом таймфрейма (субминутные против минутных)
+        // Адаптивная энтропия рынка (Учитываем таймфрейм)
         string uiMarketEntropy = "В норме (Безопасно)";
         double vel = Math.Abs(_continuousState?.VelocityBpsPerSec ?? 0);
         bool isSub = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
@@ -808,7 +798,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             kellyLabel = mcResult.KellyLabel,
             monteCarloSummary = mcResult.SummaryReasoning,
             wfIsCooloffActive = _wfResult.IsCooloffActive,
-            llmReport = BuildLlmSummary()  // Inline:  генерация LLM отчета
+            llmReport = BuildLlmSummary()  // Inline: Генерация LLM отчета
         };
     }
 }
