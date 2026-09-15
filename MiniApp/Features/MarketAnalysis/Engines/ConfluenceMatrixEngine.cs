@@ -486,9 +486,9 @@ public class ConfluenceMatrixEngine(
         double mathProb = (scoreMath + 1.0) / 2.0;
         
         // FIX PRIORITY-1: Rebalanced ML vs Math blend. 
-        // Previously (70% ML / 30% Math) gave ML absolute veto power, which is dangerous in Binary Options 
-        // if order flow or momentum is strongly against it. Now we enforce a strict 50/50 consensus.
-        double blendedProb = (metaProb * 0.50) + (mathProb * 0.50);
+        // We moved from 50/50 to 65/35. This gives the ML the decisive vote in standard disputes,
+        // but preserves exactly 35% for the Math engine to act as an emergency brake if real-time physics (SMC/OFlow) are extreme.
+        double blendedProb = (metaProb * 0.65) + (mathProb * 0.35);
         
         // FIX PRIORITY-2: Hardened entry threshold. 
         // 0.52 was only 52%, which is precisely the breakeven line for 92% payout (1 / 1.92 = 52.08%).
