@@ -493,31 +493,23 @@ public class ConfluenceMatrixEngine(
         // FIX PRIORITY-2: Hardened entry threshold. 
         // 0.52 was only 52%, which is precisely the breakeven line for 92% payout (1 / 1.92 = 52.08%).
         // We raised it to 55% to provide a definitive 3% EV buffer above market noise.
-        if (blendedProb >= 0.55)
+        // Убираем мертвую зону (NEUTRAL), так как пользователь требует сигнал всегда.
+        if (blendedProb >= 0.50)
         {
             candidateDir = "BUY";
             finalConfidenceScore = (blendedProb - 0.5) * 2.0;
-        }
-        else if (blendedProb <= 0.45)
-        {
-            candidateDir = "PUT";
-            finalConfidenceScore = (0.5 - blendedProb) * 2.0;
+            // Если уверенность слишком мала, даем минимальный вес, чтобы UI не показывал 0%
+            if (finalConfidenceScore < 0.05) finalConfidenceScore = 0.05;
         }
         else
         {
-            candidateDir = "NEUTRAL";
-            finalConfidenceScore = 0.0;
+            candidateDir = "PUT";
+            finalConfidenceScore = (0.5 - blendedProb) * 2.0;
+            if (finalConfidenceScore < 0.05) finalConfidenceScore = 0.05;
         }
 
-        // ШАГ 2: Блокировка конфликта ИИ vs Математика
-        if (candidateDir != "NEUTRAL" && mlSignal.Direction != "NEUTRAL" && mlSignal.Direction != candidateDir)
-        {
-            BotLogger.Warn($"[Conflict Resolver] ML says {mlSignal.Direction}, but Math says {candidateDir}. Forcing NEUTRAL to prevent paradox.");
-            candidateDir = "NEUTRAL";
-            finalConfidenceScore = 0.0;
-            // Обнуляем буст, так как сигнал отменен
-            mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
-        }
+        // ШАГ 2: Блокировка конфликта УДАЛЕНА. 
+        // Теперь если ИИ и математика спорят, побеждает тот, у кого суммарный перевес хотя бы на 0.1%.
 
         // ШАГ 3: Momentum Inversion (Езда по тренду против угадывания дна)
         // Если математика хочет ловить дно (BUY), но скорость цены показывает жесткое падение, мы едем вместе с падением (PUT).
