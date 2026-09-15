@@ -91,8 +91,8 @@ public class MarketDataFetcher
 
         bool isWeekend = IsWeekendNow();
 
-        // SMART ROUTING: 
-        // Decisions are made STRICTLY based on the day of the week.
+        // Убрана привязка к OTC по просьбе пользователя.
+        // Теперь в будние дни для OTC пар будут загружаться реальные котировки TwelveData.
         if (isWeekend)
         {
             BotLogger.Info($"[SmartRouting] Weekend detected. Routing {assetToFetch} to local historical DB as {cleanAsset}.");

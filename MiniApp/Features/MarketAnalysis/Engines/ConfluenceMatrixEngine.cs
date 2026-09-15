@@ -509,6 +509,16 @@ public class ConfluenceMatrixEngine(
             finalConfidenceScore = 0.0;
         }
 
+        // ШАГ 2: Блокировка конфликта ИИ vs Математика
+        if (candidateDir != "NEUTRAL" && mlSignal.Direction != "NEUTRAL" && mlSignal.Direction != candidateDir)
+        {
+            BotLogger.Warn($"[Conflict Resolver] ML says {mlSignal.Direction}, but Math says {candidateDir}. Forcing NEUTRAL to prevent paradox.");
+            candidateDir = "NEUTRAL";
+            finalConfidenceScore = 0.0;
+            // Обнуляем буст, так как сигнал отменен
+            mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
+        }
+
         double absWeightedScore = finalConfidenceScore;
         
         // Apply conflict penalty globally to the final confidence (so MTF conflict actually lowers probability)
@@ -517,6 +527,7 @@ public class ConfluenceMatrixEngine(
         // Внедрение интеллектуального сессионного множителя (Market Session Modifier)
         double sessionMultiplier = 1.0;
         string sessionName = "DEFAULT";
+        // Сессии теперь работают для OTC (проверка !isOtcAsset убрана)
         if (!asset.Contains("BTC") && !asset.Contains("ETH") && !asset.Contains("SOL"))
         {
             int h = DateTime.UtcNow.Hour;
@@ -525,10 +536,6 @@ public class ConfluenceMatrixEngine(
             else if (h >= 8 && h < 13) { sessionMultiplier = 1.0; sessionName = "LONDON_MORNING"; }
             else if (h >= 13 && h < 17) { sessionMultiplier = 1.1; sessionName = "LONDON_NY_OVERLAP"; }
             else if (h >= 17 && h < 21) { sessionMultiplier = 1.0; sessionName = "NY_AFTERNOON"; }
-        }
-        else
-        {
-            sessionName = "CRYPTO";
         }
         
         absWeightedScore *= sessionMultiplier;
