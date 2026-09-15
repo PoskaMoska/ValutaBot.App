@@ -160,7 +160,7 @@ public class ConfluenceMatrixEngine(
         {
             // Передаем реальные OhlcCandle[] (с настоящими High/Low) напрямую в ScoreTimeframe
             // FIX ROOT CAUSE #3: Include asset in cache key for per-asset isolation
-            var (score, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
+            var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
                 $"4dmatrix_{asset}_{tf}", tf, prices,
                 volumes: volumes,
                 candles: ohlcCandles.AsSpan()
@@ -517,6 +517,30 @@ public class ConfluenceMatrixEngine(
             finalConfidenceScore = 0.0;
             // Обнуляем буст, так как сигнал отменен
             mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
+        }
+
+        // ШАГ 3: Smart Delay / Momentum Trigger (Анти-Ловец ножей)
+        // Блокируем ранние входы (5 минусов перед разворотом), пока реальная скорость тиков не подтвердит разворот
+        bool isSubOrM1 = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) || timeframe.Equals("m1", StringComparison.OrdinalIgnoreCase);
+        if (isSubOrM1 && candidateDir != "NEUTRAL")
+        {
+            double vel = stateSignal.VelocityBpsPerSec;
+            // Чтобы сигнал прошел, Velocity должно подтвердить направление (BUY -> vel > -0.05, PUT -> vel < 0.05)
+            // Мы даем небольшой допуск (шум), но запрещаем входить, если нож явно летит против нас.
+            if (candidateDir == "BUY" && vel < -0.1)
+            {
+                BotLogger.Warn($"[Smart Delay] BUY suppressed on {timeframe}. Price still falling (Vel: {vel:F2}). Waiting for momentum shift.");
+                candidateDir = "NEUTRAL";
+                finalConfidenceScore = 0.0;
+                mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
+            }
+            else if (candidateDir == "PUT" && vel > 0.1)
+            {
+                BotLogger.Warn($"[Smart Delay] PUT suppressed on {timeframe}. Price still rising (Vel: {vel:F2}). Waiting for momentum shift.");
+                candidateDir = "NEUTRAL";
+                finalConfidenceScore = 0.0;
+                mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
+            }
         }
 
         double absWeightedScore = finalConfidenceScore;
