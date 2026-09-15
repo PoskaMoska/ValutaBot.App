@@ -519,26 +519,24 @@ public class ConfluenceMatrixEngine(
             mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
         }
 
-        // ШАГ 3: Smart Delay / Momentum Trigger (Анти-Ловец ножей)
-        // Блокируем ранние входы (5 минусов перед разворотом), пока реальная скорость тиков не подтвердит разворот
+        // ШАГ 3: Momentum Inversion (Езда по тренду против угадывания дна)
+        // Если математика хочет ловить дно (BUY), но скорость цены показывает жесткое падение, мы едем вместе с падением (PUT).
         bool isSubOrM1 = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) || timeframe.Equals("m1", StringComparison.OrdinalIgnoreCase);
         if (isSubOrM1 && candidateDir != "NEUTRAL")
         {
             double vel = stateSignal.VelocityBpsPerSec;
-            // Чтобы сигнал прошел, Velocity должно подтвердить направление (BUY -> vel > -0.05, PUT -> vel < 0.05)
-            // Мы даем небольшой допуск (шум), но запрещаем входить, если нож явно летит против нас.
             if (candidateDir == "BUY" && vel < -0.1)
             {
-                BotLogger.Warn($"[Smart Delay] BUY suppressed on {timeframe}. Price still falling (Vel: {vel:F2}). Waiting for momentum shift.");
-                candidateDir = "NEUTRAL";
-                finalConfidenceScore = 0.0;
+                BotLogger.Warn($"[Momentum Inversion] BUY overridden on {timeframe}. Knife falling (Vel: {vel:F2}). Inverting to PUT.");
+                candidateDir = "PUT";
+                finalConfidenceScore = Math.Abs(finalConfidenceScore) > 0 ? finalConfidenceScore : 0.2;
                 mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
             }
             else if (candidateDir == "PUT" && vel > 0.1)
             {
-                BotLogger.Warn($"[Smart Delay] PUT suppressed on {timeframe}. Price still rising (Vel: {vel:F2}). Waiting for momentum shift.");
-                candidateDir = "NEUTRAL";
-                finalConfidenceScore = 0.0;
+                BotLogger.Warn($"[Momentum Inversion] PUT overridden on {timeframe}. Price rising (Vel: {vel:F2}). Inverting to BUY.");
+                candidateDir = "BUY";
+                finalConfidenceScore = Math.Abs(finalConfidenceScore) > 0 ? finalConfidenceScore : 0.2;
                 mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
             }
         }
