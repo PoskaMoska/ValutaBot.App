@@ -1,5 +1,7 @@
+using ValutaBot.Core;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
 using ValutaBot.MiniApp.CQRS.Handlers;
@@ -9,7 +11,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 
 public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 {
-    private static readonly System.Collections.Generic.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     
     private readonly MarketDataFetcher _fetcher;
@@ -132,7 +134,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(cleanAsset, timeframe, isForex, symbol, closedCandles, closedPrices, closedVolumes, closedHigherCandles, closedHigherCandles.Select(c=>c.Close).ToArray(), closedHigherCandles.Select(c=>c.Volume).ToArray());
         
-        var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.emaVal, taResult.volStrengthVal, mainAtr, mainAdx);
+        var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.hmaVal, taResult.volStrengthVal, mainAtr, mainAdx);
         var smcSignal = new SmcSignal(smcResult.BosDirection, smcResult.SweepDirection, smcResult.OrderBlockType, smcResult.FvgType, "");
         var ofSignal = new OrderflowSignal(ofResult.ScoreContribution, ofResult.Description);
         var mlSignal = new MlSignal(lgbmDir, lgbmConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline");

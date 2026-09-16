@@ -66,6 +66,13 @@ public static partial class MiniAppController
         builder.Services.AddSingleton<MonteCarloEngine>();
         builder.Services.AddSingleton<IMonteCarloEngine>(sp => sp.GetRequiredService<MonteCarloEngine>());
         
+        // Register CircuitBreakerService
+        builder.Services.AddSingleton<ValutaBot.MiniApp.Services.ICircuitBreakerService>(sp =>
+            new ValutaBot.MiniApp.Services.CircuitBreakerService(
+                sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TradingBotSettings>>(),
+                () => ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection()
+            ));
+
         // Register CQRS Handlers
         builder.Services.AddTransient<ValutaBot.MiniApp.CQRS.Handlers.GetMarketAnalysisQueryHandler>();
         builder.Services.AddTransient<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator, ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator>();
@@ -174,6 +181,10 @@ public static partial class MiniAppController
 
         HttpFactory = app.Services.GetRequiredService<System.Net.Http.IHttpClientFactory>();
         Services    = app.Services;
+
+        // Initialize CircuitBreaker (Creates DB Table)
+        var cbService = app.Services.GetRequiredService<ValutaBot.MiniApp.Services.ICircuitBreakerService>();
+        cbService.InitializeAsync().GetAwaiter().GetResult();
 
         LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
         app.UseStaticFiles();

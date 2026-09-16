@@ -188,10 +188,6 @@ namespace ValutaBot.App.MiniApp.Data
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();
             RealtimeTickCollector.Initialize();
-            
-            // FIX 1: Restore any active CircuitBreaker halt from DB.
-            // Must run after table creation and after TradeOutcomeTracker is ready.
-            await ValutaBot.MiniApp.Services.CircuitBreakerService.LoadFromDbAsync();
         }
 
     }
