@@ -152,7 +152,42 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var stats = await SignalTracker.GetOverallStatsAsync();
         var assetStats = await SignalTracker.GetStatsAsync(cleanAsset, timeframe);
 
+        string uiMarketSession = "ВНЕБИРЖЕВАЯ (OTC)";
+        if (!cleanAsset.Contains("BTC") && !cleanAsset.Contains("ETH") && !cleanAsset.Contains("SOL"))
+        {
+            int h = DateTime.UtcNow.Hour;
+            if (h >= 21 || h < 2) uiMarketSession = "Ночь (Тихий рынок)";
+            else if (h >= 2 && h < 8) uiMarketSession = "Азия (Пила)";
+            else if (h >= 8 && h < 13) uiMarketSession = "Лондон (Начало)";
+            else if (h >= 13 && h < 17) uiMarketSession = "Нью-Йорк (Объемы)";
+            else if (h >= 17 && h < 21) uiMarketSession = "Нью-Йорк (Вечер)";
+        }
+        else 
+        {
+            uiMarketSession = "КРИПТО";
+        }
+
+        string uiMarketPhase = "Боковик (Флэт)";
+        string regime = state.VelocityRegime ?? "";
+        if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс (Резкий)";
+        else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс (Резкий)";
+        else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Разворот)";
+        else if (taResult.rsiVal > 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Откат)" : "Бычий тренд (Плавный)";
+        else if (taResult.rsiVal < 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Плавный)";
+
+        string uiMarketEntropy = "В норме (Безопасно)";
+        double vel = Math.Abs(state.VelocityBpsPerSec);
+        bool isSub = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
+        double dangerVel = isSub ? 0.3 : 3.0; 
+        double deadVel   = isSub ? 0.02 : 0.1;
+
+        if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
+        else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
+
         return new {
+            uiMarketSession = uiMarketSession,
+            uiMarketPhase = uiMarketPhase,
+            uiMarketEntropy = uiMarketEntropy,
             direction = consensus.FinalDirection,
             probability = consensus.Probability,
             duration = timeout.TimeoutText,
@@ -167,8 +202,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmConfidence = (int)(lgbmConf * 100),
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
-            chartOhcl = candles.TakeLast(80).Select(c => new { o = c.Open, h = c.High, l = c.Low, c = c.Close, v = c.Volume }),
-            goldedSetup = mtfResult.IsGoldenSetup
+            chartData = mainPrices,
+            chartOhlc = candles.TakeLast(80).Select(c => new { o = c.Open, h = c.High, l = c.Low, c = c.Close, v = c.Volume }),
+            goldenSetup = mtfResult.IsGoldenSetup
         };
     }
 }
