@@ -1,109 +1,105 @@
 using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
+using Npgsql;
 using ValutaBot.App.MiniApp.Data;
 using ValutaBot.App.MiniApp.Data.Repositories;
+using Microsoft.Extensions.Options;
 
 namespace ValutaBot.MiniApp.Services
 {
-    /// <summary>
-    /// Monitors recent trade outcomes and halts trading when thresholds are breached.
-    ///
-    /// FIX 1 (2026-09-13): Halt state is now persisted in PostgreSQL (circuit_breaker_state table).
-    /// Previously _haltedUntil was volatile in-memory: any process restart (crash, Railway redeploy,
-    /// OOM kill) silently reset the halt and trading resumed immediately.
-    ///
-    /// Architecture:
-    ///   - In-memory cache (_haltedUntil) avoids DB hit on every IsHalted() call.
-    ///   - Cache considered stale after DB_CACHE_TTL_SECONDS (30s).
-    ///   - LoadFromDbAsync() restores any active halt on startup.
-    ///   - Halt activation: DB written first, then memory updated (write-through).
-    ///   - Halt expiry:     DB row deleted, memory cleared.
-    /// </summary>
-    public static class CircuitBreakerService
+    // DI-first service. Stores and checks Circuit Breaker state with PostgreSQL persistence and in-memory TTL cache.
+    public interface ICircuitBreakerService
     {
-        private static DateTime? _haltedUntil = null;
-        private static string _haltReason = string.Empty;
-        private static DateTime _cacheLoadedAt = DateTime.MinValue;
-        private static readonly object _lock = new object();
+        Task InitializeAsync(CancellationToken ct = default);
+        bool IsHalted();
+        string? GetHaltedReason();
+        Task CheckStateAsync(CancellationToken ct = default);
+        Task ActivateHaltAsync(string reason, CancellationToken ct = default);
+    }
 
-        // How long the in-memory cache is trusted before considering a DB refresh.
-        private const int DB_CACHE_TTL_SECONDS = 30;
+    public sealed class CircuitBreakerService : ICircuitBreakerService
+    {
+        private readonly TradingBotSettings _settings;
+        private readonly Func<NpgsqlConnection> _getConnection;
+        private readonly object _lock = new();
 
-        // Thresholds
-        private const int WINDOW_SIZE = 10;
-        private const int MAX_CONSECUTIVE_LOSSES = 3;
-        private const double MIN_WIN_RATE = 0.40;
-        private const int COOLDOWN_MINUTES = 120; // 2 hours
+        // In-memory cached state (with TTL)
+        private DateTime? _haltedUntil;
+        private string _haltReason = string.Empty;
+        private DateTime _cacheLoadedAt = DateTime.MinValue;
 
-        // ── Startup ──────────────────────────────────────────────────────────────
+        public CircuitBreakerService(IOptions<TradingBotSettings> options, Func<NpgsqlConnection> connectionFactory)
+        {
+            _settings = options.Value ?? throw new ArgumentNullException(nameof(options));
+            _getConnection = connectionFactory ?? throw new ArgumentNullException(nameof(connectionFactory));
+        }
 
-        /// <summary>
-        /// Called once at application startup to reload any active halt from the DB.
-        /// Ensures a process restart does not silently clear an active CircuitBreaker halt.
-        /// </summary>
+        // Backward-compat shim to avoid breaking static call from legacy startup. No-op; use InitializeAsync via DI.
+        [Obsolete("Use ICircuitBreakerService.InitializeAsync() via DI. This method is a no-op kept for compatibility.")]
         public static async Task LoadFromDbAsync()
         {
             try
             {
-                var (haltedUntil, reason) = await ReadHaltFromDbAsync();
-                lock (_lock)
-                {
-                    if (haltedUntil.HasValue && DateTime.UtcNow < haltedUntil.Value)
-                    {
-                        _haltedUntil   = haltedUntil;
-                        _haltReason    = reason ?? string.Empty;
-                        BotLogger.Warn($"[CircuitBreaker] Restored active halt from DB. Resumes at {_haltedUntil:u}. Reason: {_haltReason}");
-                    }
-                    else if (haltedUntil.HasValue)
-                    {
-                        // Stored halt already expired — clean up the stale DB row.
-                        _ = Task.Run(DeleteHaltFromDbAsync);
-                        BotLogger.Info("[CircuitBreaker] Stored halt had already expired. Cleared.");
-                    }
-                    else
-                    {
-                        BotLogger.Info("[CircuitBreaker] No active halt in DB. Trading is open.");
-                    }
-                    _cacheLoadedAt = DateTime.UtcNow;
-                }
+                // Ensure table exists (idempotent) to avoid errors during startup migration order
+                await using var conn = DbConnectionFactory.GetConnection();
+                await conn.OpenAsync();
+                await conn.ExecuteAsync(@"CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                    id INTEGER PRIMARY KEY,
+                    halted_until TIMESTAMPTZ NULL,
+                    reason TEXT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );");
+                BotLogger.Warn("[CircuitBreaker] Legacy static LoadFromDbAsync called. No-op. Use DI service to initialize.");
             }
             catch (Exception ex)
             {
-                BotLogger.Warn($"[CircuitBreaker] LoadFromDb failed (non-fatal): {ex.Message}");
+                BotLogger.Warn($"[CircuitBreaker] Legacy LoadFromDbAsync failed (non-fatal): {ex.Message}");
             }
         }
 
-        // ── Public API ───────────────────────────────────────────────────────────
+        public async Task InitializeAsync(CancellationToken ct = default)
+        {
+            try
+            {
+                await EnsureTableAsync(ct);
+                await RefreshCacheFromDbAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[CircuitBreaker] Initialize failed (non-fatal): {ex.Message}");
+            }
+        }
 
-        public static bool IsHalted()
+        public bool IsHalted()
         {
             lock (_lock)
             {
-                // If cache is stale and no halt is currently known, trigger a background
-                // DB refresh. The next call (within 30s) will see the updated value.
-                bool cacheStale = (DateTime.UtcNow - _cacheLoadedAt).TotalSeconds > DB_CACHE_TTL_SECONDS;
-                if (cacheStale && _haltedUntil == null)
-                    _ = Task.Run(RefreshCacheFromDbAsync);
+                // Refresh from DB if cache is stale
+                var cacheStale = (DateTime.UtcNow - _cacheLoadedAt).TotalSeconds > _settings.CircuitBreakerDbCacheTtlSeconds;
+                if (cacheStale)
+                {
+                    _ = Task.Run(async () => await RefreshCacheFromDbAsync());
+                }
 
                 if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
                     return true;
 
-                // Halt expired in memory → clear state and remove DB row.
+                // Halt expired -> clear state and delete DB row
                 if (_haltedUntil.HasValue && DateTime.UtcNow >= _haltedUntil.Value)
                 {
                     _haltedUntil = null;
-                    _haltReason  = string.Empty;
+                    _haltReason = string.Empty;
                     BotLogger.Info("[CircuitBreaker] Cooldown expired. Trading resumed.");
-                    _ = Task.Run(DeleteHaltFromDbAsync);
+                    _ = Task.Run(async () => await DeleteHaltFromDbAsync());
                 }
-
                 return false;
             }
         }
 
-        public static string? GetHaltedReason()
+        public string? GetHaltedReason()
         {
             lock (_lock)
             {
@@ -116,28 +112,27 @@ namespace ValutaBot.MiniApp.Services
             }
         }
 
-        public static async Task CheckStateAsync()
+        public async Task CheckStateAsync(CancellationToken ct = default)
         {
-            // If already halted, skip the DB outcome query entirely.
+            // If already halted, skip the DB outcome query entirely
             if (IsHalted()) return;
 
             try
             {
-                var recentOutcomes = await TradeRepository.GetRecentOutcomesAsync(WINDOW_SIZE);
+                var recentOutcomes = await TradeRepository.GetRecentOutcomesAsync(_settings.CircuitBreakerWindowSize);
                 if (recentOutcomes == null || recentOutcomes.Count == 0) return;
 
                 bool shouldHalt = false;
-                string reason   = string.Empty;
+                string reason = string.Empty;
 
-                // Check 1: Consecutive Losses (outcomes are DESC, newest first)
+                // Check 1: Consecutive losses (outcomes are DESC, newest first)
                 int consecutiveLosses = 0;
                 foreach (var win in recentOutcomes)
                 {
                     if (!win) consecutiveLosses++;
                     else break;
                 }
-
-                if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES)
+                if (consecutiveLosses >= _settings.CircuitBreakerMaxConsecutiveLosses)
                 {
                     shouldHalt = true;
                     reason = $"{consecutiveLosses} consecutive losses";
@@ -146,9 +141,9 @@ namespace ValutaBot.MiniApp.Services
                 // Check 2: Win rate over the window (min 5 trades to evaluate)
                 if (!shouldHalt && recentOutcomes.Count >= 5)
                 {
-                    int wins       = recentOutcomes.Count(w => w);
+                    int wins = recentOutcomes.Count(w => w);
                     double winRate = (double)wins / recentOutcomes.Count;
-                    if (winRate < MIN_WIN_RATE)
+                    if (winRate < _settings.CircuitBreakerMinWinRate)
                     {
                         shouldHalt = true;
                         reason = $"Win rate dropped to {winRate:P0} (last {recentOutcomes.Count} trades)";
@@ -156,7 +151,9 @@ namespace ValutaBot.MiniApp.Services
                 }
 
                 if (shouldHalt)
-                    await ActivateHaltAsync(reason);
+                {
+                    await ActivateHaltAsync(reason, ct);
+                }
             }
             catch (Exception ex)
             {
@@ -164,102 +161,124 @@ namespace ValutaBot.MiniApp.Services
             }
         }
 
-        // ── Internal helpers ─────────────────────────────────────────────────────
-
-        private static async Task ActivateHaltAsync(string reason)
+        public async Task ActivateHaltAsync(string reason, CancellationToken ct = default)
         {
             DateTime newHaltUntil;
             lock (_lock)
             {
-                // Double-check: another task may have already activated the halt.
+                // Avoid duplicating halt if already active
                 if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
                     return;
-
-                newHaltUntil   = DateTime.UtcNow.AddMinutes(COOLDOWN_MINUTES);
-                _haltedUntil   = newHaltUntil;
-                _haltReason    = reason;
-                _cacheLoadedAt = DateTime.UtcNow;
+                newHaltUntil = DateTime.UtcNow.AddMinutes(_settings.CircuitBreakerCooldownMinutes);
             }
 
-            BotLogger.Warn($"[CircuitBreaker] TRADING HALTED for {COOLDOWN_MINUTES}m. Reason: {reason}");
+            BotLogger.Warn($"[CircuitBreaker] TRADING HALTED for {_settings.CircuitBreakerCooldownMinutes}m. Reason: {reason}");
 
-            // Persist to DB so the halt survives a process restart.
+            // Persist to DB first (write-through), then update memory state
             try
             {
-                await WriteHaltToDbAsync(newHaltUntil, reason);
+                await EnsureTableAsync(ct);
+                await WriteHaltToDbAsync(newHaltUntil, reason, ct);
+
+                lock (_lock)
+                {
+                    _haltedUntil = newHaltUntil;
+                    _haltReason = reason;
+                    _cacheLoadedAt = DateTime.UtcNow;
+                }
             }
             catch (Exception ex)
             {
-                // Non-fatal: halt is active in memory. On restart, CheckStateAsync will
-                // re-evaluate outcomes and re-activate if needed.
+                // Non-fatal: halt is active in memory, but DB write failed. On restart, InitializeAsync will re-evaluate.
                 BotLogger.Warn($"[CircuitBreaker] Failed to persist halt to DB (halt IS active in memory): {ex.Message}");
+                lock (_lock)
+                {
+                    _haltedUntil = newHaltUntil;
+                    _haltReason = reason;
+                    _cacheLoadedAt = DateTime.UtcNow;
+                }
             }
         }
 
-        private static async Task RefreshCacheFromDbAsync()
+        private async Task RefreshCacheFromDbAsync(CancellationToken ct = default)
         {
             try
             {
-                var (haltedUntil, reason) = await ReadHaltFromDbAsync();
+                var (haltedUntil, reason) = await ReadHaltFromDbAsync(ct);
                 lock (_lock)
                 {
                     _cacheLoadedAt = DateTime.UtcNow;
                     if (haltedUntil.HasValue && DateTime.UtcNow < haltedUntil.Value)
                     {
                         _haltedUntil = haltedUntil;
-                        _haltReason  = reason ?? string.Empty;
+                        _haltReason = reason ?? string.Empty;
                     }
                 }
             }
-            catch { /* Non-fatal background refresh — will retry on next stale cycle */ }
+            catch
+            {
+                // background refresh failure -> will retry on next IsHalted() call
+            }
         }
 
-        private static async Task<(DateTime? haltedUntil, string? reason)> ReadHaltFromDbAsync()
+        private async Task<(DateTime? haltedUntil, string? reason)> ReadHaltFromDbAsync(CancellationToken ct = default)
         {
-            using var conn = DbConnectionFactory.GetConnection();
-            await conn.OpenAsync();
+            await using var conn = _getConnection();
+            await conn.OpenAsync(ct);
+
             var row = await conn.QueryFirstOrDefaultAsync(
-                "SELECT halted_until, reason FROM circuit_breaker_state WHERE id = 1;");
+                "SELECT halted_until, reason FROM circuit_breaker_state WHERE id = 1;"
+            );
 
             if (row == null) return (null, null);
 
-            string raw = (string)row.halted_until;
+            string raw = (string?)row.halted_until;
             if (DateTime.TryParse(raw, null,
-                System.Globalization.DateTimeStyles.AdjustToUniversal |
-                System.Globalization.DateTimeStyles.AssumeUniversal, out var dt))
+                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var dt))
             {
                 return (dt, (string?)row.reason);
             }
             return (null, null);
         }
 
-        private static async Task WriteHaltToDbAsync(DateTime haltedUntil, string reason)
+        private async Task EnsureTableAsync(CancellationToken ct = default)
         {
-            using var conn = DbConnectionFactory.GetConnection();
-            await conn.OpenAsync();
+            await using var conn = _getConnection();
+            await conn.OpenAsync(ct);
+            await conn.ExecuteAsync(@"CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                id INTEGER PRIMARY KEY,
+                halted_until TIMESTAMPTZ NULL,
+                reason TEXT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );");
+        }
+
+        private async Task WriteHaltToDbAsync(DateTime haltedUntil, string reason, CancellationToken ct = default)
+        {
+            await using var conn = _getConnection();
+            await conn.OpenAsync(ct);
             await conn.ExecuteAsync(@"
                 INSERT INTO circuit_breaker_state (id, halted_until, reason, created_at)
                 VALUES (1, @HaltedUntil, @Reason, @CreatedAt)
                 ON CONFLICT (id) DO UPDATE SET
                     halted_until = EXCLUDED.halted_until,
                     reason       = EXCLUDED.reason,
-                    created_at   = EXCLUDED.created_at;",
-                new
-                {
-                    HaltedUntil = haltedUntil.ToString("o"),
-                    Reason      = reason,
-                    CreatedAt   = DateTime.UtcNow.ToString("o")
-                });
+                    created_at   = EXCLUDED.created_at;
+            ", new
+            {
+                HaltedUntil = haltedUntil.ToString("o"),
+                Reason = reason,
+                CreatedAt = DateTime.UtcNow.ToString("o")
+            });
         }
 
-        private static async Task DeleteHaltFromDbAsync()
+        private async Task DeleteHaltFromDbAsync(CancellationToken ct = default)
         {
             try
             {
-                using var conn = DbConnectionFactory.GetConnection();
-                await conn.OpenAsync();
-                await conn.ExecuteAsync(
-                    "DELETE FROM circuit_breaker_state WHERE id = 1;");
+                await using var conn = _getConnection();
+                await conn.OpenAsync(ct);
+                await conn.ExecuteAsync("DELETE FROM circuit_breaker_state WHERE id = 1;");
             }
             catch (Exception ex)
             {
@@ -268,6 +287,3 @@ namespace ValutaBot.MiniApp.Services
         }
     }
 }
-
-
-
