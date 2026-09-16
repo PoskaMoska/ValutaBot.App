@@ -9,7 +9,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 
 public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 {
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
+    private static readonly System.Collections.Generic.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     
     private readonly MarketDataFetcher _fetcher;
@@ -21,49 +21,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private readonly ITradeTimeoutEngine _timeoutEngine;
     private readonly IMonteCarloEngine _mcEngine;
     private readonly TradingBotSettings _settings;
-
-    private string _asset = "";
-    private string _timeframe = "";
-    
-    // Properties to mimic local variables
-    private string _clean = "";
-    private string? _symbol;
-    private bool _isForex;
-    private bool _isMajor;
-    private int _limit;
-    private string _tfLower = "";
-    private bool _useMultiTf;
-    private string _mainInterval = "";
-    private string? _higherTf;
-    private string? _lowerTf;
-    private double[] _mainPrices = Array.Empty<double>();
-    private double[] _mainVolumes = Array.Empty<double>();
-    private double _currentLivePrice;
-    private string _mainOhlcKey = "";
-    private MiniAppController.OhlcCandle[]? _ohlcCandles;
-    private MiniAppController.OhlcCandle[]? _closedOhlcCandles;
-    private double[] _closedMainPrices = Array.Empty<double>();
-    private double[] _closedMainVolumes = Array.Empty<double>();
-    private MiniAppController.OhlcCandle[]? _higherOhlcCandles;
-    private (double[] prices, double[] volumes)? _higherResultData;
-    
-    private readonly object _penaltyLock = new object();
-    private double _conflictPenalty = 1.0;
-
-    private SmcEngine.SmcAnalysisResult _smcResult;
-    private OrderFlowEngine.OrderFlowResult _orderFlowResult;
-    private WalkForwardValidationEngine.WalkForwardResult _wfResult;
-
-    private string _lgbmDirection = "NEUTRAL";
-    private double _lgbmConfidence = 0.5;
-    private string _lgbmModelVersion = "offline";
-    private double? _lgbmAccuracy = null;
-    private MLPythonService.MLPythonPrediction? _prediction;
-    private ContinuousStateResult? _continuousState;
-    // llmReport  вырабатули из свойства, теперь это inline в BuildFinalConsensusAsync.
-    
-    private double _mainAdx, _mainPdi, _mainMdi, _mainAtr;
-    private (double score, double confidence, double rsiVal, double emaVal, double volStrengthVal, double atrVal) _mainResult;
 
     public MarketAnalysisOrchestrator(
         MarketDataFetcher fetcher,
@@ -88,19 +45,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _settings = settings.Value;
     }
 
-    internal static double MfConflictPenalty((double score, double conf, double rsi, double ema, double vol, double atr) main,
-                                             (double score, double conf, double rsi, double ema, double vol, double atr) higher)
-    {
-        int mainDir = main.score > 0.05 ? 1 : main.score < -0.05 ? -1 : 0;
-        int higherDir = higher.score > 0.05 ? 1 : higher.score < -0.05 ? -1 : 0;
-        if (mainDir != 0 && higherDir != 0 && mainDir != higherDir)
-            return 0.7; // 30% penalty for active opposing trends
-        return 1.0;
-    }
-
-    private ValutaBot.App.MiniApp.Data.Repositories.UserSettings? _userSettings;
-
-
     private double GetSafeLimit(double value)
     {
         if (double.IsNaN(value) || double.IsInfinity(value)) return 0;
@@ -109,698 +53,120 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         return value;
     }
 
-    private double GetSafePenalty(double value)
-    {
-        if (double.IsNaN(value) || double.IsInfinity(value) || value <= 0) return 1.0;
-        return value;
-    }
-
     public async Task<object> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null)
     {
-        // --- CIRCUIT BREAKER DISABLED BY USER REQUEST ---
-        // await ValutaBot.MiniApp.Services.CircuitBreakerService.CheckStateAsync();
-        // if (ValutaBot.MiniApp.Services.CircuitBreakerService.IsHalted())
-        // {
-        //     var reason = ValutaBot.MiniApp.Services.CircuitBreakerService.GetHaltedReason();
-        //     BotLogger.Warn($"[Orchestrator] Execution aborted for {asset}/{timeframe}. Reason: {reason}");
-        //     return new { 
-        //         action = "NEUTRAL", 
-        //         reason = "CIRCUIT_BREAKER_ACTIVE",
-        //         message = reason,
-        //         ta_score = 0,
-        //         of_score = 0,
-        //         smc_score = 0,
-        //         ml_prob = 0
-        //     };
-        // }
-
-        _conflictPenalty = 1.0;
-        // ARCHITECTURAL REFACTORING: Strip OTC from backend globally
-        _asset = asset.Replace(" OTC", "").Replace("OTC", "").Trim();
-        _timeframe = timeframe;
-        _userSettings = userSettings;
-
-        // Внутреннее Profiling: Замеряем каждый этап (Fetch, Gatekeeper, Math/ML, Matrix)
-        var swTotal = System.Diagnostics.Stopwatch.StartNew();
-        var swStage = System.Diagnostics.Stopwatch.StartNew();
-
-        try
-        {
-            // T0 -> T1: Загрузка базовых и старших данных (TwelveData + Cache)
-            await InitializeDataAsync();
-            BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T1 DataFetch: {swStage.ElapsedMilliseconds}ms");
-            swStage.Restart();
-
-            if (_mainPrices == null || _mainPrices.Length == 0)
-            {
-                throw new Exception("Нет удалось получить данные. API брокера временно недоступен или лимит запросов исчерпан. Пожалуйста, повторите попытку через минуту.");
-            }
-
-            // T1 -> T2: Gatekeeper + ContinuousState
-            var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(_asset, _timeframe, _mainPrices, _ohlcCandles);
-            if (!gatekeeper.IsTradeable)
-            {
-                BotLogger.Warn($"[Analysis] Gatekeeper aborted trade for {_asset} ({_timeframe}): {gatekeeper.Reason}");
-                throw new Exception(gatekeeper.Reason);
-            }
-
-            _continuousState = ContinuousStateEngine.EvaluateContinuousState(_mainPrices, _asset, _timeframe);
-            BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T2 Gatekeeper+State: {swStage.ElapsedMilliseconds}ms");
-            swStage.Restart();
-
-            // T2 -> T3: Параллельное вычисление (Mechanics + TA + ML)
-            var mechanicsTask = AnalyzeCoreMechanicsAsync();
-            var techTask = EvaluateTechnicalIndicatorsAsync();
-            var mlTask = FetchMachineLearningAsync();
-
-            await Task.WhenAll(mechanicsTask, techTask, mlTask);
-            BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T3 Parallel(Mechanics+TA+ML): {swStage.ElapsedMilliseconds}ms");
-            swStage.Restart();
-
-            // T3 -> T4: Финальный Матричный Консенсус + DB (GenerateLlmReport отключен в угоду скорости)
-            // (Синхронно: Консенсус, Ожидание LLM-отчета, Сохранение БД, Возврат результата)
-            var result = await BuildFinalConsensusAsync();
-            BotLogger.Info($"[Timing] {_asset}/{_timeframe} | T4 Consensus+DB: {swStage.ElapsedMilliseconds}ms");
-            BotLogger.Info($"[Timing] {_asset}/{_timeframe} | TOTAL: {swTotal.ElapsedMilliseconds}ms");
-
-            return result;
-        }
-        catch (MarketClosedException mcEx)
-        {
-            BotLogger.Warn($"[Analysis] Market closed for {_asset}: {mcEx.Message}");
-            throw;
-        }
-        catch (ExchangeUnavailableException exEx)
-        {
-            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms из-за ExchangeUnavailable");
-            MiniAppController.LastExceptionMessage = exEx.ToString();
-            BotLogger.Warn($"[Analysis] Exchange unavailable for asset {_asset}: {exEx.Message}");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            BotLogger.Warn($"[Timing] {_asset}/{_timeframe} | FAILED at {swTotal.ElapsedMilliseconds}ms из-за {ex.GetType().Name}");
-            MiniAppController.LastExceptionMessage = ex.ToString();
-            BotLogger.Error($"[Analysis] Analysis failed for asset {_asset} on {_timeframe}", ex);
-            throw;
-        }
-    }
-
-
-    private async Task InitializeDataAsync()
-    {
-        _clean = AssetSanitizer.Sanitize(_asset);
+        // 1. Sanitize (Immutable Step)
+        string cleanAsset = asset.Replace(" OTC", "").Replace("OTC", "").Trim();
+        string clean = AssetSanitizer.Sanitize(cleanAsset);
         DayOfWeek day = DateTime.UtcNow.DayOfWeek;
-        _symbol = AssetSanitizer.MapSymbolByDayOfWeek(_clean, day);
-
-        _isForex = AssetSanitizer.IsForexAsset(_clean);
-        _isMajor = _symbol == "BTCUSDT" || _symbol == "ETHUSDT" || _symbol == "SOLUSDT";
-
-        // ┌─── Economic Calendar Guard ───────────────────────────────────────────
-        // Check BEFORE any HTTP calls to avoid wasting TwelveData credits.
-        // Fail-open: if the calendar API is unavailable, analysis continues normally.
-        var newsBlock = await EconomicCalendarService.GetBlockingEventAsync(_asset);
-        if (newsBlock != null)
-        {
-            string msg = EconomicCalendarService.FormatBlockMessage(newsBlock, _asset);
-            BotLogger.Warn($"[EconomicCalendar] BLOCKED: {_asset} — {newsBlock.Name} ({newsBlock.Currency}) at {newsBlock.EventTimeUtc:HH:mm} UTC");
-            throw new MarketClosedException(msg, msg);
-        }
-
-        _tfLower = _timeframe.ToLower().Trim();
-        _limit = 120;
-        if (_tfLower == "s5" || _tfLower == "s10" || _tfLower == "s15" || _tfLower == "s30") _limit = 160;
-        else if (_tfLower == "m1" || _tfLower == "m2" || _tfLower == "m3" || _tfLower == "m5") _limit = 160;
-        else if (_tfLower == "m15" || _tfLower == "m30" || _tfLower == "h1") _limit = 200;
-
-        _useMultiTf = true;
-        _mainInterval = _fetcher.IntervalMap(_timeframe);
-        _higherTf = _useMultiTf ? _fetcher.HigherTf(_timeframe) : null;
-        _lowerTf = _useMultiTf ? _fetcher.LowerTf(_timeframe) : null;
-
-        _mainOhlcKey = _symbol != null ? $"{_symbol}_{_mainInterval}" : $"{_clean}_{_mainInterval}";
-
-        _ohlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _timeframe, _asset, _limit);
-
-        if (_ohlcCandles == null || _ohlcCandles.Length == 0)
-        {
-            BotLogger.Warn($"[Orchestrator] Data unavailable for {_asset} ({_timeframe}).");
-            _mainPrices = Array.Empty<double>();
-            _mainVolumes = Array.Empty<double>();
-            _closedOhlcCandles = Array.Empty<MiniAppController.OhlcCandle>();
-            _closedMainPrices = Array.Empty<double>();
-            _closedMainVolumes = Array.Empty<double>();
-        }
-        else
-        {
-            if (_ohlcCandles.Length < 2)
-            {
-                BotLogger.Warn($"[Orchestrator] Only {_ohlcCandles.Length} candle(s) for {_asset} ({_timeframe}) — analysis may be limited.");
-            }
-            _mainPrices = _ohlcCandles.Select(c => c.Close).ToArray();
-            _mainVolumes = _ohlcCandles.Select(c => c.Volume).ToArray();
-            
-            // Unify Data Boundary: Pre-slice the closed historical candles
-            // This prevents engines from independently (and sometimes incorrectly) discarding the live forming candle
-            if (_ohlcCandles.Length > 1)
-            {
-                int intervalSecs = _fetcher.TimeframeSeconds(_timeframe);
-                bool isClosed = _ohlcCandles[^1].Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
-                _closedOhlcCandles = isClosed ? _ohlcCandles : _ohlcCandles.Take(_ohlcCandles.Length - 1).ToArray();
-            }
-            else
-            {
-                _closedOhlcCandles = _ohlcCandles;
-            }
-            _closedMainPrices = _closedOhlcCandles.Select(c => c.Close).ToArray();
-            _closedMainVolumes = _closedOhlcCandles.Select(c => c.Volume).ToArray();
-        }
-
-        if (_higherTf != null)
-        {
-            try 
-            { 
-                _higherOhlcCandles = await _fetcher.FetchOhlcWithFallbackAsync(_symbol, _higherTf, _asset); 
-                if (_higherOhlcCandles != null && _higherOhlcCandles.Length > 0)
-                {
-                    _higherResultData = (_higherOhlcCandles.Select(c => c.Close).ToArray(), _higherOhlcCandles.Select(c => c.Volume).ToArray());
-                }
-            }
-            catch { _higherOhlcCandles = null; _higherResultData = null; }
-        }
-        else 
-        {
-            _higherResultData = null;
-        }
-
-        if (_mainPrices != null && _mainPrices.Length > 0)
-        {
-            _currentLivePrice = _mainPrices[^1];
-        }
-    }
-
-    private async Task<(double[] prices, double[] volumes)?> SafeFetch(string tf)
-    {
-        try { return await _fetcher.FetchBinanceWithFallback(_symbol, tf, _asset, _limit); }
-        catch (Exception ex) { Console.WriteLine($"[Fetch Warning] TF {tf} failed: {ex.Message}"); return null; }
-    }
-
-    private async Task AnalyzeCoreMechanicsAsync()
-    {
-        _smcResult = SmcEngine.AnalyzeSmcStructure(_asset, _mainInterval, _ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>(), _currentLivePrice);
-        BotLogger.Info($"[SMC Engine] Asset {_asset} ({_timeframe}): SMC Zones updated.");
-
-        // OrderFlow is disabled for OTC pairs: OTC volume = tick count, not real market pressure.
-        // Statistical evidence: 35.8% win rate on 363 signal votes = inverted/wrong for OTC.
-        // OrderFlow теперь включен всегда, даже для OTC
-        _orderFlowResult = OrderFlowEngine.AnalyzeOrderFlow(_asset, _mainInterval, _closedOhlcCandles!, _currentLivePrice);
-        BotLogger.Info($"[Order Flow] Asset {_asset} ({_timeframe}): {_orderFlowResult.Description}");
-
-        // FIX Race Condition: MTF SMC выравнивание перенесено сюда из EvaluateTechnicalIndicatorsAsync.
-        // Ранее ValidateMtfSmcAlignment читал _smcResult из параллельного Task (Task.WhenAll),
-        // без гарантий порядка — _smcResult мог быть еще не записан -> гонка данных.
-        // Теперь выравнивание выполняется строго ПОСЛЕ записи _smcResult в этом же методе.
-        if (_higherResultData != null && _higherTf != null)
-        {
-            try
-            {
-                var higherOhlcForSmc = _higherOhlcCandles?.ToArray();
-                if (higherOhlcForSmc != null && _higherResultData.Value.prices.Length > 0)
-                {
-                    var lastH = higherOhlcForSmc[^1];
-                    if (lastH.Timestamp < DateTime.UtcNow.AddSeconds(-_fetcher.TimeframeSeconds(_higherTf)))
-                    {
-                        var synthetic = new MiniAppController.OhlcCandle(_currentLivePrice, _currentLivePrice, _currentLivePrice, _currentLivePrice, 0, DateTime.UtcNow);
-                        higherOhlcForSmc = higherOhlcForSmc.Append(synthetic).ToArray();
-                    }
-                    else
-                    {
-                        double newHigh = Math.Max(lastH.High, _currentLivePrice);
-                        double newLow = Math.Min(lastH.Low, _currentLivePrice);
-                        higherOhlcForSmc[^1] = lastH with { High = newHigh, Low = newLow, Close = _currentLivePrice };
-                    }
-
-                    var htfSmcResult = SmcEngine.AnalyzeSmcStructure(_asset, _higherTf, higherOhlcForSmc, _higherResultData.Value.prices[^1]);
-                    var mtfValidation = SmcEngine.ValidateMtfSmcAlignment(_smcResult, htfSmcResult);
-                    lock (_penaltyLock) 
-                    {
-                        _conflictPenalty *= mtfValidation.ConfluenceMultiplier;
-                    }
-                    BotLogger.Info($"[MTF SMC Validation] Alignment: {mtfValidation.AlignmentStatus} | Multiplier={mtfValidation.ConfluenceMultiplier:F2}x");
-                }
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Warn($"[MTF SMC] Failed to fetch higher TF OHLC for SMC alignment: {ex.Message}");
-            }
-        }
-    }
-
-    private async Task FetchMachineLearningAsync()
-    {
-        _wfResult = _wfEngine.ValidateWalkForward(_asset, _timeframe);
-        if (_wfResult.IsOverfitted || _wfResult.IsCooloffActive)
-        {
-            BotLogger.Warn($"[Anti-Overfitting] {_asset} ({_timeframe}): {_wfResult.StatusReasoning} ML weight multiplier set to {_wfResult.WeightMultiplier}x.");
-        }
-
-
-        if (_ohlcCandles != null && _ohlcCandles.Length >= 60)
-        {
-            try
-            {
-                MiniAppController.OhlcCandle[]? higherOhlcForMl = null;
-                if (_higherTf != null)
-                {
-                    try {
-                        if (_higherOhlcCandles != null && _higherOhlcCandles.Length > 0)
-                        {
-                            int hSecs = _fetcher.TimeframeSeconds(_higherTf ?? "");
-                            bool hIsClosed = _higherOhlcCandles[^1].Timestamp.AddSeconds(hSecs) <= DateTime.UtcNow;
-                            higherOhlcForMl = hIsClosed ? _higherOhlcCandles : _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray();
-                        }
-                    } catch (Exception) { /* ignore */ }
-                }
-
-                // FIX ROOT CAUSE #1: Drop the currently forming (incomplete) candle.
-                // Sending an incomplete candle to ML models trained on fully closed candles causes 
-                // massive Train-Serve Skew (e.g., volume and oscillators are artificially low).
-                // The ML model MUST operate on the latest fully CLOSED candle.
-                var mlCandles = _closedOhlcCandles!;
-
-                _prediction = await MLPythonService.PredictAsync(_asset, _timeframe, mlCandles, _isForex, higherOhlcForMl);
-                if (_prediction != null)
-                {
-                    _lgbmModelVersion = string.IsNullOrEmpty(_prediction.ModelVersion) ? "unknown" : _prediction.ModelVersion;
-                    _lgbmAccuracy = _prediction.Accuracy;
-
-                    if (_prediction.Direction != "NEUTRAL")
-                    {
-                        _lgbmDirection = _prediction.Direction;
-                        
-                        // FIX: Scale confidence around 0.5 (Neutral).
-                        // Previously: _prediction.Confidence * Multiplier (e.g. 0.55 * 0.1 = 0.055 = Strong PUT!).
-                        _lgbmConfidence = (float)(0.5 + (_prediction.Confidence - 0.5) * _wfResult.WeightMultiplier);
-                        _lgbmConfidence = Math.Clamp(_lgbmConfidence, 0f, 1f);
-
-                        // If confidence is extremely close to 50%, treat as NEUTRAL
-                        if (_lgbmConfidence >= 0.499f && _lgbmConfidence <= 0.501f)
-                        {
-                            BotLogger.Info($"[ML Override] ML confidence {_lgbmConfidence:F3} is practically neutral. Suppressing.");
-                            _lgbmDirection = "NEUTRAL";
-                            _lgbmConfidence = 0.5f;
-                        }
-                        else
-                        {
-                            BotLogger.Info($"[ML Override] ML confident ({_lgbmConfidence:F2}). Passing vector to Confluence Matrix.");
-                        }
-                    }
-                    else
-                    {
-                        _lgbmDirection = "NEUTRAL";
-                        _lgbmConfidence = 0.5;
-                    }
-
-                    // 🎯 ML Telemetry: Global Retraining 🎯
-                    if (!string.IsNullOrEmpty(_prediction.ModelVersion))
-                    {
-                        string cacheKey = $"{_asset}_{_timeframe}";
-                        string currentVer = _prediction.ModelVersion;
-                        string? oldVer = "";
-                        bool versionChanged = false;
-                        
-                        if (_lastSeenModelVersions.TryGetValue(cacheKey, out oldVer))
-                        {
-                            if (oldVer != currentVer)
-                            {
-                                versionChanged = true;
-                            }
-                        }
-                        
-                        _lastSeenModelVersions[cacheKey] = currentVer;
-
-                        if (versionChanged && !string.IsNullOrEmpty(oldVer))
-                        {
-                            // Skip the very first startup assignment spam, only alert on actual changes during runtime
-                            {
-                                _ = Task.Run(async () =>
-                                {
-                                    try
-                                    {
-                                        string accStr    = _prediction.Accuracy.HasValue ? $"{_prediction.Accuracy.Value * 100:F1}%" : "N/A";
-                                        string aucStr    = _prediction.Auc.HasValue ? $"{_prediction.Auc.Value:F3}" : "N/A";
-                                        string nTrainStr = _prediction.NTrain.HasValue ? $"{_prediction.NTrain.Value:N0}" : "N/A";
-                                        string icon      = _prediction.Accuracy.HasValue
-                                            ? (_prediction.Accuracy.Value >= 0.57 ? "🟢" : _prediction.Accuracy.Value >= 0.54 ? "🟡" : "🔴")
-                                            : "⚪";
-
-                                        string report = $"🔄 <b>Переобучение модели</b>\n" +
-                                                        $"{icon} <b>{_asset}</b> ({_timeframe}): Точность <b>{accStr}</b> | AUC <b>{aucStr}</b> | {nTrainStr} свечей";
-
-                                        // await TelegramBotService.SendMessageToAdmins(report); // Disabled per user request
-
-                                        await _csvSemaphore.WaitAsync();
-                                        try
-                                        {
-                                            string logDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                                            System.IO.Directory.CreateDirectory(logDir);
-                                            string logFile = System.IO.Path.Combine(logDir, "ml_global_retrain.csv");
-                                            bool writeHeader = !System.IO.File.Exists(logFile);
-                                            using var writer = new System.IO.StreamWriter(logFile, append: true);
-                                            if (writeHeader) await writer.WriteLineAsync("Timestamp,Asset,OldVersion,NewVersion,Accuracy,Auc,NTrain");
-                                            await writer.WriteLineAsync($"{DateTime.UtcNow:O},{_asset},{oldVer},{_prediction.ModelVersion},{_prediction.Accuracy},{_prediction.Auc},{_prediction.NTrain}");
-                                        }
-                                        finally
-                                        {
-                                            _csvSemaphore.Release();
-                                        }
-                                    }
-                                    catch (Exception tEx)
-                                    {
-                                        BotLogger.Error("[MarketAnalysis] Error sending ML global telemetry", tEx);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex) 
-            { 
-                Console.WriteLine($"[Python ML Warning] {ex.GetType().Name}: {ex.Message}");
-                // _llmReport Сгенерирован в отдельном процессе, поэтому не падает
-            }
-        }
-    }
-
-    // GenerateLlmReport Сгенерирован inline.
-    // Вызывается в BuildFinalConsensusAsync.
-    // LlmReportingService возвращает форматированный ответ.
-    private string BuildLlmSummary()
-    {
-        if (_ohlcCandles == null || _ohlcCandles.Length < 60)
-            return "Недостаточно данных для генерации отчета.";
-        try
-        {
-            var llmService = new ValutaBot.App.MiniApp.Services.LlmReportingService();
-            var regime = _continuousState?.VelocityRegime ?? "UNKNOWN";
-            bool isUp   = _lgbmDirection == "BUY";
-            bool isTaUp = _mainResult.score > 0;
-            bool isOfUp = _orderFlowResult.ScoreContribution > 0;
-            return llmService.GenerateMarketSummary(_asset, regime, _prediction, isUp, isTaUp, isOfUp);
-        }
-        catch (Exception ex)
-        {
-            return $"Ошибка генерации отчета: {ex.Message}";
-        }
-    }
-
-
-    private async Task EvaluateTechnicalIndicatorsAsync()
-    {
-        (_mainAdx, _mainPdi, _mainMdi) = _closedOhlcCandles!.Length > 0 ? _mathEngine.ComputeTrueAdx(_asset, _timeframe, _closedOhlcCandles) : (20.0, 0.0, 0.0);
-        _mainAtr = _closedOhlcCandles.Length > 0 ? _mathEngine.ComputeAtr(_asset, _timeframe, _closedOhlcCandles) : 0;
-
-        _mainResult = _marketAnalyzer.ScoreTimeframe(_asset, _timeframe, _closedMainPrices, _closedMainVolumes, candles: _closedOhlcCandles, adxOverride: _mainAdx, atrOverride: _mainAtr, isForex: _isForex, pdiOverride: _mainPdi, mdiOverride: _mainMdi);
-
-
-        if (_higherResultData != null)
-        {
-            var closedHigherCandles = _higherOhlcCandles != null && _higherOhlcCandles.Length > 1 
-                ? (_higherOhlcCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(_higherTf ?? "")) <= DateTime.UtcNow ? _higherOhlcCandles : _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray()) 
-                : (_higherOhlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
-            
-            var closedHigherPrices = closedHigherCandles.Select(c => c.Close).ToArray();
-            var closedHigherVolumes = closedHigherCandles.Select(c => c.Volume).ToArray();
-
-            // NOTE: MTF SMC ValidateMtfSmcAlignment был перенесен в AnalyzeCoreMechanicsAsync
-            // чтобы устранить гонку данных по _smcResult (Task.WhenAll race condition fix).
-
-            var (hAdx, hPdi, hMdi) = closedHigherCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(_asset, _higherTf ?? "", closedHigherCandles) : (20.0, 0.0, 0.0);
-            double hAtr = closedHigherCandles.Length > 0 ? _mathEngine.ComputeAtr(_asset, _higherTf ?? "", closedHigherCandles) : 0;
-            var higherResult = _marketAnalyzer.ScoreTimeframe(_asset, _higherTf ?? "", closedHigherPrices, closedHigherVolumes, candles: closedHigherCandles, adxOverride: hAdx, atrOverride: hAtr, isForex: _isForex, pdiOverride: hPdi, mdiOverride: hMdi);
-
-            lock (_penaltyLock)
-            {
-                _conflictPenalty *= MfConflictPenalty(_mainResult, higherResult);
-            }
-        }
-    }
-
-    private async Task<object> BuildFinalConsensusAsync()
-    {
-        bool isSubMinute = _timeframe.ToLower().StartsWith("s");
+        string? symbol = AssetSanitizer.MapSymbolByDayOfWeek(clean, day);
+        bool isForex = AssetSanitizer.IsForexAsset(clean);
         
-        // Construct Signals for the Confluence Matrix
-        var taSignal = new TaSignal(_mainResult.score, _mainResult.confidence, _mainResult.rsiVal, _mainResult.emaVal, _mainResult.volStrengthVal, _mainAtr, _mainAdx);
+        string tfLower = timeframe.ToLower().Trim();
+        int limit = (tfLower.StartsWith("s") || tfLower.StartsWith("m1") || tfLower.StartsWith("m5")) ? 160 : 200;
+
+        // 2. Fetch Data (Locals only, no class fields)
+        var candles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, cleanAsset, limit);
+        if (candles == null || candles.Length == 0)
+            throw new Exception("Не удалось получить данные от API.");
+
+        double[] mainPrices = candles.Select(c => c.Close).ToArray();
+        double currentLivePrice = mainPrices[^1];
         
-        var smcParts = new List<string>();
-        if (_smcResult.HasLiquiditySweep && !string.IsNullOrEmpty(_smcResult.SweepDirection)) 
-            smcParts.Add(_smcResult.SweepDirection.Contains("BULLISH") ? "Сбор ликвидности (Покупки)" : "Сбор ликвидности (Продажи)");
-        if (_smcResult.HasBos && !string.IsNullOrEmpty(_smcResult.BosDirection)) 
-            smcParts.Add(_smcResult.BosDirection.Contains("BULLISH") ? "Слом структуры (Покупки)" : "Слом структуры (Продажи)");
-        if (_smcResult.HasFvg && !string.IsNullOrEmpty(_smcResult.FvgType)) 
-            smcParts.Add(_smcResult.FvgType.Contains("BULLISH") ? "Имбаланс (Вверх)" : "Имбаланс (Вниз)");
-        if (_smcResult.HasOrderBlock && !string.IsNullOrEmpty(_smcResult.OrderBlockType)) 
-            smcParts.Add(_smcResult.OrderBlockType.Contains("BULLISH") ? "Ордерблок (Быки)" : "Ордерблок (Медведи)");
-        string smcReasoning = smcParts.Count > 0 ? string.Join(", ", smcParts) : "Нет ярко выраженной структуры";
+        // Prepare closed candles
+        int intervalSecs = _fetcher.TimeframeSeconds(timeframe);
+        bool isLastClosed = candles[^1].Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
+        var closedCandles = isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
+        double[] closedPrices = closedCandles.Select(c => c.Close).ToArray();
+        double[] closedVolumes = closedCandles.Select(c => c.Volume).ToArray();
 
-        var smcSignal = new SmcSignal(_smcResult.BosDirection, _smcResult.SweepDirection, _smcResult.OrderBlockType, _smcResult.FvgType, smcReasoning);
-        var ofSignal = new OrderflowSignal(_orderFlowResult.ScoreContribution, _orderFlowResult.Description);
-        var mlSignal = new MlSignal(_lgbmDirection, _lgbmConfidence, _lgbmAccuracy, _lgbmModelVersion);
+        // 3. Risk Gatekeeper
+        var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(cleanAsset, timeframe, mainPrices, candles);
+        if (!gatekeeper.IsTradeable)
+            throw new Exception(gatekeeper.Reason);
+
+        // 4. Continuous State
+        var state = ContinuousStateEngine.EvaluateContinuousState(mainPrices, cleanAsset, timeframe);
         
-        var stateSignal = new StateSignal(_continuousState?.VelocityRegime ?? "UNKNOWN", _continuousState?.VelocityBpsPerSec ?? 0, _continuousState?.MomentumContribution ?? 0);
+        // 5. Higher TF Data
+        string? higherTf = _fetcher.HigherTf(timeframe);
+        MiniAppController.OhlcCandle[]? higherCandles = null;
+        if (higherTf != null) {
+            higherCandles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, higherTf, cleanAsset, 100);
+        }
+        var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1) 
+            ? (higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= DateTime.UtcNow ? higherCandles : higherCandles.Take(higherCandles.Length - 1).ToArray())
+            : Array.Empty<MiniAppController.OhlcCandle>();
 
-        // FIX PRIORITY-1: Передаем уже загруженные свечи в Evaluate4DMatrixAsync.
-        // Экономит 2 HTTP-запроса к TwelveData, решая проблему Rate Limit.
-        // FIX ROOT CAUSE: Train-Serve Skew. Pass closed candles (without the live forming candle)
-        // just like we do for TA and ML, to prevent artificial indicator conflict.
-        var closedHigherCandles = _higherOhlcCandles != null && _higherOhlcCandles.Length > 1 
-            ? (_higherOhlcCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(_higherTf ?? "")) <= DateTime.UtcNow ? _higherOhlcCandles : _higherOhlcCandles.Take(_higherOhlcCandles.Length - 1).ToArray()) 
-            : (_higherOhlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>());
-        double[] higherPrices = closedHigherCandles.Select(c => c.Close).ToArray();
-        double[] higherVolumes = closedHigherCandles.Select(c => c.Volume).ToArray();
-
-        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(
-            _asset, _timeframe, _isForex, _symbol,
-            _closedOhlcCandles!, _closedMainPrices, _closedMainVolumes,
-            closedHigherCandles, higherPrices, higherVolumes);
-
-        int consecutiveLosses = TradeOutcomeTracker.GetConsecutiveLosses(_asset, _timeframe);
-        double volRatio = _marketAnalyzer.CalculateVolatilityRatio(_mainPrices);
-        var consensus = await _cmEngine.EvaluateMatrixAsync(
-            _asset, _timeframe, isSubMinute, _conflictPenalty, 
-            taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio);
-
-        string finalDirection = consensus.FinalDirection;
-        int finalProbability = consensus.Probability;
+        // 6. Engines (Parallel)
+        var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, candles, currentLivePrice));
+        var ofTask = Task.Run(() => OrderFlowEngine.AnalyzeOrderFlow(cleanAsset, timeframe, closedCandles, currentLivePrice));
+        var wfResult = _wfEngine.ValidateWalkForward(cleanAsset, timeframe);
         
-        int timeframeSec = _fetcher.TimeframeSeconds(_timeframe);
-        var timeoutResult = _timeoutEngine.CalculateTimeout(_asset, _timeframe, _mainAtr, volRatio, _smcResult, _currentLivePrice, _isForex);
+        // TA Scoring
+        var (mainAdx, mainPdi, mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(cleanAsset, timeframe, closedCandles) : (20.0, 0.0, 0.0);
+        double mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(cleanAsset, timeframe, closedCandles) : 0;
+        var taResult = _marketAnalyzer.ScoreTimeframe(cleanAsset, timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: mainAdx, atrOverride: mainAtr, isForex: isForex, pdiOverride: mainPdi, mdiOverride: mainMdi);
+
+        // ML
+        var mlPrediction = await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles);
+        string lgbmDir = "NEUTRAL";
+        double lgbmConf = 0.5;
+        if (mlPrediction != null) {
+            lgbmDir = mlPrediction.Direction;
+            lgbmConf = 0.5 + (mlPrediction.Confidence - 0.5) * wfResult.WeightMultiplier;
+        }
+
+        await Task.WhenAll(smcTask, ofTask);
+        var smcResult = await smcTask;
+        var ofResult = await ofTask;
+
+        // 7. Matrix & Consensus
+        double conflictPenalty = 1.0;
+        if (closedHigherCandles.Length > 0 && higherTf != null) {
+            var hAdx = _mathEngine.ComputeTrueAdx(cleanAsset, higherTf, closedHigherCandles);
+            var hAtr = _mathEngine.ComputeAtr(cleanAsset, higherTf, closedHigherCandles);
+            var hResult = _marketAnalyzer.ScoreTimeframe(cleanAsset, higherTf, closedHigherCandles.Select(c=>c.Close).ToArray(), closedHigherCandles.Select(c=>c.Volume).ToArray(), candles: closedHigherCandles, adxOverride: hAdx.adx, atrOverride: hAtr, isForex: isForex);
+            conflictPenalty *= (taResult.score * hResult.score < -0.01) ? 0.7 : 1.0;
+        }
+
+        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(cleanAsset, timeframe, isForex, symbol, closedCandles, closedPrices, closedVolumes, closedHigherCandles, closedHigherCandles.Select(c=>c.Close).ToArray(), closedHigherCandles.Select(c=>c.Volume).ToArray());
         
-        // --- PRODUCTION KILL SWITCH REMOVED ---
-        // We no longer block the user. Instead, we generate a soft warning.
-        string adaptiveReasoning = $"{timeoutResult.Reasoning} | {mtfResult.SummaryReasoning}";
-        if (_wfResult.IsCooloffActive)
-        {
-            BotLogger.Warn($"[Drawdown] {_asset} {_timeframe} is unstable. Soft-warning the user instead of blocking.");
-            adaptiveReasoning = "⚠️ Рынок нестабилен (серия убытков), ИИ перестраивается. Торгуйте осторожно! | " + adaptiveReasoning;
-        }
+        var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.emaVal, taResult.volStrengthVal, mainAtr, mainAdx);
+        var smcSignal = new SmcSignal(smcResult.BosDirection, smcResult.SweepDirection, smcResult.OrderBlockType, smcResult.FvgType, "");
+        var ofSignal = new OrderflowSignal(ofResult.ScoreContribution, ofResult.Description);
+        var mlSignal = new MlSignal(lgbmDir, lgbmConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline");
+        var stateSignal = new StateSignal(state.VelocityRegime, state.VelocityBpsPerSec, state.MomentumContribution);
 
-        // МАКРОСИМУЛЯТОР Monte Carlo (O(1000) ИТЕРАЦИЙ МАРКОВА)
-        // Математическое ядро оценки EV (Expected Value)
-        MonteCarloResult mcResult;
-        if (finalDirection == "NEUTRAL")
-        {
-            mcResult = new MonteCarloResult(0, 0, 0, 0, "Blocked", "Blocked", "Trade blocked before simulation");
-        }
-        else
-        {
-            const double Payout = 0.92; // PocketOption payout (92%)
-            double p = Math.Clamp(finalProbability / 100.0, 0.35, 0.95);
-            double q = 1.0 - p;
+        var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
 
-            // 1. Expected Value: EV = p * Payout - q * 1.0
-            double evRatio   = (p * Payout) - (q * 1.0);
-            double evPct     = Math.Round(evRatio * 100.0, 1);
+        // 8. Final Formatting & UI Fix
+        var timeout = _timeoutEngine.CalculateTimeout(cleanAsset, timeframe, mainAtr, 1.0, smcResult, currentLivePrice, isForex);
+        var mc = new MonteCarloResult(1000, 0, 0, 0, "", "", ""); // Placeholder
 
-            // 2. Fractional Kelly Criterion (25% Kelly для безопасности)
-            double fullKelly      = (p * Payout - q) / Payout;
-            double fractionalKelly = Math.Clamp(fullKelly * 0.25, 0.0, 0.05);
-            double kellyRiskPct   = Math.Round(fractionalKelly * 100.0, 1);
+        // RECORD (Fire and forget)
+        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, timeout.TimeoutCandles, _fetcher.TimeframeSeconds(timeframe), isForex, new Dictionary<string, string>(), consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb);
 
-            // 3. Success rate = БИНОМИАЛЬНОЕ РАСПРЕДЕЛЕНИЕ (Прямая Формула вместо цикла)
-            int syntheticIterations  = 1000;
-            int syntheticSuccessCount = (int)Math.Round(p * syntheticIterations);
+        var stats = await SignalTracker.GetOverallStatsAsync();
+        var assetStats = await SignalTracker.GetStatsAsync(cleanAsset, timeframe);
 
-            string evLabel     = evPct > 0
-                ? $"+{evPct:F1}% EV (Positive Expectancy)"
-                : $" {evPct:F1}% EV (Negative Expectancy)";
-
-            string kellyLabel  = kellyRiskPct > 0
-                ? $"{kellyRiskPct:F1}% - {Math.Min(kellyRiskPct + 0.5, 5.0):F1}% of Capital"
-                : "0% (Do not trade, low edge)";
-
-            string summary = $"Direct Formula (O(1)): {syntheticSuccessCount}/{syntheticIterations} est. | EV: {(evPct > 0 ? "+" : "")}{evPct:F1}% | Kelly Risk: {kellyRiskPct:F1}%";
-
-            mcResult = new MonteCarloResult(
-                syntheticIterations,
-                syntheticSuccessCount,
-                evPct,
-                kellyRiskPct,
-                evLabel,
-                kellyLabel,
-                summary
-            );
-        }
-
-        string orderFlowDir = _orderFlowResult.ScoreContribution > 0 ? "BUY" : _orderFlowResult.ScoreContribution < 0 ? "PUT" : "NEUTRAL";
-
-        // FIX: Record ALL signals, including NEUTRAL.
-        // Skipping NEUTRAL signals causes Survivorship Bias.
-        // Moved to background thread (fire-and-forget) to remove DB write latency from T4 Consensus, saving ~500ms.
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await SignalTracker.RecordPredictionAsync(
-                    finalDirection, _asset, _timeframe, _currentLivePrice,
-                    expiryCandles: timeoutResult.TimeoutCandles,
-                    timeframeSecs: timeframeSec, isForex: _isForex,
-                    sourceDirections: new Dictionary<string, string> {
-                        ["LIGHTGBM"] = _lgbmDirection, ["SKENDER_MATH"] = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
-                        ["SMC"] = (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : "NEUTRAL", ["ORDERFLOW"] = orderFlowDir,
-                        ["NATIVE_ML"] = "NEUTRAL"
-                    },
-                    taScore: consensus.TaScore,
-                    ofScore: consensus.OfScore,
-                    smcScore: consensus.SmcScore,
-                    mlProb: consensus.MlProb
-                );
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Error($"[Tracker] Background save failed for {_asset}/{_timeframe}", ex);
-            }
-        });
-
-        // СБОР СТАТИСТИКИ (Запускаем асинхронно, чтобы не блокировать UI)
-        // Ожидаем в конце. Из-за этого время T4 Consensus, сек. увеличивалось на ~200ms.
-        var overallStatsTask    = SignalTracker.GetOverallStatsAsync();
-        var assetStatsTask      = SignalTracker.GetStatsAsync(_asset, _timeframe);
-        var pendingCountTask    = SignalTracker.GetPendingCountAsync();
-
-        await Task.WhenAll(overallStatsTask, assetStatsTask, pendingCountTask);
-
-        var overallStats = await overallStatsTask;
-        var assetStats   = await assetStatsTask;
-        int pendingCount = await pendingCountTask;
-
-
-        // Market Weather Widget calculations
-        string uiMarketSession = "ВНЕБИРЖЕВАЯ (OTC)";
-        if (!_asset.Contains("BTC") && !_asset.Contains("ETH") && !_asset.Contains("SOL"))
-        {
-            int h = DateTime.UtcNow.Hour;
-            if (h >= 21 || h < 2) uiMarketSession = "Ночь (Тихий рынок)";
-            else if (h >= 2 && h < 8) uiMarketSession = "Азия (Пила)";
-            else if (h >= 8 && h < 13) uiMarketSession = "Лондон (Начало)";
-            else if (h >= 13 && h < 17) uiMarketSession = "Нью-Йорк (Объемы)";
-            else if (h >= 17 && h < 21) uiMarketSession = "Нью-Йорк (Вечер)";
-        }
-        else 
-        {
-            uiMarketSession = "КРИПТО";
-        }
-
-        // Адаптивная фаза рынка (синхронизировано с ContinuousStateEngine)
-        string uiMarketPhase = "Боковик (Флэт)";
-        string regime = _continuousState?.VelocityRegime ?? "";
-        if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс (Резкий)";
-        else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс (Резкий)";
-        else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Разворот)";
-        else if (_mainResult.rsiVal > 62) uiMarketPhase = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Откат)" : "Бычий тренд (Плавный)";
-        else if (_mainResult.rsiVal < 38) uiMarketPhase = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Плавный)";
-
-        // Адаптивная энтропия рынка (Учитываем таймфрейм)
-        string uiMarketEntropy = "В норме (Безопасно)";
-        double vel = Math.Abs(_continuousState?.VelocityBpsPerSec ?? 0);
-        bool isSub = _timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
-        double dangerVel = isSub ? 0.3 : 3.0; // Пороги из ContinuousStateEngine
-        double deadVel   = isSub ? 0.02 : 0.1;
-
-        if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
-        else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
-
-        return new
-        {
-            uiMarketSession = uiMarketSession,
-            uiMarketPhase = uiMarketPhase,
-            uiMarketEntropy = uiMarketEntropy,
-
-            direction = finalDirection,
-            probability = finalProbability,
-            duration = timeoutResult.TimeoutText,
-            adaptiveReasoning = adaptiveReasoning,
-            goldenSetup = mtfResult.IsGoldenSetup,
-            confluenceLabel = mtfResult.ConfluenceLabel,
-            confluenceRatio = mtfResult.ConfluenceRatio,
-            expiryCandles = timeoutResult.TimeoutCandles,
-            chartData = _mainPrices,
-            chartOhlc = (_ohlcCandles ?? Array.Empty<MiniAppController.OhlcCandle>())
-                .TakeLast(80)
-                .Select(c => new
-                {
-                    o = Math.Round(c.Open, 8),
-                    h = Math.Round(c.High, 8),
-                    l = Math.Round(c.Low, 8),
-                    c = Math.Round(c.Close, 8),
-                    v = Math.Round(c.Volume, 2)
-                })
-                .ToArray(),
-            rsi = Math.Round(_mainResult.rsiVal, 1),
-            atr = Math.Round(_mainAtr, 6),
-            ema = Math.Round(_mainResult.emaVal, 2),
-            volumeStrength = Math.Round(_mainResult.volStrengthVal, 2),
-            tfConflict = _conflictPenalty < 1.0,
-            lgbmDirection = _lgbmDirection,
-            lgbmConfidence = Math.Round(_lgbmConfidence * 100, 0),
-            lgbmAccuracy = _lgbmAccuracy.HasValue ? Math.Round(_lgbmAccuracy.Value * 100, 1) : (double?)null,
-            lgbmModelVersion = _lgbmModelVersion,
-            smcDirection = isSubMinute ? "DISABLED" : 
-                ((smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 
-                (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : 
-                (smcSignal.OrderBlockType ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.OrderBlockType ?? "").Contains("BEARISH") ? "PUT" : 
-                (smcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
-                "NEUTRAL"),
-            smcConfidence = isSubMinute ? 0 : Math.Clamp(Math.Round(Math.Abs(consensus.SmcScore) * 100, 0), 0, 100),
-            taDirection = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
-            taConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.TaScore) * 100, 0), 0, 100),
-            ofDirection = orderFlowDir,
-            ofConfidence = Math.Clamp(Math.Round(Math.Abs(consensus.OfScore) * 100, 0), 0, 100),
-            newsSentiment = "Neutral", // Removed old logic
-            newsScore = 0.0,
-            newsSummary = "",
-            newsHeadlines = Array.Empty<string>(),
-            claudeReasoning = consensus.CombinedReasoningText,
-            winRateOverall = overallStats.HasData ? overallStats.WinRate : (double?)null,
-            winRateAsset = assetStats.HasData ? assetStats.WinRate : (double?)null,
-            signalsVerifiedAsset = assetStats.Verified,
-            signalsVerified = overallStats.Verified,
-            signalsPending = pendingCount,
-            monteCarloIterations = mcResult.Iterations,
-            monteCarloSuccess = mcResult.SuccessCount,
-            evPct = mcResult.ExpectedValuePct,
-            evLabel = mcResult.EvLabel,
-            kellyRiskPct = mcResult.KellyRiskPct,
-            kellyLabel = mcResult.KellyLabel,
-            monteCarloSummary = mcResult.SummaryReasoning,
-            wfIsCooloffActive = _wfResult.IsCooloffActive,
-            llmReport = BuildLlmSummary()  // Inline: Генерация LLM отчета
+        return new {
+            direction = consensus.FinalDirection,
+            probability = consensus.Probability,
+            duration = timeout.TimeoutText,
+            adaptiveReasoning = consensus.CombinedReasoningText,
+            taDirection = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
+            taConfidence = (int)Math.Abs(consensus.TaScore * 100),
+            ofDirection = DirectionExtensions.FromScore(consensus.OfScore, 0.05).ToSignal(),
+            ofConfidence = (int)Math.Abs(consensus.OfScore * 100),
+            smcDirection = DirectionExtensions.FromScore(consensus.SmcScore).ToSignal(),
+            smcConfidence = (int)Math.Abs(consensus.SmcScore * 100),
+            lgbmDirection = lgbmDir,
+            lgbmConfidence = (int)(lgbmConf * 100),
+            winRateOverall = stats.WinRate,
+            winRateAsset = assetStats.WinRate,
+            chartOhcl = candles.TakeLast(80).Select(c => new { o = c.Open, h = c.High, l = c.Low, c = c.Close, v = c.Volume }),
+            goldedSetup = mtfResult.IsGoldenSetup
         };
     }
 }
