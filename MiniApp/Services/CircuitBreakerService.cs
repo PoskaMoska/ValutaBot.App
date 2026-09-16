@@ -221,24 +221,19 @@ namespace ValutaBot.MiniApp.Services
             }
         }
 
+        private sealed record CbState(DateTime? halted_until, string? reason);
+
         private async Task<(DateTime? haltedUntil, string? reason)> ReadHaltFromDbAsync(CancellationToken ct = default)
         {
             await using var conn = _getConnection();
             await conn.OpenAsync(ct);
 
-            var row = await conn.QueryFirstOrDefaultAsync(
+            var row = await conn.QueryFirstOrDefaultAsync<CbState>(
                 "SELECT halted_until, reason FROM circuit_breaker_state WHERE id = 1;"
             );
 
             if (row == null) return (null, null);
-
-            string raw = (string?)row.halted_until;
-            if (DateTime.TryParse(raw, null,
-                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var dt))
-            {
-                return (dt, (string?)row.reason);
-            }
-            return (null, null);
+            return (row.halted_until, row.reason);
         }
 
         private async Task EnsureTableAsync(CancellationToken ct = default)
@@ -266,9 +261,9 @@ namespace ValutaBot.MiniApp.Services
                     created_at   = EXCLUDED.created_at;
             ", new
             {
-                HaltedUntil = haltedUntil.ToString("o"),
+                HaltedUntil = haltedUntil,
                 Reason = reason,
-                CreatedAt = DateTime.UtcNow.ToString("o")
+                CreatedAt = DateTime.UtcNow
             });
         }
 
