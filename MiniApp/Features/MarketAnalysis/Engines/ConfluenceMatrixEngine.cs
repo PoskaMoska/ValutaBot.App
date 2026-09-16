@@ -77,9 +77,9 @@ public class ConfluenceMatrixEngine(
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "✨ ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
-                >= 0.65 => "⚡ СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
-                _       => "🔍 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
+                >= 0.99 => "💠 ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "💠 СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "💠 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
             string summary = $"• 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label}";
@@ -103,7 +103,7 @@ public class ConfluenceMatrixEngine(
                 ConfluenceRatio: 0.0,
                 IsGoldenSetup: false,
                 ProbabilityBoost: 0,
-                ConfluenceLabel: "⚠️ 3D Matrix Unavailable",
+                ConfluenceLabel: "💠 3D Matrix Unavailable",
                 SummaryReasoning: "MTF sync failed due to rate limits",
                 TimeframeDirections: new Dictionary<string, string>(),
                 DominantDirection: "NEUTRAL"
@@ -137,11 +137,11 @@ public class ConfluenceMatrixEngine(
     /// Scores directional bias for a single timeframe using the full
     /// TechnicalAnalysisEngine pipeline (HMA, ConnorsRSI, ADX, Volume).
     /// </summary>
-    ///
+    /// <remarks>
     /// FIX: Previously passed candles=null to ScoreTimeframe, which caused
     /// candles.Length == 0 < 14 always return score=0.0 always "NEUTRAL".
     /// Now constructs a real OhlcCandle[] from price/volume arrays.
-    /// </summary>
+    /// </remarks>
     // В отличие от ScoreDirection (которому нужен только цены и дает avgDiff±0.5),
     // этот метод передает реальные High/Low свечи -> ATR/ADX корректны -> нет шума ±12%.
     private string ScoreDirectionFromCandles(
@@ -267,9 +267,9 @@ public class ConfluenceMatrixEngine(
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "✨ ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
-                >= 0.65 => "⚡ СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
-                _       => "🔍 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
+                >= 0.99 => "💠 ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "💠 СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "💠 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
             string summary = $"• 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch smart]";
@@ -398,7 +398,7 @@ public class ConfluenceMatrixEngine(
         if (Math.Abs(finalSmcScore) > 0.1 && !isSubMinute)
         {
             // FIX W-20: dynamic normalization — max score depends on active weights
-            // AUDIT FIX: SMC полностью отключен на sub-minute (s5/s10/s15/s30).
+            // AUDIT FIX: SMC полностью отключен на суб-минуте (s5/s10/s15/s30).
             // BOS, FVG, OrderBlock — институциональные концепции для H1 и +.
             // На 5-секундных свечах это стохастический шум, загрязняющий скоринг.
             double maxPossibleSmc = (trendWeight * 4.0) + (reversionWeight * 2.0);
@@ -494,7 +494,7 @@ public class ConfluenceMatrixEngine(
         // FIX PRIORITY-2: Hardened entry threshold. 
         // 0.52 was only 52%, which is precisely the breakeven line for 92% payout (1 / 1.92 = 52.08%).
         // We raised it to 55% to provide a definitive 3% EV buffer above market noise.
-        // Убрали мертвую зону (NEUTRAL), так как пользователь требует сигнал всегда.
+        // Убираем мертвую зону (NEUTRAL), так как пользователь требует сигнал всегда.
         if (blendedProb >= 0.50)
         {
             candidateDir = "BUY";
@@ -512,29 +512,8 @@ public class ConfluenceMatrixEngine(
         // ШАГ 2: Блокировка конфликта УДАЛЕНА. 
         // Теперь если ИИ и математика спорят, побеждает тот, у кого суммарный перевес хотя бы на 0.1%.
 
-        // ШАГ 3: Momentum Inversion (Езда по тренду против угадывания дна)
-        // ОТКЛЮЧЕНО ПО ТРЕБОВАНИЮ: Сигнал должен честно отражать то, что показывают компоненты.
-        /*
-        bool isSubOrM1 = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) || timeframe.Equals("m1", StringComparison.OrdinalIgnoreCase);
-        if (isSubOrM1 && candidateDir != "NEUTRAL")
-        {
-            double vel = stateSignal.VelocityBpsPerSec;
-            if (candidateDir == "BUY" && vel < -0.1)
-            {
-                BotLogger.Warn($"[Momentum Inversion] BUY overridden on {timeframe}. Knife falling (Vel: {vel:F2}). Inverting to PUT.");
-                candidateDir = "PUT";
-                finalConfidenceScore = Math.Abs(finalConfidenceScore) > 0 ? finalConfidenceScore : 0.2;
-                mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
-            }
-            else if (candidateDir == "PUT" && vel > 0.1)
-            {
-                BotLogger.Warn($"[Momentum Inversion] PUT overridden on {timeframe}. Price rising (Vel: {vel:F2}). Inverting to BUY.");
-                candidateDir = "BUY";
-                finalConfidenceScore = Math.Abs(finalConfidenceScore) > 0 ? finalConfidenceScore : 0.2;
-                mtfResult = mtfResult with { ProbabilityBoost = 0, IsGoldenSetup = false };
-            }
-        }
-        */
+        // ШАГ 3: Momentum Inversion УДАЛЕН.
+        // Итоговый сигнал должен честно отражать компоненты без принудительных переворотов.
 
         double absWeightedScore = finalConfidenceScore;
         
@@ -551,7 +530,7 @@ public class ConfluenceMatrixEngine(
             if (h >= 21 || h < 2) { sessionMultiplier = 0.75; sessionName = "DEAD_ZONE"; }
             else if (h >= 2 && h < 8) { sessionMultiplier = 0.85; sessionName = "ASIAN"; }
             else if (h >= 8 && h < 13) { sessionMultiplier = 1.0; sessionName = "LONDON_MORNING"; }
-            else if (h >= 13 && h < 17) { sessionMultiplier = 1.1; sessionName = "LONDON_NY_OVERLAP"; }
+            else if (h >= 13 && h < 16) { sessionMultiplier = 1.1; sessionName = "LONDON_NY_OVERLAP"; }
             else if (h >= 17 && h < 21) { sessionMultiplier = 1.0; sessionName = "NY_AFTERNOON"; }
         }
         
@@ -587,7 +566,7 @@ public class ConfluenceMatrixEngine(
 
         // 6. Reasoning text
         string modelAccText = mlSignal.Accuracy.HasValue
-            ? $" [Точность: {Math.Round(mlSignal.Accuracy.Value * 100, 1)}%]"
+            ? $" [Точность {Math.Round(mlSignal.Accuracy.Value * 100, 1)}%]"
             : "";
 
         string smcText = !string.IsNullOrEmpty(smcSignal.Reasoning)
@@ -599,16 +578,16 @@ public class ConfluenceMatrixEngine(
             : "• 🌊 Order Flow & CVD: нет выраженных объемов";
 
         string lgbmText = !string.IsNullOrEmpty(mlSignal.Direction) && mlSignal.Direction != "NEUTRAL"
-            ? $"• ⚡ Нейросеть (LightGBM): {(mlSignal.Direction == "BUY" ? "ВВЕРХ 🟢" : "ВНИЗ 🔴")} ({Math.Round(mlSignal.Confidence * 100)}% уверенности){modelAccText}"
+            ? $"• 💠 Нейросеть (LightGBM): {(mlSignal.Direction == "BUY" ? "ВВЕРХ 📈" : "ВНИЗ 📉")} ({Math.Round(mlSignal.Confidence * 100)}% уверенности){modelAccText}"
             : (mlSignal.ModelVersion == "disabled"
-                ? "• ⚡ Нейросеть (LightGBM): Отключена пользователем"
+                ? "• 💠 Нейросеть (LightGBM): Отключена пользователем"
                 : mlSignal.ModelVersion == "forex-only"
-                    ? "• ⚡ Нейросеть (LightGBM): Недоступна для крипты"
+                    ? "• 💠 Нейросеть (LightGBM): Недоступна для крипты"
                     : mlSignal.ModelVersion == "not-trained"
-                        ? "• ⚡ Нейросеть (LightGBM): Модель обучается (зайдите через пару минут)"
+                        ? "• 💠 Нейросеть (LightGBM): Модель обучается (зайдите через пару минут)"
                         : mlSignal.ModelVersion == "offline"
-                            ? "• ⚡ Нейросеть (LightGBM): Сервер недоступен (Оффлайн)"
-                            : $"• ⚡ Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
+                            ? "• 💠 Нейросеть (LightGBM): Сервер недоступен (Оффлайн)"
+                            : $"• 💠 Нейросеть (LightGBM): НЕЙТРАЛЬНО (0% уверенности){modelAccText}");
 
         string combinedReasoning = $"{smcText}\n{flowText}\n{lgbmText}";
 
