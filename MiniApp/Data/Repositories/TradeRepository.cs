@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -372,6 +372,82 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 LIMIT @Limit
             ", new { Asset = asset, Timeframe = timeframe, Limit = limit });
             return rows.ToList();
+        }
+
+        // ── MetaLearner Persistence ──────────────────────────────────────────────
+
+        /// <summary>
+        /// Создаёт таблицу meta_learner_weights если не существует.
+        /// Вызывается при инициализации TradeOutcomeTracker.
+        /// </summary>
+        public static async Task EnsureMetaWeightsTableAsync()
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.ExecuteAsync(@"
+                    CREATE TABLE IF NOT EXISTS meta_learner_weights (
+                        key          TEXT PRIMARY KEY,
+                        weights_json TEXT NOT NULL,
+                        update_count INT  NOT NULL DEFAULT 0,
+                        updated_at   TEXT NOT NULL
+                    )");
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] EnsureMetaWeightsTable notice: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Сохраняет веса одного ключа MetaLearner в PostgreSQL (upsert).
+        /// </summary>
+        public static async Task SaveMetaWeightAsync(string key, double[] weights, int updateCount)
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            try
+            {
+                var json = System.Text.Json.JsonSerializer.Serialize(weights);
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.ExecuteAsync(@"
+                    INSERT INTO meta_learner_weights (key, weights_json, update_count, updated_at)
+                    VALUES (@key, @json, @updateCount, @updatedAt)
+                    ON CONFLICT (key) DO UPDATE SET
+                        weights_json = EXCLUDED.weights_json,
+                        update_count = EXCLUDED.update_count,
+                        updated_at   = EXCLUDED.updated_at",
+                    new { key, json, updateCount, updatedAt = DateTime.UtcNow.ToString("o") });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] SaveMetaWeight notice: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Загружает все веса MetaLearner из PostgreSQL при старте.
+        /// </summary>
+        public static async Task<System.Collections.Generic.List<(string key, double[] weights, int updateCount)>> LoadMetaWeightsAsync()
+        {
+            var result = new System.Collections.Generic.List<(string, double[], int)>();
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return result;
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                var rows = await conn.QueryAsync("SELECT key, weights_json, update_count FROM meta_learner_weights");
+                foreach (var r in rows)
+                {
+                    var w = System.Text.Json.JsonSerializer.Deserialize<double[]>((string)r.weights_json);
+                    if (w != null)
+                        result.Add(((string)r.key, w, Convert.ToInt32(r.update_count)));
+                }
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] LoadMetaWeights notice: {ex.Message}");
+            }
+            return result;
         }
     }
 }

@@ -104,6 +104,15 @@ public class PendingTradeVerificationService : BackgroundService
         }
 
         double priceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
+
+        // Guard: NEUTRAL сигнал не несёт обучающей информации
+        if (record.Direction == "NEUTRAL")
+        {
+            BotLogger.Warn($"[PendingVerifier] NEUTRAL direction for {record.Id} — skipping, deleting.");
+            await TradeRepository.DeletePendingTradeAsync(record.Id);
+            return;
+        }
+
         bool isCorrect = (record.Direction == "BUY" && exitPrice.Value > record.EntryPrice)
                       || (record.Direction == "PUT" && exitPrice.Value < record.EntryPrice);
 

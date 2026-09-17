@@ -17,12 +17,81 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
 
         // Скользящее окно последних 10 сделок для расчёта rolling win rate.
         // Ring buffer: true = победа, false = поражение.
-        public readonly bool[] RecentOutcomes = new bool[10];
+        public bool[] RecentOutcomes { get; set; } = new bool[10];
         public int OutcomeIndex { get; set; }
         public int OutcomeCount { get; set; }
     }
 
     private readonly ConcurrentDictionary<SignalKey, CooloffState> _cooloffMap = new();
+    private static readonly string _savePath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "walkforward_state.json");
+    private static readonly System.Threading.SemaphoreSlim _saveLock = new(1, 1);
+
+    public WalkForwardValidationEngine()
+    {
+        LoadState();
+    }
+
+    private void LoadState()
+    {
+        try
+        {
+            if (System.IO.File.Exists(_savePath))
+            {
+                var json = System.IO.File.ReadAllText(_savePath);
+                var dict = System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, CooloffState>>(json);
+                if (dict != null)
+                {
+                    foreach (var kvp in dict)
+                    {
+                        var parts = kvp.Key.Split('_');
+                        if (parts.Length == 2)
+                        {
+                            var key = new SignalKey(parts[0], parts[1]);
+                            _cooloffMap[key] = kvp.Value;
+                        }
+                    }
+                    BotLogger.Info($"[WalkForward] Restored {dict.Count} drawdown states from file.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Error("[WalkForward] Failed to load state", ex);
+        }
+    }
+
+    private void SaveStateAsync()
+    {
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            if (!await _saveLock.WaitAsync(0)) return;
+            try
+            {
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(_savePath)!);
+                var dict = new System.Collections.Generic.Dictionary<string, CooloffState>();
+                foreach (var kvp in _cooloffMap)
+                {
+                    // Сохраняем только активные или недавние кулоффы (чистим мусор)
+                    if (kvp.Value.ConsecutiveLosses > 0 || kvp.Value.CooloffUntil > DateTime.UtcNow.AddHours(-1))
+                    {
+                        dict[kvp.Key.ToString()] = kvp.Value;
+                    }
+                }
+                var json = System.Text.Json.JsonSerializer.Serialize(dict);
+                string tmpPath = _savePath + ".tmp";
+                await System.IO.File.WriteAllTextAsync(tmpPath, json);
+                System.IO.File.Move(tmpPath, _savePath, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Error("[WalkForward] Failed to save state", ex);
+            }
+            finally
+            {
+                _saveLock.Release();
+            }
+        });
+    }
 
     /// <summary>
     /// Проверяет активен ли cooloff для данного актива/таймфрейма.
@@ -113,6 +182,7 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
                 }
             }
         }
+        SaveStateAsync();
     }
 
     public readonly record struct SignalKey(string Asset, string Timeframe)

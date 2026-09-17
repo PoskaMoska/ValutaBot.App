@@ -296,7 +296,7 @@ export async function executeAnalysis() {
                 }
                 const conf = document.getElementById('mlEnsembleConf');
                 if (conf && data.lgbmConfidence) {
-                    conf.innerText = (data.lgbmConfidence * 100).toFixed(0) + '%';
+                    conf.innerText = data.lgbmConfidence + '%';
                 }
                 const rep = document.getElementById('mlEnsembleReport');
                 if (rep) {

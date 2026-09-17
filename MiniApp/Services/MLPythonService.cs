@@ -25,8 +25,7 @@ public static class MLPythonService
     public static void SetFactory(IHttpClientFactory factory) => _httpFactory = factory;
     private static Process? _mlProcess; // Track to prevent zombie leaks
 
-    // --- HFT Transport Optimization ---
-    private static readonly HttpClient _fastHttpClient = new HttpClient();
+
     private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     static MLPythonService()
@@ -187,6 +186,7 @@ public static class MLPythonService
     private static void StartPythonWatchdog()
     {
         _watchdogCts?.Cancel();
+        _watchdogCts?.Dispose();
         _watchdogCts = new CancellationTokenSource();
         var token = _watchdogCts.Token;
 
@@ -288,7 +288,8 @@ public static class MLPythonService
             using var content = new ByteArrayContent(jsonBytes);
             content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-            var response = await _fastHttpClient.PostAsync(new Uri($"{_baseUrl}/predict"), content);
+            var client = _httpFactory?.CreateClient("MLPythonService") ?? throw new InvalidOperationException("HttpFactory not set");
+            var response = await client.PostAsync(new Uri($"{_baseUrl}/predict"), content);
             
             if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
             {

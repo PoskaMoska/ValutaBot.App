@@ -180,6 +180,7 @@ public static partial class MiniAppController
         TradeOutcomeTracker.WfEngine = app.Services.GetRequiredService<IWalkForwardValidationEngine>();
 
         HttpFactory = app.Services.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+        MLPythonService.SetFactory(HttpFactory);
         Services    = app.Services;
 
         // Initialize CircuitBreaker (Creates DB Table)

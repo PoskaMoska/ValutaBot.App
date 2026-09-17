@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using ValutaBot.App.MiniApp.Backtesting;
 
@@ -28,6 +28,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
             services.AddHttpClient();
             var sp = services.BuildServiceProvider();
             ValutaBot.MiniApp.MiniAppController.HttpFactory = sp.GetRequiredService<System.Net.Http.IHttpClientFactory>();
+            ValutaBot.MiniApp.MLPythonService.SetFactory(ValutaBot.MiniApp.MiniAppController.HttpFactory);
             ValutaBot.MiniApp.MLPythonService.Init("http://127.0.0.1:8765");
             System.Threading.Thread.Sleep(3000); // give it time to start
 

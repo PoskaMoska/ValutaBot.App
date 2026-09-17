@@ -40,16 +40,10 @@ namespace ValutaBot.MiniApp
                     {
                         try
                         {
-                            var fetcher = new MarketDataFetcher();
-                            var candles = await fetcher.FetchOhlcWithFallbackAsync(asset, timeframe, asset, 5000);
-                            
-                            if (candles != null && candles.Length > 0)
-                            {
-                                string cleanAsset = AssetSanitizer.Sanitize(asset);
-                                bool isForex = AssetSanitizer.IsForexAsset(cleanAsset);
-                                bool success = await MLPythonService.ForceTrainGlobalAsync(asset, timeframe, isForex);
-                                if (!success) BotLogger.Warn($"[DriftDetector] Failed to Auto-Retrain {asset}/{timeframe}. Cooldown active.");
-                            }
+                            string cleanAsset = AssetSanitizer.Sanitize(asset);
+                            bool isForex = AssetSanitizer.IsForexAsset(cleanAsset);
+                            bool success = await MLPythonService.ForceTrainGlobalAsync(asset, timeframe, isForex);
+                            if (!success) BotLogger.Warn($"[DriftDetector] Failed to Auto-Retrain {asset}/{timeframe}. Cooldown active.");
                         }
                         catch (Exception ex)
                         {

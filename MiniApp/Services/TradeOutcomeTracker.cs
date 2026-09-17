@@ -39,6 +39,10 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             // L2-FIX: Создаём таблицу calibration_state если не существует
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureCalibrationTableAsync();
 
+            // MetaLearner: создаём таблицу весов и восстанавливаем из PostgreSQL
+            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureMetaWeightsTableAsync();
+            await OnlineMetaLearner.InitializeFromDbAsync();
+
             // L2-FIX: Загружаем сохранённые EMA-веса из PostgreSQL
             var calibStates = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
             foreach (var state in calibStates)

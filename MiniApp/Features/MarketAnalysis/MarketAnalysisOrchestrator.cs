@@ -146,8 +146,17 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var timeout = _timeoutEngine.CalculateTimeout(cleanAsset, timeframe, mainAtr, 1.0, smcResult, currentLivePrice, isForex);
         var mc = new MonteCarloResult(1000, 0, 0, 0, "", "", ""); // Placeholder
 
+        // FIX: Передаём направления каждого источника для per-source калибровки
+        var sourceDirections = new Dictionary<string, string>
+        {
+            ["TechAnalysis"] = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
+            ["OrderFlow"]    = DirectionExtensions.FromScore(consensus.OfScore, 0.05).ToSignal(),
+            ["SMC"]          = DirectionExtensions.FromScore(consensus.SmcScore).ToSignal(),
+            ["LIGHTGBM"]     = lgbmDir,
+        };
+
         // RECORD (Fire and forget)
-        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, timeout.TimeoutCandles, _fetcher.TimeframeSeconds(timeframe), isForex, new Dictionary<string, string>(), consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb);
+        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, timeout.TimeoutCandles, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb);
 
         var stats = await SignalTracker.GetOverallStatsAsync();
         var assetStats = await SignalTracker.GetStatsAsync(cleanAsset, timeframe);
@@ -203,6 +212,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmConfidence = (int)(lgbmConf * 100),
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
+            signalsVerifiedAsset = assetStats.Verified,
+            // TA indicators for UI display (resRsi, resEma, resVol elements)
+            rsi = Math.Round(GetSafeLimit(taResult.rsiVal), 1),
+            ema = Math.Round(GetSafeLimit(taResult.hmaVal), isForex ? 5 : 2),
+            volumeStrength = Math.Round(GetSafeLimit(taResult.volStrengthVal), 2),
+            atr = Math.Round(GetSafeLimit(mainAtr), isForex ? 5 : 2),
             chartData = mainPrices,
             chartOhlc = candles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
             goldenSetup = mtfResult.IsGoldenSetup,

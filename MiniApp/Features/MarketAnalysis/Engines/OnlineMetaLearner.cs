@@ -115,7 +115,7 @@ public static class OnlineMetaLearner
 
         BotLogger.Info($"[MetaLearner] {key} | LR={lr:F4} | error={error:F3} | w=[{w[0]:F2},{w[1]:F2},{w[2]:F2},{w[3]:F2},{w[4]:F2}]");
 
-        _ = SaveWeightsAsync();
+        _ = SaveWeightsAsync(key, w, _updateCounts.GetOrAdd(key, 0));
     }
 
     private static void LoadWeights()
@@ -151,11 +151,12 @@ public static class OnlineMetaLearner
 
     private static readonly SemaphoreSlim _saveLock = new(1, 1);
 
-    private static async Task SaveWeightsAsync()
+    private static async Task SaveWeightsAsync(string updatedKey, double[] updatedWeights, int updateCount)
     {
-        // FIX P-3: Use SemaphoreSlim to prevent concurrent saves from racing,
-        // and write via a temp file + atomic rename so a crash mid-write
-        // cannot corrupt the existing meta_weights.json.
+        // 1. Сохраняем в PostgreSQL немедленно (один upsert для изменившегося ключа)
+        _ = ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveMetaWeightAsync(updatedKey, updatedWeights, updateCount);
+
+        // 2. Атомарный сброс всех весов в файл (crash-safe через .tmp + rename)
         if (!await _saveLock.WaitAsync(0)) // non-blocking: skip if another save is already queued
             return;
         try
@@ -169,15 +170,46 @@ public static class OnlineMetaLearner
             var json = JsonSerializer.Serialize(state);
             string tmpPath = _savePath + ".tmp";
             await File.WriteAllTextAsync(tmpPath, json);
-            File.Move(tmpPath, _savePath, overwrite: true); // atomic on same filesystem volume
+            File.Move(tmpPath, _savePath, overwrite: true);
         }
         catch (Exception ex)
         {
-            BotLogger.Error("[MetaLearner] Failed to save weights", ex);
+            BotLogger.Error("[MetaLearner] Failed to save weights to file", ex);
         }
         finally
         {
             _saveLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Загружает веса из PostgreSQL при старте. Перекрывает файловый кэш.
+    /// Вызывается из TradeOutcomeTracker.InitializeAsync() после инициализации БД.
+    /// </summary>
+    public static async Task InitializeFromDbAsync()
+    {
+        try
+        {
+            var rows = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadMetaWeightsAsync();
+            if (rows.Count == 0)
+            {
+                BotLogger.Info("[MetaLearner] No DB weights found — using file weights (first deploy or empty DB).");
+                return;
+            }
+
+            foreach (var (key, weights, updateCount) in rows)
+            {
+                if (weights.Length == 5)
+                {
+                    _weights[key]      = weights;
+                    _updateCounts[key] = updateCount;
+                }
+            }
+            BotLogger.Info($"[MetaLearner] Restored {rows.Count} weight keys from PostgreSQL (DB is source of truth).");
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Error("[MetaLearner] Failed to load weights from DB", ex);
         }
     }
 
