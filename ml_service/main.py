@@ -763,7 +763,7 @@ def feedback(req: TrainFeedback):
         mtf_candles = _fetch_candles_at_entry(req.asset, higher_tf, req.timestamp, limit=100)
 
         if len(recent_candles) >= 60:
-            ok = predictor.partial_fit_online(recent_candles, mtf_candles, req.entry_price, req.exit_price)
+            ok = predictor.partial_fit_online(recent_candles, mtf_candles, req.was_win, req.direction)
             if ok:
                 log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | candles_at_entry={len(recent_candles)}")
 
