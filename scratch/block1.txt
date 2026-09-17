@@ -1,0 +1,2759 @@
+﻿/// <summary>
+/// Stateful incremental indicator implementations.
+/// Each class is a self-contained mathematical state machine вЂ” no cache,
+/// no logging, no HTTP dependencies. Feed prices one tick at a time.
+/// </summary>
+namespace ValutaBot.MiniApp.Indicators;
+
+// в”Ђв”Ђ RSI (Wilder's Smoothed Moving Average variant) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulRsi
+{
+    private readonly int _period;
+    private int _count;
+    private double _avgGain;
+    private double _avgLoss;
+    private double _prevPrice;
+
+    public StatefulRsi(int period = 14) { _period = period; }
+
+    /// <summary>Returns RSI 0-100. Returns 50.0 during warm-up.</summary>
+    public double Update(double price)
+    {
+        if (_count == 0)
+        {
+            _prevPrice = price;
+            _count++;
+            return 50.0;
+        }
+        double diff = price - _prevPrice;
+        _prevPrice = price;
+
+        if (_count <= _period)
+        {
+            if (diff > 0) _avgGain += diff;
+            else          _avgLoss -= diff;
+            if (_count == _period)
+            {
+                _avgGain /= _period;
+                _avgLoss /= _period;
+            }
+            _count++;
+            if (_count <= _period) return 50.0;
+        }
+        else
+        {
+            double gain = diff > 0 ? diff : 0;
+            double loss = diff < 0 ? -diff : 0;
+            _avgGain = (_avgGain * (_period - 1) + gain) / _period;
+            _avgLoss = (_avgLoss * (_period - 1) + loss) / _period;
+            _count++;
+        }
+        // If both gain and loss are near zero вЂ” true flat market. Return neutral 50.0.
+        // If only avgLoss is near zero but avgGain > 0 вЂ” genuine uptrend, return 100.0.
+        if (_avgLoss < 1e-10) return _avgGain < 1e-10 ? 50.0 : 100.0;
+        return 100.0 - (100.0 / (1.0 + (_avgGain / _avgLoss)));
+    }
+
+    public bool IsWarm => _count > _period;
+
+    public StatefulRsi Clone() => (StatefulRsi)this.MemberwiseClone();
+}
+
+// в”Ђв”Ђ ConnorsRSI в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulConnorsRsi
+{
+    private StatefulRsi _rsi       = new(3);
+    private StatefulRsi _streakRsi = new(2);
+    private double _currentStreak;
+    private double _prevPrice;
+    private int _count;
+
+    // Percentile rank: 50 periods в†’ 2% resolution (industry standard uses 100)
+    private const int RankPeriod = 50;
+    private double[] _returnsHistory = new double[RankPeriod];
+    private int _returnsCount;
+
+    /// <summary>Returns ConnorsRSI 0-100. Returns 50.0 during warm-up.</summary>
+    public double Update(double price)
+    {
+        double rsiVal = _rsi.Update(price);
+        if (_count > 0)
+        {
+            if      (price > _prevPrice) _currentStreak = _currentStreak > 0 ? _currentStreak + 1 :  1;
+            else if (price < _prevPrice) _currentStreak = _currentStreak < 0 ? _currentStreak - 1 : -1;
+            else                         _currentStreak = 0;
+        }
+        double streakRsiVal = _streakRsi.Update(_currentStreak);
+
+        double currentReturn = (_count > 0 && Math.Abs(_prevPrice) > 1e-10)
+            ? (price - _prevPrice) / _prevPrice
+            : 0.0;
+
+        // Percentile rank against rolling history (before adding current return)
+        int winCount = 0;
+        for (int i = 0; i < _returnsCount; i++)
+            if (currentReturn > _returnsHistory[i]) winCount++;
+        double pctRank = _returnsCount > 0 ? (winCount / (double)_returnsCount) * 100.0 : 50.0;
+
+        // Slide window
+        if (_returnsCount < RankPeriod)
+            _returnsHistory[_returnsCount++] = currentReturn;
+        else
+        {
+            Array.Copy(_returnsHistory, 1, _returnsHistory, 0, RankPeriod - 1);
+            _returnsHistory[RankPeriod - 1] = currentReturn;
+        }
+
+        _prevPrice = price;
+        _count++;
+        return (rsiVal + streakRsiVal + pctRank) / 3.0;
+    }
+
+    public StatefulConnorsRsi Clone()
+    {
+        var clone = (StatefulConnorsRsi)this.MemberwiseClone();
+        clone._rsi = this._rsi.Clone();
+        clone._streakRsi = this._streakRsi.Clone();
+        clone._returnsHistory = (double[])this._returnsHistory.Clone();
+        return clone;
+    }
+}
+
+// в”Ђв”Ђ Hull Moving Average (HMA) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulHma
+{
+    private readonly int _period;
+    private readonly int _halfPeriod;
+    private readonly int _sqrtPeriod;
+    private double[] _priceHistory;
+    private int _priceCount;
+    private double[] _diffHistory;
+    private int _diffCount;
+
+    public StatefulHma(int period = 9)
+    {
+        // FIX W-03: HMA math requires at least period >= 4 to produce meaningful half-period/sqrt-period.
+        _period      = Math.Max(4, period);
+        _halfPeriod  = _period / 2;
+        _sqrtPeriod  = (int)Math.Sqrt(_period);
+        _priceHistory = new double[_period];
+        _diffHistory  = new double[_sqrtPeriod];
+    }
+
+    public StatefulHma Clone()
+    {
+        var clone = (StatefulHma)this.MemberwiseClone();
+        clone._priceHistory = (double[])this._priceHistory.Clone();
+        clone._diffHistory = (double[])this._diffHistory.Clone();
+        return clone;
+    }
+
+    /// <summary>Returns HMA. Returns raw price during warm-up.</summary>
+    public double Update(double price)
+    {
+        if (_priceCount < _period)
+            _priceHistory[_priceCount++] = price;
+        else
+        {
+            Array.Copy(_priceHistory, 1, _priceHistory, 0, _period - 1);
+            _priceHistory[_period - 1] = price;
+        }
+
+        if (_priceCount == _period)
+        {
+            double diff = 2.0 * Wma(_priceHistory, _halfPeriod) - Wma(_priceHistory, _period);
+
+            if (_diffCount < _sqrtPeriod)
+                _diffHistory[_diffCount++] = diff;
+            else
+            {
+                Array.Copy(_diffHistory, 1, _diffHistory, 0, _sqrtPeriod - 1);
+                _diffHistory[_sqrtPeriod - 1] = diff;
+            }
+
+            if (_diffCount == _sqrtPeriod)
+                return Wma(_diffHistory, _sqrtPeriod);
+        }
+        return price;
+    }
+
+    private static double Wma(double[] arr, int period)
+    {
+        double sum = 0, weightSum = 0;
+        int startIndex = arr.Length - period;
+        for (int i = 0; i < period; i++)
+        {
+            double w = i + 1;
+            sum       += arr[startIndex + i] * w;
+            weightSum += w;
+        }
+        return weightSum > 0 ? sum / weightSum : 0;
+    }
+}
+
+// в”Ђв”Ђ Exponential Moving Average (EMA) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulEma
+{
+    private readonly int _period;
+    private readonly double _k;
+    private int _count;
+    private double _ema;
+    private double _sum;
+
+    public StatefulEma(int period = 9)
+    {
+        _period = period;
+        _k      = 2.0 / (period + 1.0);
+    }
+
+    /// <summary>
+    /// Returns EMA. Returns 0.0 during warm-up (not raw price) so callers
+    /// can detect uninitialized state. IsWarm indicates when values are valid.
+    /// </summary>
+    public double Update(double price)
+    {
+        if (_count < _period)
+        {
+            _sum += price;
+            _count++;
+            if (_count == _period) _ema = _sum / _period;
+            // Return 0.0 during warmup вЂ” NOT raw price (misleading).
+            return _count < _period ? 0.0 : _ema;
+        }
+        _ema = (price - _ema) * _k + _ema;
+        _count++;
+        return _ema;
+    }
+
+    public bool IsWarm => _count >= _period;
+
+    public StatefulEma Clone() => (StatefulEma)this.MemberwiseClone();
+}
+
+// в”Ђв”Ђ Average True Range (ATR) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulAtr
+{
+    private readonly int _period;
+    private int _count;
+    private double _atr;
+    private double _prevClose;
+    private double _sumTr;
+
+    public double LastAtr { get; private set; }
+
+    public StatefulAtr(int period = 14) { _period = period; }
+
+    /// <summary>Returns ATR (Wilder). Returns 0.0 during warm-up.</summary>
+    public double Update(double high, double low, double close)
+    {
+        if (_count == 0)
+        {
+            _prevClose = close;
+            _count++;
+            return 0.0;
+        }
+        double tr = Math.Max(high - low,
+                    Math.Max(Math.Abs(high - _prevClose),
+                             Math.Abs(low  - _prevClose)));
+        _prevClose = close;
+
+        if (_count <= _period)
+        {
+            _sumTr += tr;
+            if (_count == _period) _atr = _sumTr / _period;
+            _count++;
+            LastAtr = _count <= _period ? 0.0 : _atr;
+            return LastAtr;
+        }
+        _atr   = (_atr * (_period - 1) + tr) / _period;
+        _count++;
+        LastAtr = _atr;
+        return _atr;
+    }
+
+    public bool IsWarm => _count > _period;
+
+    public StatefulAtr Clone() => (StatefulAtr)this.MemberwiseClone();
+}
+
+// в”Ђв”Ђ True ADX (Wilder) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulTrueAdx
+{
+    private readonly int _period;
+    private int _count;
+    private double _prevClose, _prevHigh, _prevLow;
+    private double _smoothTr, _smoothPdm, _smoothMdm;
+    private double _adx;
+    private double[] _dxHistory;
+    private double _sumDx;
+
+    public double LastPdi { get; private set; }
+    public double LastMdi { get; private set; }
+    public double LastAdx { get; private set; }
+
+    public StatefulTrueAdx(int period = 14)
+    {
+        _period    = period;
+        _dxHistory = new double[period];
+    }
+
+    public StatefulTrueAdx Clone()
+    {
+        var clone = (StatefulTrueAdx)this.MemberwiseClone();
+        clone._dxHistory = (double[])this._dxHistory.Clone();
+        return clone;
+    }
+
+    /// <summary>Returns ADX 0-100. Returns 20.0 during warm-up.</summary>
+    public double Update(double high, double low, double close)
+    {
+        if (_count == 0)
+        {
+            _prevClose = close; _prevHigh = high; _prevLow = low;
+            _count++;
+            return 20.0;
+        }
+
+        double tr      = Math.Max(high - low,
+                         Math.Max(Math.Abs(high - _prevClose),
+                                  Math.Abs(low  - _prevClose)));
+        double upMove   = high - _prevHigh;
+        double downMove = _prevLow - low;
+
+        double pdm = (upMove   > downMove && upMove   > 0) ? upMove   : 0;
+        double mdm = (downMove > upMove   && downMove > 0) ? downMove : 0;
+
+        _prevClose = close; _prevHigh = high; _prevLow = low;
+
+        if (_count <= _period)
+        {
+            _smoothTr += tr; _smoothPdm += pdm; _smoothMdm += mdm;
+            _count++;
+            return 20.0;
+        }
+
+        // Fix: was `_count > _period + 1` вЂ” skipped smoothing on the first live tick.
+        // Now smoothing is applied from _count == _period + 1 onwards (correct).
+        if (_count > _period)
+        {
+            _smoothTr  = _smoothTr  - (_smoothTr  / _period) + tr;
+            _smoothPdm = _smoothPdm - (_smoothPdm / _period) + pdm;
+            _smoothMdm = _smoothMdm - (_smoothMdm / _period) + mdm;
+        }
+
+        LastPdi = _smoothTr == 0 ? 0 : 100.0 * _smoothPdm / _smoothTr;
+        LastMdi = _smoothTr == 0 ? 0 : 100.0 * _smoothMdm / _smoothTr;
+        double dx = (LastPdi + LastMdi) == 0
+            ? 0
+            : 100.0 * Math.Abs(LastPdi - LastMdi) / (LastPdi + LastMdi);
+
+        if (_count <= _period * 2)
+        {
+            _dxHistory[_count - _period - 1] = dx;
+            if (_count == _period * 2)
+            {
+                for (int i = 0; i < _period; i++) _sumDx += _dxHistory[i];
+                _adx = _sumDx / _period;
+            }
+        }
+        else
+        {
+            _adx = (_adx * (_period - 1) + dx) / _period;
+        }
+
+        // FIX C-04: previously LastAdx was assigned AFTER _count++.
+        // At the exact tick where _count just became period*2+1, the check
+        // `_count <= _period*2` evaluated false в†’ first real ADX discarded (returned 20.0).
+        // Fix: lock in isWarm BEFORE the increment.
+        bool isWarm = _count >= _period * 2;
+        _count++;
+        LastAdx = isWarm ? _adx : 20.0;
+        return LastAdx;
+    }
+
+    public bool IsWarm => _count > _period * 2;
+}
+using System;
+using System.Collections.Generic;
+
+namespace ValutaBot.MiniApp.Indicators;
+
+public class StatefulOrderFlow
+{
+    private double _cumulativeVolumeDelta = 0;
+    
+    // FIX W-06: replaced fake rolling avg (_volSum/_volCount) with proper sliding window Queue
+    private readonly Queue<double> _volWindow = new(20);
+    private double _avgVolume = 1.0;
+
+    private DateTime _lastProcessedTime;
+
+    private readonly Queue<(double buy, double sell)> _shortTermWindow = new();
+    private double _shortTermBuyVolume = 0;
+    private double _shortTermSellVolume = 0;
+    
+    // B10-FIX: Track open candle volume separately so getters can include it without permanent accumulation
+    private double _openBuyVolume = 0;
+    private double _openSellVolume = 0;
+    private bool _openHasInstitutionalBlockTrade = false;
+
+    public double CumulativeVolumeDelta
+    {
+        get { lock (_lockObj) { return _cumulativeVolumeDelta + (_openBuyVolume - _openSellVolume); } }
+    }
+
+    // The DeltaRatio is calculated over the short-term window (12 candles), as it reflects immediate momentum
+    public double DeltaRatio
+    {
+        get
+        {
+            lock (_lockObj)
+            {
+                double buy = _shortTermBuyVolume + _openBuyVolume;
+                double sell = (_shortTermSellVolume + _openSellVolume) > 1e-8 ? (_shortTermSellVolume + _openSellVolume) : 1.0;
+                return buy / sell;
+            }
+        }
+    }
+
+    public double BuyVolume  { get { lock (_lockObj) { return _shortTermBuyVolume + _openBuyVolume;  } } }
+    public double SellVolume { get { lock (_lockObj) { return _shortTermSellVolume + _openSellVolume; } } }
+
+    public bool HasInstitutionalBlockTrade
+    {
+        get { lock (_lockObj) { return _hasInstitutionalBlockTrade || _openHasInstitutionalBlockTrade; } }
+        private set { _hasInstitutionalBlockTrade = value; }
+    }
+    private bool _hasInstitutionalBlockTrade;
+
+    public double PriceDelta  { get { lock (_lockObj) { return _priceDelta;  } } }
+    public double CurrentPrice { get { lock (_lockObj) { return _currentPrice; } } }
+    private double _priceDelta;
+    private double _currentPrice;
+
+    private readonly object _lockObj = new();
+
+        public void Update(ReadOnlySpan<MiniAppController.OhlcCandle> candles)
+    {
+        if (candles.Length == 0) return;
+
+        lock (_lockObj)
+        {
+            // Permanent processing of closed candles
+            for (int i = 0; i < candles.Length - 1; i++)
+            {
+                var c = candles[i];
+                if (c.Timestamp <= _lastProcessedTime && _lastProcessedTime != default)
+                    continue;
+
+                // Session reset logic (e.g. gap > 4 hours)
+                if (_lastProcessedTime != default && (c.Timestamp - _lastProcessedTime).TotalHours > 4)
+                {
+                    _cumulativeVolumeDelta = 0;
+                    _shortTermWindow.Clear();
+                    _shortTermBuyVolume = 0;
+                    _shortTermSellVolume = 0;
+                    // FIX C-3: Clear volume window so stale thresholds from previous session
+                    // don't cause morning blindness to block trades.
+                    _volWindow.Clear();
+                }
+
+                // FIX: Reset permanent block trade flag before processing the new closed candle
+                _hasInstitutionalBlockTrade = false;
+
+                ProcessCandle(c, isPermanent: true);
+                _lastProcessedTime = c.Timestamp;
+            }
+
+            // For the current open candle, we calculate the state without permanently committing
+            if (candles.Length > 0)
+            {
+                // B11-FIX: Reset open block trade flag, preserve historical block trade flag
+                _openHasInstitutionalBlockTrade = false;
+                _openBuyVolume = 0;
+                _openSellVolume = 0;
+
+                ProcessCandle(candles[^1], isPermanent: false);
+
+                if (candles.Length >= 5)
+                {
+                    _priceDelta = candles[^1].Close - candles[^5].Close;
+                }
+                _currentPrice = candles[^1].Close;
+            }
+        }
+    }
+
+    private void ProcessCandle(MiniAppController.OhlcCandle c, bool isPermanent)
+    {
+        double totalVol = c.Volume > 0 ? c.Volume : 1.0;
+        
+        if (isPermanent)
+        {
+            // FIX W-06: old code subtracted the current mean instead of the oldest value,
+            // giving ~5-10% systematic error in avgVolume в†’ wrong blockTradeThreshold.
+            // Proper fix: use a Queue as a real sliding window of last 20 candles.
+            _volWindow.Enqueue(totalVol);
+            if (_volWindow.Count > 20) _volWindow.Dequeue();
+            _avgVolume = _volWindow.Average();
+        }
+
+        double noiseThreshold = _avgVolume * 0.60;
+        double blockTradeThreshold = _avgVolume * 1.70;
+
+        if (totalVol < noiseThreshold)
+            return;
+
+        if (totalVol >= blockTradeThreshold)
+        {
+            if (isPermanent) _hasInstitutionalBlockTrade = true;
+            else _openHasInstitutionalBlockTrade = true;
+        }
+
+        double range = c.High - c.Low;
+        double buyV, sellV;
+
+        if (range > 1e-9)
+        {
+            double buyRatio = (c.Close - c.Low) / range;
+            double sellRatio = (c.High - c.Close) / range;
+            buyV = totalVol * buyRatio;
+            sellV = totalVol * sellRatio;
+        }
+        else
+        {
+            buyV = totalVol * 0.5;
+            sellV = totalVol * 0.5;
+        }
+
+        if (isPermanent)
+        {
+            _cumulativeVolumeDelta += (buyV - sellV);
+
+            _shortTermWindow.Enqueue((buyV, sellV));
+            _shortTermBuyVolume += buyV;
+            _shortTermSellVolume += sellV;
+
+            if (_shortTermWindow.Count > 12)
+            {
+                var oldest = _shortTermWindow.Dequeue();
+                _shortTermBuyVolume -= oldest.buy;
+                _shortTermSellVolume -= oldest.sell;
+            }
+        }
+        else
+        {
+            // For the uncommitted open candle, we just temporarily save its volume
+            _openBuyVolume = buyV;
+            _openSellVolume = sellV;
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+
+namespace ValutaBot.MiniApp.Indicators;
+
+/// <summary>
+/// Thread-safe stateful Smart Money Concepts indicator.
+///
+/// FIX: All public methods and the Update method now use a shared _lockObj.
+/// Previously _activeFvgs and _activeObs were modified by Update() while
+/// GetNearestFvg/GetNearestOb iterated them concurrently, causing
+/// InvalidOperationException ("Collection was modified").
+/// </summary>
+public class StatefulSmc
+{
+    public readonly record struct FvgZone(double Top, double Bottom, bool IsBullish, DateTime CreationTime);
+    public readonly record struct OrderBlockZone(double Top, double Bottom, bool IsBullish, DateTime CreationTime);
+    public readonly record struct Fractal(double Price, bool IsHigh, DateTime Time);
+
+    private readonly object _lockObj = new();
+
+    private List<FvgZone>        _activeFvgs = new();
+    private List<OrderBlockZone> _activeObs  = new();
+
+    private Fractal _lastSwingHigh;
+    private Fractal _lastSwingLow;
+    private string  _currentTrend = "NEUTRAL";
+
+    private DateTime _lastProcessedTime;
+    private double   _recentAtr;
+    private TimeSpan _tfEstimate = TimeSpan.FromMinutes(1);
+
+    // Output state вЂ” backing fields accessed under lock
+    private bool   _hasLiquiditySweep;
+    private string _sweepDirection = "NONE";
+    private bool   _hasBos;
+    private string _bosDirection   = "NONE";
+
+    public StatefulSmc Clone()
+    {
+        lock (_lockObj)
+        {
+            var clone = (StatefulSmc)this.MemberwiseClone();
+            clone._activeFvgs = new List<FvgZone>(this._activeFvgs);
+            clone._activeObs = new List<OrderBlockZone>(this._activeObs);
+            return clone;
+        }
+    }
+
+    public bool   HasLiquiditySweep { get { lock (_lockObj) { return _hasLiquiditySweep; } } }
+    public string SweepDirection    { get { lock (_lockObj) { return _sweepDirection;    } } }
+    public bool   HasBos            { get { lock (_lockObj) { return _hasBos;            } } }
+    public string BosDirection      { get { lock (_lockObj) { return _bosDirection;      } } }
+    public string CurrentTrend      { get { lock (_lockObj) { return _currentTrend;      } } }
+
+    public void Update(ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
+    {
+        if (candles.Length < 5) return;
+
+        lock (_lockObj)
+        {
+            // FIX M-07: Process up to candles.Length to include the most recently closed candle.
+            // Previously `i < candles.Length - 1` double-stripped the latest candle, meaning
+            // Order Blocks and FVGs were recognized with a 1-candle lag.
+            for (int i = 2; i < candles.Length; i++)
+            {
+                var c = candles[i];
+                if (c.Timestamp <= _lastProcessedTime && _lastProcessedTime != default)
+                    continue;
+
+                // Reset transient single-tick events for the NEW closed candle
+                _hasLiquiditySweep = false;
+                _sweepDirection    = "NONE";
+                _hasBos            = false;
+                _bosDirection      = "NONE";
+
+                _recentAtr = GetAtrAt(candles, i, 14); // B13-FIX: Point-in-time ATR, no lookahead bias
+
+                if (i >= 4) DetectFractalAt(candles, i - 2);
+                DetectFvgAt(candles, i);
+                DetectOrderBlockAt(candles, i - 1, i);
+                DetectStructureBreak(c);
+                DetectLiquiditySweep(c);  // FIX: sweep detection moved outside fractal block
+                MitigateZones(c);
+
+                _lastProcessedTime = c.Timestamp;
+            }
+
+            // Live mitigation on current open candle
+            MitigateZones(candles[^1]);
+
+            // W-05 FIX: Instead of hardcoded -50 minutes (which breaks higher TFs),
+            // estimate timeframe from the last two candles and prune 50 candles back.
+            if (_lastProcessedTime != default)
+            {
+                TimeSpan tf = candles.Length > 1 
+                    ? candles[^1].Timestamp - candles[^2].Timestamp 
+                    : TimeSpan.FromMinutes(1);
+                
+                // Fallback to sane limits if timestamps are exactly the same
+                if (tf.TotalSeconds < 1) tf = TimeSpan.FromMinutes(1);
+                _tfEstimate = tf;
+                
+                PruneStaleZones(_lastProcessedTime.Subtract(tf * 50));
+            }
+        }
+    }
+
+    /// <summary>
+    /// РЈРґР°Р»СЏРµС‚ FVG Рё OrderBlock Р·РѕРЅС‹, СЃРѕР·РґР°РЅРЅС‹Рµ СЂР°РЅСЊС€Рµ cutoffTime.
+    /// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РїРѕРґ _lockObj.
+    /// </summary>
+    private void PruneStaleZones(DateTime cutoffTime)
+    {
+        _activeFvgs.RemoveAll(z => z.CreationTime < cutoffTime);
+        _activeObs.RemoveAll(z => z.CreationTime < cutoffTime);
+    }
+
+    private double GetAtrAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int currentIdx, int period)
+    {
+        int count = 0;
+        double sum = 0;
+        for (int i = currentIdx - period; i < currentIdx; i++)
+        {
+            if (i >= 0)
+            {
+                sum += (candles[i].High - candles[i].Low);
+                count++;
+            }
+        }
+        return count > 0 ? sum / count : 0;
+    }
+
+    private void DetectFractalAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int idx)
+    {
+        var cM2 = candles[idx - 2];
+        var cM1 = candles[idx - 1];
+        var c   = candles[idx];
+        var cP1 = candles[idx + 1];
+        var cP2 = candles[idx + 2];
+
+        bool isSwingHigh = c.High > cM2.High && c.High > cM1.High && c.High > cP1.High && c.High > cP2.High;
+        bool isSwingLow  = c.Low  < cM2.Low  && c.Low  < cM1.Low  && c.Low  < cP1.Low  && c.Low  < cP2.Low;
+
+        // Record swing fractals only вЂ” sweep detection moved to DetectLiquiditySweep()
+        if (isSwingHigh)
+            _lastSwingHigh = new Fractal(c.High, true, c.Timestamp);
+
+        if (isSwingLow)
+            _lastSwingLow = new Fractal(c.Low, false, c.Timestamp);
+    }
+
+    /// <summary>
+    /// Detects liquidity sweeps: current candle's wick exceeded a prior swing,
+    /// but price rejected and closed back inside вЂ” classic stop-hunt pattern.
+    /// FIX: Previously this logic was inside DetectFractalAt() inside the isSwingHigh
+    /// block, checking cP2.High > c.High вЂ” which is mathematically impossible
+    /// (isSwingHigh requires c.High > cP2.High). Sweep was NEVER detected.
+    /// </summary>
+    private void DetectLiquiditySweep(MiniAppController.OhlcCandle c)
+    {
+        // Bearish sweep: wick above prior swing high, but close back below it
+        if (_lastSwingHigh.Time != default
+            && c.High  > _lastSwingHigh.Price
+            && c.Close < _lastSwingHigh.Price)
+        {
+            _hasLiquiditySweep = true;
+            _sweepDirection    = "BEARISH_SWEEP";
+        }
+
+        // Bullish sweep: wick below prior swing low, but close back above it
+        if (_lastSwingLow.Time != default
+            && c.Low   < _lastSwingLow.Price
+            && c.Close > _lastSwingLow.Price)
+        {
+            _hasLiquiditySweep = true;
+            _sweepDirection    = "BULLISH_SWEEP";
+        }
+    }
+
+    private void DetectFvgAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int idx)
+    {
+        var    c1     = candles[idx - 2];
+        var    c3     = candles[idx];
+        double minGap = _recentAtr * 0.20;
+
+        if (c3.Low > c1.High && (c3.Low - c1.High) >= minGap)
+        {
+            _activeFvgs.Add(new FvgZone(c3.Low, c1.High, true, c3.Timestamp));
+            if (_activeFvgs.Count > 10) _activeFvgs.RemoveAt(0);
+        }
+        else if (c3.High < c1.Low && (c1.Low - c3.High) >= minGap)
+        {
+            _activeFvgs.Add(new FvgZone(c1.Low, c3.High, false, c3.Timestamp));
+            if (_activeFvgs.Count > 10) _activeFvgs.RemoveAt(0);
+        }
+    }
+
+    private void DetectOrderBlockAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int obIdx, int dispIdx)
+    {
+        var ob   = candles[obIdx];
+        var disp = candles[dispIdx];
+
+        double body  = Math.Abs(ob.Close - ob.Open);
+        double range = ob.High - ob.Low;
+        if (range <= 1e-8 || (body / range) < 0.60) return;
+
+        bool isBearishCandle = ob.Close < ob.Open;
+        bool isBullishCandle = ob.Close > ob.Open;
+
+        if (isBearishCandle && disp.Close > disp.Open && (disp.Close - disp.Open) > (_recentAtr * 0.4))
+        {
+            _activeObs.Add(new OrderBlockZone(ob.High, ob.Low, true, disp.Timestamp));
+            if (_activeObs.Count > 5) _activeObs.RemoveAt(0);
+        }
+        else if (isBullishCandle && disp.Close < disp.Open && (disp.Open - disp.Close) > (_recentAtr * 0.4))
+        {
+            _activeObs.Add(new OrderBlockZone(ob.High, ob.Low, false, disp.Timestamp));
+            if (_activeObs.Count > 5) _activeObs.RemoveAt(0);
+        }
+    }
+
+    private void DetectStructureBreak(MiniAppController.OhlcCandle c)
+    {
+        if (_lastSwingHigh.Time != default && c.Close > _lastSwingHigh.Price)
+        {
+            if (_currentTrend != "BULLISH")
+            {
+                _hasBos       = true;
+                _bosDirection = "BULLISH_BOS";
+                _currentTrend = "BULLISH";
+            }
+        }
+        else if (_lastSwingLow.Time != default && c.Close < _lastSwingLow.Price)
+        {
+            if (_currentTrend != "BEARISH")
+            {
+                _hasBos       = true;
+                _bosDirection = "BEARISH_BOS";
+                _currentTrend = "BEARISH";
+            }
+        }
+    }
+
+    private void MitigateZones(MiniAppController.OhlcCandle c)
+    {
+        _activeFvgs.RemoveAll(f =>
+            (f.IsBullish  && c.Low  <= f.Bottom) ||
+            (!f.IsBullish && c.High >= f.Top));
+
+        // FIX: Order Blocks are invalidated only when price closes beyond their extreme.
+        // Previously they were removed on the first touch (c.Low <= o.Top), erasing them
+        // right before they could act as support/resistance.
+        _activeObs.RemoveAll(o =>
+            (o.IsBullish  && c.Close < o.Bottom) ||
+            (!o.IsBullish && c.Close > o.Top));
+    }
+
+    public (bool hasBullishFvg, bool hasBearishFvg, FvgZone? nearestFvg) GetNearestFvg(double currentPrice)
+    {
+        lock (_lockObj)
+        {
+            bool  bull        = false;
+            bool  bear        = false;
+            FvgZone? nearest  = null;
+            double minDistance = double.MaxValue;
+
+            foreach (var fvg in _activeFvgs)
+            {
+                if (fvg.IsBullish) bull = true;
+                else               bear = true;
+
+                double dist = Math.Min(
+                    Math.Abs(currentPrice - fvg.Top),
+                    Math.Abs(currentPrice - fvg.Bottom));
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    nearest     = fvg;
+                }
+            }
+            return (bull, bear, nearest);
+        }
+    }
+
+    public (bool hasBullishOb, bool hasBearishOb, OrderBlockZone? nearestOb) GetNearestOb(double currentPrice, int maxAgeBars = 30)
+    {
+        lock (_lockObj)
+        {
+            bool  bull        = false;
+            bool  bear        = false;
+            OrderBlockZone? nearest = null;
+            double minDistance = double.MaxValue;
+
+            // Р’СЂРµРјРµРЅРЅРѕР№ С„РёР»СЊС‚СЂ: OB СЃС‚Р°СЂС€Рµ maxAgeBars СЃРІРµС‡РµР№ РёСЃРєР»СЋС‡Р°РµС‚СЃСЏ РёР· СЃРєРѕСЂРёРЅРіР°.
+            // CreationTime С…СЂР°РЅРёС‚СЃСЏ РєР°Рє DateTime РїРѕСЃР»РµРґРЅРµР№ СЃРІРµС‡Рё РІ РјРѕРјРµРЅС‚ С„РѕСЂРјРёСЂРѕРІР°РЅРёСЏ OB.
+            // Р”Р»СЏ m1: 30 СЃРІРµС‡РµР№ = 30 РјРёРЅСѓС‚; РґР»СЏ m5: 30 СЃРІРµС‡РµР№ = 2.5 С‡Р°СЃР°.
+            // OB, СЃС„РѕСЂРјРёСЂРѕРІР°РЅРЅС‹Р№ РґР°РІРЅРѕ, СЃ РІС‹СЃРѕРєРѕР№ РІРµСЂРѕСЏС‚РЅРѕСЃС‚СЊСЋ СѓР¶Рµ РѕС‚СЂР°Р±РѕС‚Р°РЅ РёР»Рё СЃС‚Р°Р» РЅРµР°РєС‚СѓР°Р»СЊРЅС‹Рј.
+            DateTime cutoff = _lastProcessedTime != default
+                ? _lastProcessedTime - (_tfEstimate * maxAgeBars)
+                : DateTime.MinValue;
+
+            foreach (var ob in _activeObs)
+            {
+                // РџСЂРѕРїСѓСЃРєР°РµРј СѓСЃС‚Р°СЂРµРІС€РёРµ OB
+                if (ob.CreationTime < cutoff) continue;
+
+                if (ob.IsBullish) bull = true;
+                else              bear = true;
+
+                double dist = Math.Min(
+                    Math.Abs(currentPrice - ob.Top),
+                    Math.Abs(currentPrice - ob.Bottom));
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    nearest     = ob;
+                }
+            }
+            return (bull, bear, nearest);
+        }
+    }
+}
+using System.Collections.Concurrent;
+using System.Globalization;
+using System;
+
+namespace ValutaBot.MiniApp;
+
+/// <summary>
+/// Market-Regime Aware Auto-Calibrating Signal Weight Engine for Forex & OTC market pairs.
+/// Classifies current market phase ("TRENDING_IMPULSE", "RANGING_FLAT", "HIGH_VOLATILITY_CHAOS")
+/// and applies adaptive regime weight matrices combined with rolling empirical win-rate statistics.
+/// </summary>
+public class AutoCalibrationEngine : IAutoCalibrationEngine
+{
+    public enum MarketRegime
+    {
+        TrendingImpulse,
+        RangingFlat,
+        HighVolatilityChaos
+    }
+
+    public readonly record struct SignalKey(string Source, string Asset, string Timeframe)
+    {
+        public override string ToString() => $"{Source}_{Asset}_{Timeframe}";
+    }
+
+    private class SourceStats
+    {
+        public int TotalTrades { get; set; }
+        public double EmaWinRate { get; set; } = 0.50; // РќРµР№С‚СЂР°Р»СЊРЅС‹Р№ СЃС‚Р°СЂС‚
+    }
+
+    private readonly ConcurrentDictionary<SignalKey, SourceStats> _statsMap = new();
+
+    // L2-FIX: Р’РѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµС‚ СЃРѕСЃС‚РѕСЏРЅРёРµ EMA-РІРµСЃРѕРІ РёР· PostgreSQL РїРѕСЃР»Рµ СЂРµСЃС‚Р°СЂС‚Р°.
+    // Р’С‹Р·С‹РІР°РµС‚СЃСЏ РёР· TradeOutcomeTracker.InitializeAsync РїРѕСЃР»Рµ Р·Р°РіСЂСѓР·РєРё РєР°Р»РёР±СЂРѕРІРѕС‡РЅС‹С… РґР°РЅРЅС‹С….
+    public void RestoreState(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate)
+    {
+        var key = new SignalKey(sourceName, asset, timeframe);
+        var stats = _statsMap.GetOrAdd(key, _ => new SourceStats());
+        lock (stats)
+        {
+            stats.TotalTrades = totalTrades;
+            stats.EmaWinRate  = emaWinRate;
+        }
+    }
+
+    public IEnumerable<(SignalKey key, int totalTrades, double emaWinRate)> GetAllStats()
+    {
+        foreach (var kv in _statsMap)
+        {
+            int trades;
+            double winRate;
+            lock (kv.Value) 
+            { 
+                trades = kv.Value.TotalTrades;
+                winRate = kv.Value.EmaWinRate;
+            }
+            yield return (kv.Key, trades, winRate);
+        }
+    }
+
+    public MarketRegime DetectMarketRegime(double adx, double volRatio, double rsi, ReadOnlySpan<double> prices = default)
+    {
+        double entropy = prices.IsEmpty ? 0.5 : CalculateShannonEntropy(prices);
+
+        // Dominant regime classification (used for logging/labels)
+        if (adx >= 25.0 && volRatio <= 2.0 && entropy < 0.75)
+        {
+            return MarketRegime.TrendingImpulse;
+        }
+
+        if (entropy > 0.90 || volRatio > 1.75 || Math.Abs(rsi - 50.0) > 28.0)
+        {
+            return MarketRegime.HighVolatilityChaos;
+        }
+
+        return MarketRegime.RangingFlat;
+    }
+
+    private double CalculateShannonEntropy(ReadOnlySpan<double> prices)
+    {
+        int len = Math.Min(prices.Length, 1000);
+        if (len < 10) return 1.0;
+
+        int bins = (int)Math.Ceiling(1.0 + Math.Log2(len));
+
+        Span<double> returns = stackalloc double[len - 1];
+        double minRet = double.MaxValue;
+        double maxRet = double.MinValue;
+
+        int startIndex = prices.Length - len;
+        for (int i = 1; i < len; i++)
+        {
+            double prev = prices[startIndex + i - 1];
+            double curr = prices[startIndex + i];
+            double ret = prev != 0 ? (curr - prev) / prev : 0;
+            returns[i - 1] = ret;
+
+            if (ret < minRet) minRet = ret;
+            if (ret > maxRet) maxRet = ret;
+        }
+
+        if (minRet == maxRet) return 0.0;
+
+        Span<int> histogram = stackalloc int[bins];
+        double binSize = (maxRet - minRet) / bins;
+
+        for (int i = 0; i < returns.Length; i++)
+        {
+            int binIndex = (int)((returns[i] - minRet) / binSize);
+            if (binIndex == bins) binIndex--;
+            histogram[binIndex]++;
+        }
+
+        double entropy = 0;
+        for (int i = 0; i < bins; i++)
+        {
+            if (histogram[i] > 0)
+            {
+                double p = (double)histogram[i] / returns.Length;
+                entropy -= p * Math.Log2(p);
+            }
+        }
+        
+        double maxEntropy = Math.Log2(bins);
+        return maxEntropy > 0 ? entropy / maxEntropy : 0;
+    }
+
+    public double GetCalibratedRegimeWeight(
+        string sourceName,
+        string asset,
+        string timeframe,
+        MarketRegime regime)
+    {
+        var statsKey = new SignalKey(sourceName, asset, timeframe);
+        double empiricalWinRate = _statsMap.TryGetValue(statsKey, out var stats) ? stats.EmaWinRate : 0.50;
+
+        double baseWeight = sourceName switch
+        {
+            "TechAnalysis" => regime switch
+            {
+                MarketRegime.TrendingImpulse    => 1.2,
+                MarketRegime.RangingFlat        => 0.8,
+                MarketRegime.HighVolatilityChaos => 0.5,
+                _ => 1.0
+            },
+            "OrderFlow" => regime switch
+            {
+                MarketRegime.TrendingImpulse    => 0.9,
+                MarketRegime.RangingFlat        => 1.3, // OF С…РѕСЂРѕС€Рѕ СЂР°Р±РѕС‚Р°РµС‚ РІ РґРёР°РїР°Р·РѕРЅР°С… (СЂР°Р·РІРѕСЂРѕС‚С‹)
+                MarketRegime.HighVolatilityChaos => 0.7,
+                _ => 1.0
+            },
+            "SMC" => regime switch
+            {
+                MarketRegime.TrendingImpulse    => 1.1, // BOS СЂР°Р±РѕС‚Р°РµС‚ РІ С‚СЂРµРЅРґРµ
+                MarketRegime.RangingFlat        => 0.6, // SMC СЃР»Р°Р±РµРµ РІ СѓР·РєРёС… РґРёР°РїР°Р·РѕРЅР°С…
+                MarketRegime.HighVolatilityChaos => 1.4, // Liquidity sweeps вЂ” РІ С…Р°РѕСЃРµ Р»СѓС‡С€РёР№ СЃРёРіРЅР°Р»
+                _ => 1.0
+            },
+            // L4-FIX: LIGHTGBM Рё SKENDER_MATH СЂР°РЅРµРµ РІСЃРµРіРґР° РІРѕР·РІСЂР°С‰Р°Р»Рё 1.0 (РІРµС‚РєР° _).
+            // РўРµРїРµСЂСЊ РєР°Р»РёР±СЂСѓСЋС‚СЃСЏ РїРѕ СЂРµР¶РёРјСѓ вЂ” EMA-РІРёРЅСЂРµР№С‚ РїСЂРёРјРµРЅСЏРµС‚СЃСЏ РєРѕСЂСЂРµРєС‚РЅРѕ.
+            "LIGHTGBM" => regime switch
+            {
+                MarketRegime.TrendingImpulse    => 1.3, // ML РѕС‚Р»РёС‡РЅРѕ СЂР°СЃРїРѕР·РЅР°С‘С‚ РёРјРїСѓР»СЊСЃС‹
+                MarketRegime.RangingFlat        => 0.9,
+                MarketRegime.HighVolatilityChaos => 0.6, // РҐР°РѕСЃ РїР»РѕС…Рѕ РїСЂРµРґСЃРєР°Р·С‹РІР°РµС‚СЃСЏ ML
+                _ => 1.0
+            },
+            "SKENDER_MATH" => regime switch
+            {
+                MarketRegime.TrendingImpulse    => 1.0,
+                MarketRegime.RangingFlat        => 1.2, // РњР°С‚РµРјР°С‚РёРєР° СѓСЃС‚РѕР№С‡РёРІРµРµ РІ С„Р»СЌС‚Рµ
+                MarketRegime.HighVolatilityChaos => 0.8,
+                _ => 1.0
+            },
+            _ => 1.0
+        };
+
+        // Calibration formula:
+        // Weight is heavily penalized if empirical win rate drops below 50%.
+        // Weight is boosted if empirical win rate is above 50%.
+        double confidenceMultiplier = (empiricalWinRate - 0.50) * 2.0; // scales -1.0 to 1.0
+        
+        // Final weight is BaseWeight modified by up to +- 50% based on empirical performance.
+        double finalWeight = baseWeight * (1.0 + (confidenceMultiplier * 0.5));
+        
+        // Clamp bounds
+        return Math.Clamp(finalWeight, 0.1, 2.5);
+    }
+
+    public void RecordSourceOutcome(string sourceName, string asset, string timeframe, bool isWin)
+    {
+        var statsKey = new SignalKey(sourceName, asset, timeframe);
+        var stats = _statsMap.GetOrAdd(statsKey, _ => new SourceStats());
+
+        lock (stats)
+        {
+            stats.TotalTrades++;
+            
+            // EMA: alpha=0.2 (РїРµСЂРёРѕРґ ~5 СЃРґРµР»РѕРє). РџСЂРµР¶РЅРёР№ alpha=0.1 (~10 СЃРґРµР»РѕРє) Р±С‹Р» СЃР»РёС€РєРѕРј
+            // РјРµРґР»РµРЅРЅС‹Рј РїСЂРё СЂРµРґРєРѕР№ С‚РѕСЂРіРѕРІР»Рµ вЂ” СЂРµР¶РёРј РјРµРЅСЏР»СЃСЏ СЂР°РЅСЊС€Рµ, С‡РµРј EMA СѓСЃРїРµРІР°Р»Р° Р°РґР°РїС‚РёСЂРѕРІР°С‚СЊСЃСЏ.
+            double alpha = 0.2;
+            double outcomeVal = isWin ? 1.0 : 0.0;
+            
+            stats.EmaWinRate = (alpha * outcomeVal) + ((1.0 - alpha) * stats.EmaWinRate);
+        }
+    }
+
+    public string GetStatsReport(string sourceName, string asset, string timeframe)
+    {
+        var statsKey = new SignalKey(sourceName, asset, timeframe);
+        if (_statsMap.TryGetValue(statsKey, out var stats))
+        {
+            return $"Trades: {stats.TotalTrades}, EMA WinRate: {(stats.EmaWinRate * 100).ToString("F1", CultureInfo.InvariantCulture)}%";
+        }
+        return "No Data";
+    }
+}
+using System;
+
+namespace ValutaBot.MiniApp;
+
+public interface IAutoCalibrationEngine
+{
+    AutoCalibrationEngine.MarketRegime DetectMarketRegime(double adx, double volRatio, double rsi, ReadOnlySpan<double> prices = default);
+    double GetCalibratedRegimeWeight(string sourceName, string asset, string timeframe, AutoCalibrationEngine.MarketRegime regime);
+    void RecordSourceOutcome(string sourceName, string asset, string timeframe, bool isWin);
+    string GetStatsReport(string sourceName, string asset, string timeframe);
+    // L2-FIX: РџРµСЂСЃРёСЃС‚РµРЅС‚РЅРѕСЃС‚СЊ EMA-РІРµСЃРѕРІ
+    void RestoreState(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate);
+    IEnumerable<(AutoCalibrationEngine.SignalKey key, int totalTrades, double emaWinRate)> GetAllStats();
+}
+using System.Collections.Concurrent;
+using ValutaBot.MiniApp.Indicators;
+
+namespace ValutaBot.MiniApp;
+
+/// <summary>
+/// Manages per-(asset, timeframe) stateful indicator instances and their
+/// incremental update logic. Only processes unseen candles on each call,
+/// resetting the state machine if candles arrive out of order or in bulk.
+/// </summary>
+internal sealed class IndicatorCache
+{
+    private sealed class CacheState
+    {
+        public DateTime            LastAccess    = DateTime.UtcNow;
+
+        // ROOT-CAUSE FIX: Time-based cache invalidation.
+        // Previously indicators accumulated state indefinitely вЂ” reset only on unseen > 50.
+        // At active trading pace (1 req/30s), unseen is always 0-3 в†’ reset NEVER happened.
+        // Result: yesterday's RSI/HMA/EMA "memory" poisoned today's signals.
+        //
+        // Two reset triggers:
+        //   1. Every MaxCacheAgeHours (4h) вЂ” clears within-session contamination
+        //      (e.g. cold-start synthetic 1m candles followed by real s5 ticks)
+        //   2. New trading day (UTC midnight) вЂ” ensures day-to-day clean slate
+        public DateTime            LastFullReset = DateTime.MinValue;
+
+        public StatefulRsi?        RsiBase;
+        public long                RsiLastClosedTick;
+        public double              RsiLast;
+
+        public StatefulConnorsRsi? ConnorsRsiBase;
+        public long                ConnorsRsiLastClosedTick;
+        public double              ConnorsRsiLast;
+
+        public StatefulHma?        HmaBase;
+        public long                HmaLastClosedTick;
+        public double              HmaLast;
+
+        public StatefulEma?        EmaBase;
+        public long                EmaLastClosedTick;
+        public double              EmaLast;
+
+        public StatefulTrueAdx?    AdxBase;
+        public long                AdxLastClosedTick;
+
+        public StatefulAtr?        AtrBase;
+        public long                AtrLastClosedTick;
+
+        public StatefulSmc?        SmcBase;
+        public long                SmcLastClosedTick;
+    }
+
+    // Indicators are fully recalculated if their last reset is older than this.
+    // 4 hours covers: Londonв†’NY session transition, cold-start synthetic contamination.
+    private const double MaxCacheAgeHours = 4.0;
+
+    private readonly ConcurrentDictionary<(string asset, string tf, string indicatorKey), CacheState> _states = new();
+
+    private static readonly ConcurrentDictionary<string, Indicators.StatefulOrderFlow> _orderFlowCache = new();
+
+    // FIX C-3: LRU eviction вЂ” evict the least-recently-used 25% of entries.
+    // Previously used Take(toRemove) on unordered ConcurrentDictionary keys,
+    // which was effectively random and could delete actively-trading pairs.
+    private static void PruneOrderFlowCache()
+    {
+        var ordered = _orderFlowCache
+            .OrderBy(kv => _orderFlowLastTicks.GetValueOrDefault($"{kv.Key}", 0))
+            .Take(Math.Max(1, _orderFlowCache.Count / 4))
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var k in ordered)
+        {
+            _orderFlowCache.TryRemove(k, out _);
+            // FIX M-1: Also remove from _orderFlowLastTicks to prevent stale tick lookup
+            _orderFlowLastTicks.TryRemove(k, out _);
+        }
+    }
+
+    // Maintain last tick for OrderFlow cache validation
+    private static readonly ConcurrentDictionary<string, long> _orderFlowLastTicks = new();
+
+    // FIX C-03: three non-atomic ConcurrentDictionary operations had no single lock в†’
+    // a concurrent request could see the reset state before GetOrAdd reinserts the new object.
+    private static readonly object _orderFlowLock = new();
+
+    public static Indicators.StatefulOrderFlow GetOrderFlow(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles)
+    {
+        if (_orderFlowCache.Count > 1000) PruneOrderFlowCache();
+        string key = $"{asset}_{timeframe}";
+
+        lock (_orderFlowLock)
+        {
+            long lastTick = _orderFlowLastTicks.GetValueOrDefault(key, 0);
+            int unseen    = CountUnseen(candles, lastTick);
+
+            if (unseen > 50 || IsTimestampRewind(candles, lastTick))
+                _orderFlowCache[key] = new Indicators.StatefulOrderFlow();
+
+            if (candles.Length > 0)
+                _orderFlowLastTicks[key] = candles[^1].Timestamp.Ticks;
+
+            return _orderFlowCache.GetOrAdd(key, _ => new Indicators.StatefulOrderFlow());
+        }
+    }
+
+    // в”Ђв”Ђ RSI в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    // FIX C-3: LRU eviction вЂ” sort by LastAccess so the most recently used pairs survive.
+    // Previously used Take(toRemove) on unordered ConcurrentDictionary keys вЂ” random eviction.
+    private void PruneStates()
+    {
+        var toDelete = _states
+            .OrderBy(kv => kv.Value.LastAccess)
+            .Take(Math.Max(1, _states.Count / 4))
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var k in toDelete)
+            _states.TryRemove(k, out _);
+    }
+
+    /// <summary>
+    /// Returns true if the indicator state is too old and must be fully recalculated.
+    /// Called inside lock(s) вЂ” no thread-safety concerns.
+    /// </summary>
+    private static bool IsStale(CacheState s)
+    {
+        var now = DateTime.UtcNow;
+        // FIX: Removed UTC midnight hard-reset to fix the "First bet of the day loses" (Cold Start) bug.
+        // Trigger: 4-hour threshold вЂ” within-session contamination (cold-start synthetic в†’ real ticks)
+        if ((now - s.LastFullReset).TotalHours > MaxCacheAgeHours) return true;
+        return false;
+    }
+
+    public double GetRsi(string asset, string tf,
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+    {
+        if (candles.Length <= period) return 50.0;
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, $"RSI_{period}"), _ => new CacheState());
+        lock (s)
+        {
+            s.LastAccess = DateTime.UtcNow;
+            int unseen = CountUnseen(candles, s.RsiLastClosedTick);
+            if (s.RsiBase is null || unseen > 50 || IsTimestampRewind(candles, s.RsiLastClosedTick) || IsStale(s))
+            {
+                s.RsiBase = new StatefulRsi(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.RsiBase.Update(candles[i].Close);
+                
+                s.RsiLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.RsiLastClosedTick)
+                    {
+                        s.RsiBase.Update(candles[i].Close);
+                        s.RsiLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
+            }
+
+            var liveRsi = s.RsiBase.Clone();
+            s.RsiLast = liveRsi.Update(candles[^1].Close);
+            return s.RsiLast;
+        }
+    }
+
+    // в”Ђв”Ђ ConnorsRSI в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    public double GetConnorsRsi(string asset, string tf,
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles)
+    {
+        if (candles.Length < 20) return GetRsi(asset, tf, candles, 14);
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, "CONNORS_RSI"), _ => new CacheState());
+        lock (s)
+        {
+            int unseen = CountUnseen(candles, s.ConnorsRsiLastClosedTick);
+            if (s.ConnorsRsiBase is null || unseen > 50 || IsTimestampRewind(candles, s.ConnorsRsiLastClosedTick) || IsStale(s))
+            {
+                s.ConnorsRsiBase = new StatefulConnorsRsi();
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.ConnorsRsiBase.Update(candles[i].Close);
+                
+                s.ConnorsRsiLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.ConnorsRsiLastClosedTick)
+                    {
+                        s.ConnorsRsiBase.Update(candles[i].Close);
+                        s.ConnorsRsiLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
+            }
+
+            var liveRsi = s.ConnorsRsiBase.Clone();
+            s.ConnorsRsiLast = liveRsi.Update(candles[^1].Close);
+            return s.ConnorsRsiLast;
+        }
+    }
+
+    // в”Ђв”Ђ HMA в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    public double GetHma(string asset, string tf,
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
+    {
+        if (candles.Length < period) return candles.Length > 0 ? candles[^1].Close : 0.0;
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
+        lock (s)
+        {
+            int unseen = CountUnseen(candles, s.HmaLastClosedTick);
+            if (s.HmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastClosedTick) || IsStale(s))
+            {
+                s.HmaBase = new StatefulHma(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.HmaBase.Update(candles[i].Close);
+                
+                s.HmaLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.HmaLastClosedTick)
+                    {
+                        s.HmaBase.Update(candles[i].Close);
+                        s.HmaLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
+            }
+
+            var liveHma = s.HmaBase.Clone();
+            s.HmaLast = liveHma.Update(candles[^1].Close);
+            return s.HmaLast;
+        }
+    }
+
+    // в”Ђв”Ђ EMA в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    public double GetEma(string asset, string tf,
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
+    {
+        if (candles.Length == 0) return 0.0;
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, $"EMA_{period}"), _ => new CacheState());
+        lock (s)
+        {
+            int unseen = CountUnseen(candles, s.EmaLastClosedTick);
+            if (s.EmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.EmaLastClosedTick) || IsStale(s))
+            {
+                s.EmaBase = new StatefulEma(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.EmaBase.Update(candles[i].Close);
+                
+                s.EmaLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.EmaLastClosedTick)
+                    {
+                        s.EmaBase.Update(candles[i].Close);
+                        s.EmaLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
+            }
+
+            var liveEma = s.EmaBase.Clone();
+            s.EmaLast = liveEma.Update(candles[^1].Close);
+            return s.EmaLast;
+        }
+    }
+
+    // в”Ђв”Ђ ADX в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    public (double adx, double pdi, double mdi) GetAdx(string asset, string tf,
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+    {
+        if (candles.Length <= period) return (20.0, 0.0, 0.0);
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, $"ADX_{period}"), _ => new CacheState());
+        lock (s)
+        {
+            int unseen = CountUnseen(candles, s.AdxLastClosedTick);
+            if (s.AdxBase is null || unseen > 50 || IsTimestampRewind(candles, s.AdxLastClosedTick) || IsStale(s))
+            {
+                s.AdxBase = new StatefulTrueAdx(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.AdxBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                
+                s.AdxLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.AdxLastClosedTick)
+                    {
+                        s.AdxBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                        s.AdxLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
+            }
+
+            var liveAdx = s.AdxBase.Clone();
+            liveAdx.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
+            return (liveAdx.LastAdx, liveAdx.LastPdi, liveAdx.LastMdi);
+        }
+    }
+
+    // в”Ђв”Ђ ATR в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    public double GetAtr(string asset, string tf,
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+    {
+        if (candles.Length <= period) return 0.0;
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, $"ATR_{period}"), _ => new CacheState());
+        lock (s)
+        {
+            int unseen = CountUnseen(candles, s.AtrLastClosedTick);
+            if (s.AtrBase is null || unseen > 50 || IsTimestampRewind(candles, s.AtrLastClosedTick) || IsStale(s))
+            {
+                s.AtrBase = new StatefulAtr(period);
+                for (int i = 0; i < candles.Length - 1; i++)
+                    s.AtrBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                
+                s.AtrLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.AtrLastClosedTick)
+                    {
+                        s.AtrBase.Update(candles[i].High, candles[i].Low, candles[i].Close);
+                        s.AtrLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
+            }
+
+            var liveAtr = s.AtrBase.Clone();
+            liveAtr.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
+            return liveAtr.LastAtr;
+        }
+    }
+
+    // в”Ђв”Ђ SMC в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    public StatefulSmc GetSmcState(string asset, string tf, ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
+    {
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, "SMC"), _ => new CacheState());
+        lock (s)
+        {
+            int unseen = CountUnseen(candles, s.SmcLastClosedTick);
+            if (s.SmcBase is null || unseen > 50 || IsTimestampRewind(candles, s.SmcLastClosedTick) || IsStale(s))
+            {
+                s.SmcBase = new StatefulSmc();
+                s.SmcBase.Update(candles.Slice(0, Math.Max(0, candles.Length - 1)), currentPrice);
+                s.SmcLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                int startIdx = Math.Max(0, candles.Length - unseen - 20);
+                s.SmcBase.Update(candles.Slice(startIdx, candles.Length - 1 - startIdx), currentPrice);
+                s.SmcLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+            }
+
+            var liveSmc = s.SmcBase.Clone();
+            liveSmc.Update(candles.Slice(Math.Max(0, candles.Length - 5)), currentPrice);
+            return liveSmc;
+        }
+    }
+
+    // в”Ђв”Ђ Helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+    /// <summary>Count candles whose timestamp is strictly newer than lastTick.</summary>
+    private static int CountUnseen(
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, long lastTick)
+    {
+        int count = 0;
+        for (int i = candles.Length - 1; i >= 0; i--)
+        {
+            if (candles[i].Timestamp.Ticks <= lastTick) break;
+            count++;
+        }
+        return count;
+    }
+
+    /// <summary>Returns true if the last candle is older than what we've already processed
+    /// вЂ” indicates a time rewind (reconnect, data replay) requiring full reset.</summary>
+    private static bool IsTimestampRewind(
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, long lastTick)
+        => candles.Length > 0 && candles[^1].Timestamp.Ticks < lastTick;
+}
+
+
+namespace ValutaBot.MiniApp;
+
+using System;
+
+public interface IMathEngine
+{
+    double ComputeRsi(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14);
+    double ComputeConnorsRsi(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles);
+    double ComputeHma(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9);
+    double ComputeEma(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9);
+    (double adx, double pdi, double mdi) ComputeTrueAdx(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14);
+    double ComputeAtr(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14);
+    
+    ValutaBot.MiniApp.Indicators.StatefulSmc GetSmcState(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice);
+}
+
+public interface IMarketAnalyzer
+{
+    (double score, double confidence, double rsiVal, double hmaVal, double volStrengthVal, double atrVal) ScoreTimeframe(
+        string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<double> volumes, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default,
+        double? adxOverride = null, double? atrOverride = null, bool isForex = false,
+        double? pdiOverride = null, double? mdiOverride = null);
+
+    
+    double CalculateVolatilityRatio(ReadOnlySpan<double> prices);
+}
+
+public interface IRiskGatekeeper
+{
+    TechnicalAnalysisEngine.GatekeeperResult ValidateMarketGatekeeper(string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default);
+}
+
+public interface ITechnicalAnalysisEngine : IMathEngine, IMarketAnalyzer, IRiskGatekeeper
+{
+}
+using System;
+using System.Numerics;
+
+namespace ValutaBot.MiniApp;
+
+public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
+{
+    public static ITechnicalAnalysisEngine Instance { get; set; } = new TechnicalAnalysisEngine();
+
+    private readonly IndicatorCache _cache = new();
+
+    public double ComputeRsi(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+        => _cache.GetRsi(asset, timeframe, candles, period);
+
+    public double ComputeConnorsRsi(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles)
+        => _cache.GetConnorsRsi(asset, timeframe, candles);
+
+    public double ComputeHma(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
+        => _cache.GetHma(asset, timeframe, candles, period);
+
+    public double ComputeEma(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
+        => _cache.GetEma(asset, timeframe, candles, period);
+
+    public (double adx, double pdi, double mdi) ComputeTrueAdx(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+        => _cache.GetAdx(asset, timeframe, candles, period);
+
+    public double ComputeAtr(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+        => _cache.GetAtr(asset, timeframe, candles, period);
+
+    public ValutaBot.MiniApp.Indicators.StatefulSmc GetSmcState(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
+        => _cache.GetSmcState(asset, timeframe, candles, currentPrice);
+
+    public (double score, double confidence, double rsiVal, double hmaVal, double volStrengthVal, double atrVal) ScoreTimeframe(
+        string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<double> volumes, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default,
+        double? adxOverride = null, double? atrOverride = null, bool isForex = false,
+        double? pdiOverride = null, double? mdiOverride = null)
+
+    {
+        if (prices.Length < 14 || candles.Length < 14)
+        {
+            throw new Exception($"РћРўРљРђР— API: РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ СЃРІРµС‡РµР№ РґР»СЏ С‚РµС…РЅРёС‡РµСЃРєРѕРіРѕ Р°РЅР°Р»РёР·Р°. РџРѕР»СѓС‡РµРЅРѕ {prices.Length}. РќСѓР¶РЅРѕ РјРёРЅРёРјСѓРј 14.");
+        }
+
+        // в”Ђв”Ђ Sub-minute detection в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        // On s5/s10/s15/s30 RSI(14) covers only 70вЂ“420 seconds of price history.
+        // In that window RSI almost never crosses 30/70 в†’ score в‰€ 0 permanently в†’ NEUTRAL bias.
+        // ADX(14) on sub-minute is always < 20 (range zone) в†’ HMA is zeroed out в†’ another scoring dead end.
+        // Fix: use shorter indicator periods scaled to the timeframe resolution,
+        // and replace the ADX regime branch with a micro-velocity path that reads
+        // short-term price momentum directly.
+        bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
+
+        int rsiPeriod = isSubMinute ? 8  : 14;
+        int hmaPeriod = isSubMinute ? 6  : 9;
+        int adxPeriod = isSubMinute ? 7  : 14;
+        int atrPeriod = isSubMinute ? 7  : 14;
+
+        double rsi        = ComputeRsi(asset, timeframe, candles, rsiPeriod);
+        double connorsRsi = ComputeConnorsRsi(asset, timeframe, candles);
+        double hma        = ComputeHma(asset, timeframe, candles, hmaPeriod);
+        double lastPrice  = prices[^1];
+
+        var (adxVal, pdiVal, mdiVal) = adxOverride.HasValue
+            ? (adxOverride.Value, pdiOverride ?? 0.0, mdiOverride ?? 0.0)
+            : (candles.Length > 0 ? ComputeTrueAdx(asset, timeframe, candles, adxPeriod) : (20.0, 0.0, 0.0));
+
+
+        double atrVal = atrOverride.HasValue
+            ? atrOverride.Value
+            : (candles.Length > 0 ? ComputeAtr(asset, timeframe, candles, atrPeriod) : 0);
+
+        double score      = 0;
+        double confidence = 60.0;
+
+        // в”Ђв”Ђ Dynamic RSI Thresholds в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        double rsiOverbought = isSubMinute ? 62.0 : 70.0;
+        double rsiOversold   = isSubMinute ? 38.0 : 30.0;
+
+        if (!isSubMinute)
+        {
+            if (adxVal > 30.0) { rsiOverbought = 80.0; rsiOversold = 20.0; }
+            else if (adxVal < 20.0) { rsiOverbought = 65.0; rsiOversold = 35.0; }
+        }
+
+        // в”Ђв”Ђ Adaptive Regime Logic в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        double hmaWeight = 0.15;
+
+        if (isSubMinute)
+        {
+            // Sub-minute regime: ADX is structurally low вЂ” do NOT use it to gate HMA.
+            // Instead use micro-velocity: short-term price slope over last 5 candles.
+            // PROACTIVE FIX: Chaos Mean-Reversion Patch
+            double volRatio = CalculateVolatilityRatio(prices);
+            bool isChaos = volRatio > 1.5;
+
+            // Micro-velocity: slope of last 5 closes (basis points per candle)
+            double microVel = prices.Length >= 5
+                ? (prices[^1] - prices[^5]) / Math.Max(1e-8, prices[^5]) * 10_000.0
+                : 0.0;
+
+            // HMA direction signal вЂ” disabled in chaos (prevents buying the top)
+            hmaWeight = isChaos ? 0.0 : 0.35;
+            if (lastPrice > hma) score += hmaWeight;
+            else if (lastPrice < hma) score -= hmaWeight;
+
+            // Micro-velocity contribution вЂ” disabled in chaos
+            double velContrib = isChaos ? 0.0 : Math.Clamp(microVel / 25.0, -0.40, 0.40);
+            score += velContrib;
+
+            // RSI with tighter bands вЂ” AMPLIFIED in chaos (catch the bounce)
+            double rsiWeight = isChaos ? 0.75 : 0.40;
+            if (rsi > rsiOverbought)      score -= rsiWeight;
+            else if (rsi < rsiOversold)   score += rsiWeight;
+
+            // ConnorsRSI follow-through
+            double connorsSignalSub = (connorsRsi - 50.0) / 50.0;
+            score += Math.Clamp(connorsSignalSub * 0.15, -0.15, 0.15);
+
+            // Confidence boost from velocity clarity
+            double velClarity = Math.Abs(microVel);
+            confidence += Math.Min(velClarity * 1.5, 15.0);
+        }
+        else
+        {
+            // в”Ђв”Ђ Standard minute+ regime logic в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+            double trendMultiplier = Math.Clamp((adxVal - 18.0) / 10.0, 0.0, 1.0); // 18 -> 0%, 28 -> 100%
+            double rangeMultiplier = 1.0 - trendMultiplier;
+
+            // PROACTIVE FIX: Chaos Mean-Reversion Patch
+            double volRatio = CalculateVolatilityRatio(prices);
+            if (volRatio > 1.5)
+            {
+                trendMultiplier = 0.0; // Force disable trend logic
+                rangeMultiplier = 1.5; // Aggressively amplify mean-reversion
+            }
+
+            // 1. Ranging Signals (scaled by rangeMultiplier)
+            // In chaos, rsi logic gets amplified to 0.75 (0.5 * 1.5).
+            if (rsi > rsiOverbought) score -= 0.5 * rangeMultiplier;
+            else if (rsi < rsiOversold) score += 0.5 * rangeMultiplier;
+            
+            // Neutral zone RSI (applies mostly in transition, scales down as trend strengthens)
+            if (rsi > 75.0 && rsi <= rsiOverbought) score -= 0.25 * rangeMultiplier;
+            else if (rsi < 25.0 && rsi >= rsiOversold) score += 0.25 * rangeMultiplier;
+
+            // 2. Trending Signals (scaled by trendMultiplier)
+            if (pdiVal > mdiVal) score += 0.6 * trendMultiplier;
+            if (mdiVal > pdiVal) score -= 0.6 * trendMultiplier;
+
+            // 3. ConnorsRSI (Dynamic flip based on regime)
+            double connorsSignal = (connorsRsi - 50.0) / 50.0;
+            score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15) * trendMultiplier;
+            score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10) * rangeMultiplier; // subtracts (reversion) in range
+
+            // 4. HMA Trend Signal
+            hmaWeight = 0.40 * trendMultiplier;
+            if (lastPrice > hma) score += hmaWeight;
+            else if (lastPrice < hma) score -= hmaWeight;
+        } // end else (minute+ regime)
+
+        if (adxVal > 25.0 && !isSubMinute)
+        {
+            confidence += Math.Min((adxVal - 25.0) * 0.8, 20.0);
+        }
+
+        // РСЃРїСЂР°РІР»РµРЅРёРµ: volStrength СЃС‡РёС‚Р°РµС‚СЃСЏ РїРѕ rolling CVD (5 СЃРІРµС‡РµР№) РІРјРµСЃС‚Рѕ СЂР°Р·РЅРёС†С‹ РѕРґРЅРѕРіРѕ С‚РёРєР°.
+        // РџСЂРµРґС‹РґСѓС‰Р°СЏ РІРµСЂСЃРёСЏ Р±СЂР°Р»Р° sign(prices[^1] - prices[^2]) вЂ” С‡РёСЃС‚С‹Р№ С€СѓРј РїСЂРё РЅРµР№С‚СЂР°Р»СЊРЅРѕРј СЂС‹РЅРєРµ.
+        double volStrength = 0.0;
+        if (volumes.Length >= 5)
+        {
+            int volCount = 0;
+            double volSum = 0;
+            int startIdx = Math.Max(0, volumes.Length - 21);
+            for (int i = startIdx; i < volumes.Length - 1; i++)
+            {
+                volSum += volumes[i];
+                volCount++;
+            }
+            double avgVol = volCount > 0 ? volSum / volCount : 0.0;
+            double lastVol = volumes[^1];
+            if (avgVol > 1e-9)
+            {
+                // Rolling CVD: РЅР°РєРѕРїР»РµРЅРЅРѕРµ РґР°РІР»РµРЅРёРµ РїРѕРєСѓРїР°С‚РµР»РµР№/РїСЂРѕРґР°РІС†РѕРІ Р·Р° 5 СЃРІРµС‡РµР№ РІРјРµСЃС‚Рѕ 1 С‚РёРєР°
+                double rollingCvd = 0;
+                // FIX C-05: cvdLookback must also be capped by volumes.Length to avoid index confusion.
+                // Old: `i <= volumes.Length` в†’ at i==volumes.Length, volumes[^i]=volumes[0] (oldest, wrong).
+                int cvdLookback = Math.Min(5, Math.Min(prices.Length - 1, volumes.Length - 1));
+                for (int i = 1; i <= cvdLookback; i++)
+                {
+                    double pc = prices[^i] - prices[^(i + 1)];
+                    double v  = volumes[^i]; // safe: cvdLookback guarantees i < volumes.Length
+                    rollingCvd += pc >= 0 ? v : -v;
+                }
+
+                double ratio = lastVol / avgVol;
+                // РќРѕСЂРјР°Р»РёР·СѓРµРј CVD РїРѕ СЃСЂРµРґРЅРµРјСѓ РѕР±СЉС‘РјСѓ РґР»СЏ РјР°СЃС€С‚Р°Р±РёСЂСѓРµРјРѕСЃС‚Рё
+                double cvdNorm = avgVol > 1e-9 ? Math.Clamp(rollingCvd / (avgVol * cvdLookback), -1.0, 1.0) : 0;
+                volStrength = cvdNorm * Math.Max(0.0, Math.Min(ratio - 0.8, 1.0));
+
+                // Volume bonus: up to +10 confidence points
+                double volBonus = Math.Abs(volStrength) * 10.0;
+                confidence += Math.Min(volBonus, 10.0);
+                score += Math.Clamp(volStrength * 0.15, -0.20, 0.20);
+            }
+        }
+
+        // RSI extremes add conviction
+        if (rsi <= 30.0 || rsi >= 70.0)
+            confidence += Math.Min(Math.Abs(rsi - 50.0) * 0.3, 5.0);
+
+        // FIX: The user recently increased RSI contribution (e.g. 0.75/0.8), causing the raw sum 
+        // to exceed the [-1.0, +1.0] design scale, leading to perpetual 90-95% probability.
+        // We must clamp the final score here to preserve math integrity across engines.
+        score = Math.Clamp(score, -1.0, 1.0);
+
+        // Now achievable max: 60 (base) + 20 (ADX) + 10 (volume) + 5 (RSI) = 95
+        return (score, Math.Clamp(confidence, 50.0, 95.0), Math.Round(rsi, 1), Math.Round(hma, 5), Math.Round(volStrength, 2), Math.Round(atrVal, 6));
+    }
+
+    public record GatekeeperResult(bool IsTradeable, string Reason, double Atr, double Adx);
+
+    public GatekeeperResult ValidateMarketGatekeeper(string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default)
+    {
+        if (prices.Length < 15) return new GatekeeperResult(false, "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С… С†РµРЅС‹ РґР»СЏ РїСЂРѕРІРµСЂРєРё Gatekeeper", 0, 0);
+
+        // FIX ROOT CAUSE: Shared Cache Poisoning. 
+        // Gatekeeper used to pass `candles` (which included the live forming candle) to ComputeAtr.
+        // This caused the IndicatorCache to advance its permanent state up to the last closed candle.
+        // Later, EvaluateTechnicalIndicatorsAsync passed `closedCandles` (without the live candle) to ComputeAtr.
+        // The cache's "live overlay" logic would then apply the last closed candle AGAIN on top of the permanent state,
+        // resulting in double-counting the last closed candle and permanently warping ADX and ATR.
+        var closedCandles = candles.Length > 1 ? candles.Slice(0, candles.Length - 1) : candles;
+        
+        double atr = closedCandles.Length >= 15 ? ComputeAtr(asset, timeframe, closedCandles) : 0;
+        var (adx, _, _) = closedCandles.Length >= 15 ? ComputeTrueAdx(asset, timeframe, closedCandles) : (20.0, 0, 0);
+
+        double minPrice = double.MaxValue;
+        double maxPrice = double.MinValue;
+        int startIdx = prices.Length - 15;
+        for (int i = startIdx; i < prices.Length; i++)
+        {
+            if (prices[i] < minPrice) minPrice = prices[i];
+            if (prices[i] > maxPrice) maxPrice = prices[i];
+        }
+        
+        double priceRange = maxPrice - minPrice;
+        // Fix: when ATR = 0 (not yet warmed up), fallback to an asset-appropriate
+        // minimum pip range so the dead-market check is never silently disabled.
+        double fallbackThreshold = asset.Length == 6 && asset.Contains("JPY") ? 0.005 : 0.00005;
+        double deadMarketThreshold = atr > 0 ? Math.Max(1e-10, atr * 0.10) : fallbackThreshold;
+
+        if (priceRange < deadMarketThreshold)
+        {
+            BotLogger.Warn($"[Gatekeeper] Market is completely flat / frozen. PriceRange={priceRange}, Threshold={deadMarketThreshold}. Aborting analysis.");
+            return new GatekeeperResult(false, "вљ пёЏ Р С‹РЅРѕРє РІ СЃРѕСЃС‚РѕСЏРЅРёРё Р·Р°СЃС‚РѕСЏ (РЅРµС‚ РєРѕР»РµР±Р°РЅРёР№ С†РµРЅС‹).", atr, adx);
+        }
+
+        double maxCandleRange = 0;
+        if (candles.Length > 0)
+        {
+            int cStartIdx = Math.Max(0, candles.Length - 3);
+            for (int i = cStartIdx; i < candles.Length; i++)
+            {
+                double range = candles[i].High - candles[i].Low;
+                if (range > maxCandleRange) maxCandleRange = range;
+            }
+        }
+        
+        if (atr > 0 && maxCandleRange > atr * 4.0)
+        {
+            BotLogger.Warn($"[Gatekeeper] Market Flash Crash detected! Single candle range {maxCandleRange} is > 4x ATR {atr}.");
+            return new GatekeeperResult(false, "вљ пёЏ РћР±РЅР°СЂСѓР¶РµРЅ Р°РЅРѕРјР°Р»СЊРЅС‹Р№ РІС‹Р±СЂРѕСЃ РІРѕР»Р°С‚РёР»СЊРЅРѕСЃС‚Рё (РЎРєРІРёР·/Flash Crash). РўРѕСЂРіРѕРІР»СЏ РїСЂРёРѕСЃС‚Р°РЅРѕРІР»РµРЅР° РґР»СЏ Р·Р°С‰РёС‚С‹ РґРµРїРѕР·РёС‚Р°.", atr, adx);
+        }
+
+        return new GatekeeperResult(true, "Р С‹РЅРѕРє Р°РєС‚РёРІРµРЅ", atr, adx);
+    }
+
+    public double CalculateVolatilityRatio(ReadOnlySpan<double> prices)
+    {
+        if (prices.Length < 26) return 1.0;
+
+        Span<double> returns = stackalloc double[25];
+        for (int i = 0; i < 25; i++)
+        {
+            int idx = prices.Length - 25 + i;
+            double prevPrice = prices[idx - 1] <= 0 ? 1e-10 : prices[idx - 1];
+            double currPrice = prices[idx] <= 0 ? 1e-10 : prices[idx];
+            returns[i] = Math.Log(currPrice / prevPrice);
+        }
+
+        double shortVol = StandardDeviationScalar(returns.Slice(20, 5));
+        double longVol = StandardDeviationScalar(returns.Slice(0, 20));
+
+        if (longVol < 1e-5) return 1.0;
+        return shortVol / longVol;
+    }
+
+    private static double StandardDeviationScalar(ReadOnlySpan<double> values)
+    {
+        int count = values.Length;
+        if (count < 2) return 0.0;
+        
+        double sum = 0;
+        for (int i = 0; i < count; i++) sum += values[i];
+        double mean = sum / count;
+        
+        double sqSum = 0;
+        for (int i = 0; i < count; i++)
+        {
+            double diff = values[i] - mean;
+            sqSum += diff * diff;
+        }
+        
+        return Math.Sqrt(sqSum / (count - 1));
+    }
+}
+/// <summary>
+/// Stateful incremental indicator implementations.
+/// Each class is a self-contained mathematical state machine вЂ” no cache,
+/// no logging, no HTTP dependencies. Feed prices one tick at a time.
+/// </summary>
+namespace ValutaBot.MiniApp.Indicators;
+
+// в”Ђв”Ђ RSI (Wilder's Smoothed Moving Average variant) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulRsi
+{
+    private readonly int _period;
+    private int _count;
+    private double _avgGain;
+    private double _avgLoss;
+    private double _prevPrice;
+
+    public StatefulRsi(int period = 14) { _period = period; }
+
+    /// <summary>Returns RSI 0-100. Returns 50.0 during warm-up.</summary>
+    public double Update(double price)
+    {
+        if (_count == 0)
+        {
+            _prevPrice = price;
+            _count++;
+            return 50.0;
+        }
+        double diff = price - _prevPrice;
+        _prevPrice = price;
+
+        if (_count <= _period)
+        {
+            if (diff > 0) _avgGain += diff;
+            else          _avgLoss -= diff;
+            if (_count == _period)
+            {
+                _avgGain /= _period;
+                _avgLoss /= _period;
+            }
+            _count++;
+            if (_count <= _period) return 50.0;
+        }
+        else
+        {
+            double gain = diff > 0 ? diff : 0;
+            double loss = diff < 0 ? -diff : 0;
+            _avgGain = (_avgGain * (_period - 1) + gain) / _period;
+            _avgLoss = (_avgLoss * (_period - 1) + loss) / _period;
+            _count++;
+        }
+        // If both gain and loss are near zero вЂ” true flat market. Return neutral 50.0.
+        // If only avgLoss is near zero but avgGain > 0 вЂ” genuine uptrend, return 100.0.
+        if (_avgLoss < 1e-10) return _avgGain < 1e-10 ? 50.0 : 100.0;
+        return 100.0 - (100.0 / (1.0 + (_avgGain / _avgLoss)));
+    }
+
+    public bool IsWarm => _count > _period;
+
+    public StatefulRsi Clone() => (StatefulRsi)this.MemberwiseClone();
+}
+
+// в”Ђв”Ђ ConnorsRSI в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulConnorsRsi
+{
+    private StatefulRsi _rsi       = new(3);
+    private StatefulRsi _streakRsi = new(2);
+    private double _currentStreak;
+    private double _prevPrice;
+    private int _count;
+
+    // Percentile rank: 50 periods в†’ 2% resolution (industry standard uses 100)
+    private const int RankPeriod = 50;
+    private double[] _returnsHistory = new double[RankPeriod];
+    private int _returnsCount;
+
+    /// <summary>Returns ConnorsRSI 0-100. Returns 50.0 during warm-up.</summary>
+    public double Update(double price)
+    {
+        double rsiVal = _rsi.Update(price);
+        if (_count > 0)
+        {
+            if      (price > _prevPrice) _currentStreak = _currentStreak > 0 ? _currentStreak + 1 :  1;
+            else if (price < _prevPrice) _currentStreak = _currentStreak < 0 ? _currentStreak - 1 : -1;
+            else                         _currentStreak = 0;
+        }
+        double streakRsiVal = _streakRsi.Update(_currentStreak);
+
+        double currentReturn = (_count > 0 && Math.Abs(_prevPrice) > 1e-10)
+            ? (price - _prevPrice) / _prevPrice
+            : 0.0;
+
+        // Percentile rank against rolling history (before adding current return)
+        int winCount = 0;
+        for (int i = 0; i < _returnsCount; i++)
+            if (currentReturn > _returnsHistory[i]) winCount++;
+        double pctRank = _returnsCount > 0 ? (winCount / (double)_returnsCount) * 100.0 : 50.0;
+
+        // Slide window
+        if (_returnsCount < RankPeriod)
+            _returnsHistory[_returnsCount++] = currentReturn;
+        else
+        {
+            Array.Copy(_returnsHistory, 1, _returnsHistory, 0, RankPeriod - 1);
+            _returnsHistory[RankPeriod - 1] = currentReturn;
+        }
+
+        _prevPrice = price;
+        _count++;
+        return (rsiVal + streakRsiVal + pctRank) / 3.0;
+    }
+
+    public StatefulConnorsRsi Clone()
+    {
+        var clone = (StatefulConnorsRsi)this.MemberwiseClone();
+        clone._rsi = this._rsi.Clone();
+        clone._streakRsi = this._streakRsi.Clone();
+        clone._returnsHistory = (double[])this._returnsHistory.Clone();
+        return clone;
+    }
+}
+
+// в”Ђв”Ђ Hull Moving Average (HMA) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulHma
+{
+    private readonly int _period;
+    private readonly int _halfPeriod;
+    private readonly int _sqrtPeriod;
+    private double[] _priceHistory;
+    private int _priceCount;
+    private double[] _diffHistory;
+    private int _diffCount;
+
+    public StatefulHma(int period = 9)
+    {
+        // FIX W-03: HMA math requires at least period >= 4 to produce meaningful half-period/sqrt-period.
+        _period      = Math.Max(4, period);
+        _halfPeriod  = _period / 2;
+        _sqrtPeriod  = (int)Math.Sqrt(_period);
+        _priceHistory = new double[_period];
+        _diffHistory  = new double[_sqrtPeriod];
+    }
+
+    public StatefulHma Clone()
+    {
+        var clone = (StatefulHma)this.MemberwiseClone();
+        clone._priceHistory = (double[])this._priceHistory.Clone();
+        clone._diffHistory = (double[])this._diffHistory.Clone();
+        return clone;
+    }
+
+    /// <summary>Returns HMA. Returns raw price during warm-up.</summary>
+    public double Update(double price)
+    {
+        if (_priceCount < _period)
+            _priceHistory[_priceCount++] = price;
+        else
+        {
+            Array.Copy(_priceHistory, 1, _priceHistory, 0, _period - 1);
+            _priceHistory[_period - 1] = price;
+        }
+
+        if (_priceCount == _period)
+        {
+            double diff = 2.0 * Wma(_priceHistory, _halfPeriod) - Wma(_priceHistory, _period);
+
+            if (_diffCount < _sqrtPeriod)
+                _diffHistory[_diffCount++] = diff;
+            else
+            {
+                Array.Copy(_diffHistory, 1, _diffHistory, 0, _sqrtPeriod - 1);
+                _diffHistory[_sqrtPeriod - 1] = diff;
+            }
+
+            if (_diffCount == _sqrtPeriod)
+                return Wma(_diffHistory, _sqrtPeriod);
+        }
+        return price;
+    }
+
+    private static double Wma(double[] arr, int period)
+    {
+        double sum = 0, weightSum = 0;
+        int startIndex = arr.Length - period;
+        for (int i = 0; i < period; i++)
+        {
+            double w = i + 1;
+            sum       += arr[startIndex + i] * w;
+            weightSum += w;
+        }
+        return weightSum > 0 ? sum / weightSum : 0;
+    }
+}
+
+// в”Ђв”Ђ Exponential Moving Average (EMA) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulEma
+{
+    private readonly int _period;
+    private readonly double _k;
+    private int _count;
+    private double _ema;
+    private double _sum;
+
+    public StatefulEma(int period = 9)
+    {
+        _period = period;
+        _k      = 2.0 / (period + 1.0);
+    }
+
+    /// <summary>
+    /// Returns EMA. Returns 0.0 during warm-up (not raw price) so callers
+    /// can detect uninitialized state. IsWarm indicates when values are valid.
+    /// </summary>
+    public double Update(double price)
+    {
+        if (_count < _period)
+        {
+            _sum += price;
+            _count++;
+            if (_count == _period) _ema = _sum / _period;
+            // Return 0.0 during warmup вЂ” NOT raw price (misleading).
+            return _count < _period ? 0.0 : _ema;
+        }
+        _ema = (price - _ema) * _k + _ema;
+        _count++;
+        return _ema;
+    }
+
+    public bool IsWarm => _count >= _period;
+
+    public StatefulEma Clone() => (StatefulEma)this.MemberwiseClone();
+}
+
+// в”Ђв”Ђ Average True Range (ATR) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulAtr
+{
+    private readonly int _period;
+    private int _count;
+    private double _atr;
+    private double _prevClose;
+    private double _sumTr;
+
+    public double LastAtr { get; private set; }
+
+    public StatefulAtr(int period = 14) { _period = period; }
+
+    /// <summary>Returns ATR (Wilder). Returns 0.0 during warm-up.</summary>
+    public double Update(double high, double low, double close)
+    {
+        if (_count == 0)
+        {
+            _prevClose = close;
+            _count++;
+            return 0.0;
+        }
+        double tr = Math.Max(high - low,
+                    Math.Max(Math.Abs(high - _prevClose),
+                             Math.Abs(low  - _prevClose)));
+        _prevClose = close;
+
+        if (_count <= _period)
+        {
+            _sumTr += tr;
+            if (_count == _period) _atr = _sumTr / _period;
+            _count++;
+            LastAtr = _count <= _period ? 0.0 : _atr;
+            return LastAtr;
+        }
+        _atr   = (_atr * (_period - 1) + tr) / _period;
+        _count++;
+        LastAtr = _atr;
+        return _atr;
+    }
+
+    public bool IsWarm => _count > _period;
+
+    public StatefulAtr Clone() => (StatefulAtr)this.MemberwiseClone();
+}
+
+// в”Ђв”Ђ True ADX (Wilder) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+
+public sealed class StatefulTrueAdx
+{
+    private readonly int _period;
+    private int _count;
+    private double _prevClose, _prevHigh, _prevLow;
+    private double _smoothTr, _smoothPdm, _smoothMdm;
+    private double _adx;
+    private double[] _dxHistory;
+    private double _sumDx;
+
+    public double LastPdi { get; private set; }
+    public double LastMdi { get; private set; }
+    public double LastAdx { get; private set; }
+
+    public StatefulTrueAdx(int period = 14)
+    {
+        _period    = period;
+        _dxHistory = new double[period];
+    }
+
+    public StatefulTrueAdx Clone()
+    {
+        var clone = (StatefulTrueAdx)this.MemberwiseClone();
+        clone._dxHistory = (double[])this._dxHistory.Clone();
+        return clone;
+    }
+
+    /// <summary>Returns ADX 0-100. Returns 20.0 during warm-up.</summary>
+    public double Update(double high, double low, double close)
+    {
+        if (_count == 0)
+        {
+            _prevClose = close; _prevHigh = high; _prevLow = low;
+            _count++;
+            return 20.0;
+        }
+
+        double tr      = Math.Max(high - low,
+                         Math.Max(Math.Abs(high - _prevClose),
+                                  Math.Abs(low  - _prevClose)));
+        double upMove   = high - _prevHigh;
+        double downMove = _prevLow - low;
+
+        double pdm = (upMove   > downMove && upMove   > 0) ? upMove   : 0;
+        double mdm = (downMove > upMove   && downMove > 0) ? downMove : 0;
+
+        _prevClose = close; _prevHigh = high; _prevLow = low;
+
+        if (_count <= _period)
+        {
+            _smoothTr += tr; _smoothPdm += pdm; _smoothMdm += mdm;
+            _count++;
+            return 20.0;
+        }
+
+        // Fix: was `_count > _period + 1` вЂ” skipped smoothing on the first live tick.
+        // Now smoothing is applied from _count == _period + 1 onwards (correct).
+        if (_count > _period)
+        {
+            _smoothTr  = _smoothTr  - (_smoothTr  / _period) + tr;
+            _smoothPdm = _smoothPdm - (_smoothPdm / _period) + pdm;
+            _smoothMdm = _smoothMdm - (_smoothMdm / _period) + mdm;
+        }
+
+        LastPdi = _smoothTr == 0 ? 0 : 100.0 * _smoothPdm / _smoothTr;
+        LastMdi = _smoothTr == 0 ? 0 : 100.0 * _smoothMdm / _smoothTr;
+        double dx = (LastPdi + LastMdi) == 0
+            ? 0
+            : 100.0 * Math.Abs(LastPdi - LastMdi) / (LastPdi + LastMdi);
+
+        if (_count <= _period * 2)
+        {
+            _dxHistory[_count - _period - 1] = dx;
+            if (_count == _period * 2)
+            {
+                for (int i = 0; i < _period; i++) _sumDx += _dxHistory[i];
+                _adx = _sumDx / _period;
+            }
+        }
+        else
+        {
+            _adx = (_adx * (_period - 1) + dx) / _period;
+        }
+
+        // FIX C-04: previously LastAdx was assigned AFTER _count++.
+        // At the exact tick where _count just became period*2+1, the check
+        // `_count <= _period*2` evaluated false в†’ first real ADX discarded (returned 20.0).
+        // Fix: lock in isWarm BEFORE the increment.
+        bool isWarm = _count >= _period * 2;
+        _count++;
+        LastAdx = isWarm ? _adx : 20.0;
+        return LastAdx;
+    }
+
+    public bool IsWarm => _count > _period * 2;
+}
+using System;
+using System.Collections.Generic;
+
+namespace ValutaBot.MiniApp.Indicators;
+
+public class StatefulOrderFlow
+{
+    private double _cumulativeVolumeDelta = 0;
+    
+    // FIX W-06: replaced fake rolling avg (_volSum/_volCount) with proper sliding window Queue
+    private readonly Queue<double> _volWindow = new(20);
+    private double _avgVolume = 1.0;
+
+    private DateTime _lastProcessedTime;
+
+    private readonly Queue<(double buy, double sell)> _shortTermWindow = new();
+    private double _shortTermBuyVolume = 0;
+    private double _shortTermSellVolume = 0;
+    
+    // B10-FIX: Track open candle volume separately so getters can include it without permanent accumulation
+    private double _openBuyVolume = 0;
+    private double _openSellVolume = 0;
+    private bool _openHasInstitutionalBlockTrade = false;
+
+    public double CumulativeVolumeDelta
+    {
+        get { lock (_lockObj) { return _cumulativeVolumeDelta + (_openBuyVolume - _openSellVolume); } }
+    }
+
+    // The DeltaRatio is calculated over the short-term window (12 candles), as it reflects immediate momentum
+    public double DeltaRatio
+    {
+        get
+        {
+            lock (_lockObj)
+            {
+                double buy = _shortTermBuyVolume + _openBuyVolume;
+                double sell = (_shortTermSellVolume + _openSellVolume) > 1e-8 ? (_shortTermSellVolume + _openSellVolume) : 1.0;
+                return buy / sell;
+            }
+        }
+    }
+
+    public double BuyVolume  { get { lock (_lockObj) { return _shortTermBuyVolume + _openBuyVolume;  } } }
+    public double SellVolume { get { lock (_lockObj) { return _shortTermSellVolume + _openSellVolume; } } }
+
+    public bool HasInstitutionalBlockTrade
+    {
+        get { lock (_lockObj) { return _hasInstitutionalBlockTrade || _openHasInstitutionalBlockTrade; } }
+        private set { _hasInstitutionalBlockTrade = value; }
+    }
+    private bool _hasInstitutionalBlockTrade;
+
+    public double PriceDelta  { get { lock (_lockObj) { return _priceDelta;  } } }
+    public double CurrentPrice { get { lock (_lockObj) { return _currentPrice; } } }
+    private double _priceDelta;
+    private double _currentPrice;
+
+    private readonly object _lockObj = new();
+
+        public void Update(ReadOnlySpan<MiniAppController.OhlcCandle> candles)
+    {
+        if (candles.Length == 0) return;
+
+        lock (_lockObj)
+        {
+            // Permanent processing of closed candles
+            for (int i = 0; i < candles.Length - 1; i++)
+            {
+                var c = candles[i];
+                if (c.Timestamp <= _lastProcessedTime && _lastProcessedTime != default)
+                    continue;
+
+                // Session reset logic (e.g. gap > 4 hours)
+                if (_lastProcessedTime != default && (c.Timestamp - _lastProcessedTime).TotalHours > 4)
+                {
+                    _cumulativeVolumeDelta = 0;
+                    _shortTermWindow.Clear();
+                    _shortTermBuyVolume = 0;
+                    _shortTermSellVolume = 0;
+                    // FIX C-3: Clear volume window so stale thresholds from previous session
+                    // don't cause morning blindness to block trades.
+                    _volWindow.Clear();
+                }
+
+                // FIX: Reset permanent block trade flag before processing the new closed candle
+                _hasInstitutionalBlockTrade = false;
+
+                ProcessCandle(c, isPermanent: true);
+                _lastProcessedTime = c.Timestamp;
+            }
+
+            // For the current open candle, we calculate the state without permanently committing
+            if (candles.Length > 0)
+            {
+                // B11-FIX: Reset open block trade flag, preserve historical block trade flag
+                _openHasInstitutionalBlockTrade = false;
+                _openBuyVolume = 0;
+                _openSellVolume = 0;
+
+                ProcessCandle(candles[^1], isPermanent: false);
+
+                if (candles.Length >= 5)
+                {
+                    _priceDelta = candles[^1].Close - candles[^5].Close;
+                }
+                _currentPrice = candles[^1].Close;
+            }
+        }
+    }
+
+    private void ProcessCandle(MiniAppController.OhlcCandle c, bool isPermanent)
+    {
+        double totalVol = c.Volume > 0 ? c.Volume : 1.0;
+        
+        if (isPermanent)
+        {
+            // FIX W-06: old code subtracted the current mean instead of the oldest value,
+            // giving ~5-10% systematic error in avgVolume в†’ wrong blockTradeThreshold.
+            // Proper fix: use a Queue as a real sliding window of last 20 candles.
+            _volWindow.Enqueue(totalVol);
+            if (_volWindow.Count > 20) _volWindow.Dequeue();
+            _avgVolume = _volWindow.Average();
+        }
+
+        double noiseThreshold = _avgVolume * 0.60;
+        double blockTradeThreshold = _avgVolume * 1.70;
+
+        if (totalVol < noiseThreshold)
+            return;
+
+        if (totalVol >= blockTradeThreshold)
+        {
+            if (isPermanent) _hasInstitutionalBlockTrade = true;
+            else _openHasInstitutionalBlockTrade = true;
+        }
+
+        double range = c.High - c.Low;
+        double buyV, sellV;
+
+        if (range > 1e-9)
+        {
+            double buyRatio = (c.Close - c.Low) / range;
+            double sellRatio = (c.High - c.Close) / range;
+            buyV = totalVol * buyRatio;
+            sellV = totalVol * sellRatio;
+        }
+        else
+        {
+            buyV = totalVol * 0.5;
+            sellV = totalVol * 0.5;
+        }
+
+        if (isPermanent)
+        {
+            _cumulativeVolumeDelta += (buyV - sellV);
+
+            _shortTermWindow.Enqueue((buyV, sellV));
+            _shortTermBuyVolume += buyV;
+            _shortTermSellVolume += sellV;
+
+            if (_shortTermWindow.Count > 12)
+            {
+                var oldest = _shortTermWindow.Dequeue();
+                _shortTermBuyVolume -= oldest.buy;
+                _shortTermSellVolume -= oldest.sell;
+            }
+        }
+        else
+        {
+            // For the uncommitted open candle, we just temporarily save its volume
+            _openBuyVolume = buyV;
+            _openSellVolume = sellV;
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+
+namespace ValutaBot.MiniApp.Indicators;
+
+/// <summary>
+/// Thread-safe stateful Smart Money Concepts indicator.
+///
+/// FIX: All public methods and the Update method now use a shared _lockObj.
+/// Previously _activeFvgs and _activeObs were modified by Update() while
+/// GetNearestFvg/GetNearestOb iterated them concurrently, causing
+/// InvalidOperationException ("Collection was modified").
+/// </summary>
+public class StatefulSmc
+{
+    public readonly record struct FvgZone(double Top, double Bottom, bool IsBullish, DateTime CreationTime);
+    public readonly record struct OrderBlockZone(double Top, double Bottom, bool IsBullish, DateTime CreationTime);
+    public readonly record struct Fractal(double Price, bool IsHigh, DateTime Time);
+
+    private readonly object _lockObj = new();
+
+    private List<FvgZone>        _activeFvgs = new();
+    private List<OrderBlockZone> _activeObs  = new();
+
+    private Fractal _lastSwingHigh;
+    private Fractal _lastSwingLow;
+    private string  _currentTrend = "NEUTRAL";
+
+    private DateTime _lastProcessedTime;
+    private double   _recentAtr;
+    private TimeSpan _tfEstimate = TimeSpan.FromMinutes(1);
+
+    // Output state вЂ” backing fields accessed under lock
+    private bool   _hasLiquiditySweep;
+    private string _sweepDirection = "NONE";
+    private bool   _hasBos;
+    private string _bosDirection   = "NONE";
+
+    public StatefulSmc Clone()
+    {
+        lock (_lockObj)
+        {
+            var clone = (StatefulSmc)this.MemberwiseClone();
+            clone._activeFvgs = new List<FvgZone>(this._activeFvgs);
+            clone._activeObs = new List<OrderBlockZone>(this._activeObs);
+            return clone;
+        }
+    }
+
+    public bool   HasLiquiditySweep { get { lock (_lockObj) { return _hasLiquiditySweep; } } }
+    public string SweepDirection    { get { lock (_lockObj) { return _sweepDirection;    } } }
+    public bool   HasBos            { get { lock (_lockObj) { return _hasBos;            } } }
+    public string BosDirection      { get { lock (_lockObj) { return _bosDirection;      } } }
+    public string CurrentTrend      { get { lock (_lockObj) { return _currentTrend;      } } }
+
+    public void Update(ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
+    {
+        if (candles.Length < 5) return;
+
+        lock (_lockObj)
+        {
+            // FIX M-07: Process up to candles.Length to include the most recently closed candle.
+            // Previously `i < candles.Length - 1` double-stripped the latest candle, meaning
+            // Order Blocks and FVGs were recognized with a 1-candle lag.
+            for (int i = 2; i < candles.Length; i++)
+            {
+                var c = candles[i];
+                if (c.Timestamp <= _lastProcessedTime && _lastProcessedTime != default)
+                    continue;
+
+                // Reset transient single-tick events for the NEW closed candle
+                _hasLiquiditySweep = false;
+                _sweepDirection    = "NONE";
+                _hasBos            = false;
+                _bosDirection      = "NONE";
+
+                _recentAtr = GetAtrAt(candles, i, 14); // B13-FIX: Point-in-time ATR, no lookahead bias
+
+                if (i >= 4) DetectFractalAt(candles, i - 2);
+                DetectFvgAt(candles, i);
+                DetectOrderBlockAt(candles, i - 1, i);
+                DetectStructureBreak(c);
+                DetectLiquiditySweep(c);  // FIX: sweep detection moved outside fractal block
+                MitigateZones(c);
+
+                _lastProcessedTime = c.Timestamp;
+            }
+
+            // Live mitigation on current open candle
+            MitigateZones(candles[^1]);
+
+            // W-05 FIX: Instead of hardcoded -50 minutes (which breaks higher TFs),
+            // estimate timeframe from the last two candles and prune 50 candles back.
+            if (_lastProcessedTime != default)
+            {
+                TimeSpan tf = candles.Length > 1 
+                    ? candles[^1].Timestamp - candles[^2].Timestamp 
+                    : TimeSpan.FromMinutes(1);
+                
+                // Fallback to sane limits if timestamps are exactly the same
+                if (tf.TotalSeconds < 1) tf = TimeSpan.FromMinutes(1);
+                _tfEstimate = tf;
+                
+                PruneStaleZones(_lastProcessedTime.Subtract(tf * 50));
+            }
+        }
+    }
+
+    /// <summary>
+    /// РЈРґР°Р»СЏРµС‚ FVG Рё OrderBlock Р·РѕРЅС‹, СЃРѕР·РґР°РЅРЅС‹Рµ СЂР°РЅСЊС€Рµ cutoffTime.
+    /// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РїРѕРґ _lockObj.
+    /// </summary>
+    private void PruneStaleZones(DateTime cutoffTime)
+    {
+        _activeFvgs.RemoveAll(z => z.CreationTime < cutoffTime);
+        _activeObs.RemoveAll(z => z.CreationTime < cutoffTime);
+    }
+
+    private double GetAtrAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int currentIdx, int period)
+    {
+        int count = 0;
+        double sum = 0;
+        for (int i = currentIdx - period; i < currentIdx; i++)
+        {
+            if (i >= 0)
+            {
+                sum += (candles[i].High - candles[i].Low);
+                count++;
+            }
+        }
+        return count > 0 ? sum / count : 0;
+    }
+
+    private void DetectFractalAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int idx)
+    {
+        var cM2 = candles[idx - 2];
+        var cM1 = candles[idx - 1];
+        var c   = candles[idx];
+        var cP1 = candles[idx + 1];
+        var cP2 = candles[idx + 2];
+
+        bool isSwingHigh = c.High > cM2.High && c.High > cM1.High && c.High > cP1.High && c.High > cP2.High;
+        bool isSwingLow  = c.Low  < cM2.Low  && c.Low  < cM1.Low  && c.Low  < cP1.Low  && c.Low  < cP2.Low;
+
+        // Record swing fractals only вЂ” sweep detection moved to DetectLiquiditySweep()
+        if (isSwingHigh)
+            _lastSwingHigh = new Fractal(c.High, true, c.Timestamp);
+
+        if (isSwingLow)
+            _lastSwingLow = new Fractal(c.Low, false, c.Timestamp);
+    }
+
+    /// <summary>
+    /// Detects liquidity sweeps: current candle's wick exceeded a prior swing,
+    /// but price rejected and closed back inside вЂ” classic stop-hunt pattern.
+    /// FIX: Previously this logic was inside DetectFractalAt() inside the isSwingHigh
+    /// block, checking cP2.High > c.High вЂ” which is mathematically impossible
+    /// (isSwingHigh requires c.High > cP2.High). Sweep was NEVER detected.
+    /// </summary>
+    private void DetectLiquiditySweep(MiniAppController.OhlcCandle c)
+    {
+        // Bearish sweep: wick above prior swing high, but close back below it
+        if (_lastSwingHigh.Time != default
+            && c.High  > _lastSwingHigh.Price
+            && c.Close < _lastSwingHigh.Price)
+        {
+            _hasLiquiditySweep = true;
+            _sweepDirection    = "BEARISH_SWEEP";
+        }
+
+        // Bullish sweep: wick below prior swing low, but close back above it
+        if (_lastSwingLow.Time != default
+            && c.Low   < _lastSwingLow.Price
+            && c.Close > _lastSwingLow.Price)
+        {
+            _hasLiquiditySweep = true;
+            _sweepDirection    = "BULLISH_SWEEP";
+        }
+    }
+
+    private void DetectFvgAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int idx)
+    {
+        var    c1     = candles[idx - 2];
+        var    c3     = candles[idx];
+        double minGap = _recentAtr * 0.20;
+
+        if (c3.Low > c1.High && (c3.Low - c1.High) >= minGap)
+        {
+            _activeFvgs.Add(new FvgZone(c3.Low, c1.High, true, c3.Timestamp));
+            if (_activeFvgs.Count > 10) _activeFvgs.RemoveAt(0);
+        }
+        else if (c3.High < c1.Low && (c1.Low - c3.High) >= minGap)
+        {
+            _activeFvgs.Add(new FvgZone(c1.Low, c3.High, false, c3.Timestamp));
+            if (_activeFvgs.Count > 10) _activeFvgs.RemoveAt(0);
+        }
+    }
+
+    private void DetectOrderBlockAt(ReadOnlySpan<MiniAppController.OhlcCandle> candles, int obIdx, int dispIdx)
+    {
+        var ob   = candles[obIdx];
+        var disp = candles[dispIdx];
+
+        double body  = Math.Abs(ob.Close - ob.Open);
+        double range = ob.High - ob.Low;
+        if (range <= 1e-8 || (body / range) < 0.60) return;
+
+        bool isBearishCandle = ob.Close < ob.Open;
+        bool isBullishCandle = ob.Close > ob.Open;
+
+        if (isBearishCandle && disp.Close > disp.Open && (disp.Close - disp.Open) > (_recentAtr * 0.4))
+        {
+            _activeObs.Add(new OrderBlockZone(ob.High, ob.Low, true, disp.Timestamp));
+            if (_activeObs.Count > 5) _activeObs.RemoveAt(0);
+        }
+        else if (isBullishCandle && disp.Close < disp.Open && (disp.Open - disp.Close) > (_recentAtr * 0.4))
+        {
+            _activeObs.Add(new OrderBlockZone(ob.High, ob.Low, false, disp.Timestamp));
+            if (_activeObs.Count > 5) _activeObs.RemoveAt(0);
+        }
+    }
+
+    private void DetectStructureBreak(MiniAppController.OhlcCandle c)
+    {
+        if (_lastSwingHigh.Time != default && c.Close > _lastSwingHigh.Price)
+        {
+            if (_currentTrend != "BULLISH")
+            {
+                _hasBos       = true;
+                _bosDirection = "BULLISH_BOS";
+                _currentTrend = "BULLISH";
+            }
+        }
+        else if (_lastSwingLow.Time != default && c.Close < _lastSwingLow.Price)
+        {
+            if (_currentTrend != "BEARISH")
+            {
+                _hasBos       = true;
+                _bosDirection = "BEARISH_BOS";
+                _currentTrend = "BEARISH";
+            }
+        }
+    }
+
+    private void MitigateZones(MiniAppController.OhlcCandle c)
+    {
+        _activeFvgs.RemoveAll(f =>
+            (f.IsBullish  && c.Low  <= f.Bottom) ||
+            (!f.IsBullish && c.High >= f.Top));
+
+        // FIX: Order Blocks are invalidated only when price closes beyond their extreme.
+        // Previously they were removed on the first touch (c.Low <= o.Top), erasing them
+        // right before they could act as support/resistance.
+        _activeObs.RemoveAll(o =>
+            (o.IsBullish  && c.Close < o.Bottom) ||
+            (!o.IsBullish && c.Close > o.Top));
+    }
+
+    public (bool hasBullishFvg, bool hasBearishFvg, FvgZone? nearestFvg) GetNearestFvg(double currentPrice)
+    {
+        lock (_lockObj)
+        {
+            bool  bull        = false;
+            bool  bear        = false;
+            FvgZone? nearest  = null;
+            double minDistance = double.MaxValue;
+
+            foreach (var fvg in _activeFvgs)
+            {
+                if (fvg.IsBullish) bull = true;
+                else               bear = true;
+
+                double dist = Math.Min(
+                    Math.Abs(currentPrice - fvg.Top),
+                    Math.Abs(currentPrice - fvg.Bottom));
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    nearest     = fvg;
+                }
+            }
+            return (bull, bear, nearest);
+        }
+    }
+
+    public (bool hasBullishOb, bool hasBearishOb, OrderBlockZone? nearestOb) GetNearestOb(double currentPrice, int maxAgeBars = 30)
+    {
+        lock (_lockObj)
+        {
+            bool  bull        = false;
+            bool  bear        = false;
+            OrderBlockZone? nearest = null;
+            double minDistance = double.MaxValue;
+
+            // Р’СЂРµРјРµРЅРЅРѕР№ С„РёР»СЊС‚СЂ: OB СЃС‚Р°СЂС€Рµ maxAgeBars СЃРІРµС‡РµР№ РёСЃРєР»СЋС‡Р°РµС‚СЃСЏ РёР· СЃРєРѕСЂРёРЅРіР°.
+            // CreationTime С…СЂР°РЅРёС‚СЃСЏ РєР°Рє DateTime РїРѕСЃР»РµРґРЅРµР№ СЃРІРµС‡Рё РІ РјРѕРјРµРЅС‚ С„РѕСЂРјРёСЂРѕРІР°РЅРёСЏ OB.
+            // Р”Р»СЏ m1: 30 СЃРІРµС‡РµР№ = 30 РјРёРЅСѓС‚; РґР»СЏ m5: 30 СЃРІРµС‡РµР№ = 2.5 С‡Р°СЃР°.
+            // OB, СЃС„РѕСЂРјРёСЂРѕРІР°РЅРЅС‹Р№ РґР°РІРЅРѕ, СЃ РІС‹СЃРѕРєРѕР№ РІРµСЂРѕСЏС‚РЅРѕСЃС‚СЊСЋ СѓР¶Рµ РѕС‚СЂР°Р±РѕС‚Р°РЅ РёР»Рё СЃС‚Р°Р» РЅРµР°РєС‚СѓР°Р»СЊРЅС‹Рј.
+            DateTime cutoff = _lastProcessedTime != default
+                ? _lastProcessedTime - (_tfEstimate * maxAgeBars)
+                : DateTime.MinValue;
+
+            foreach (var ob in _activeObs)
+            {
+                // РџСЂРѕРїСѓСЃРєР°РµРј СѓСЃС‚Р°СЂРµРІС€РёРµ OB
+                if (ob.CreationTime < cutoff) continue;
+
+                if (ob.IsBullish) bull = true;
+                else              bear = true;
+
+                double dist = Math.Min(
+                    Math.Abs(currentPrice - ob.Top),
+                    Math.Abs(currentPrice - ob.Bottom));
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    nearest     = ob;
+                }
+            }
+            return (bull, bear, nearest);
+        }
+    }
+}

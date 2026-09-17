@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
@@ -17,8 +17,8 @@ namespace ValutaBot.MiniApp;
 /// Previously ReceiveAsync had no timeout. When TwelveData server silently dropped the
 /// TCP connection (no WebSocket Close frame), ReceiveAsync blocked indefinitely.
 /// During this silent-dead period (typically 2-4 min until OS-level TCP keepalive fires),
-/// _livePrices was frozen → flat candles were emitted → indicators degraded → BAD signals.
-/// After OS timeout, exception was caught → reconnect → GOOD again. Cycle repeated.
+/// _livePrices was frozen в†’ flat candles were emitted в†’ indicators degraded в†’ BAD signals.
+/// After OS timeout, exception was caught в†’ reconnect в†’ GOOD again. Cycle repeated.
 ///
 /// Fix 1: Watchdog task aborts the WebSocket if no tick arrives for 30 seconds.
 /// Fix 2: IsAlive flag exposed so RealtimeTickCollector skips flat-candle emission
@@ -86,7 +86,7 @@ public static class TwelveDataWebSocketStream
                     await _ws.ConnectAsync(new Uri(url), ct);
                     BotLogger.Info("[TwelveData WS] Connected successfully.");
 
-                    // Mark alive — we're connected
+                    // Mark alive вЂ” we're connected
                     _wsIsAlive = true;
                     _lastTickTime = DateTime.UtcNow;
 
@@ -101,7 +101,7 @@ public static class TwelveDataWebSocketStream
                     var subBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(subMsg));
                     await _ws.SendAsync(new ArraySegment<byte>(subBytes), WebSocketMessageType.Text, true, ct);
 
-                    // ROOT-CAUSE FIX: Watchdog — aborts WebSocket if no tick arrives for 30s.
+                    // ROOT-CAUSE FIX: Watchdog вЂ” aborts WebSocket if no tick arrives for 30s.
                     // Covers the "silent TCP drop" case where _ws.State stays Open but no data flows.
                     using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     _ = Task.Run(async () =>
@@ -115,7 +115,7 @@ public static class TwelveDataWebSocketStream
                             double silenceSecs = (DateTime.UtcNow - _lastTickTime).TotalSeconds;
                             if (silenceSecs > SilenceThresholdSeconds)
                             {
-                                BotLogger.Warn($"[WS Watchdog] No ticks for {silenceSecs:F0}s — forcing reconnect.");
+                                BotLogger.Warn($"[WS Watchdog] No ticks for {silenceSecs:F0}s вЂ” forcing reconnect.");
                                 _wsIsAlive = false;
                                 try { _ws?.Abort(); } catch { }
                                 break;
@@ -167,25 +167,31 @@ public static class TwelveDataWebSocketStream
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            if (root.TryGetProperty("event", out var eventProp) && eventProp.GetString() == "price")
+            if (root.TryGetProperty("event", out var eventProp))
             {
-                string rawSymbol = root.GetProperty("symbol").GetString() ?? "";
-                double price = root.GetProperty("price").GetDouble();
+                string ev = eventProp.GetString() ?? "";
+                if (ev == "heartbeat" || ev == "subscribe-status") return; // Ignore known noise
 
-                string cleanSym = rawSymbol.Replace("/", "").ToUpper();
+                if (ev == "price")
+                {
+                    string rawSymbol = root.GetProperty("symbol").GetString() ?? "";
+                    double price = root.GetProperty("price").GetDouble();
 
-                // Update local fast cache
-                _livePrices[cleanSym] = price;
-                SignalTracker._livePrices[cleanSym] = price;
+                    string cleanSym = rawSymbol.Replace("/", "").ToUpper();
 
-                // ROOT-CAUSE FIX: Update liveness timestamp on every real tick
-                _lastTickTime = DateTime.UtcNow;
-                _wsIsAlive = true;
+                    _livePrices[cleanSym] = price;
+                    SignalTracker._livePrices[cleanSym] = price;
 
-                // Push to accumulator for 5s candles (async continuous save per-tick, no timer flush dependency)
-                _ = RealtimeTickCollector.OnPriceUpdateAsync(cleanSym, price);
+                    _lastTickTime = DateTime.UtcNow;
+                    _wsIsAlive = true;
+
+                    _ = RealtimeTickCollector.OnPriceUpdateAsync(cleanSym, price);
+                }
             }
         }
-        catch { /* Ignore parsing errors on ping/heartbeat messages */ }
+        catch (Exception ex) 
+        { 
+            BotLogger.Warn($"[TwelveData WS] JSON Parse Error. Payload: {json}. Error: {ex.Message}"); 
+        }
     }
 }

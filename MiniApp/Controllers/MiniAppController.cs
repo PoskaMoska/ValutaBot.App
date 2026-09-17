@@ -97,7 +97,8 @@ public static partial class MiniAppController
         builder.Services.AddHostedService<TelegramBotService>();
         // FIX #6: Verification of pending trades
         builder.Services.AddHostedService<PendingTradeVerificationService>();
-        builder.Services.AddHostedService<HistoricalCandleAccumulatorService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
+        builder.Services.AddHostedService<HistoricalCandleAccumulatorService>();
+        builder.Services.AddHostedService<ValutaBot.MiniApp.Services.DataRetentionService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
 
         builder.Services.AddHttpClient("Binance").AddStandardResilienceHandler(options =>
         {
@@ -110,7 +111,7 @@ public static partial class MiniAppController
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("MLPythonService", client => 
         {
-            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret");
+            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? Guid.NewGuid().ToString());
         }).AddStandardResilienceHandler(options =>
         {
             options.Retry.MaxRetryAttempts = 1;
@@ -129,7 +130,7 @@ public static partial class MiniAppController
         builder.Services.AddHttpClient("MLPythonLongRunning", client =>
         {
             client.Timeout = TimeSpan.FromMinutes(12);
-            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret");
+            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? Guid.NewGuid().ToString());
         });
 
         builder.Services.AddRateLimiter(options =>
@@ -438,7 +439,7 @@ public static partial class MiniAppController
         // Internal endpoint for ML service -> Telegram admin notifications
         app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
         {
-            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret";
+            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? Guid.NewGuid().ToString();
             if (!context.Request.Headers.TryGetValue("X-Internal-Secret", out var providedSecret) || providedSecret != expectedSecret)
             {
                 BotLogger.Warn($"[Security] Blocked unauthorized access to /notify-admins from {context.Connection.RemoteIpAddress}");
@@ -481,7 +482,7 @@ public static partial class MiniAppController
             var query = context.Request.Query;
             
             // SECURITY: Verify Postback Secret
-            string expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET") ?? "";
+            string expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET") ?? Guid.NewGuid().ToString();
             string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
             
             if (string.IsNullOrEmpty(providedSecret) || providedSecret != expectedSecret)

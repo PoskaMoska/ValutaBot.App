@@ -166,6 +166,8 @@ namespace ValutaBot.App.MiniApp.Data
                     UNIQUE(asset, interval, open_time)
                 );
 
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf ON trade_outcomes(asset, timeframe);
+                CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_hist_candles_asset
                     ON historical_candles(asset, interval, open_time);
 

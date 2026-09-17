@@ -194,6 +194,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
 
         return new {
+            tfConflict = conflictPenalty < 1.0,
             uiMarketSession = uiMarketSession,
             uiMarketPhase = uiMarketPhase,
             uiMarketEntropy = uiMarketEntropy,
@@ -226,3 +227,4 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
     }
 }
+

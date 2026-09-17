@@ -6,6 +6,7 @@ Final signal = 0.70 * LightGBM_prob + 0.30 * SGD_prob.
 """
 
 from __future__ import annotations
+from data.data_loader import TF_MAP, _fetch_local_sqlite, _fetch_historical_candles, _fetch_rl_feedback, _interpolate_subminute
 
 import os
 import time
@@ -89,36 +90,9 @@ TD_INTERVAL_MAP = {
 # and more robust when one model is confidently wrong (adversarial case).
 # ---------------------------------------------------------------
 
-def _logit(p: float, eps: float = 1e-6) -> float:
-    p = min(max(p, eps), 1.0 - eps)
-    return np.log(p / (1.0 - p))
-
-
-def _sigmoid(x: float) -> float:
-    return 1.0 / (1.0 + np.exp(-x))
-
-
-def bayesian_fusion(prob_a: float, prob_b: float, weight_a: float, weight_b: float) -> float:
-    """
-    Fuse two probability estimates via logarithmic opinion pooling (Bayes-consistent).
-    
-    weight_a, weight_b should ideally be normalized (sum to 1) reliability weights
-    (e.g. derived from historical accuracy or sample count). If they don't sum to 1,
-    they are normalized internally to preserve calibration.
-    
-    Returns: fused probability P(y=1) in (0, 1).
-    """
-    total_w = weight_a + weight_b
-    if total_w < 1e-9:
-        return 0.5
-    w_a = weight_a / total_w
-    w_b = weight_b / total_w
-
-    combined_logit = w_a * _logit(prob_a) + w_b * _logit(prob_b)
-    return float(_sigmoid(combined_logit))
-
-
-# ── End Bayesian Fusion ─────────────────────────────────────────────────
+from models.components.tactician import OnlineTactician
+from models.components.shadow import ShadowChallenger
+from core.math_utils import _logit, _sigmoid, bayesian_fusion
 
 def is_forex_symbol(symbol: str) -> bool:
     # FIX W-23: "EURUSD_OTC" has length 10 в†’ old check (len==6) returned False в†’
@@ -145,300 +119,10 @@ def to_twelvedata_symbol(symbol: str) -> str:
         return f"{sym[:3]}/{sym[3:]}"
     return sym
 
-def _interpolate_subminute(m1_candles: List[Dict], interval: str) -> List[Dict]:
-    """Interpolate 1-minute candles into sub-minute steps (s5, s10, s15, s30).
-       Uses a Brownian Bridge to generate stochastic micro-paths that respect OHLC boundaries
-       without injecting artificial deterministic patterns (like sine waves)."""
-    sec = int(interval[1:]) if (interval.startswith("s") and len(interval) > 1) else 60
-    if sec >= 60:
-        return m1_candles
-        
-    sub_per_min = 60 // sec
-    interpolated = []
-    
-    import math
-    import random
-    
-    for m in m1_candles:
-        start_price = m["open"]
-        end_price = m["close"]
-        high_limit = m["high"]
-        low_limit = m["low"]
-        vol_step = m["volume"] / sub_per_min
-        
-        # Generate standard Brownian motion
-        dW = [random.gauss(0, 1) for _ in range(sub_per_min)]
-        W = [0.0]
-        for dw in dW:
-            W.append(W[-1] + dw)
-            
-        # Bridge it so it ends exactly at 0 variance from the target
-        W = W[1:]
-        T = sub_per_min
-        bridge = [W[i] - ((i + 1) / T) * W[-1] for i in range(T)]
-        
-        # Scale bridge to fit within the candle's High-Low range safely
-        max_b = max(bridge) if bridge else 0
-        min_b = min(bridge) if bridge else 0
-        range_b = max_b - min_b + 1e-10
-        
-        candle_range = high_limit - low_limit
-        scale = (candle_range * 0.5) / range_b # Scale to 50% of the true range to avoid boundary breaks
-        
-        for i in range(sub_per_min):
-            frac_end = (i + 1) / sub_per_min
-            
-            # Linear drift + stochastic bridge
-            c = start_price + (end_price - start_price) * frac_end + (bridge[i] * scale)
-            
-            # Clamp to limits
-            c = max(min(c, high_limit), low_limit)
-            
-            if i == 0:
-                o = start_price
-            else:
-                o = interpolated[-1]["close"]
-                
-            h = max(o, c) + (candle_range * 0.1 * random.random())
-            l = min(o, c) - (candle_range * 0.1 * random.random())
-            
-            h = min(h, high_limit)
-            l = max(l, low_limit)
-            
-            interpolated.append({
-                "open": o,
-                "high": h,
-                "low": l,
-                "close": c,
-                "volume": vol_step
-            })
-            
-    return interpolated
-
-def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
-    # Try to fetch from PostgreSQL SubminuteCandles
-    try:
-        db_url = os.getenv("DATABASE_URL")
-        if db_url:
-            import psycopg2
-            conn = psycopg2.connect(db_url)
-            query = '''
-                SELECT open_time as "openTime", open_price as "open", high_price as "high", low_price as "low", close_price as "close", volume as "volume"
-                FROM subminute_candles 
-                WHERE asset = %s AND interval = %s 
-                ORDER BY open_time DESC 
-                LIMIT %s
-            '''
-            df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
-            conn.close()
-            if not df.empty:
-                return df.iloc[::-1].to_dict(orient='records')
-    except Exception as e:
-        print(f"  [WARN] PostgreSQL subminute fetch failed: {e}")
-
-    # Fallback to SQLite
-    db_path = TICKS_DB_PATH
-    if not os.path.exists(db_path):
-        return []
-    try:
-        conn = sqlite3.connect(db_path, timeout=30.0)
-        query = '''
-            SELECT OpenTime as openTime, Open as open, High as high, Low as low, Close as close, Volume as volume 
-            FROM SubminuteCandles 
-            WHERE Asset = ? AND Interval = ? 
-            ORDER BY OpenTime DESC 
-            LIMIT ?
-        '''
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
-        conn.close()
-        
-        # DataFrame is fetched descending, we reverse it to ascending time order
-        return df.iloc[::-1].to_dict(orient='records')
-    except Exception as e:
-        log.error(f"SQLite Fetch Error: {e}")
-        return []
 
 
-def _query_historical_candles_db(symbol: str, norm_interval: str, limit: int) -> pd.DataFrame:
-    db_url = os.getenv("DATABASE_URL")
-    if db_url:
-        try:
-            import psycopg2
-            conn = psycopg2.connect(db_url)
-            query = """
-                SELECT open_time as "openTime", open as "open", high as "high",
-                       low as "low", close as "close", volume as "volume"
-                FROM historical_candles
-                WHERE asset = %s AND interval = %s
-                ORDER BY open_time DESC
-                LIMIT %s
-            """
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', UserWarning)
-                df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
-            conn.close()
-            if not df.empty:
-                return df
-        except Exception as e:
-            log.warning(f"[HistoricalCandles] PostgreSQL fetch failed: {e}")
-
-    db_path = TICKS_DB_PATH
-    if os.path.exists(db_path):
-        try:
-            conn = sqlite3.connect(db_path, timeout=30.0)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
-            if cursor.fetchone():
-                query = """
-                    SELECT OpenTime as openTime, Open as open, High as high, Low as low, Close as close, Volume as volume
-                    FROM HistoricalCandles WHERE Asset = ? AND Interval = ? ORDER BY OpenTime DESC LIMIT ?
-                """
-                df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
-                conn.close()
-                if not df.empty:
-                    return df
-            else:
-                conn.close()
-        except Exception as e:
-            log.error(f"[HistoricalCandles] SQLite fetch error: {e}")
-    return pd.DataFrame()
-
-def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Dict]:
-    """
-    Fetch large historical dataset for LightGBM Global Strategist training.
-    Priority 1: Direct fetch from DB.
-    Priority 2: If not found and interval > 1m, fetch 1m and resample in Pandas.
-    """
-    interval_aliases = {"m1": "1m", "m5": "5m", "m15": "15m", "m30": "30m", "h1": "1h", "h4": "4h"}
-    norm_interval = interval_aliases.get(interval.lower(), interval.lower())
-
-    df = _query_historical_candles_db(symbol, norm_interval, limit)
-    
-    # If we have enough data directly, return it
-    if not df.empty and len(df) >= min(limit, 3000) * 0.1:
-        log.info(f"[HistoricalCandles] Loaded {len(df)} rows from DB for {symbol} {norm_interval}")
-        return df.iloc[::-1].to_dict(orient='records')
-        
-    # If not enough data and it's a higher timeframe, try to resample from 1m
-    if norm_interval not in ("1m", "s3", "s5", "s10", "s15", "s30"):
-        multiplier = 1
-        if norm_interval.endswith("m"): multiplier = int(norm_interval[:-1])
-        elif norm_interval.endswith("h"): multiplier = int(norm_interval[:-1]) * 60
-        elif norm_interval.endswith("d"): multiplier = int(norm_interval[:-1]) * 1440
-        
-        if multiplier > 1:
-            req_limit = limit * multiplier
-            log.info(f"[HistoricalCandles] Not enough {norm_interval} for {symbol}. Fetching {req_limit} 1m candles for resampling...")
-            df_1m = _query_historical_candles_db(symbol, "1m", req_limit)
-            
-            if not df_1m.empty:
-                # DB returns DESC order, we need ASC for accurate resampling
-                df_1m = df_1m.iloc[::-1].copy()
-                
-                try:
-                    df_1m['openTime'] = pd.to_datetime(df_1m['openTime'], utc=True, format='mixed')
-                    df_1m.set_index('openTime', inplace=True)
-                    
-                    rule = norm_interval
-                    if rule.endswith('m'): rule = rule[:-1] + 'min'
-                    if rule.endswith('d'): rule = rule[:-1] + 'D'
-                    
-                    df_resampled = df_1m.resample(rule, label='left', closed='left').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    }).dropna()
-                    
-                    df_resampled.reset_index(inplace=True)
-                    df_resampled['openTime'] = df_resampled['openTime'].apply(lambda x: x.isoformat().replace("+00:00", "Z"))
-                    
-                    if not df_resampled.empty:
-                        log.info(f"[HistoricalCandles] Synthesized {len(df_resampled)} {norm_interval} candles from {len(df_1m)} 1m candles for {symbol}")
-                        return df_resampled.to_dict(orient='records')
-                except Exception as e:
-                    log.error(f"[HistoricalCandles] Failed to resample 1m to {norm_interval} for {symbol}: {e}")
-
-    # Fallback: just return what we got initially
-    if not df.empty:
-        log.info(f"[HistoricalCandles] Loaded {len(df)} rows from DB for {symbol} {norm_interval} (partial)")
-        return df.iloc[::-1].to_dict(orient='records')
-        
-    return []
 
 
-def _fetch_rl_feedback(symbol: str, interval: str) -> List[Dict]:
-    db_path = TICKS_DB_PATH
-    if not os.path.exists(db_path):
-        return []
-    try:
-        conn = sqlite3.connect(db_path, timeout=30.0)
-        
-        # Check if table exists
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='OnlineFeedback'")
-        if not cursor.fetchone():
-            conn.close()
-            return []
-            
-        # Bug1 fix: fetch Timestamp for time-based matching instead of EntryPrice
-        query = "SELECT Timestamp as ts, Direction as dir, WasWin as win FROM OnlineFeedback WHERE Asset=? AND Interval=?"
-        df = pd.read_sql_query(query, conn, params=(symbol, interval))
-        conn.close()
-        
-        return df.to_dict(orient='records')
-    except Exception as e:
-        log.error(f"SQLite RL Fetch Error: {e}")
-        return []
-
-# в”Ђв”Ђ Timeframe в†’ Binance interval string в”Ђв”Ђ
-TF_MAP = {
-    "s3": "1m", "s5": "1m", "s10": "1m", "s15": "1m", "s30": "1m",
-    "m1": "1m", "m2": "1m", "m3": "3m", "m5": "5m", "m10": "5m",
-    "m15": "15m", "m30": "30m", "h1": "1h", "h4": "4h",
-    "1m": "1m", "2m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h",
-}
-
-LGBM_PARAMS_STANDARD = {
-    "objective": "binary",
-    "metric": "auc",
-    "n_estimators": 500,
-    "learning_rate": 0.02,
-    "max_depth": 6,
-    "num_leaves": 31,
-    "min_child_samples": 30,
-    "feature_fraction": 0.7,
-    "bagging_fraction": 0.7,
-    "bagging_freq": 5,
-    "lambda_l1": 0.5,
-    "lambda_l2": 1.0,
-    "is_unbalance": True,
-    "min_split_gain": 0.01,
-    "verbose": -1,
-}
-
-LGBM_PARAMS_SUBMINUTE = {
-    "objective": "binary",
-    "metric": "auc",
-    "n_estimators": 300,
-    "learning_rate": 0.05,
-    "max_depth": 4,
-    "num_leaves": 15,
-    "min_child_samples": 50,
-    "feature_fraction": 0.6,
-    "bagging_fraction": 0.6,
-    "bagging_freq": 3,
-    "lambda_l1": 1.0,
-    "lambda_l2": 2.0,
-    "is_unbalance": True,
-    "min_split_gain": 0.01,
-    "verbose": -1,
-}
 
 def get_lgbm_params(interval: str) -> dict:
     if interval.lower().startswith('s'):
@@ -589,12 +273,8 @@ class ForexPredictor:
         self._lock = threading.Lock()
         self.is_training = False
         # Tier 2: Local Tactician
-        self._online_model: Optional[SGDClassifier] = None
-        self._online_lock = threading.Lock()
-        self._online_classes = np.array([0, 1])
-        self._sgd_update_count: int = 0  # Bug3 fix: track updates for dynamic weight
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        SGD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        self.tactician = OnlineTactician(self._key, str(SGD_MODEL_DIR))
+
 
         # D11: Shadow Challenger — a background candidate model that "trades" virtually
         # (shadow mode) alongside production. Promoted only if it statistically
@@ -671,13 +351,10 @@ class ForexPredictor:
 
             # Tier 2: SGD (Local Tactician) — blend if available
             # Bug3 fix: dynamic weight 0%→30% based on real trade count (prevents noise at low sample count)
-            with self._online_lock:
-                online_model = self._online_model
-                sgd_count = self._sgd_update_count
-            if online_model is not None:
+            prob_sgd = self.tactician.predict_proba(X_arr_base)
+            if prob_sgd is not None:
                 try:
-                    prob_sgd = float(online_model.predict_proba(X_arr_base)[0, 1])
-                    sgd_weight = min(0.05, sgd_count / 200.0)  # max 5%, grows very slowly
+                    sgd_weight = self.tactician.get_weight()  # max 5%, grows very slowly
                     lgbm_weight = 1.0 - sgd_weight
                     # C9: Bayesian Fusion (logarithmic opinion pool) replaces naive linear
                     # weighted average (0.7*A + 0.3*B). Linear pooling has no probabilistic
@@ -986,30 +663,8 @@ class ForexPredictor:
             else:
                 sample_w = None
 
-            with self._online_lock:
-                if self._online_model is None:
-                    self._online_model = SGDClassifier(
-                        loss="log_loss",
-                        learning_rate="optimal",
-                        alpha=0.01,
-                        random_state=42,
-                        warm_start=True,
-                    )
-                self._online_model.partial_fit(X_last, y, classes=self._online_classes, sample_weight=sample_w)
-                self._sgd_update_count += 1  # Bug3 fix: track update count
-                online_model = self._online_model
-                sgd_count = self._sgd_update_count
-
-                # FIX Race Condition: сохранение ВНУТРИ лока через атомарную запись.
-                # Ранее joblib.dump был вне with-блока → параллельные /feedback
-                # могли одновременно писать в один .pkl → Corrupted Pickle.
-                # Паттерн: сначала во временный файл, затем os.replace (атомарно).
-                sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
-                SGD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-                tmp_path = sgd_path.with_suffix(".tmp")
-                joblib.dump({"model": online_model, "count": sgd_count}, tmp_path)
-                os.replace(tmp_path, sgd_path)
-
+            self.tactician.partial_fit(X_last, y, sample_w)
+            sgd_count = self.tactician._sgd_update_count
             sw_val = float(sample_w[0]) if sample_w is not None else 1.0
             log.info(f"[SGD] partial_fit done for {self._key} | dir={direction} win={was_win} | label={y[0]} | sample_weight={sw_val:.2f} | total_updates={sgd_count}")
             return True
@@ -1520,23 +1175,7 @@ class ForexPredictor:
                 except Exception:
                     pass
 
-        # Load SGD (Tier 2) вЂ” Bug3 fix: restore update count from dict format
-        sgd_path = SGD_MODEL_DIR / f"{self._key}_sgd.pkl"
-        if sgd_path.exists():
-            try:
-                sgd_data = joblib.load(sgd_path)
-                with self._online_lock:
-                    if isinstance(sgd_data, dict):
-                        # New format: {model, count}
-                        self._online_model = sgd_data["model"]
-                        self._sgd_update_count = int(sgd_data.get("count", 0))
-                    else:
-                        # Legacy format: raw SGDClassifier object (backward compat)
-                        self._online_model = sgd_data
-                        self._sgd_update_count = 0
-                log.info(f"[Load] Loaded SGD from {sgd_path} | total_updates={self._sgd_update_count}")
-            except Exception as e:
-                log.warning(f"[Load] Failed to load SGD {sgd_path}: {e}")
+        self.tactician.load()
 
 
     def _fetch_binance(self, limit: int = 1500) -> List[Dict]:
@@ -1911,6 +1550,10 @@ def context_embedding_column_names(dim: int) -> List[str]:
 
 
 # ── End Contextual Embeddings ─────────────────────────────────────────────
+
+
+
+
 
 
 

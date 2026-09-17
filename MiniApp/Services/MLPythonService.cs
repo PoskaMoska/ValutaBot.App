@@ -104,7 +104,8 @@ public static class MLPythonService
         {
             try
             {
-                using var testClient = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+                var testClient = _httpFactory?.CreateClient("MLPythonService");
+                if (testClient != null) testClient.Timeout = TimeSpan.FromSeconds(3);
                 var res = await testClient.GetAsync(new Uri($"{_baseUrl}/health"));
                 if (res.IsSuccessStatusCode)
                 {
@@ -207,7 +208,8 @@ public static class MLPythonService
 
                 try
                 {
-                    using var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(HealthTimeoutSeconds) };
+                    var hc = _httpFactory?.CreateClient("MLPythonService");
+                    if (hc != null) hc.Timeout = TimeSpan.FromSeconds(HealthTimeoutSeconds);
                     var resp = await hc.GetAsync(new Uri($"{_baseUrl}/health"), token);
 
                     if (resp.IsSuccessStatusCode)
@@ -416,3 +418,4 @@ public static class MLPythonService
         }
     }
 }
+
