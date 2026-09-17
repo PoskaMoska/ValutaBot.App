@@ -481,52 +481,45 @@ public class ConfluenceMatrixEngine(
         string candidateDir = "NEUTRAL";
         double finalConfidenceScore = 0.0;
         
-        // 5. Final Decision & Market Session Awareness
+        // 5. Final Decision: ML-Dominant Universal Blend (For ALL Timeframes)
         
-        // Convert scoreMath [-1.0, 1.0] to a probability [0.0, 1.0]
-        double mathProb = (scoreMath + 1.0) / 2.0;
-        
-        // FIX PRIORITY-1: Rebalanced ML vs Math blend. 
-        double blendedProb = (metaProb * 0.65) + (mathProb * 0.35);
-        
-        int buyVotes = 0;
-        int putVotes = 0;
+        // 1. Нормализуем сырые сигналы в диапазон [-1.0, 1.0]
+        double ta  = Math.Clamp(taScoreRaw, -1.0, 1.0);
+        double smc = Math.Clamp(finalSmcScore, -1.0, 1.0);
+        double of  = Math.Clamp(ofScoreRaw, -1.0, 1.0);
+        double ml  = Math.Clamp(mlProbRaw, -1.0, 1.0); // >0 BUY, <0 PUT
+        double mom = Math.Clamp(stateSignal.MomentumContribution, -1.0, 1.0);
 
-        // В голосовании участвуют все 5 элементов (4 индикатора + состояние рынка)
-        // 1. TA
-        if (taScoreRaw > 0.05) buyVotes++; else if (taScoreRaw < -0.05) putVotes++;
-        // 2. SMC
-        if (finalSmcScore > 0.05) buyVotes++; else if (finalSmcScore < -0.05) putVotes++;
-        // 3. OF
-        if (ofScoreRaw > 0.05) buyVotes++; else if (ofScoreRaw < -0.05) putVotes++;
-        // 4. ML
-        if (mlProbRaw > 0) buyVotes++; else if (mlProbRaw < 0) putVotes++;
-        // 5. State (Momentum)
-        if (stateSignal.MomentumContribution > 0.03) buyVotes++; else if (stateSignal.MomentumContribution < -0.03) putVotes++;
+        // 2. Жесткие веса (Архитектура: ИИ решает, физика корректирует, остальное — шум)
+        double mlDominantWeight    = 0.60; // Нейросеть (база 100k+ свечей)
+        double momDominantWeight   = 0.25; // Моментум (защита от торговли против резких импульсов)
+        double taDominantWeight    = 0.10; // Теханализ (защита от входов на жестких экстремумах)
+        double smcOfDominantWeight = 0.05; // SMC и OrderFlow (дают микро-влияние, чтобы радар не был пустым)
 
-        // Если 3 из 5 совпадают — берем их сигнал
-        if (buyVotes >= 3) 
+        // 3. Вычисляем итоговый вектор [-1.0, 1.0]
+        double combinedScore = (ml * mlDominantWeight) 
+                             + (mom * momDominantWeight) 
+                             + (ta * taDominantWeight) 
+                             + (((smc + of) / 2.0) * smcOfDominantWeight);
+
+        // 4. Переводим вектор в базовую вероятность [0.0, 1.0]
+        double baseProb = (combinedScore + 1.0) / 2.0;
+
+        // 5. Применяем жесткий порог (Убираем сигналы с уверенностью ниже 55%, так как они математически убыточны на бинарках)
+        if (baseProb >= 0.55) 
         {
             candidateDir = "BUY";
+            finalConfidenceScore = (baseProb - 0.5) * 2.0; // масштабируем в [0.1, 1.0]
         }
-        else if (putVotes >= 3) 
+        else if (baseProb <= 0.45) 
         {
             candidateDir = "PUT";
+            finalConfidenceScore = (0.5 - baseProb) * 2.0;
         }
         else 
         {
-            // Если нет 3 совпадающих (ничья) — возвращаемся к базовой математически-взвешенной вероятности (ML + Math)
-            candidateDir = blendedProb >= 0.50 ? "BUY" : "PUT";
-        }
-
-        // Align finalConfidenceScore based on the explicitly chosen candidateDir
-        if (candidateDir == "BUY")
-        {
-            finalConfidenceScore = blendedProb >= 0.50 ? (blendedProb - 0.5) * 2.0 : 0.10;
-        }
-        else
-        {
-            finalConfidenceScore = blendedProb < 0.50 ? (0.5 - blendedProb) * 2.0 : 0.10;
+            candidateDir = "NEUTRAL";
+            finalConfidenceScore = 0.0;
         }
 
         if (finalConfidenceScore < 0.05) finalConfidenceScore = 0.05;

@@ -20,28 +20,19 @@ namespace ValutaBot.MiniApp;
 public static class MLPythonService
 {
     private static string _baseUrl = string.Empty;
-    private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private static IHttpClientFactory? _httpFactory;
+
+    public static void SetFactory(IHttpClientFactory factory) => _httpFactory = factory;
     private static Process? _mlProcess; // Track to prevent zombie leaks
 
     // --- HFT Transport Optimization ---
     private static readonly HttpClient _fastHttpClient;
 
+    private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
+
     static MLPythonService()
     {
-        var handler = new SocketsHttpHandler
-        {
-            PooledConnectionLifetime = TimeSpan.FromMinutes(15),
-            MaxConnectionsPerServer = 50 
-        };
-        
-        _fastHttpClient = new HttpClient(handler)
-        {
-            Timeout = TimeSpan.FromSeconds(5) // Fast fail
-        };
-        _fastHttpClient.DefaultRequestHeaders.ConnectionClose = false; 
-        
-        string secret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? "default_secret";
-        _fastHttpClient.DefaultRequestHeaders.Add("X-Internal-Secret", secret);
+        // Note: HttpClient instances are obtained via IHttpClientFactory to benefit from Polly policies.
     }
 
     public class MarketDataColumnar
