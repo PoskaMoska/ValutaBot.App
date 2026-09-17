@@ -203,7 +203,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
             chartData = mainPrices,
-            chartOhlc = candles.TakeLast(80).Select(c => new { o = c.Open, h = c.High, l = c.Low, c = c.Close, v = c.Volume }),
+            chartOhlc = candles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
             goldenSetup = mtfResult.IsGoldenSetup
         };
     }
