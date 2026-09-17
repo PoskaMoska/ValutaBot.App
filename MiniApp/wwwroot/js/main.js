@@ -1,5 +1,5 @@
-﻿import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20260918_1';
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20260918_1';
+﻿import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20260918_2';
+import { switchResultTab, updateTrafficLight } from './ui.js?v=20260918_2';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
@@ -50,7 +50,7 @@ function renderAssets(arr) {
     const top = getTopAssets();
     const majors = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
     return arr.map(function(a) {
-        var star = top.indexOf(a) !== -1 ? '<span class="top-star">в…</span>' : '';
+        var star = top.indexOf(a) !== -1 ? '<span class="top-star">★</span>' : '';
         var cls = majors.indexOf(a) !== -1 ? 'asset-item major' : 'asset-item';
         return '<div class="' + cls + '" data-asset="' + a + '">' + a + star + '</div>';
     }).join('');
@@ -207,7 +207,7 @@ function updateCountdown() {
     if (!el) return;
     el.innerText = `${mins}:${secs.toString().padStart(2,'0')}`;
     
-    // Р”РёРЅР°РјРёС‡РµСЃРєРёРµ РїРѕСЂРѕРіРё СЃРІРµС‚РѕС„РѕСЂР° РїРѕРґ С‚Р°Р№РјС„СЂРµР№Рј
+    // Динамические пороги светофора под таймфрейм
     let greenThresh = 5;
     let yellowThresh = 15;
     
@@ -235,4 +235,3 @@ function updateCountdown() {
 
 setInterval(updateCountdown, 1000);
 setTimeout(updateCountdown, 100);
-

@@ -1,4 +1,4 @@
-﻿import { lastPriceVal } from './api.js?v=20260918_1';
+﻿import { lastPriceVal } from './api.js?v=20260918_2';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');
@@ -42,7 +42,7 @@ export function clearResults() {
     safeSetText('resProb', '--%');
     safeSetStyle('resProb', 'color', 'var(--accent)');
     safeSetText('resProbFact', '');
-    safeSetText('resDirLabel', 'РќР°РїСЂР°РІР»РµРЅРёРµ');
+    safeSetText('resDirLabel', 'Направление');
     safeSetText('resDir', '--');
     safeSetStyle('resDir', 'color', 'var(--subtext)');
     safeSetText('resDur', '--');
@@ -93,7 +93,7 @@ export function renderMiniChart(containerId, values, color) {
 }
 
 // Expiry candles: renders N real OHLC candlesticks (N = expiryCandles),
-// so the "Р’СЂРµРјСЏ" card literally shows the N candles the trade lives through.
+// so the "Время" card literally shows the N candles the trade lives through.
 // ohlc: [{o,h,l,c}...] chronological. Last candle = forming -> pulses.
 export function renderExpiryCandles(containerId, ohlc, count) {
     const container = document.getElementById(containerId);
@@ -184,7 +184,7 @@ export function renderSparklinePrediction(containerId, normalizedPrices, directi
     container.innerHTML = svgHtml;
 }
 
-const sbStatuses = ['Р—РђР“Р РЈР—РљРђ Р”РђРќРќР«РҐ', 'РџРћР›РЈР§Р•РќРР• Р¦Р•РќР«', 'РђРќРђР›РР— Р Р«РќРљРђ'];
+const sbStatuses = ['ЗАГРУЗКА ДАННЫХ', 'ПОЛУЧЕНИЕ ЦЕНЫ', 'АНАЛИЗ РЫНКА'];
 let sbTimer = null, sbIdx = 0;
 
 export function startStatusBar() {
@@ -193,7 +193,7 @@ export function startStatusBar() {
     sb.classList.add('show');
     const title = document.getElementById('sbTitle');
     const sub = document.getElementById('sbSub');
-    if (title) title.innerHTML = 'РђРќРђР›РР—РР РЈР® Р Р«РќРћРљ<span class=\'blink\'>.</span>';
+    if (title) title.innerHTML = 'АНАЛИЗИРУЮ РЫНОК<span class=\'blink\'>.</span>';
     if (sub) { sub.textContent = sbStatuses[0]; sub.className = 'sb-sub'; }
     sbIdx = 0;
 
@@ -203,7 +203,7 @@ export function startStatusBar() {
         if (title) {
             const m = title.textContent.match(/\.+$/);
             const dots = m ? m[0].length : 0;
-            title.innerHTML = 'РђРќРђР›РР—РР РЈР® Р Р«РќРћРљ<span class=\'blink\'>' + '.'.repeat((dots % 3) + 1) + '</span>';
+            title.innerHTML = 'АНАЛИЗИРУЮ РЫНОК<span class=\'blink\'>' + '.'.repeat((dots % 3) + 1) + '</span>';
         }
         sbIdx = (sbIdx + 1) % sbStatuses.length;
         const sub = document.getElementById('sbSub');
@@ -234,47 +234,47 @@ export function renderError(rawError, debugText) {
     const errDisp = document.getElementById('errorDisplay');
     if (!errDisp) return;
 
-    let title = 'вљ пёЏ РћС€РёР±РєР°';
-    let desc = 'РџСЂРѕРёР·РѕС€Р»Р° РЅРµРїСЂРµРґРІРёРґРµРЅРЅР°СЏ РѕС€РёР±РєР° РїСЂРё РѕР±СЂР°Р±РѕС‚РєРµ Р·Р°РїСЂРѕСЃР°.';
+    let title = '⚠️ Ошибка';
+    let desc = 'Произошла непредвиденная ошибка при обработке запроса.';
 
     if (rawError) {
         const errLower = rawError.toLowerCase();
         
         if (errLower.includes('run out of api credits') || errLower.includes('api credits') || (errLower.includes('limit') && errLower.includes('twelvedata'))) {
-            title = 'вљ пёЏ Р›РёРјРёС‚ TwelveData РёСЃС‡РµСЂРїР°РЅ';
-            desc = 'РџСЂРµРІС‹С€РµРЅ СЃСѓС‚РѕС‡РЅС‹Р№ Р»РёРјРёС‚ Р·Р°РїСЂРѕСЃРѕРІ Рє API TwelveData (800 С€С‚). РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РїРѕРґРѕР¶РґРёС‚Рµ РѕР±РЅРѕРІР»РµРЅРёСЏ Р»РёРјРёС‚Р° (СЃР»РµРґСѓСЋС‰РёР№ РґРµРЅСЊ).';
+            title = '⚠️ Лимит TwelveData исчерпан';
+            desc = 'Превышен суточный лимит запросов к API TwelveData (800 шт). Пожалуйста, подождите обновления лимита (следующий день).';
         } else if (errLower.includes('too many requests') || errLower.includes('rate limit') || errLower.includes('429')) {
-            title = 'вљ пёЏ РџСЂРµРІС‹С€РµРЅ Р»РёРјРёС‚ Р·Р°РїСЂРѕСЃРѕРІ';
+            title = '⚠️ Превышен лимит запросов';
             const match = rawError.match(/(\d+)s/);
-            const sec = match ? ` РЅР° ${match[1]} СЃРµРє.` : '';
-            desc = `РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ Р·Р°РїСЂРѕСЃРѕРІ. РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РїРѕРґРѕР¶РґРёС‚Рµ${sec} РїРµСЂРµРґ СЃР»РµРґСѓСЋС‰РёРј СЃРєР°РЅРёСЂРѕРІР°РЅРёРµРј.`;
+            const sec = match ? ` на ${match[1]} сек.` : '';
+            desc = `Слишком много запросов. Пожалуйста, подождите${sec} перед следующим сканированием.`;
         } else if (errLower.includes('access denied') || errLower.includes('deposit required')) {
-            title = 'вљ пёЏ Р”РѕСЃС‚СѓРї РѕРіСЂР°РЅРёС‡РµРЅ';
-            desc = 'Р”Р»СЏ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ Р±РѕС‚Р° РЅРµРѕР±С…РѕРґРёРјР° СЂРµРіРёСЃС‚СЂР°С†РёСЏ РЅР° Pocket Option Рё РІРЅРµСЃРµРЅРёРµ РґРµРїРѕР·РёС‚Р°.';
+            title = '⚠️ Доступ ограничен';
+            desc = 'Для использования бота необходима регистрация на Pocket Option и внесение депозита.';
         } else if (errLower.includes('signature') || errLower.includes('initdata') || errLower.includes('unauthorized') || errLower.includes('401')) {
-            title = 'вљ пёЏ РћС€РёР±РєР° Р°РІС‚РѕСЂРёР·Р°С†РёРё';
-            desc = 'РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РїРµСЂРµР·Р°РїСѓСЃС‚РёС‚Рµ Р±РѕС‚Р° С‡РµСЂРµР· Telegram, С‡С‚РѕР±С‹ РѕР±РЅРѕРІРёС‚СЊ СЃРµСЃСЃРёСЋ.';
+            title = '⚠️ Ошибка авторизации';
+            desc = 'Пожалуйста, перезапустите бота через Telegram, чтобы обновить сессию.';
         } else if (errLower.includes('asset and timeframe')) {
-            title = 'вљ пёЏ РќРµРІРµСЂРЅС‹Рµ РїР°СЂР°РјРµС‚СЂС‹';
-            desc = 'РќРµРѕР±С…РѕРґРёРјРѕ РІС‹Р±СЂР°С‚СЊ РІР°Р»СЋС‚РЅСѓСЋ РїР°СЂСѓ Рё С‚Р°Р№РјС„СЂРµР№Рј.';
+            title = '⚠️ Неверные параметры';
+            desc = 'Необходимо выбрать валютную пару и таймфрейм.';
         } else if (errLower.includes('pocketid')) {
-            title = 'вљ пёЏ РћС€РёР±РєР° РїСЂРѕС„РёР»СЏ';
-            desc = 'РќРµ СѓРєР°Р·Р°РЅ Pocket Option ID.';
+            title = '⚠️ Ошибка профиля';
+            desc = 'Не указан Pocket Option ID.';
         } else if (errLower.includes('api key') || errLower.includes('apikey')) {
-            title = 'вљ пёЏ РЎР±РѕР№ РєРѕРЅС„РёРіСѓСЂР°С†РёРё';
-            desc = 'РќР° СЃРµСЂРІРµСЂРµ РЅРµ РЅР°СЃС‚СЂРѕРµРЅ API-РєР»СЋС‡ TwelveData.';
+            title = '⚠️ Сбой конфигурации';
+            desc = 'На сервере не настроен API-ключ TwelveData.';
         } else if (errLower.includes('plan') || errLower.includes('subscription') || errLower.includes('tier')) {
-            title = 'вљ пёЏ РћРіСЂР°РЅРёС‡РµРЅРёРµ С‚Р°СЂРёС„Р°';
-            desc = 'Р’Р°С€ С‚Р°СЂРёС„ TwelveData РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚ СЌС‚РѕС‚ Р°РєС‚РёРІ РёР»Рё С‚Р°Р№РјС„СЂРµР№Рј. РџРѕРїСЂРѕР±СѓР№С‚Рµ РІС‹Р±СЂР°С‚СЊ РґСЂСѓРіРѕР№ РёРЅСЃС‚СЂСѓРјРµРЅС‚.';
+            title = '⚠️ Ограничение тарифа';
+            desc = 'Ваш тариф TwelveData не поддерживает этот актив или таймфрейм. Попробуйте выбрать другой инструмент.';
         } else if (errLower.includes('fetch') || errLower.includes('network') || errLower.includes('failed') || errLower.includes('connect')) {
-            title = 'вљ пёЏ РћС€РёР±РєР° СЃРѕРµРґРёРЅРµРЅРёСЏ';
-            desc = 'РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРєР»СЋС‡РёС‚СЊСЃСЏ Рє СЃРµСЂРІРµСЂСѓ. РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РїСЂРѕРІРµСЂСЊС‚Рµ РёРЅС‚РµСЂРЅРµС‚-СЃРѕРµРґРёРЅРµРЅРёРµ.';
+            title = '⚠️ Ошибка соединения';
+            desc = 'Не удалось подключиться к серверу. Пожалуйста, проверьте интернет-соединение.';
         } else {
-            title = 'вљ пёЏ РЎР±РѕР№ РѕРїРµСЂР°С†РёРё';
+            title = '⚠️ Сбой операции';
             desc = rawError;
-            desc = desc.replace(/failed/gi, 'РѕС€РёР±РєР°');
-            desc = desc.replace(/error/gi, 'СЃР±РѕР№');
-            desc = desc.replace(/internal server error/gi, 'Р’РЅСѓС‚СЂРµРЅРЅСЏСЏ РѕС€РёР±РєР° СЃРµСЂРІРµСЂР°');
+            desc = desc.replace(/failed/gi, 'ошибка');
+            desc = desc.replace(/error/gi, 'сбой');
+            desc = desc.replace(/internal server error/gi, 'Внутренняя ошибка сервера');
         }
     }
 
@@ -290,7 +290,7 @@ export function renderError(rawError, debugText) {
     errDisp.innerHTML = `
         <div class="error-header">${safeTitle}</div>
         <div class="error-desc">${safeDesc}</div>
-        <div class="error-debug-toggle" id="errorDebugToggle">в–ё Р”РµС‚Р°Р»Рё РѕС‚Р»Р°РґРєРё</div>
+        <div class="error-debug-toggle" id="errorDebugToggle">▸ Детали отладки</div>
         <div class="error-debug-content" id="errorDebugContent" style="display: none;">${safeDebug}</div>
     `;
     errDisp.style.display = 'block';
@@ -302,7 +302,7 @@ export function renderError(rawError, debugText) {
             if (!content) return;
             const isHidden = content.style.display === 'none';
             content.style.display = isHidden ? 'block' : 'none';
-            debugToggleBtn.innerText = isHidden ? 'в–ѕ РЎРєСЂС‹С‚СЊ РґРµС‚Р°Р»Рё' : 'в–ё Р”РµС‚Р°Р»Рё РѕС‚Р»Р°РґРєРё';
+            debugToggleBtn.innerText = isHidden ? '▾ Скрыть детали' : '▸ Детали отладки';
         });
     }
 }
@@ -516,4 +516,3 @@ function renderAiChartLoop() {
     ctx.restore();
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
 }
-
