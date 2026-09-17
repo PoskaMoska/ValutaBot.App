@@ -487,27 +487,57 @@ public class ConfluenceMatrixEngine(
         double mathProb = (scoreMath + 1.0) / 2.0;
         
         // FIX PRIORITY-1: Rebalanced ML vs Math blend. 
-        // We moved from 50/50 to 65/35. This gives the ML the decisive vote in standard disputes,
-        // but preserves exactly 35% for the Math engine to act as an emergency brake if real-time physics (SMC/Oflow) are extreme.
         double blendedProb = (metaProb * 0.65) + (mathProb * 0.35);
         
-        // FIX PRIORITY-2: Hardened entry threshold. 
-        // 0.52 was only 52%, which is precisely the breakeven line for 92% payout (1 / 1.92 = 52.08%).
-        // We raised it to 55% to provide a definitive 3% EV buffer above market noise.
-        // Убираем мертвую зону (NEUTRAL), так как пользователь требует сигнал всегда.
-        if (blendedProb >= 0.50)
+        int buyVotes = 0;
+        int putVotes = 0;
+
+        // 1. TA
+        if (taScoreRaw > 0.05) buyVotes++; else if (taScoreRaw < -0.05) putVotes++;
+        // 2. SMC
+        if (finalSmcScore > 0.05) buyVotes++; else if (finalSmcScore < -0.05) putVotes++;
+        // 3. OF
+        if (ofScoreRaw > 0.05) buyVotes++; else if (ofScoreRaw < -0.05) putVotes++;
+        // 4. ML
+        if (mlProbRaw > 0) buyVotes++; else if (mlProbRaw < 0) putVotes++;
+        // 5. State (Momentum)
+        if (stateSignal.MomentumContribution > 0.03) buyVotes++; else if (stateSignal.MomentumContribution < -0.03) putVotes++;
+
+        if (buyVotes >= 3) 
         {
             candidateDir = "BUY";
-            finalConfidenceScore = (blendedProb - 0.5) * 2.0;
-            // Если уверенность слишком мала, даем минимальный вес, чтобы UI не показывал 0%
-            if (finalConfidenceScore < 0.05) finalConfidenceScore = 0.05;
+        }
+        else if (putVotes >= 3) 
+        {
+            candidateDir = "PUT";
+        }
+        else if (buyVotes > putVotes) 
+        {
+            candidateDir = "BUY";
+        }
+        else if (putVotes > buyVotes) 
+        {
+            candidateDir = "PUT";
+        }
+        else 
+        {
+            // Tie (or neutral majority) -> take signal from market state
+            if (stateSignal.MomentumContribution > 0) candidateDir = "BUY";
+            else if (stateSignal.MomentumContribution < 0) candidateDir = "PUT";
+            else candidateDir = blendedProb >= 0.50 ? "BUY" : "PUT";
+        }
+
+        // Align finalConfidenceScore based on the explicitly chosen candidateDir
+        if (candidateDir == "BUY")
+        {
+            finalConfidenceScore = blendedProb >= 0.50 ? (blendedProb - 0.5) * 2.0 : 0.10;
         }
         else
         {
-            candidateDir = "PUT";
-            finalConfidenceScore = (0.5 - blendedProb) * 2.0;
-            if (finalConfidenceScore < 0.05) finalConfidenceScore = 0.05;
+            finalConfidenceScore = blendedProb < 0.50 ? (0.5 - blendedProb) * 2.0 : 0.10;
         }
+
+        if (finalConfidenceScore < 0.05) finalConfidenceScore = 0.05;
 
         // ШАГ 2: Блокировка конфликта УДАЛЕНА. 
         // Теперь если ИИ и математика спорят, побеждает тот, у кого суммарный перевес хотя бы на 0.1%.
