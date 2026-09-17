@@ -515,11 +515,8 @@ public class ConfluenceMatrixEngine(
         }
         else 
         {
-            // Если нет 3 совпадающих (например, ничья 2x2, или 2x1 с нейтральными)
-            // Берем сигнал из состояния рынка
-            if (stateSignal.MomentumContribution > 0) candidateDir = "BUY";
-            else if (stateSignal.MomentumContribution < 0) candidateDir = "PUT";
-            else candidateDir = blendedProb >= 0.50 ? "BUY" : "PUT";
+            // Если нет 3 совпадающих (ничья) — возвращаемся к базовой математически-взвешенной вероятности (ML + Math)
+            candidateDir = blendedProb >= 0.50 ? "BUY" : "PUT";
         }
 
         // Align finalConfidenceScore based on the explicitly chosen candidateDir
