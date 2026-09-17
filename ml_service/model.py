@@ -219,6 +219,12 @@ class RegimeRouter:
             try:
                 # model.predict returns an array of labels for the sequence.
                 # We want the regime of the most recent (last) candle.
+                n_expected = getattr(self._gmm, 'n_features_in_', X.shape[1])
+                if X.shape[1] > n_expected:
+                    X = X[:, :n_expected]
+                elif X.shape[1] < n_expected:
+                    # Not enough features, fallback to ALL
+                    return "ALL"
                 raw_labels = self._gmm.predict(X)
                 raw_label = raw_labels[-1]
                 mapped_label = self._mapping[raw_label]

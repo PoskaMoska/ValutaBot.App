@@ -127,7 +127,7 @@ async def _weekly_global_retrain_loop():
                 continue
             for tf in _WEEKLY_INTERVALS:
                 tf = tf.strip().lower()
-                for regime in ["FLAT", "TREND", "CHAOS"]:
+                for regime in ["ALL", "FLAT", "TREND", "CHAOS"]:
                     predictor = _get_predictor(sym, tf, regime)
                     
                     with predictor._lock:
@@ -549,6 +549,14 @@ async def predict(request: Request):
 
     predictor = _get_predictor(symbol, interval, regime)
 
+    if predictor._model is None and regime == "ALL":
+        for fallback in ["FLAT", "TREND", "CHAOS"]:
+            fb_pred = _get_predictor(symbol, interval, fallback)
+            if fb_pred._model is not None:
+                predictor = fb_pred
+                regime = fallback
+                break
+
     # Auto-train in background if model is missing.
     if predictor._model is None and not predictor.is_training:
         predictor.is_training = True
@@ -556,7 +564,7 @@ async def predict(request: Request):
         import threading
         t = threading.Thread(
             target=_background_train, 
-            args=(symbol, interval, candle_dicts, mtf_candle_dicts), 
+            args=(symbol, interval, None, None), 
             daemon=True
         )
         t.start()
@@ -628,7 +636,7 @@ def train_sync(req: TrainRequest):
 
 def _background_train(symbol: str, interval: str, candles: Optional[list] = None, mtf_candles: Optional[list] = None):
     log.info(f"[BG Train] Starting clustered training for {symbol}_{interval}")
-    for regime in ["FLAT", "TREND", "CHAOS"]:
+    for regime in ["ALL", "FLAT", "TREND", "CHAOS"]:
         predictor = _get_predictor(symbol, interval, regime)
         report = predictor.train(candles, mtf_candles)
         log.info(f"[BG Train] Done {regime}: {report}")
