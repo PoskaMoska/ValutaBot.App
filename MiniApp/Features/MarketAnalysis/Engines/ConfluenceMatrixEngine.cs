@@ -492,7 +492,7 @@ public class ConfluenceMatrixEngine(
         int buyVotes = 0;
         int putVotes = 0;
 
-        // Голосуют только 4 основных индикатора
+        // В голосовании участвуют все 5 элементов (4 индикатора + состояние рынка)
         // 1. TA
         if (taScoreRaw > 0.05) buyVotes++; else if (taScoreRaw < -0.05) putVotes++;
         // 2. SMC
@@ -501,8 +501,10 @@ public class ConfluenceMatrixEngine(
         if (ofScoreRaw > 0.05) buyVotes++; else if (ofScoreRaw < -0.05) putVotes++;
         // 4. ML
         if (mlProbRaw > 0) buyVotes++; else if (mlProbRaw < 0) putVotes++;
+        // 5. State (Momentum)
+        if (stateSignal.MomentumContribution > 0.03) buyVotes++; else if (stateSignal.MomentumContribution < -0.03) putVotes++;
 
-        // Если 3 из 4 индикаторов совпадают — берем их сигнал
+        // Если 3 из 5 совпадают — берем их сигнал
         if (buyVotes >= 3) 
         {
             candidateDir = "BUY";
@@ -513,7 +515,8 @@ public class ConfluenceMatrixEngine(
         }
         else 
         {
-            // Если нет 3 одинаковых (например, ничья 2 vs 2, или 2 vs 1) — решает "Состояние рынка" (5-й элемент)
+            // Если нет 3 совпадающих (например, ничья 2x2, или 2x1 с нейтральными)
+            // Берем сигнал из состояния рынка
             if (stateSignal.MomentumContribution > 0) candidateDir = "BUY";
             else if (stateSignal.MomentumContribution < 0) candidateDir = "PUT";
             else candidateDir = blendedProb >= 0.50 ? "BUY" : "PUT";
