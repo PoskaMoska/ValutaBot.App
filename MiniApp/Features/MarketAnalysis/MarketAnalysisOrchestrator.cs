@@ -1,4 +1,4 @@
-using ValutaBot.Core;
+﻿using ValutaBot.Core;
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;

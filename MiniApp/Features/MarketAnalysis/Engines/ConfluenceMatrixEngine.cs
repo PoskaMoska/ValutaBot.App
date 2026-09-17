@@ -506,32 +506,15 @@ public class ConfluenceMatrixEngine(
         double baseProb = (combinedScore + 1.0) / 2.0;
 
         // 5. Р’С‹РґР°РµРј СЃРёРіРЅР°Р» РІСЃРµРіРґР° (Р‘РµР· NEUTRAL Р·РѕРЅС‹ РїРѕ С‚СЂРµР±РѕРІР°РЅРёСЋ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ)
-        if (mlSignal.Direction == "NEUTRAL" || mlProbRaw == 0)
-        {
-            BotLogger.Warn($"[Veto] ML is NEUTRAL for {asset}/{timeframe}. Forcing final signal to NEUTRAL.");
-            candidateDir = "NEUTRAL";
-            finalConfidenceScore = 0.0;
-        }
-        else if ((mlProbRaw > 0.50 && taScoreRaw < -0.3) || (mlProbRaw < -0.50 && taScoreRaw > 0.3))
-        {
-            BotLogger.Warn($"[Veto] Conflict ML vs TA for {asset}/{timeframe}. Forcing final signal to NEUTRAL.");
-            candidateDir = "NEUTRAL";
-            finalConfidenceScore = 0.0;
-        }
-        else if (baseProb >= 0.53) 
+        if (baseProb >= 0.50) 
         {
             candidateDir = "BUY";
-            finalConfidenceScore = (baseProb - 0.5) * 2.0;
-        }
-        else if (baseProb <= 0.47)
-        {
-            candidateDir = "PUT";
-            finalConfidenceScore = (0.5 - baseProb) * 2.0;
+            finalConfidenceScore = (baseProb - 0.5) * 2.0; // РјР°СЃС€С‚Р°Р±РёСЂСѓРµРј РІ [0.0, 1.0]
         }
         else 
         {
-            candidateDir = "NEUTRAL";
-            finalConfidenceScore = 0.0;
+            candidateDir = "PUT";
+            finalConfidenceScore = (0.5 - baseProb) * 2.0; // РјР°СЃС€С‚Р°Р±РёСЂСѓРµРј РІ [0.0, 1.0]
         }
 
         // РњРёРЅРёРјР°Р»СЊРЅС‹Р№ РїРѕСЂРѕРі СѓРІРµСЂРµРЅРЅРѕСЃС‚Рё РґР»СЏ UI (С‡С‚РѕР±С‹ РІРёР·СѓР°Р»СЊРЅРѕ РЅРµ РїРѕРєР°Р·С‹РІР°С‚СЊ 0%)
