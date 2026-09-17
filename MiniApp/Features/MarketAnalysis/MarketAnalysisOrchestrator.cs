@@ -203,14 +203,23 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             duration = timeout.TimeoutText,
             expiryCandles = timeout.TimeoutCandles,
             adaptiveReasoning = consensus.CombinedReasoningText,
-            taDirection = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
-            taConfidence = (int)Math.Abs(consensus.TaScore * 100),
-            ofDirection = DirectionExtensions.FromScore(consensus.OfScore, 0.05).ToSignal(),
-            ofConfidence = (int)Math.Abs(consensus.OfScore * 100),
-            smcDirection = DirectionExtensions.FromScore(consensus.SmcScore).ToSignal(),
-            smcConfidence = (int)Math.Abs(consensus.SmcScore * 100),
-            lgbmDirection = lgbmDir,
-            lgbmConfidence = (int)(lgbmConf * 100),
+            taDirection = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
+            taConfidence = (int)Math.Clamp(Math.Abs(consensus.TaScore * 100), 0, 100),
+            ofDirection = ofSignal.ScoreContribution > 0.02 ? "BUY" : ofSignal.ScoreContribution < -0.02 ? "PUT" : "NEUTRAL",
+            ofConfidence = (int)Math.Clamp(Math.Abs(ofSignal.ScoreContribution * 100), 0, 100),
+            smcDirection = 
+                (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 
+                (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : 
+                (smcSignal.OrderBlockType ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.OrderBlockType ?? "").Contains("BEARISH") ? "PUT" : 
+                (smcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
+                (smcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
+                "NEUTRAL",
+            smcConfidence = (int)Math.Clamp(Math.Abs(consensus.SmcScore * 100), 0, 100),
+            lgbmDirection = mlSignal.Direction,
+            lgbmConfidence = (int)(mlSignal.Confidence * 100),
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
             signalsVerifiedAsset = assetStats.Verified,
