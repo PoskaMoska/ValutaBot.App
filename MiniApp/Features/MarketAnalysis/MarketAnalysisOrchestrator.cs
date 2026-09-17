@@ -191,6 +191,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             direction = consensus.FinalDirection,
             probability = consensus.Probability,
             duration = timeout.TimeoutText,
+            expiryCandles = timeout.TimeoutCandles,
             adaptiveReasoning = consensus.CombinedReasoningText,
             taDirection = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
             taConfidence = (int)Math.Abs(consensus.TaScore * 100),
@@ -204,7 +205,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             winRateAsset = assetStats.WinRate,
             chartData = mainPrices,
             chartOhlc = candles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
-            goldenSetup = mtfResult.IsGoldenSetup
+            goldenSetup = mtfResult.IsGoldenSetup,
+            confluenceLabel = mtfResult.ConfluenceLabel,
+            confluenceRatio = mtfResult.ConfluenceRatio
         };
     }
 }
