@@ -26,8 +26,7 @@ public static class MLPythonService
     private static Process? _mlProcess; // Track to prevent zombie leaks
 
     // --- HFT Transport Optimization ---
-    private static readonly HttpClient _fastHttpClient;
-
+    private static readonly HttpClient _fastHttpClient = new HttpClient();
     private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     static MLPythonService()

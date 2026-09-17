@@ -505,23 +505,19 @@ public class ConfluenceMatrixEngine(
         // 4. Переводим вектор в базовую вероятность [0.0, 1.0]
         double baseProb = (combinedScore + 1.0) / 2.0;
 
-        // 5. Применяем жесткий порог (Убираем сигналы с уверенностью ниже 55%, так как они математически убыточны на бинарках)
-        if (baseProb >= 0.55) 
+        // 5. Выдаем сигнал всегда (Без NEUTRAL зоны по требованию пользователя)
+        if (baseProb >= 0.50) 
         {
             candidateDir = "BUY";
-            finalConfidenceScore = (baseProb - 0.5) * 2.0; // масштабируем в [0.1, 1.0]
-        }
-        else if (baseProb <= 0.45) 
-        {
-            candidateDir = "PUT";
-            finalConfidenceScore = (0.5 - baseProb) * 2.0;
+            finalConfidenceScore = (baseProb - 0.5) * 2.0; // масштабируем в [0.0, 1.0]
         }
         else 
         {
-            candidateDir = "NEUTRAL";
-            finalConfidenceScore = 0.0;
+            candidateDir = "PUT";
+            finalConfidenceScore = (0.5 - baseProb) * 2.0; // масштабируем в [0.0, 1.0]
         }
 
+        // Минимальный порог уверенности для UI (чтобы визуально не показывать 0%)
         if (finalConfidenceScore < 0.05) finalConfidenceScore = 0.05;
 
         // ШАГ 2: Блокировка конфликта УДАЛЕНА. 
