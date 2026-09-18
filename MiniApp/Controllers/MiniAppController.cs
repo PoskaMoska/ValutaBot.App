@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -58,8 +58,6 @@ public static partial class MiniAppController
         builder.Services.AddSingleton<IMathEngine>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IMarketAnalyzer>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IRiskGatekeeper>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
-        builder.Services.AddSingleton<IWalkForwardValidationEngine, WalkForwardValidationEngine>();
-        builder.Services.AddSingleton<IAutoCalibrationEngine, AutoCalibrationEngine>();
         builder.Services.AddSingleton<IConfluenceMatrixEngine, ConfluenceMatrixEngine>();
         builder.Services.AddSingleton<TradeTimeoutEngine>();
         builder.Services.AddSingleton<ITradeTimeoutEngine>(sp => sp.GetRequiredService<TradeTimeoutEngine>());
@@ -176,9 +174,6 @@ public static partial class MiniAppController
 
         builder.Environment.WebRootPath = System.IO.Path.Combine(AppContext.BaseDirectory, "MiniApp", "wwwroot");
         var app = builder.Build();
-        
-        TradeOutcomeTracker.CalibrationEngine = app.Services.GetRequiredService<IAutoCalibrationEngine>();
-        TradeOutcomeTracker.WfEngine = app.Services.GetRequiredService<IWalkForwardValidationEngine>();
 
         HttpFactory = app.Services.GetRequiredService<System.Net.Http.IHttpClientFactory>();
         MLPythonService.SetFactory(HttpFactory);
@@ -554,3 +549,4 @@ public static partial class MiniAppController
         }
     }
 }
+

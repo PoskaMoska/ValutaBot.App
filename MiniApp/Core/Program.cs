@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 
 namespace ValutaBot.MiniApp;
 
@@ -51,10 +51,10 @@ internal static class Program
     private static async System.Threading.Tasks.Task RunLocalTests()
     {
         var ta = new TechnicalAnalysisEngine();
-        var wfEngine = new WalkForwardValidationEngine();
-        var autoCalibEngine = new AutoCalibrationEngine();
-        TradeOutcomeTracker.WfEngine = wfEngine;
-        TradeOutcomeTracker.CalibrationEngine = autoCalibEngine;
+        //
+        //
+        //
+        //
         var cmEngine = new ConfluenceMatrixEngine(new MarketDataFetcher(), ta);
         var aeEngine = new TradeTimeoutEngine();
         Console.WriteLine("==================================================");
@@ -166,7 +166,7 @@ internal static class Program
             // Test weekend fallback for EUR/USD
             Console.WriteLine("Fetching EUR/USD (simulated weekend fallback)...");
             var settings = new ValutaBot.MiniApp.TradingBotSettings { EnableMachineLearning = false, EnableSmc = false, EnableOrderFlow = false, EnableAutoCalibration = false };
-            var res = await new ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator(new MarketDataFetcher(), ta, ta, ta, cmEngine, wfEngine, aeEngine, new MonteCarloEngine(), Microsoft.Extensions.Options.Options.Create(settings)).ExecuteAnalysisAsync("EUR/USD OTC", "m1");
+            var res = await new ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator(new MarketDataFetcher(), ta, ta, ta, cmEngine, aeEngine, new MonteCarloEngine(), Microsoft.Extensions.Options.Options.Create(settings)).ExecuteAnalysisAsync("EUR/USD OTC", "m1");
             string resJson = JsonSerializer.Serialize(res, options);
             
             Assert("EUR/USD OTC fetching", resJson.Contains("direction") && !resJson.Contains("error"));
@@ -192,8 +192,8 @@ internal static class Program
             Assert("Gatekeeper detects flat market", gatekeeperRes.IsTradeable == false && gatekeeperRes.Reason.Contains("Р В·Р В°РЎРѓРЎвЂљР С•"), $"Expected false/Р В·Р В°РЎРѓРЎвЂљР С•Р в„–, got {gatekeeperRes.IsTradeable}/{gatekeeperRes.Reason}");
 
             // 8.2 Walk-Forward — test cooloff check
-            var wfRes = wfEngine.ValidateWalkForward("TEST", "m1");
-            Assert("WalkForward returns valid result", !wfRes.IsCooloffActive, $"Expected no cooloff, got {wfRes.IsCooloffActive}");
+            //
+            //
 
             // 8.3 Order Flow Spoofing Trap Detection
             double[] spoofPrices = new double[10];
@@ -317,6 +317,7 @@ internal static class Program
         
     }
 }
+
 
 
 

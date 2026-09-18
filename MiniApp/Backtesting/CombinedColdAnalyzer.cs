@@ -17,7 +17,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
             Console.WriteLine($"Успешно загружено: {candles.Length} свечей.");
 
             var taEngine = new TechnicalAnalysisEngine();
-            var wf = new WalkForwardValidationEngine(); // Узел Риск-менеджмента
+            // // Узел Риск-менеджмента
 
             int horizon = 5;
             int totalTrades = 0, wins = 0;
@@ -63,8 +63,8 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 if (Math.Abs(ensemble) > 1.2) // Строгий порог 
                 {
                     // Узел 5: Риск-менеджмент (Walk-Forward)
-                    var wfResult = wf.ValidateWalkForward("EURUSD", "1m");
-                    if (wfResult.IsCooloffActive)
+                    //
+                    if (false)
                     {
                         cooloffSkips++;
                         continue; 
@@ -75,8 +75,6 @@ namespace ValutaBot.App.MiniApp.Backtesting
                     
                     if (isWin) wins++;
                     totalTrades++;
-
-                    wf.RecordTradeOutcome("EURUSD", "1m", isWin);
                 }
             }
 
@@ -96,3 +94,5 @@ namespace ValutaBot.App.MiniApp.Backtesting
         }
     }
 }
+
+

@@ -1,4 +1,4 @@
-﻿using ValutaBot.Core;
+using ValutaBot.Core;
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
@@ -19,8 +19,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private readonly IMathEngine _mathEngine;
     private readonly IMarketAnalyzer _marketAnalyzer;
     private readonly IConfluenceMatrixEngine _cmEngine;
-    private readonly IWalkForwardValidationEngine _wfEngine;
-    private readonly ITradeTimeoutEngine _timeoutEngine;
+        private readonly ITradeTimeoutEngine _timeoutEngine;
     private readonly IMonteCarloEngine _mcEngine;
     private readonly TradingBotSettings _settings;
 
@@ -30,7 +29,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         IMathEngine mathEngine,
         IMarketAnalyzer marketAnalyzer,
         IConfluenceMatrixEngine cmEngine,
-        IWalkForwardValidationEngine wfEngine,
         ITradeTimeoutEngine timeoutEngine,
         IMonteCarloEngine mcEngine,
         Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings
@@ -41,7 +39,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _mathEngine = mathEngine;
         _marketAnalyzer = marketAnalyzer;
         _cmEngine = cmEngine;
-        _wfEngine = wfEngine;
         _timeoutEngine = timeoutEngine;
         _mcEngine = mcEngine;
         _settings = settings.Value;
@@ -103,8 +100,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         // 6. Engines (Parallel)
         var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, candles, currentLivePrice));
         var ofTask = Task.Run(() => OrderFlowEngine.AnalyzeOrderFlow(cleanAsset, timeframe, closedCandles, currentLivePrice));
-        var wfResult = _wfEngine.ValidateWalkForward(cleanAsset, timeframe);
-        
         // TA Scoring
         var (mainAdx, mainPdi, mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(cleanAsset, timeframe, closedCandles) : (20.0, 0.0, 0.0);
         double mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(cleanAsset, timeframe, closedCandles) : 0;
@@ -116,7 +111,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         double lgbmConf = 0.5;
         if (mlPrediction != null) {
             lgbmDir = mlPrediction.Direction;
-            lgbmConf = 0.5 + (mlPrediction.Confidence - 0.5) * wfResult.WeightMultiplier;
+            lgbmConf = mlPrediction.Confidence;
         }
 
         await Task.WhenAll(smcTask, ofTask);
@@ -156,7 +151,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
 
         // RECORD (Fire and forget)
-        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, timeout.TimeoutCandles, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb);
+        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, timeout.TimeoutCandles, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw);
 
         var stats = await SignalTracker.GetOverallStatsAsync();
         var assetStats = await SignalTracker.GetStatsAsync(cleanAsset, timeframe);
@@ -236,4 +231,5 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
     }
 }
+
 

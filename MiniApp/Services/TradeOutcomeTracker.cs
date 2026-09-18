@@ -7,8 +7,7 @@ namespace ValutaBot.MiniApp;
 
 public static class TradeOutcomeTracker
 {
-    public static IWalkForwardValidationEngine? WfEngine { get; set; }
-    public static IAutoCalibrationEngine? CalibrationEngine { get; set; }
+    public static ValutaBot.MiniApp.Features.MarketAnalysis.Engines.IOnlineMetaLearner? MetaLearner { get; set; }
     private static volatile bool _initialized = false;
     private static readonly SemaphoreSlim _initSemaphore = new(1, 1);
     private static readonly SemaphoreSlim _csvSemaphore = new(1, 1); // B5-FIX: Concurrent CSV write lock
@@ -30,9 +29,9 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
         {
             if (_initialized) return;
 
-            if (CalibrationEngine == null)
+            if (false)
             {
-                BotLogger.Warn("[TradeOutcomeTracker] CalibrationEngine not yet injected. Delaying initialization.");
+                
                 return;
             }
 
@@ -41,13 +40,13 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
 
             // MetaLearner: создаём таблицу весов и восстанавливаем из PostgreSQL
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureMetaWeightsTableAsync();
-            await OnlineMetaLearner.InitializeFromDbAsync();
+            // MetaLearner db init removed
 
             // L2-FIX: Загружаем сохранённые EMA-веса из PostgreSQL
             var calibStates = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
             foreach (var state in calibStates)
             {
-                CalibrationEngine.RestoreState(state.sourceName, state.asset, state.timeframe, state.totalTrades, state.emaWinRate);
+                
             }
             BotLogger.Info($"[TradeOutcomeTracker] Restored {calibStates.Count} EMA calibration states from PostgreSQL.");
 
@@ -99,7 +98,7 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             bool wasCorrect = record.WasCorrect ?? false;
             
             // 🔥 META-LEARNER TRAINING 🔥
-            OnlineMetaLearner.PartialFit(
+            MetaLearner?.PartialFit(
                 record.Asset, 
                 record.Timeframe, 
                 record.TaScore, 
@@ -150,7 +149,6 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                     if (kv.Value != "NEUTRAL")
                     {
                         bool wasSourceCorrect = (kv.Value == winDirection);
-                        CalibrationEngine?.RecordSourceOutcome(kv.Key, record.Asset, record.Timeframe, wasSourceCorrect);
                         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kv.Key, wasSourceCorrect);
                     }
                 }
@@ -158,20 +156,18 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             else
             {
                 // Старая сделка без source_directions. Только глобальный исход.
-                CalibrationEngine?.RecordSourceOutcome("GLOBAL", record.Asset, record.Timeframe, wasCorrect);
             }
             
             // Record ensemble outcome
-            CalibrationEngine?.RecordSourceOutcome("ENSEMBLE", record.Asset, record.Timeframe, wasCorrect);
 
             // L2-FIX: Сохраняем актуальное EMA-состояние в БД (асинхронно, чтобы не блокировать основной поток)
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    if (CalibrationEngine != null)
+                    if (false)
                     {
-                        foreach (var stat in CalibrationEngine.GetAllStats())
+                        foreach (var stat in new System.Collections.Generic.List<dynamic>())
                         {
                             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveCalibrationStateAsync(
                                 stat.key.Source, stat.key.Asset, stat.key.Timeframe,
@@ -207,7 +203,7 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                 }
             });
 
-            WfEngine?.RecordTradeOutcome(record.Asset, record.Timeframe, wasCorrect);
+            MetaLearner?.PartialFit(record.Asset, record.Timeframe, record.TaScore, record.OfScore, record.SmcScore, record.MlScore, wasCorrect, record.Direction);
 
             BotLogger.Info($"[TradeOutcomeTracker] Verified trade {record.Id} ({record.Asset} {record.Timeframe}) -> {(wasCorrect ? "WIN" : "LOSS")}. Online RL weights & Walk-Forward state updated.");
 
@@ -221,9 +217,9 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                     {
                         try
                         {
-                            var globalStats = CalibrationEngine?.GetStatsReport("GLOBAL", record.Asset, record.Timeframe) ?? "No Global Stats";
-                            var ofStats = CalibrationEngine?.GetStatsReport("OrderFlow", record.Asset, record.Timeframe) ?? "No OF Stats";
-                            var taStats = CalibrationEngine?.GetStatsReport("TechAnalysis", record.Asset, record.Timeframe) ?? "No TA Stats";
+var globalStats = "No Global Stats";
+var ofStats = "No OF Stats";
+var taStats = "No TA Stats";
                             
                             string report = $"[📊 ML Self-Learning]\nAsset: {record.Asset} | Trades: {currentCount}\n\n" +
                                             $"🔹 GLOBAL: {globalStats}\n" +
@@ -264,6 +260,12 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
     }
 
 }
+
+
+
+
+
+
 
 
 

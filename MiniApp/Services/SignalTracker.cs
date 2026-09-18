@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -44,7 +44,7 @@ public static class SignalTracker
         double taScore = 0.0,
         double ofScore = 0.0,
         double smcScore = 0.0,
-        double mlProb = 0.0)
+        double mlProb = 0.0, double mlScore = 0.0)
     {
         string sym = asset.ToUpper();
         var now = DateTime.UtcNow;
@@ -105,7 +105,8 @@ public static class SignalTracker
             TaScore = taScore,
             OfScore = ofScore,
             SmcScore = smcScore,
-            MlProb = mlProb
+            MlProb = mlProb,
+            MlScore = mlScore
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
@@ -231,6 +232,7 @@ public static class SignalTracker
         public double OfScore { get; set; }
         public double SmcScore { get; set; }
         public double MlProb { get; set; }
+        public double MlScore { get; set; }
     }
 
     public class AccuracyStats
@@ -260,6 +262,7 @@ public static class SignalTracker
             : 1.0;
     }
 }
+
 
 
 

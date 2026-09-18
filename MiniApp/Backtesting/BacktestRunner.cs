@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -35,8 +35,8 @@ namespace ValutaBot.App.MiniApp.Backtesting
             Console.WriteLine($"[BacktestRunner] Старт | {timeframe} | {total} свечей | горизонт {horizon}");
 
             // ── Два изолированных инстанса AutoCalibrationEngine ──────────────
-            var calibOn  = new AutoCalibrationEngine(); // самообучение включено
-            var calibOff = new AutoCalibrationEngine(); // веса заморожены (baseline)
+            // // самообучение включено
+            // // веса заморожены (baseline)
 
             var wfOn  = new WalkForwardValidationEngine();
             var wfOff = new WalkForwardValidationEngine();
@@ -105,14 +105,14 @@ namespace ValutaBot.App.MiniApp.Backtesting
 
                 // Adaptive Ensemble
                 double volRatio = taEngine.CalculateVolatilityRatio(closedPricesArray);
-                var regime = calibOn.DetectMarketRegime(20, volRatio, rsiVal, closedPricesArray);
+                var regime = 0;
                 string regimeName = regime.ToString();
 
-                double wTA   = calibOn.GetCalibratedRegimeWeight("TechAnalysis", Asset, timeframe, regime);
-                double wOF   = calibOn.GetCalibratedRegimeWeight("OrderFlow",    Asset, timeframe, regime);
-                double wLGBM = calibOn.GetCalibratedRegimeWeight("LIGHTGBM",     Asset, timeframe, regime);
-                double wSMC  = calibOn.GetCalibratedRegimeWeight("SMC",          Asset, timeframe, regime);
-                double wSkender = calibOn.GetCalibratedRegimeWeight("SKENDER_MATH", Asset, timeframe, regime);
+                double wTA   = 1.0;
+                double wOF   = 1.0;
+                double wLGBM = 1.0;
+                double wSMC  = 1.0;
+                double wSkender = 1.0;
 
                 // ── Определяем направление сигнала через Ансамбль (Ensemble) ──
                 double ensembleScore = 0;
@@ -133,7 +133,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 double confidence = 0;
 
                 // Dynamically adaptive threshold
-                double triggerThreshold = regime == AutoCalibrationEngine.MarketRegime.HighVolatilityChaos ? 0.7 : 0.4;
+                double triggerThreshold = regime == 1 ? 0.7 : 0.4;
 
                 if (ensembleScore > triggerThreshold) {
                     direction = "BUY";
@@ -146,12 +146,12 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 if (direction == "NEUTRAL") continue; // нет сигнала
 
                 // Walk-Forward guard (CalibON)
-                var wfResultOn = wfOn.ValidateWalkForward(Asset, timeframe);
-                bool cooloffOn = wfResultOn.IsCooloffActive;
+                //
+                bool cooloffOn = false;
 
                 // Walk-Forward guard (CalibOFF)
-                var wfResultOff = wfOff.ValidateWalkForward(Asset, timeframe);
-                bool cooloffOff = wfResultOff.IsCooloffActive;
+                //
+                bool cooloffOff = false;
                 // ── Верификация исхода через горизонт ─────────────────────────
                 double exitPrice  = candles[i + horizon].Close;
                 bool   isWin      = direction == "BUY"
@@ -162,13 +162,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 if (!cooloffOn)
                 {
                     // CalibON: реальное самообучение
-                    calibOn.RecordSourceOutcome("TechAnalysis", Asset, timeframe,
-                        taScore > 0 == (exitPrice > currentPrice));
-                    calibOn.RecordSourceOutcome("OrderFlow",    Asset, timeframe,
-                        ofResult.OrderFlowState.Contains("BULLISH") == (exitPrice > currentPrice));
-                    calibOn.RecordSourceOutcome("SMC",          Asset, timeframe,
-                        smcState.BosDirection == direction);
-                        
+                                                                                    
                     // ONLINE REINFORCEMENT LEARNING FOR ML (Скармливаем исход нейросети)
                     await MLPythonService.SendFeedbackAsync(Asset, timeframe, isWin, currentPrice, exitPrice, direction, null, true);
 
@@ -242,3 +236,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
         }
     }
 }
+
+
+
+

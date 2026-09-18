@@ -1,4 +1,4 @@
-"""
+﻿"""
 Two-Tier Forex Predictor.
   Tier 1 (Global Strategist):  LightGBM вЂ” retrained every 24h on up to 100k candles.
   Tier 2 (Local Tactician):    SGDClassifier вЂ” updated via partial_fit after every trade (<1ms).
@@ -1556,6 +1556,7 @@ def context_embedding_column_names(dim: int) -> List[str]:
 
 
 # ── End Contextual Embeddings ─────────────────────────────────────────────
+
 
 
 

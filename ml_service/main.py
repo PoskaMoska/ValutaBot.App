@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI ML microservice — LightGBM Forex/Crypto direction predictor.
 
 Endpoints:
@@ -702,92 +702,54 @@ def challenger_status(symbol: str, interval: str, regime: str = "ALL"):
 
 
 @app.post("/feedback", dependencies=[Depends(verify_secret)])
-def feedback(req: TrainFeedback):
-    """
-    Online Reinforcement Learning Endpoint.
-    Saves the real outcome of a live trade so the model can retrain on it later.
-    """
+def feedback(req: TrainFeedback, background_tasks: BackgroundTasks):
     log.info(f"[Online RL] Received feedback for {req.asset} ({req.timeframe}): {'WIN' if req.was_win else 'LOSS'} "
              f"| Dir: {req.direction} Entry: {req.entry_price} Exit: {req.exit_price}")
     
-    db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    
-    try:
-        conn = sqlite3.connect(db_path, timeout=30.0)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS OnlineFeedback (
-                Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                Asset TEXT NOT NULL,
-                Interval TEXT NOT NULL,
-                Direction TEXT NOT NULL,
-                EntryPrice REAL NOT NULL,
-                ExitPrice REAL NOT NULL,
-                WasWin INTEGER NOT NULL,
-                Timestamp TEXT NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS SubminuteCandles (
-                Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                Asset TEXT NOT NULL,
-                Interval TEXT NOT NULL,
-                OpenTime TEXT NOT NULL,
-                Open REAL NOT NULL,
-                High REAL NOT NULL,
-                Low REAL NOT NULL,
-                Close REAL NOT NULL,
-                Volume REAL NOT NULL,
-                UNIQUE(Asset, Interval, OpenTime)
-            )
-        ''')
-        cursor.execute('''
-            INSERT INTO OnlineFeedback (Asset, Interval, Direction, EntryPrice, ExitPrice, WasWin, Timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (req.asset, req.timeframe, req.direction, req.entry_price, req.exit_price, int(req.was_win), req.timestamp))
-        conn.commit()
-        conn.close()
-        
-        # Tier 2 (Local Tactician): instant SGD update — no heavy retrain
-        norm_interval = _normalize_interval(req.timeframe)
-
-        # FIX #5: Берем свечи строго ДО момента входа (req.timestamp), а не из _live_candles_cache.
-        recent_candles = _fetch_candles_at_entry(req.asset, norm_interval, req.timestamp, limit=200)
-
-        regime = "ALL"
+    def process_feedback_bg():
+        db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         try:
-            from features import build_features
-            from model import get_regime_router
-            feats = build_features(recent_candles)
-            if not feats.empty:
-                router = get_regime_router(req.asset, norm_interval)
-                regime = router.predict_live(feats.iloc[-10:])
+            conn = sqlite3.connect(db_path, timeout=30.0)
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS OnlineFeedback (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    Asset TEXT NOT NULL,
+                    Interval TEXT NOT NULL,
+                    Direction TEXT NOT NULL,
+                    EntryPrice REAL NOT NULL,
+                    ExitPrice REAL NOT NULL,
+                    WasWin INTEGER NOT NULL,
+                    Timestamp TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                INSERT INTO OnlineFeedback (Asset, Interval, Direction, EntryPrice, ExitPrice, WasWin, Timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (req.asset, req.timeframe, req.direction, req.entry_price, req.exit_price, int(req.was_win), req.timestamp))
+            conn.commit()
+            conn.close()
+
+            norm_interval = req.timeframe.replace("s", "") if req.timeframe.endswith("s") else req.timeframe
+            from model import ForexPredictor
+            regime = "TREND"
+            recent_candles = _fetch_candles_at_entry(req.asset, norm_interval, req.timestamp, limit=200)
+            predictor = _get_predictor(req.asset, norm_interval, regime)
+            higher_tf = predictor._get_higher_tf()
+            mtf_candles = _fetch_candles_at_entry(req.asset, higher_tf, req.timestamp, limit=100)
+
+            if len(recent_candles) >= 60:
+                predictor.partial_fit_online(recent_candles, mtf_candles, req.was_win, req.direction)
+                try:
+                    predictor.evaluate_shadow(recent_candles, mtf_candles, req.entry_price, req.exit_price)
+                except Exception as shadow_ex:
+                    log.debug(f"[ShadowChallenger] evaluation skipped: {shadow_ex}")
         except Exception as e:
-            log.error(f"[Feedback] Failed to calc regime, fallback to ALL: {e}")
-            
-        predictor = _get_predictor(req.asset, norm_interval, regime)
-        higher_tf = predictor._get_higher_tf()
-        mtf_candles = _fetch_candles_at_entry(req.asset, higher_tf, req.timestamp, limit=100)
+            log.error(f"[Online RL] DB Error: {e}")
 
-        if len(recent_candles) >= 60:
-            ok = predictor.partial_fit_online(recent_candles, mtf_candles, req.was_win, req.direction)
-            if ok:
-                log.info(f"[SGD] Online update done for {req.asset} ({req.timeframe}) | candles_at_entry={len(recent_candles)}")
-
-            # D11: Shadow Challenger — score production vs challenger on this real
-            # outcome without affecting live signals. Triggers promotion check
-            # internally if enough shadow samples have accumulated.
-            try:
-                predictor.evaluate_shadow(recent_candles, mtf_candles, req.entry_price, req.exit_price)
-            except Exception as shadow_ex:
-                log.debug(f"[ShadowChallenger] evaluation skipped: {shadow_ex}")
-            
-        return {"status": "ok", "message": "Feedback saved. Local Tactician (SGD) updated instantly."}
-
-    except Exception as e:
-        log.error(f"[Online RL] DB Error: {e}")
-        return {"status": "error", "message": str(e)}
+    background_tasks.add_task(process_feedback_bg)
+    return {"status": "ok", "message": "Feedback queued for processing."}
 
 
 # ┌────────────────────────────────────────────────────────────────────────┐
@@ -798,3 +760,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8765))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
