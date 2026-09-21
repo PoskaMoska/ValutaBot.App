@@ -97,8 +97,8 @@ public class StatefulSmc
                     ? candles[^1].Timestamp - candles[^2].Timestamp 
                     : TimeSpan.FromMinutes(1);
                 
-                // Fallback to sane limits if timestamps are exactly the same
-                if (tf.TotalSeconds < 1) tf = TimeSpan.FromMinutes(1);
+                // Fallback to sane limits if timestamps are exactly the same or wildly apart
+                if (tf.TotalSeconds < 1 || tf.TotalDays > 1) tf = TimeSpan.FromMinutes(1);
                 _tfEstimate = tf;
                 
                 PruneStaleZones(_lastProcessedTime.Subtract(tf * 50));

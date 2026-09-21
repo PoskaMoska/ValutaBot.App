@@ -238,10 +238,15 @@ namespace ValutaBot.MiniApp
                     {
                         if (liveAcc.Open.HasValue)
                         {
-                            result[resultIdx] = new MiniAppController.OhlcCandle(
+                            result[resultIdx++] = new MiniAppController.OhlcCandle(
                                 liveAcc.Open.Value, liveAcc.High, liveAcc.Low, liveAcc.Close, liveAcc.TickCount, liveAcc.OpenTime);
                         }
                     }
+                }
+
+                if (resultIdx < resultSize)
+                {
+                    Array.Resize(ref result, resultIdx);
                 }
 
                 return result;
