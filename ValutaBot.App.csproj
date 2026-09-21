@@ -15,12 +15,11 @@
     <InternalsVisibleTo Include="ValutaBot.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Switch to Update (not Include) so the SDK's auto-discovered wwwroot items are not double-added. -->
-    <!-- Remove js/tests explicitly: those package.json files conflict with the SDK's Content auto-include. -->
-    <Content Remove="MiniApp\wwwroot\js\tests\**" />
-    <Content Update="MiniApp/wwwroot/**">
+    <Content Include="MiniApp\wwwroot\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <Content Remove="MiniApp\wwwroot\js\tests\**" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Tests\**" />
