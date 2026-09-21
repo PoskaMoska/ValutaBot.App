@@ -37,7 +37,7 @@ COPY ml_service ./ml_service
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip3 install --no-cache-dir -r ./ml_service/requirements.txt
-RUN pip3 install --no-cache-dir pytest && pytest ml_service/tests/
+RUN pip3 install --no-cache-dir pytest httpx && PYTHONPATH=/app/ml_service pytest ml_service/tests/
 
 # Open the port
 EXPOSE 5000 8765
