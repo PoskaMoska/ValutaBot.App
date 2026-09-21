@@ -70,6 +70,7 @@ const mockBackendResponse = {
         goldenSetup: true,
         chartData: [1.081, 1.082, 1.08234],
         expiryCandles: 5,
+        duration: "5 мин",
         atr: 0.001,
         llmReport: "Отличный сигнал",
         taDirection: "BUY",
@@ -172,6 +173,8 @@ async function runTest() {
     assertEq("Entropy Regex (Red)", entColor === 'rgb(239, 68, 68)' || entColor === '#ef4444', true);
     
     assertEq("Main Direction is BUY", getVal('resDir').includes('ВВЕРХ'), true);
+    assertEq("Duration formatting", getVal('resDur'), '5 мин');
+    assertEq("ML Radar is BUY", getVal('radarMl').includes('ВВЕРХ (85%)'), true);
     assertEq("TA Radar is BUY", getVal('radarTa').includes('ВВЕРХ (80%)'), true);
     assertEq("SMC Radar is PUT", getVal('radarSmc').includes('ВНИЗ (65%)'), true);
     assertEq("OrderFlow Radar is NEUTRAL", getVal('radarOf').includes('НЕЙТРАЛЬНО'), true);

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Frontend Integration Tests</title>
+    <style>
+        body { font-family: monospace; background: #121212; color: #fff; padding: 20px; }
+        .pass { color: #00e676; }
+        .fail { color: #ff1744; }
+        .log-line { margin: 5px 0; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        /* Hide the actual UI we are testing against */
+        #test-sandbox { display: none; }
+    </style>
+</head>
+<body>
+    <h2>ValutaBot Frontend Integration Tests</h2>
+    <div id="test-results"></div>
+
+    <!-- 1. Sandbox: Exact UI elements that api.js mutates -->
+    <div id="test-sandbox">
+        <div id="resProb"></div>
+        <div id="resProbFact"></div>
+        <div id="resEma"></div>
+        <div id="weatherPhase"></div>
+        <div id="weatherEntropy"></div>
+        <div id="mlEnsembleConf"></div>
+        <div id="winRateAsset"></div>
+        <div id="winRateOverall"></div>
+        <div id="confluenceCard"></div>
+        <button id="btnGet"></button>
+        <div id="mainSphere"></div>
+        <div id="statusBar"></div>
+        <div id="radarTa"></div>
+        <div id="radarOf"></div>
+        <div id="radarSmc"></div>
+        <div id="radarMl"></div>
+        <div id="probChart"></div>
+        <div id="dirChart"></div>
+        <div id="durChart"></div>
+        <div id="resultsTabBar"></div>
+        <div id="resultsGrid"></div>
+        <div id="tabContentAI"></div>
+        <div id="mlEnsembleCard"></div>
+        <div id="mcCard"></div>
+        <div id="reasoningCard"></div>
+        <div id="newsCard"></div>
+        <div id="welcomeSec"></div>
+        <div id="errorDisplay"></div>
+        <div id="confluenceLabel"></div>
+        <div id="goldenSetupBadge"></div>
+        <div id="goldenSetupBadgeMain"></div>
+        <div id="resDir"></div>
+        <div id="resDirLabel"></div>
+        <div id="resDur"></div>
+        <div id="resRsi"></div>
+        <div id="resVol"></div>
+    </div>
+
+    <!-- 2. Test Runner Script -->
+    <script type="module">
+        // A. Mocking fetch to return our strict backend JSON DTO
+        const mockBackendResponse = {
+            result: {
+                direction: "BUY",
+                probability: 82, // int 0-100
+                winRateAsset: 64, // int 0-100
+                winRateOverall: 58, // int 0-100
+                signalsVerifiedAsset: 12,
+                ema: 1.08234, // double
+                uiMarketPhase: "Замедление (Разворот)",
+                uiMarketEntropy: "ВЫСОКАЯ (Хаос / Опасно!)",
+                lgbmDirection: "BUY",
+                lgbmConfidence: 85, // int 0-100
+                confluenceLabel: "Strong Buy",
+                goldenSetup: true,
+                chartData: [1.081, 1.082, 1.08234],
+                expiryCandles: 5,
+                atr: 0.001
+            },
+            config: { ml: true, smc: true, of: true }
+        };
+
+        window.originalFetch = window.fetch;
+        window.fetch = async (url) => {
+            if (url.includes('/api/analyze')) {
+                return {
+                    json: async () => mockBackendResponse
+                };
+            }
+            if (url.includes('/api/chart-ohlc')) {
+                return { json: async () => [] };
+            }
+            return { json: async () => ({}) };
+        };
+
+        // B. Load modules directly (bypassing init functions that crash in sandbox)
+        import { executeAnalysis } from './js/api.js?v=20260920_1';
+
+        const results = document.getElementById('test-results');
+        function logTest(name, passed, details = "") {
+            const el = document.createElement('div');
+            el.className = 'log-line ' + (passed ? 'pass' : 'fail');
+            el.innerHTML = `<strong>${passed ? '✅ PASS' : '❌ FAIL'}</strong>: ${name} <span style="color:#aaa">${details}</span>`;
+            results.appendChild(el);
+        }
+
+        async function runTests() {
+            // Trigger analysis
+            executeAnalysis();
+
+            // executeAnalysis has a delay of Math.max(0, 2000 - elapsed), so we wait 2.5s for DOM to update
+            logTest("Test framework initialized", true, "Waiting for api.js DOM mutations (2.5s)...");
+            
+            setTimeout(() => {
+                try {
+                    // Test 1: Probability (No *100 bug)
+                    const prob = document.getElementById('resProb').innerText;
+                    logTest("Probability scaling (Int)", prob === '82%', `Expected: 82%, Got: ${prob}`);
+
+                    // Test 2: WinRateAsset (No *100 bug)
+                    const wrAsset = document.getElementById('winRateAsset').innerText;
+                    logTest("WinRateAsset scaling (Int)", wrAsset === '64%', `Expected: 64%, Got: ${wrAsset}`);
+
+                    // Test 3: WinRateOverall (No *100 bug)
+                    const wrOverall = document.getElementById('winRateOverall').innerText;
+                    logTest("WinRateOverall scaling (Int)", wrOverall === '58%', `Expected: 58%, Got: ${wrOverall}`);
+
+                    // Test 4: lgbmConfidence (No *100 bug)
+                    const mlConf = document.getElementById('mlEnsembleConf').innerText;
+                    logTest("LGBM Confidence scaling (Int)", mlConf === '85%', `Expected: 85%, Got: ${mlConf}`);
+
+                    // Test 5: EMA Formatting (5 decimals)
+                    const ema = document.getElementById('resEma').innerText;
+                    logTest("EMA precision formatting", ema === '1.08234', `Expected: 1.08234, Got: ${ema}`);
+
+                    // Test 6: Market Phase Regex Match (Yellow for Замедление)
+                    const phaseColor = document.getElementById('weatherPhase').style.color;
+                    const isYellow = phaseColor === 'rgb(245, 158, 11)' || phaseColor === '#f59e0b';
+                    logTest("Market Phase Magic Strings -> Regex (Yellow)", isYellow, `Expected: Yellow (#f59e0b), Got: ${phaseColor}`);
+
+                    // Test 7: Market Entropy Regex Match (Red for ВЫСОКАЯ)
+                    const entColor = document.getElementById('weatherEntropy').style.color;
+                    const isRed = entColor === 'rgb(239, 68, 68)' || entColor === '#ef4444';
+                    logTest("Market Entropy Magic Strings -> Regex (Red)", isRed, `Expected: Red (#ef4444), Got: ${entColor}`);
+
+                    // Test 8: Confluence Card Visibility
+                    const confCardStyle = document.getElementById('confluenceCard').style.display;
+                    logTest("Confluence Card visibility toggle", confCardStyle === 'block', `Expected: block, Got: ${confCardStyle}`);
+
+                } catch (e) {
+                    logTest("Execution Error", false, e.message);
+                }
+            }, 2500);
+        }
+
+        runTests();
+    </script>
+</body>
+</html>
