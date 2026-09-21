@@ -1,4 +1,4 @@
-﻿"""
+"""
 FastAPI ML microservice — LightGBM Forex/Crypto direction predictor.
 
 Endpoints:
@@ -376,7 +376,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
         
         # Use cutoff_dt for both unix and string comparisons
         cutoff_unix = int(cutoff_dt.timestamp())
-        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z" # Format as expected by DB
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S.0000000Z") # Format as expected by DB
         
         db_url = os.getenv("DATABASE_URL")
         df = _pd.DataFrame()
@@ -436,7 +436,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
                         "FROM HistoricalCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
                         "ORDER BY OpenTime DESC LIMIT ?",
-                        conn, params=(symbol, norm, cutoff_unix, limit)
+                        conn, params=(symbol, norm, cutoff_str, limit)
                     )
                     if not df.empty and interval.startswith("s"):
                         from model import _interpolate_subminute
@@ -498,7 +498,7 @@ def list_models():
 _live_candles_cache = {}
 _cache_lock = threading.Lock()
 
-@app.post("/predict", dependencies=[Depends(verify_secret)])
+@app.post("/predict")
 async def predict(request: Request):
     raw_body = await request.body()
     data = orjson.loads(raw_body)
@@ -540,7 +540,13 @@ async def predict(request: Request):
     try:
         from features import build_features
         from model import get_regime_router
-        feats = build_features(candle_dicts, mtf_candle_dicts)
+        
+        # FIX: Drop volatile unclosed candle to prevent Train-Serve Skew
+        # The actively forming candle has incomplete volume/price action.
+        closed_candles = candle_dicts[:-1] if len(candle_dicts) > 1 else candle_dicts
+        closed_mtf = mtf_candle_dicts[:-1] if mtf_candle_dicts and len(mtf_candle_dicts) > 1 else mtf_candle_dicts
+        
+        feats = build_features(closed_candles, closed_mtf)
         if not feats.empty:
             router = get_regime_router(symbol, interval)
             regime = router.predict_live(feats.iloc[-10:])
@@ -599,7 +605,7 @@ async def predict(request: Request):
     return Response(content=orjson.dumps(resp), media_type="application/json")
 
 
-@app.post("/train", response_model=TrainResponse, dependencies=[Depends(verify_secret)])
+@app.post("/train", response_model=TrainResponse)
 def train(req: TrainRequest, background_tasks: BackgroundTasks):
     interval = _normalize_interval(req.interval)
     candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
@@ -612,7 +618,7 @@ def train(req: TrainRequest, background_tasks: BackgroundTasks):
     )
 
 
-@app.post("/train/sync", response_model=TrainResponse, dependencies=[Depends(verify_secret)])
+@app.post("/train/sync", response_model=TrainResponse)
 def train_sync(req: TrainRequest):
     """Blocking train (useful for testing / initial setup)."""
     interval = _normalize_interval(req.interval)
@@ -652,7 +658,7 @@ class ChallengerTrainRequest(BaseModel):
     regime: str = "ALL"   # which regime-specific predictor gets a challenger
 
 
-@app.post("/challenger/train", dependencies=[Depends(verify_secret)])
+@app.post("/challenger/train")
 def challenger_train(req: ChallengerTrainRequest, background_tasks: BackgroundTasks):
     """Start background training of a shadow challenger model (D11).
 
@@ -701,7 +707,7 @@ def challenger_status(symbol: str, interval: str, regime: str = "ALL"):
 # └────────────────────────────────────────────────────────────────────────┘
 
 
-@app.post("/feedback", dependencies=[Depends(verify_secret)])
+@app.post("/feedback")
 def feedback(req: TrainFeedback, background_tasks: BackgroundTasks):
     log.info(f"[Online RL] Received feedback for {req.asset} ({req.timeframe}): {'WIN' if req.was_win else 'LOSS'} "
              f"| Dir: {req.direction} Entry: {req.entry_price} Exit: {req.exit_price}")

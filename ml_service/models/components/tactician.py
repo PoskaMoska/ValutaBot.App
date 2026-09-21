@@ -1,4 +1,4 @@
-import threading
+﻿import threading
 import numpy as np
 import logging
 import joblib
@@ -30,13 +30,13 @@ class OnlineTactician:
                 )
             self._online_model.partial_fit(X_last, y, classes=self._online_classes, sample_weight=sample_w)
             self._sgd_update_count += 1
-            
-            # Atomic save
-            sgd_path = os.path.join(self._save_dir, f"{self._key}_sgd.pkl")
-            os.makedirs(self._save_dir, exist_ok=True)
-            tmp_path = sgd_path + ".tmp"
-            joblib.dump({"model": self._online_model, "count": self._sgd_update_count}, tmp_path)
-            os.replace(tmp_path, sgd_path)
+            # Atomic save (throttled)
+            if self._sgd_update_count <= 5 or self._sgd_update_count % 10 == 0:
+                sgd_path = os.path.join(self._save_dir, f"{self._key}_sgd.pkl")
+                os.makedirs(self._save_dir, exist_ok=True)
+                tmp_path = sgd_path + ".tmp"
+                joblib.dump({"model": self._online_model, "count": self._sgd_update_count}, tmp_path)
+                os.replace(tmp_path, sgd_path)
             
         return True
 
@@ -68,4 +68,5 @@ class OnlineTactician:
                 log.info(f"[Tactician] Loaded for {self._key} | updates={self._sgd_update_count}")
             except Exception as e:
                 log.warning(f"[Tactician] Load failed for {sgd_path}: {e}")
+
 

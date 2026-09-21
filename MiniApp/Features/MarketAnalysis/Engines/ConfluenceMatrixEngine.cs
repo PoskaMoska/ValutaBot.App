@@ -18,11 +18,13 @@ public record ConfluenceMatrixResult(
 
 public class ConfluenceMatrixEngine(
     MarketDataFetcher fetcher,
-    IMarketAnalyzer marketAnalyzer) : IConfluenceMatrixEngine
+    IMarketAnalyzer marketAnalyzer,
+    IAutoCalibrationEngine? autoCalib = null) : IConfluenceMatrixEngine
 {
-    // 4D Matrix
-    
-    public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
+    // 4D Matrix — fetch mode (always makes 3 HTTP requests)
+    // Named distinctly from the smart-reuse overload to make fallback behavior explicit.
+    // Only called directly when no pre-loaded candles are available.
+    private async Task<ConfluenceMatrixResult> Evaluate4DMatrixFetchAsync(
         string asset,
         string primaryTimeframe,
         bool isForex = false,
@@ -198,8 +200,8 @@ public class ConfluenceMatrixEngine(
             higherCandles == null || higherPrices == null ||
             higherCandles.Length < 10 || higherPrices.Length < 10)
         {
-            BotLogger.Info($"[Confluence 3D] Pre-loaded candles missing or too short for {asset}/{primaryTimeframe} вЂ” falling back to 3-fetch mode.");
-            return await Evaluate4DMatrixAsync(asset, primaryTimeframe, isForex, binanceSymbol);
+            BotLogger.Info($"[Confluence 3D] Pre-loaded candles missing or too short for {asset}/{primaryTimeframe} — falling back to 3-fetch mode.");
+            return await Evaluate4DMatrixFetchAsync(asset, primaryTimeframe, isForex, binanceSymbol);
         }
 
         var (microTf, primaryTf, macroTf) = Resolve3DTimeframes(primaryTimeframe);
@@ -289,7 +291,7 @@ public class ConfluenceMatrixEngine(
         catch (Exception ex)
         {
             BotLogger.Error($"[Confluence 3D] Error in 1-fetch mode for {asset}", ex);
-            return await Evaluate4DMatrixAsync(asset, primaryTimeframe, isForex, binanceSymbol);
+            return await Evaluate4DMatrixFetchAsync(asset, primaryTimeframe, isForex, binanceSymbol);
         }
     }
 
@@ -321,6 +323,30 @@ public class ConfluenceMatrixEngine(
 
         double mlScore = mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? -mlSignal.Confidence : 0);
 
+        // ── AutoCalibration: Regime-Aware Signal Weights ──────────────────────────
+        // Only activate for minute+ timeframes. Sub-minute markets have structurally
+        // low ADX and high Shannon entropy, which would misclassify them as Chaos.
+        if (!isSubMinute && autoCalib != null)
+        {
+            var regime = autoCalib.DetectMarketRegime(
+                adx: taSignal.Adx,
+                volRatio: volRatio,
+                rsi: taSignal.Rsi);
+
+            double wTa  = autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, regime);
+            double wOf  = autoCalib.GetCalibratedRegimeWeight("OrderFlow",    asset, timeframe, regime);
+            double wSmc = autoCalib.GetCalibratedRegimeWeight("SMC",          asset, timeframe, regime);
+            double wMl  = autoCalib.GetCalibratedRegimeWeight("LIGHTGBM",     asset, timeframe, regime);
+
+            taScore  *= wTa;
+            ofScore  *= wOf;
+            smcScore *= wSmc;
+            mlScore  *= wMl;
+
+            BotLogger.Info($"[AutoCalib] {asset}/{timeframe} Regime={regime} | wTA={wTa:F2} wOF={wOf:F2} wSMC={wSmc:F2} wML={wMl:F2}");
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
         bool tfConflict = mtfResult.DominantDirection != "NEUTRAL" && 
                          ((taScore > 0 && mtfResult.DominantDirection == "PUT") || 
                           (taScore < 0 && mtfResult.DominantDirection == "BUY"));
@@ -333,9 +359,11 @@ public class ConfluenceMatrixEngine(
         }
         else
         {
-            metaProb = 0.5 + (mlScore * 0.5); // Fallback
+            // ML-FALLBACK LOBOTOMY FIX: weight TA, SMC, OF, and ML when MetaLearner is offline.
+            metaProb = Math.Clamp(0.5 + (taScore * 0.2) + (smcScore * 0.2) + (ofScore * 0.1) + (mlScore * 0.2), 0.0, 1.0);
         }
 
+        // Пользовательское требование: Бот должен всегда давать сигнал (без NEUTRAL зоны)
         string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
         double finalScore = metaProb >= 0.5 ? metaProb : 1.0 - metaProb;
         
@@ -360,6 +388,7 @@ public class ConfluenceMatrixEngine(
     }
 
 }
+
 
 
 

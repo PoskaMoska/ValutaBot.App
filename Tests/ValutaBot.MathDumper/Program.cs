@@ -21,7 +21,7 @@ class Program
         int limit = 1000;
         int targetHorizon = 5; // Look ahead 5 candles
 
-        var candles = await FetchBinanceKlinsAsync(symbol, interval, limit);
+        var candles = await FetchKlinsAsync(symbol, interval, limit);
         if (candles == null || candles.Length == 0) return;
 
         var engine = new TechnicalAnalysisEngine();
@@ -140,7 +140,7 @@ class Program
         Console.WriteLine($"=== SIMULATION COMPLETE ===");
     }
 
-    private static async Task<MiniAppController.OhlcCandle[]> FetchBinanceKlinsAsync(string symbol, string interval, int limit)
+    private static async Task<MiniAppController.OhlcCandle[]> FetchKlinsAsync(string symbol, string interval, int limit)
     {
         string url = $"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}";
         using var client = new HttpClient();

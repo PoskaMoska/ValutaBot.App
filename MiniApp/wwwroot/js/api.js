@@ -1,4 +1,4 @@
-﻿import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260918_3';
+import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260918_3';
 import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js?v=20260918_3';
 
 export let priceSocket = null;
@@ -8,6 +8,9 @@ export let timeOffset = 0;
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
 export function resetSignalKey() { lastSignalKey = null; }
+
+let reconnectTimeout = null;
+let reconnectAttempts = 0;
 
 export function initPriceWebSocket() {
     closePriceWebSocket();
@@ -33,6 +36,10 @@ export function initPriceWebSocket() {
         
         priceSocket = new WebSocket(wsUrl);
 
+        priceSocket.onopen = function() {
+            reconnectAttempts = 0;
+        };
+
         priceSocket.onmessage = function(event) {
             try {
                 const data = JSON.parse(event.data);
@@ -46,8 +53,17 @@ export function initPriceWebSocket() {
             }
         };
 
-        priceSocket.onclose = function() {
+        priceSocket.onclose = function(e) {
             console.log('Price WebSocket closed');
+            if (e.code !== 1000 && reconnectAttempts < 10) {
+                const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 15000);
+                reconnectAttempts++;
+                console.log(`Reconnecting WS in ${delay}ms... (Attempt ${reconnectAttempts})`);
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = setTimeout(() => {
+                    initPriceWebSocket();
+                }, delay);
+            }
         };
 
         priceSocket.onerror = function(err) {
@@ -59,9 +75,10 @@ export function initPriceWebSocket() {
 }
 
 export function closePriceWebSocket() {
+    clearTimeout(reconnectTimeout);
     if (priceSocket) {
         try {
-            priceSocket.close();
+            priceSocket.close(1000); // 1000 means normal closure
         } catch(e) {}
         priceSocket = null;
     }
@@ -85,13 +102,14 @@ export async function executeAnalysis() {
     if (btn && btn.disabled) return;
     const sphere = document.getElementById('mainSphere');
     
+    let animFrame;
     try {
         const ed = document.getElementById('errorDisplay');
         if (ed) ed.style.display = 'none';
         clearResults();
         startStatusBar();
 
-        requestAnimationFrame(() => {
+        animFrame = requestAnimationFrame(() => {
             if (sphere) {
                 sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
                 sphere.classList.add('analyzing');
@@ -288,8 +306,8 @@ export async function executeAnalysis() {
                     dir.style.color = data.lgbmDirection === 'BUY' ? '#a78bfa' : data.lgbmDirection === 'PUT' ? '#f472b6' : 'var(--subtext)';
                 }
                 const conf = document.getElementById('mlEnsembleConf');
-                if (conf && data.lgbmConfidence) {
-                    conf.innerText = (data.lgbmConfidence * 100).toFixed(0) + '%';
+                if (conf && data.lgbmConfidence != null) {
+                    conf.innerText = Math.round(data.lgbmConfidence) + '%';
                 }
                 const rep = document.getElementById('mlEnsembleReport');
                 if (rep) {
@@ -302,7 +320,9 @@ export async function executeAnalysis() {
 
             // Confluence + Win Rate Card
             const confCard = document.getElementById('confluenceCard');
-            if (confCard) confCard.style.display = 'block';
+            const hasConfData = data.confluenceLabel || data.winRateAsset != null || data.winRateOverall != null;
+            if (confCard) confCard.style.display = hasConfData ? 'block' : 'none';
+            
             const confLabel = document.getElementById('confluenceLabel');
             if (confLabel) confLabel.innerText = data.confluenceLabel || 'Анализ';
             const goldenBadge = document.getElementById('goldenSetupBadge');
@@ -312,7 +332,7 @@ export async function executeAnalysis() {
             const wrAssetEl = document.getElementById('winRateAsset');
             if (wrAssetEl) {
                 if (data.winRateAsset != null) {
-                    const pct = Math.round(data.winRateAsset * 100);
+                    const pct = Math.round(data.winRateAsset);
                     wrAssetEl.innerText = pct + '%';
                     wrAssetEl.style.color = pct >= 55 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#f43f5e';
                 } else {
@@ -323,7 +343,7 @@ export async function executeAnalysis() {
             const wrOverallEl = document.getElementById('winRateOverall');
             if (wrOverallEl) {
                 if (data.winRateOverall != null) {
-                    const pct = Math.round(data.winRateOverall * 100);
+                    const pct = Math.round(data.winRateOverall);
                     wrOverallEl.innerText = pct + '%';
                     wrOverallEl.style.color = pct >= 55 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#f43f5e';
                 } else {
@@ -443,8 +463,9 @@ export async function executeAnalysis() {
 
         }, remainingDelay);
     } catch(e) {
+        if (animFrame) cancelAnimationFrame(animFrame);
         stopStatusBar();
-        sphere.classList.remove('analyzing');
+        if (sphere) sphere.classList.remove('analyzing');
         btn.disabled = false;
         btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';
         const catchMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${window.location.href}`;

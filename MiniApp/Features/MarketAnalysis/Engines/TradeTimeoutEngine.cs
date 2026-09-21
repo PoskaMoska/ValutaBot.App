@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace ValutaBot.MiniApp;
 
@@ -40,63 +40,61 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         double volRatio,
         SmcEngine.SmcAnalysisResult smc,
         double currentPrice,
+        ContinuousStateResult state,
         bool isForex = false)
     {
         int tfSeconds = TimeframeToSeconds(timeframe);
-        bool isSubMinute = tfSeconds < 60;
-
         int baseCandles = 3;
-        string dynamicReason = "Стандартный рынок (3 свечи).";
+        string dynamicReason = "";
 
         double lastPrice = currentPrice > 0 ? currentPrice : 1.0;
-        double normalizedAtr = atr / lastPrice;
 
-        // Dead-market threshold
-        double baseDeadMarketThreshold = isForex ? 0.000030 : 0.0005;
-        double deadMarketThreshold = baseDeadMarketThreshold * (tfSeconds / 60.0);
+        // 1. Expected Distance to overcome noise/broker latency
+        // A minimal target distance in price units. E.g., broker spread is around 1-3 pips.
+        double brokerSafeDistance = isForex ? 0.00003 : lastPrice * 0.0005; 
+        
+        // 2. Velocity evaluation
+        double velocityPerSecAbs = state != null ? Math.Abs(state.VelocityBpsPerSec) : 0; 
+        double expectedPriceVelocityPerSec = (velocityPerSecAbs * 0.0001) * lastPrice;
+        if (expectedPriceVelocityPerSec < 1e-9) expectedPriceVelocityPerSec = 1e-9;
 
-        bool isDeadMarket = atr > 0 && normalizedAtr < deadMarketThreshold;
-        bool isZeroAtr = atr <= 0;
+        // 3. Expected Time to Reach Safe Distance (in seconds)
+        double expectedSecondsToSafe = brokerSafeDistance / expectedPriceVelocityPerSec;
+        
+        // 4. Convert Expected Seconds to Candles
+        double expectedCandles = expectedSecondsToSafe / tfSeconds;
 
-        if (volRatio > 1.5)
+        // Dynamic Expiration Logic [1..4]
+        if (state != null && state.VelocityRegime != null && state.VelocityRegime.StartsWith("HYPER_ACCELERATING"))
+        {
+            baseCandles = 1;
+            dynamicReason = "HYPER_ACCELERATING -> Снайперский пробой (1 свеча).";
+        }
+        else if (expectedCandles <= 2.0 && velocityPerSecAbs > 0.5)
         {
             baseCandles = 2;
-            dynamicReason = "Высокая волатильность -> Ускорение (2 свечи).";
+            dynamicReason = $"Высокая скорость (цель за {expectedCandles:F1} св.) -> 2 свечи.";
         }
-        else if (isZeroAtr || isDeadMarket)
+        else if (expectedCandles > 4.0 || (state != null && state.VelocityRegime == "STABLE"))
         {
             baseCandles = 4;
-            dynamicReason = "Мертвый рынок -> Замедление (4 свечи).";
+            dynamicReason = $"Вязкий рынок / STABLE (цель за {expectedCandles:F1} св.) -> 4 свечи (максимум).";
         }
-        else if (smc.HasOrderBlock || smc.HasFvg)
+        else 
         {
-            baseCandles = 3;
-            dynamicReason = "SMC паттерн (OB/FVG) -> Стандарт (3 свечи).";
-        }
-        else if (volRatio < 0.8)
-        {
-            baseCandles = 3;
-            dynamicReason = "Низкая волатильность -> Стандарт (3 свечи).";
-        }
-
-        // Sub-minute floor logic
-        if (isSubMinute)
-        {
-            int minCandles = timeframe.ToLower() switch
+            if (smc.HasOrderBlock || smc.HasFvg)
             {
-                "s5"  => 4, // 20 sec min
-                "s10" => 3, // 30 sec min
-                "s15" => 3, // 45 sec min
-                "s30" => 2, // 60 sec min
-                _     => 2
-            };
-
-            if (baseCandles < minCandles)
+                baseCandles = 3;
+                dynamicReason = "SMC паттерн (структурный отскок) -> 3 свечи.";
+            }
+            else
             {
-                dynamicReason += $" | Floor: минимум {minCandles} свечи для {timeframe}.";
-                baseCandles = minCandles;
+                baseCandles = 3;
+                dynamicReason = $"Стандартный тренд (цель за {expectedCandles:F1} св.) -> 3 свечи.";
             }
         }
+        
+        baseCandles = Math.Clamp(baseCandles, 1, 4);
 
         int totalSeconds = baseCandles * tfSeconds;
         string timeoutText = FormatSeconds(totalSeconds);

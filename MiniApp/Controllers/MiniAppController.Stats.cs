@@ -48,8 +48,8 @@ public static partial class MiniAppController
                 asset     = r.Asset,
                 tf        = r.Timeframe,
                 direction = r.Direction,
-                entry     = Math.Round(r.EntryPrice, 5),
-                exit      = Math.Round(r.ExitPrice, 5),
+                entry     = r.EntryPrice,
+                exit      = r.ExitPrice,
                 pnlBps    = r.PnlBps,
                 correct   = r.WasWin,
                 at        = r.CreatedAt

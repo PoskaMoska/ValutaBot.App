@@ -35,7 +35,7 @@ public static class SmcEngine
     {
         if (candles.Length < 10)
         {
-            return new SmcAnalysisResult();
+            return new SmcAnalysisResult(false, "NONE", false, "NONE", 0, 0, 0, false, "NONE", 0, false, false, "NONE");
         }
 
         // Delegate to IndicatorCache which manages StatefulSmc instances per asset/timeframe

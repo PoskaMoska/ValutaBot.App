@@ -1,4 +1,4 @@
-﻿"""
+"""
 Two-Tier Forex Predictor.
   Tier 1 (Global Strategist):  LightGBM вЂ” retrained every 24h on up to 100k candles.
   Tier 2 (Local Tactician):    SGDClassifier вЂ” updated via partial_fit after every trade (<1ms).
@@ -334,6 +334,14 @@ class ForexPredictor:
             return "NEUTRAL", 0.5, "not-trained"
 
         try:
+            # FIX TRAIN-SERVE SKEW: Drop the volatile unclosed candle for prediction.
+            # During training, features are built from fully formed, closed candles.
+            # We must not predict using features from an actively forming candle.
+            if len(candles) > 1:
+                candles = candles[:-1]
+            if mtf_candles is not None and len(mtf_candles) > 1:
+                mtf_candles = mtf_candles[:-1]
+
             feats = build_features(candles, mtf_candles)
             if feats.empty or len(feats) < 5:
                 return "NEUTRAL", 0.5, meta.version if meta else "no-feats"
@@ -807,9 +815,16 @@ class ForexPredictor:
                 else:
                     age_hours = np.linspace(len(candles), 0, len(candles)) / 60.0 # fallback
                 
-                half_life_hours = 24.0 # 24h half-life
+                # FIX: Adaptive half-life based on dataset size to prevent "amnesia"
+                # Set half-life to 1/3 of the total dataset span, but at least 24h
+                max_age_h = age_hours.max() if len(age_hours) > 0 else 24.0
+                half_life_hours = max(24.0, max_age_h / 3.0)
+                
                 decay_rate = np.log(2) / half_life_hours
                 time_weight = np.exp(-decay_rate * age_hours)
+                
+                # Prevent weight from dropping below 0.1 so historical patterns are still learned
+                time_weight = np.clip(time_weight, 0.1, 1.0)
             except Exception as e:
                 log.warning(f"Failed to calc true time weights, falling back to linspace: {e}")
                 power = np.linspace(0, 1, len(candles))
@@ -901,6 +916,7 @@ class ForexPredictor:
 
                 if parsed_feedbacks:
                     match_count = 0
+                    used_fb_ids = set()
                     for i, orig_idx in enumerate(feat_indices_valid):
                         raw_time = candles[orig_idx].get("openTime")
                         if raw_time is None:
@@ -923,21 +939,21 @@ class ForexPredictor:
                             if diff < best_diff:
                                 best_diff, best_fb = diff, fb
 
-                        # FIX W-12: Match window was hardcoded to В±300s (5 mins).
-                        # For s5 TF, this matched one trade to 60 candles (massive noise).
-                        # Now dynamic: В±1.5 candles
-                        tf_seconds = {"s5": 5, "s15": 15, "s30": 30, "1m": 60, "5m": 300, "15m": 900}.get(self.interval, 60)
-                        max_diff = max(30, tf_seconds * 1.5)
+                        # FIX LABEL SMEARING: Match window must be strict (0.9x tf) and 1:1.
+                        tf_seconds = {"s5": 5, "s10": 10, "s15": 15, "s30": 30, "1m": 60, "m1": 60, "5m": 300, "m5": 300}.get(self.interval, 60)
+                        max_diff = tf_seconds * 0.9  # Strictly match only the closest candle
                         
                         if best_fb and best_diff < max_diff:
-                            match_count += 1
-                            sample_weights[i] = 5.0  # x5 weight (reduced from x10 to avoid over-correction)
-                            win, dir_ = best_fb["win"], best_fb["dir"]
-                            if win == 0:
-                                y[i] = 0 if dir_ == "BUY" else 1
-                            else:
-                                y[i] = 1 if dir_ == "BUY" else 0
-
+                            # Ensure this feedback is only consumed ONCE (ArgMin by distance prevents cloning)
+                            if id(best_fb) not in used_fb_ids:
+                                used_fb_ids.add(id(best_fb))
+                                match_count += 1
+                                sample_weights[i] = 5.0  # x5 weight
+                                win, dir_ = best_fb["win"], best_fb["dir"]
+                                if win == 0:
+                                    y[i] = 0 if dir_ == "BUY" else 1
+                                else:
+                                    y[i] = 1 if dir_ == "BUY" else 0
                     if match_count > 0:
                         log.info(f"[Online RL] {self._key}: matched {match_count} feedback samples by timestamp (В±5 min window) with x5 weight.")
                     else:

@@ -1,4 +1,4 @@
-import { lastPriceVal } from './api.js?v=20260913_2';
+﻿import { lastPriceVal } from './api.js?v=20260918_3';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');

@@ -47,6 +47,11 @@ public sealed class StatefulRsi
             double loss = diff < 0 ? -diff : 0;
             _avgGain = (_avgGain * (_period - 1) + gain) / _period;
             _avgLoss = (_avgLoss * (_period - 1) + loss) / _period;
+            
+            // FPU SUBNORMAL FLOAT FIX: Snap to zero
+            if (_avgGain < 1e-10) _avgGain = 0;
+            if (_avgLoss < 1e-10) _avgLoss = 0;
+            
             _count++;
         }
         // If both gain and loss are near zero — true flat market. Return neutral 50.0.
@@ -74,6 +79,7 @@ public sealed class StatefulConnorsRsi
     private const int RankPeriod = 50;
     private double[] _returnsHistory = new double[RankPeriod];
     private int _returnsCount;
+    private int _returnsIndex;
 
     /// <summary>Returns ConnorsRSI 0-100. Returns 50.0 during warm-up.</summary>
     public double Update(double price)
@@ -99,11 +105,14 @@ public sealed class StatefulConnorsRsi
 
         // Slide window
         if (_returnsCount < RankPeriod)
+        {
             _returnsHistory[_returnsCount++] = currentReturn;
+            _returnsIndex = _returnsCount % RankPeriod;
+        }
         else
         {
-            Array.Copy(_returnsHistory, 1, _returnsHistory, 0, RankPeriod - 1);
-            _returnsHistory[RankPeriod - 1] = currentReturn;
+            _returnsHistory[_returnsIndex] = currentReturn;
+            _returnsIndex = (_returnsIndex + 1) % RankPeriod;
         }
 
         _prevPrice = price;
@@ -130,8 +139,10 @@ public sealed class StatefulHma
     private readonly int _sqrtPeriod;
     private double[] _priceHistory;
     private int _priceCount;
+    private int _priceIndex;
     private double[] _diffHistory;
     private int _diffCount;
+    private int _diffIndex;
 
     public StatefulHma(int period = 9)
     {
@@ -155,39 +166,48 @@ public sealed class StatefulHma
     public double Update(double price)
     {
         if (_priceCount < _period)
+        {
             _priceHistory[_priceCount++] = price;
+            _priceIndex = _priceCount % _period;
+        }
         else
         {
-            Array.Copy(_priceHistory, 1, _priceHistory, 0, _period - 1);
-            _priceHistory[_period - 1] = price;
+            _priceHistory[_priceIndex] = price;
+            _priceIndex = (_priceIndex + 1) % _period;
         }
 
         if (_priceCount == _period)
         {
-            double diff = 2.0 * Wma(_priceHistory, _halfPeriod) - Wma(_priceHistory, _period);
+            double diff = 2.0 * Wma(_priceHistory, _priceIndex, _halfPeriod) - Wma(_priceHistory, _priceIndex, _period);
 
             if (_diffCount < _sqrtPeriod)
+            {
                 _diffHistory[_diffCount++] = diff;
+                _diffIndex = _diffCount % _sqrtPeriod;
+            }
             else
             {
-                Array.Copy(_diffHistory, 1, _diffHistory, 0, _sqrtPeriod - 1);
-                _diffHistory[_sqrtPeriod - 1] = diff;
+                _diffHistory[_diffIndex] = diff;
+                _diffIndex = (_diffIndex + 1) % _sqrtPeriod;
             }
 
             if (_diffCount == _sqrtPeriod)
-                return Wma(_diffHistory, _sqrtPeriod);
+                return Wma(_diffHistory, _diffIndex, _sqrtPeriod);
         }
         return price;
     }
 
-    private static double Wma(double[] arr, int period)
+    private static double Wma(double[] arr, int index, int period)
     {
         double sum = 0, weightSum = 0;
-        int startIndex = arr.Length - period;
+        int len = arr.Length;
+        int startIdx = (index - period + len) % len;
+        
         for (int i = 0; i < period; i++)
         {
             double w = i + 1;
-            sum       += arr[startIndex + i] * w;
+            int currIdx = (startIdx + i) % len;
+            sum       += arr[currIdx] * w;
             weightSum += w;
         }
         return weightSum > 0 ? sum / weightSum : 0;
@@ -271,6 +291,10 @@ public sealed class StatefulAtr
             return LastAtr;
         }
         _atr   = (_atr * (_period - 1) + tr) / _period;
+        
+        // FPU SUBNORMAL FLOAT FIX
+        if (_atr < 1e-10) _atr = 0;
+        
         _count++;
         LastAtr = _atr;
         return _atr;
@@ -345,6 +369,11 @@ public sealed class StatefulTrueAdx
             _smoothTr  = _smoothTr  - (_smoothTr  / _period) + tr;
             _smoothPdm = _smoothPdm - (_smoothPdm / _period) + pdm;
             _smoothMdm = _smoothMdm - (_smoothMdm / _period) + mdm;
+
+            // FPU SUBNORMAL FLOAT FIX: Snap to zero to prevent massive CPU performance degradation
+            if (_smoothTr < 1e-10) _smoothTr = 0;
+            if (_smoothPdm < 1e-10) _smoothPdm = 0;
+            if (_smoothMdm < 1e-10) _smoothMdm = 0;
         }
 
         LastPdi = _smoothTr == 0 ? 0 : 100.0 * _smoothPdm / _smoothTr;

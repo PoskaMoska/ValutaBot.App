@@ -26,7 +26,10 @@ public static class MLPythonService
     private static Process? _mlProcess; // Track to prevent zombie leaks
 
 
-    private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private static readonly JsonSerializerOptions _jsonOptions = new() { 
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower 
+    };
 
     static MLPythonService()
     {
@@ -76,7 +79,9 @@ public static class MLPythonService
         string ModelVersion,
         double? Accuracy,
         double? Auc,
-        int? NTrain
+        int? NTrain,
+        double? VarianceEstimate = null,
+        double? RawConfidence = null
     );
 
     public static void Init(string? baseUrl)
@@ -97,32 +102,61 @@ public static class MLPythonService
     }
 
     private static CancellationTokenSource? _watchdogCts;
+    private static int _isLaunching = 0; // Lock to prevent multiple spawns
 
     private static void EnsureLocalPythonServiceRunning()
     {
+        // On Railway (and any container orchestrator) the watchdog must NOT run:
+        // the orchestrator already handles process restarts via health checks.
+        // A competing C# watchdog would cause kill/restart races and prevent recovery.
+        if (IsRunningOnRailway())
+        {
+            BotLogger.Info("[MLPython] Running on Railway — skipping local process watchdog (container orchestrator handles restarts).");
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _isLaunching, 1, 0) != 0)
+            return;
+
         Task.Run(async () =>
         {
             try
             {
-                var testClient = _httpFactory?.CreateClient("MLPythonService");
-                if (testClient != null) testClient.Timeout = TimeSpan.FromSeconds(3);
-                var res = await testClient.GetAsync(new Uri($"{_baseUrl}/health"));
-                if (res.IsSuccessStatusCode)
+                try
                 {
-                    BotLogger.Info("[MLPython] Local LightGBM service is active.");
-                    StartPythonWatchdog();
-                    return;
+                    var testClient = _httpFactory?.CreateClient("MLPythonService");
+                    if (testClient != null) testClient.Timeout = TimeSpan.FromSeconds(3);
+                    var res = await testClient.GetAsync(new Uri($"{_baseUrl}/health"));
+                    if (res.IsSuccessStatusCode)
+                    {
+                        BotLogger.Info("[MLPython] Local LightGBM service is active.");
+                        StartPythonWatchdog();
+                        return;
+                    }
                 }
-            }
-            catch
-            {
-                // Not running yet -> try launching
-            }
+                catch
+                {
+                    // Not running yet -> try launching
+                }
 
-            LaunchPythonProcess();
-            StartPythonWatchdog();
+                LaunchPythonProcess();
+                StartPythonWatchdog();
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isLaunching, 0);
+            }
         });
     }
+
+    /// <summary>
+    /// Returns true when running inside Railway (or any platform that sets RAILWAY_ENVIRONMENT).
+    /// Used to disable the local Python watchdog which conflicts with container-level restarts.
+    /// </summary>
+    private static bool IsRunningOnRailway() =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_ENVIRONMENT")) ||
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_SERVICE_NAME")) ||
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_PROJECT_ID"));
 
     private static void LaunchPythonProcess()
     {
@@ -237,15 +271,26 @@ public static class MLPythonService
                     consecutiveFails = 0;
 
                     // Kill stale process
+                    bool killSuccess = true;
                     try
                     {
                         if (_mlProcess != null && !_mlProcess.HasExited)
+                        {
+                            BotLogger.Warn($"[MLPython] Watchdog killing stale Python service (PID: {_mlProcess.Id})...");
                             _mlProcess.Kill();
+                        }
                     }
-                    catch { /* best-effort */ }
+                    catch (Exception killEx) 
+                    { 
+                        BotLogger.Error($"[MLPython] Watchdog failed to kill stale Python service. Aborting relaunch to prevent zombie leak.", killEx);
+                        killSuccess = false;
+                    }
 
-                    await Task.Delay(1000, token); // brief pause before relaunch
-                    LaunchPythonProcess();
+                    if (killSuccess)
+                    {
+                        await Task.Delay(1000, token); // brief pause before relaunch
+                        LaunchPythonProcess();
+                    }
                     await Task.Delay(RestartCooldownMs, token); // wait for port binding
                 }
             }
@@ -279,12 +324,32 @@ public static class MLPythonService
         try
         {
             var binanceSymbol = MapSymbol(symbol, isForex);
-            var columnarCandles = ToColumnar(candles);
-            MarketDataColumnar? columnarMtf = mtfCandles != null && mtfCandles.Length > 0 ? ToColumnar(mtfCandles) : null;
+            
+            var mappedCandles = candles.Select(c => new {
+                openTime = new DateTimeOffset(DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc)).ToUnixTimeSeconds(),
+                open = c.Open,
+                high = c.High,
+                low = c.Low,
+                close = c.Close,
+                volume = c.Volume
+            }).ToArray();
 
-            object payload = columnarMtf != null 
-                ? new { symbol = binanceSymbol, interval = interval, candles = columnarCandles, is_forex = isForex, mtf_candles = columnarMtf }
-                : new { symbol = binanceSymbol, interval = interval, candles = columnarCandles, is_forex = isForex };
+            object? mappedMtf = null;
+            if (mtfCandles != null && mtfCandles.Length > 0)
+            {
+                mappedMtf = mtfCandles.Select(c => new {
+                    openTime = new DateTimeOffset(DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc)).ToUnixTimeSeconds(),
+                    open = c.Open,
+                    high = c.High,
+                    low = c.Low,
+                    close = c.Close,
+                    volume = c.Volume
+                }).ToArray();
+            }
+
+            object payload = mappedMtf != null 
+                ? new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex, mtf_candles = mappedMtf }
+                : new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex };
 
             byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(payload);
             using var content = new ByteArrayContent(jsonBytes);
@@ -309,12 +374,14 @@ public static class MLPythonService
             {
                 BotLogger.Info($"[MLPython] {binanceSymbol}/{interval} -> {result.Direction} (Conf: {result.Confidence:F2}) [v:{result.ModelVersion}]");
                 return new MLPythonPrediction(
-                    Direction:    result.Direction,
-                    Confidence:   result.Confidence,
-                    ModelVersion: result.ModelVersion,
-                    Accuracy:     result.Accuracy,
-                    Auc:          result.Auc,
-                    NTrain:       result.NTrain
+                    Direction:        result.Direction,
+                    Confidence:       result.Confidence,
+                    ModelVersion:     result.ModelVersion,
+                    Accuracy:         result.Accuracy,
+                    Auc:              result.Auc,
+                    NTrain:           result.NTrain,
+                    VarianceEstimate: result.VarianceEstimate,
+                    RawConfidence:    result.RawConfidence
                 );
             }
             return null;
@@ -388,8 +455,8 @@ public static class MLPythonService
             var binanceSymbol = MapSymbol(asset, isForex);
             var payload = new
             {
-                asset = binanceSymbol,
-                timeframe = timeframe,
+                symbol = binanceSymbol,   // FIXED: was 'asset'
+                interval = timeframe,     // FIXED: was 'timeframe'
                 is_forex = isForex,
                 limit = limit
             };

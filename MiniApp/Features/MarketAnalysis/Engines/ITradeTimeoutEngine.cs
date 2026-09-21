@@ -9,6 +9,7 @@ public interface ITradeTimeoutEngine
         double volRatio,
         SmcEngine.SmcAnalysisResult smc,
         double currentPrice,
+        ContinuousStateResult state,
         bool isForex = false);
 }
 

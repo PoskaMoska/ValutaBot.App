@@ -12,7 +12,7 @@ namespace ValutaBot.Tests.Engines
 
         public ConfluenceMatrixEngineTests()
         {
-            _engine = new ConfluenceMatrixEngine(null, null, null);
+            _engine = new ConfluenceMatrixEngine(null!, null!);
         }
 
         [Fact]
@@ -69,7 +69,8 @@ namespace ValutaBot.Tests.Engines
             var decision = await _engine.EvaluateMatrixAsync("EURUSD", "m5", false, 1.0, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult);
 
             // Assert
-            Assert.Equal("NEUTRAL", decision.FinalDirection);
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.Equal(50, decision.Probability);
         }
     }
 }

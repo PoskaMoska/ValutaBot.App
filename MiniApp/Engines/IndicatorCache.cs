@@ -388,6 +388,41 @@ internal sealed class IndicatorCache
         }
     }
 
+    // ── Raw (cache-bypass) methods for Gatekeeper ─────────────────────────────
+    // IMPORTANT: These methods do NOT read or write the IndicatorCache.
+    // They exist solely so ValidateMarketGatekeeper can compute ATR/ADX
+    // without poisoning the cache that ScoreTimeframe relies on.
+    // Root cause of the "Shared Cache Poisoning" bug was Gatekeeper calling
+    // GetAtr/GetAdx with 'allCandles' (including the live unclosed candle),
+    // advancing the permanent cache state and causing ScoreTimeframe to
+    // double-count the last closed candle on the very next call.
+
+    public static double ComputeAtrRaw(
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+    {
+        if (candles.Length <= period) return 0.0;
+        // Feed all but the last candle into a fresh stateful ATR
+        var atr = new StatefulAtr(period);
+        for (int i = 0; i < candles.Length - 1; i++)
+            atr.Update(candles[i].High, candles[i].Low, candles[i].Close);
+        // Apply the live (potentially unclosed) candle in a throw-away clone
+        var live = atr.Clone();
+        live.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
+        return live.LastAtr;
+    }
+
+    public static (double adx, double pdi, double mdi) ComputeAdxRaw(
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
+    {
+        if (candles.Length <= period) return (20.0, 0.0, 0.0);
+        var adx = new StatefulTrueAdx(period);
+        for (int i = 0; i < candles.Length - 1; i++)
+            adx.Update(candles[i].High, candles[i].Low, candles[i].Close);
+        var live = adx.Clone();
+        live.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
+        return (live.LastAdx, live.LastPdi, live.LastMdi);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>Count candles whose timestamp is strictly newer than lastTick.</summary>

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -78,7 +78,7 @@ public static class LatencyProbe
     /// Выполняет единичный замер RTT до TwelveData API.
     /// Использует среднее из 3 последовательных запросов для стабилизации результата.
     ///
-    /// FIX 2 (2026-09-13): Replaced Binance stub (always 200ms hardcoded) with a real HTTP
+    /// FIX 2 (2026-09-13): Replaced stub (always 200ms hardcoded) with a real HTTP
     /// probe to https://api.twelvedata.com (root — no API key required, no quota consumed).
     /// On failure: keeps the last known RTT instead of silently resetting to 200ms,
     /// so SendAtOffsetMs stays meaningful even during temporary network blips.

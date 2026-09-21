@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
@@ -53,8 +53,11 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         ml = Math.Clamp(ml, -1.0, 1.0);
 
         var w = GetOrCreateWeights(GetKey(asset, timeframe));
-        
-        double z = w[0] + (w[1] * ta) + (w[2] * of) + (w[3] * smc) + (w[4] * ml);
+        double z;
+        lock (w) // DATA RACE FIX: Read weights safely
+        {
+            z = w[0] + (w[1] * ta) + (w[2] * of) + (w[3] * smc) + (w[4] * ml);
+        }
         return 1.0 / (1.0 + Math.Exp(-z));
     }
 
@@ -82,31 +85,35 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         double penaltyMultiplier = isSubMinute ? 2.0 : 4.0;
         double lossDecay         = isSubMinute ? 0.95 : 0.85;
 
-        double p = Predict(asset, timeframe, ta, of, smc, ml, false);
-        double error = y - p;
-        
-        double lr = GetLearningRate(key);
-        if (!wasWin)
+        lock (w) // DATA RACE FIX: Mutate weights atomically
         {
-            lr *= penaltyMultiplier;
-            for (int i = 1; i < w.Length; i++) w[i] *= lossDecay; // Decay loop fixed (i=1)
-        }
-        else
-        {
-            for (int i = 1; i < w.Length; i++) w[i] *= WeightDecay; // Decay loop fixed (i=1)
-        }
+            double z = w[0] + (w[1] * ta) + (w[2] * of) + (w[3] * smc) + (w[4] * ml);
+            double p = 1.0 / (1.0 + Math.Exp(-z));
+            double error = y - p;
+            
+            double lr = GetLearningRate(key);
+            if (!wasWin)
+            {
+                lr *= penaltyMultiplier;
+                for (int i = 1; i < w.Length; i++) w[i] *= lossDecay;
+            }
+            else
+            {
+                for (int i = 1; i < w.Length; i++) w[i] *= WeightDecay;
+            }
 
-        w[0] += lr * error;         // Bias
-        w[1] += lr * error * ta;    // TA
-        w[2] += lr * error * of;    // OF
-        w[3] += lr * error * smc;   // SMC
-        w[4] += lr * error * ml;    // ML
+            w[0] += lr * error;         // Bias
+            w[1] += lr * error * ta;    // TA
+            w[2] += lr * error * of;    // OF
+            w[3] += lr * error * smc;   // SMC
+            w[4] += lr * error * ml;    // ML
 
-        // Cap L1 Norm
-        for (int i = 1; i < w.Length; i++)
-        {
-            if (w[i] > 4.0) w[i] = 4.0;
-            if (w[i] < -4.0) w[i] = -4.0;
+            // Cap L1 Norm
+            for (int i = 1; i < w.Length; i++)
+            {
+                if (w[i] > 4.0) w[i] = 4.0;
+                if (w[i] < -4.0) w[i] = -4.0;
+            }
         }
 
         _updateCounts.AddOrUpdate(key, 1, (_, v) => v + 1);
@@ -130,22 +137,32 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         catch { }
     }
 
+    private readonly System.Threading.SemaphoreSlim _saveLock = new(1, 1);
+
     private Task SaveWeightsAsync()
     {
         return Task.Run(async () =>
         {
+            if (!_saveLock.Wait(0)) return; // I/O CRASH FIX: Debounce overlapping saves
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_savePath)!);
                 var dict = new System.Collections.Generic.Dictionary<string, double[]>();
-                foreach (var kvp in _weights) dict[kvp.Key] = kvp.Value;
+                foreach (var kvp in _weights) 
+                {
+                    lock (kvp.Value) { dict[kvp.Key] = (double[])kvp.Value.Clone(); }
+                }
                 
                 string json = JsonSerializer.Serialize(dict);
-                string tmpPath = _savePath + ".tmp";
+                string tmpPath = _savePath + $".tmp.{Guid.NewGuid():N}"; // I/O CRASH FIX: Unique temp file
                 await File.WriteAllTextAsync(tmpPath, json);
                 File.Move(tmpPath, _savePath, overwrite: true);
             }
             catch { }
+            finally
+            {
+                _saveLock.Release();
+            }
         });
     }
 }

@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -96,7 +96,7 @@ public static class SignalTracker
             Direction   = direction,
             Asset       = asset,
             Timeframe   = timeframe,
-            BinanceSymbol = sym,
+            BrokerSymbol = sym,
             EntryPrice  = price,
             CreatedAt   = DateTime.UtcNow,
             VerifyAt    = verifyAt,
@@ -192,7 +192,7 @@ public static class SignalTracker
     // The legacy timer caused race conditions with the new memory-driven validator,
     // and using JSON serialization on old archive rows crashed the system (10 of Swords + 6 of Cups).
 
-    private static string MapToBinanceSymbol(string asset) =>
+    private static string MapToBrokerSymbol(string asset) =>
         asset.ToUpper()
              .Replace("OTC", "")
              .Replace("/", "")
@@ -218,7 +218,7 @@ public static class SignalTracker
         public string   Direction     { get; set; } = "";
         public string   Asset         { get; set; } = "";
         public string   Timeframe     { get; set; } = "";
-        public string   BinanceSymbol { get; set; } = "";
+        public string   BrokerSymbol  { get; set; } = "";
         public double   EntryPrice    { get; set; }
         public double?  ExitPrice     { get; set; }
         public double   PnlBps        { get; set; }

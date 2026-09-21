@@ -4,6 +4,17 @@ WORKDIR /src
 COPY . .
 # We replace net10.0 with net9.0 in Docker just in case the container only has 9.0 stable
 RUN sed -i 's/<TargetFramework>net10.0<\/TargetFramework>/<TargetFramework>net9.0<\/TargetFramework>/g' ValutaBot.App.csproj
+RUN sed -i 's/<TargetFramework>net10.0<\/TargetFramework>/<TargetFramework>net9.0<\/TargetFramework>/g' Tests/ValutaBot.Tests/ValutaBot.Tests.csproj
+
+# [CI/CD GATE] Run backend unit tests and E2E tests
+RUN dotnet test Tests/ValutaBot.Tests/ValutaBot.Tests.csproj -c Release
+RUN dotnet run --project ValutaBot.App.csproj -- --test
+
+# [CI/CD GATE] Run frontend JS tests
+RUN apt-get update && apt-get install -y nodejs npm
+RUN cd MiniApp/wwwroot/js/tests && npm install && node run-tests.js
+
+# If tests pass, publish the app
 RUN dotnet publish "ValutaBot.App.csproj" -c Release -o /app/out
 
 # Build the runtime image with ASP.NET and Python

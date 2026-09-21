@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
@@ -170,6 +170,11 @@ public static class TwelveDataWebSocketStream
             if (root.TryGetProperty("event", out var eventProp))
             {
                 string ev = eventProp.GetString() ?? "";
+
+                // HEARTBEAT SUICIDE FIX: Update liveness before returning
+                _lastTickTime = DateTime.UtcNow;
+                _wsIsAlive = true;
+
                 if (ev == "heartbeat" || ev == "subscribe-status") return; // Ignore known noise
 
                 if (ev == "price")
@@ -181,9 +186,6 @@ public static class TwelveDataWebSocketStream
 
                     _livePrices[cleanSym] = price;
                     SignalTracker._livePrices[cleanSym] = price;
-
-                    _lastTickTime = DateTime.UtcNow;
-                    _wsIsAlive = true;
 
                     _ = RealtimeTickCollector.OnPriceUpdateAsync(cleanSym, price);
                 }

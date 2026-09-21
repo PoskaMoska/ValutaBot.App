@@ -37,9 +37,9 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
 
     {
         if (prices.Length < 14 || candles.Length < 14)
-        {
-            throw new Exception($"ОТКАЗ API: Недостаточно свечей для технического анализа. Получено {prices.Length}. Нужно минимум 14.");
-        }
+        { BotLogger.Warn($"[TAEngine] Not enough candles for full analysis ({prices.Length}/14). Returning neutral score."); return (0.0, 50.0, 50.0, prices.Length > 0 ? prices[^1] : 0.0, 0.0, 0.0); }
+
+
 
         // ── Sub-minute detection ──────────────────────────────────────────────────────────
         // On s5/s10/s15/s30 RSI(14) covers only 70–420 seconds of price history.
@@ -231,8 +231,20 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         // resulting in double-counting the last closed candle and permanently warping ADX and ATR.
         var closedCandles = candles.Length > 1 ? candles.Slice(0, candles.Length - 1) : candles;
         
-        double atr = closedCandles.Length >= 15 ? ComputeAtr(asset, timeframe, closedCandles) : 0;
-        var (adx, _, _) = closedCandles.Length >= 15 ? ComputeTrueAdx(asset, timeframe, closedCandles) : (20.0, 0, 0);
+        // FIX ROOT CAUSE: Shared Cache Poisoning.
+        // Gatekeeper MUST NOT use the shared IndicatorCache (ComputeAtr / ComputeTrueAdx).
+        // Those methods advance the permanent per-(asset,tf) cache state.
+        // If Gatekeeper runs first with `allCandles` (including the unclosed live candle),
+        // ScoreTimeframe's subsequent call with `closedCandles` would see unseen=0,
+        // skip the rebuild, and double-apply the last closed candle via the "live overlay".
+        // Solution: use cache-bypassing Raw methods that compute fresh state each time
+        // without touching the shared ConcurrentDictionary entries.
+        double atr = closedCandles.Length >= 15
+            ? IndicatorCache.ComputeAtrRaw(closedCandles)
+            : 0;
+        var (adx, _, _) = closedCandles.Length >= 15
+            ? IndicatorCache.ComputeAdxRaw(closedCandles)
+            : (20.0, 0.0, 0.0);
 
         double minPrice = double.MaxValue;
         double maxPrice = double.MinValue;

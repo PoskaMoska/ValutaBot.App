@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -13,6 +13,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Polly;
 using Polly.Retry;
+using ValutaBot.App.MiniApp.Models;
 
 namespace ValutaBot.MiniApp;
 
@@ -58,7 +59,13 @@ public static partial class MiniAppController
         builder.Services.AddSingleton<IMathEngine>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IMarketAnalyzer>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IRiskGatekeeper>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
-        builder.Services.AddSingleton<IConfluenceMatrixEngine, ConfluenceMatrixEngine>();
+        // AutoCalibrationEngine — Regime-Aware Signal Weight Engine (minute+ TFs only)
+        builder.Services.AddSingleton<AutoCalibrationEngine>();
+        builder.Services.AddSingleton<IAutoCalibrationEngine>(sp => sp.GetRequiredService<AutoCalibrationEngine>());
+        builder.Services.AddSingleton<IConfluenceMatrixEngine>(sp => new ConfluenceMatrixEngine(
+            sp.GetRequiredService<MarketDataFetcher>(),
+            sp.GetRequiredService<IMarketAnalyzer>(),
+            sp.GetRequiredService<IAutoCalibrationEngine>()));
         builder.Services.AddSingleton<TradeTimeoutEngine>();
         builder.Services.AddSingleton<ITradeTimeoutEngine>(sp => sp.GetRequiredService<TradeTimeoutEngine>());
         builder.Services.AddSingleton<MonteCarloEngine>();
@@ -71,8 +78,7 @@ public static partial class MiniAppController
                 () => ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection()
             ));
 
-        // Register CQRS Handlers
-        builder.Services.AddTransient<ValutaBot.MiniApp.CQRS.Handlers.GetMarketAnalysisQueryHandler>();
+        // Register Orchestrator
         builder.Services.AddTransient<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator, ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator>();
 
         builder.Services.AddCors(options =>
@@ -97,19 +103,12 @@ public static partial class MiniAppController
         builder.Services.AddHostedService<PendingTradeVerificationService>();
         builder.Services.AddHostedService<HistoricalCandleAccumulatorService>();
         builder.Services.AddHostedService<ValutaBot.MiniApp.Services.DataRetentionService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
+        builder.Services.AddHostedService<ValutaBot.App.MiniApp.Services.SelfDiagnosticService>(); // Post-deploy self-scanner
 
-        builder.Services.AddHttpClient("Binance").AddStandardResilienceHandler(options =>
-        {
-            options.Retry.MaxRetryAttempts = botSettings.MaxHttpRetries;
-            options.Retry.Delay = TimeSpan.FromMilliseconds(botSettings.HttpRetryDelayMs);
-            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(3);
-            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(5);
-        });
         builder.Services.AddHttpClient("TwelveData").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("MLPythonService", client => 
         {
-            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? Guid.NewGuid().ToString());
         }).AddStandardResilienceHandler(options =>
         {
             options.Retry.MaxRetryAttempts = 1;
@@ -128,7 +127,6 @@ public static partial class MiniAppController
         builder.Services.AddHttpClient("MLPythonLongRunning", client =>
         {
             client.Timeout = TimeSpan.FromMinutes(12);
-            client.DefaultRequestHeaders.Add("X-Internal-Secret", Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? Guid.NewGuid().ToString());
         });
 
         builder.Services.AddRateLimiter(options =>
@@ -149,11 +147,11 @@ public static partial class MiniAppController
                 return RateLimitPartition.GetTokenBucketLimiter(fingerprint, _ =>
                     new TokenBucketRateLimiterOptions
                     {
-                        TokenLimit = 10,
+                        TokenLimit = 10000,
                         QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                         QueueLimit = 0,
                         ReplenishmentPeriod = TimeSpan.FromSeconds(2),
-                        TokensPerPeriod = 1,
+                        TokensPerPeriod = 10000,
                         AutoReplenishment = true
                     });
             });
@@ -201,328 +199,10 @@ public static partial class MiniAppController
         app.UseRateLimiter();
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
 
-        app.MapGet("/", async (HttpContext context) =>
-        {
-            context.Response.ContentType = "text/html; charset=utf-8";
-            
-            bool isNgrok = (context.Request.Host.Value ?? "").Contains("ngrok", StringComparison.OrdinalIgnoreCase);
-            if (isNgrok &&
-                !context.Request.Headers.ContainsKey("ngrok-skip-browser-warning") &&
-                !context.Request.Query.ContainsKey("ngrok_passed"))
-            {
-                string bypassScript = @"<!DOCTYPE html><html><head><script>
-                        var xhr = new XMLHttpRequest();
-                        xhr.open('GET', window.location.href, true);
-                        xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
-                        xhr.onreadystatechange = function () { if (xhr.readyState === 4) { var url = new URL(window.location.href); url.searchParams.set('ngrok_passed', '1'); window.location.href = url.toString(); } };
-                        xhr.send();
-                    </script></head><body style='background:#0d0e1e; display:flex; justify-content:center; align-items:center; height:100vh; color:#8a4bfb; font-family:sans-serif;'>Loading...</body></html>";
-                await context.Response.WriteAsync(bypassScript);
-                return;
-            }
-            await context.Response.SendFileAsync(System.IO.Path.Combine(app.Environment.WebRootPath, "index.html"));
-        });
-
-
-
-        // FIX: /api/time was called by frontend (syncTime in api.js) but never registered.
-        // Every page load produced a 404, leaving timeOffset=0 and disabling clock-drift compensation.
-        app.MapGet("/api/time", (HttpContext context) =>
-        {
-            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            return Results.Ok(new { t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
-        });
-
-        app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe) =>
-        {
-            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
-
-            if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(timeframe))
-                return Results.Json(new { error = "asset and timeframe are required" });
-
-            long userId = 0;
-            if (context.Items["userId"] is long uid) userId = uid;
-
-            var userSettings = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.GetSettingsAsync(userId);
-
-            string tf = timeframe.ToLower().Trim();
-            string assetTrimmed = asset.Trim();
-            Console.WriteLine($"[ANALYZE] {assetTrimmed} | TF: {tf} | User: {userId}");
-
-            try
-            {
-                var handler = context.RequestServices.GetRequiredService<ValutaBot.MiniApp.CQRS.Handlers.GetMarketAnalysisQueryHandler>();
-                var query = new ValutaBot.MiniApp.CQRS.Queries.GetMarketAnalysisQuery(assetTrimmed, tf);
-                query.UserSettings = userSettings; // Pass settings to the query
-                
-                var result = await handler.Handle(query, context.RequestAborted);
-                
-                // --- VOLATILITY FILTER & KELLY SIZING ---
-                double confidence = 0.5;
-                double variance = 0.0;
-                double volatility = 1.0; // Fail-safe pass
-                bool isMlOverruled = false;
-                
-                try 
-                {
-                    var resultJsonStr = JsonSerializer.Serialize(result);
-                    using var doc = JsonDocument.Parse(resultJsonStr);
-                    var root = doc.RootElement;
-                    
-                    JsonElement mlNode = default;
-                    if (root.TryGetProperty("MlAnalysis", out var n1)) mlNode = n1;
-                    else if (root.TryGetProperty("mlAnalysis", out var n2)) mlNode = n2;
-                    
-                    if (mlNode.ValueKind == JsonValueKind.Object)
-                    {
-                        if (mlNode.TryGetProperty("Confidence", out var c1)) confidence = c1.GetDouble();
-                        else if (mlNode.TryGetProperty("confidence", out var c2)) confidence = c2.GetDouble();
-                        
-                        if (mlNode.TryGetProperty("Variance", out var v1)) variance = v1.GetDouble();
-                        else if (mlNode.TryGetProperty("variance", out var v2)) variance = v2.GetDouble();
-                    }
-                    else
-                    {
-                        if (root.TryGetProperty("Confidence", out var c1)) confidence = c1.GetDouble();
-                        else if (root.TryGetProperty("confidence", out var c2)) confidence = c2.GetDouble();
-                        
-                        if (root.TryGetProperty("Variance", out var v1)) variance = v1.GetDouble();
-                        else if (root.TryGetProperty("variance", out var v2)) variance = v2.GetDouble();
-                    }
-                    
-                    JsonElement taNode = default;
-                    if (root.TryGetProperty("TechnicalAnalysis", out var t1)) taNode = t1;
-                    else if (root.TryGetProperty("technicalAnalysis", out var t2)) taNode = t2;
-                    
-                    if (taNode.ValueKind == JsonValueKind.Object)
-                    {
-                        if (taNode.TryGetProperty("Atr", out var a1)) volatility = a1.GetDouble();
-                        else if (taNode.TryGetProperty("atr", out var a2)) volatility = a2.GetDouble();
-                    }
-                    else
-                    {
-                        if (root.TryGetProperty("Atr", out var a1)) volatility = a1.GetDouble();
-                        else if (root.TryGetProperty("atr", out var a2)) volatility = a2.GetDouble();
-                        else if (root.TryGetProperty("AtrNorm", out var an1)) volatility = an1.GetDouble();
-                        else if (root.TryGetProperty("atrNorm", out var an2)) volatility = an2.GetDouble();
-                    }
-
-                    string overallDir = "";
-                    if (root.TryGetProperty("Action", out var actProp)) overallDir = actProp.GetString() ?? "";
-                    else if (root.TryGetProperty("Direction", out var dirProp)) overallDir = dirProp.GetString() ?? "";
-                    else if (root.TryGetProperty("action", out var actProp2)) overallDir = actProp2.GetString() ?? "";
-                    else if (root.TryGetProperty("direction", out var dirProp2)) overallDir = dirProp2.GetString() ?? "";
-
-                    string mlDir = "";
-                    if (mlNode.ValueKind == JsonValueKind.Object)
-                    {
-                        if (mlNode.TryGetProperty("Direction", out var mDir)) mlDir = mDir.GetString() ?? "";
-                        else if (mlNode.TryGetProperty("direction", out var mDir2)) mlDir = mDir2.GetString() ?? "";
-                    }
-
-                    if (!string.IsNullOrEmpty(overallDir) && overallDir != "NEUTRAL" &&
-                        !string.IsNullOrEmpty(mlDir) && mlDir != "NEUTRAL" &&
-                        !string.Equals(overallDir, mlDir, StringComparison.OrdinalIgnoreCase))
-                    {
-                        isMlOverruled = true;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[KELLY] Error extracting metrics: {ex.Message}");
-                }
-                
-                // BO Kelly Criterion
-                double payout = 0.82; 
-                double q = 1.0 - confidence;
-                double kellyPct = confidence - (q / payout);
-                double fractionalKelly = kellyPct > 0 ? kellyPct * 0.5 : 0.0;
-                
-                // Adjust Kelly by Variance
-                double adjustedKelly = Math.Max(0, fractionalKelly * (1.0 - Math.Min(variance, 1.0)));
-                
-                // Volatility Filter
-                double minVolThreshold = 0.0001;
-                bool volFilterPassed = volatility >= minVolThreshold;
-                if (!volFilterPassed) 
-                {
-                    adjustedKelly = 0.0;
-                }
-                
-                // Add config and latency compensation data to the result for the frontend
-                var finalResult = new
-                {
-                    result = result,
-                    config = new 
-                    {
-                        ml = userSettings.EnableMl,
-                        smc = userSettings.EnableSmc,
-                        of = userSettings.EnableOf
-                    },
-                    risk_management = new
-                    {
-                        kelly_percentage = Math.Round(adjustedKelly * 100.0, 2),
-                        volatility_filter_passed = volFilterPassed,
-                        variance_penalty = variance,
-                        volatility_value = volatility
-                    },
-                    ui_flags = new 
-                    {
-                        is_ml_overruled = isMlOverruled,
-                        warning_message = isMlOverruled ? "⚠️ Консенсус (TA+OF) перевесил сигнал Нейросети" : ""
-                    },
-                    // Pre-execution latency compensation:
-                    latency_ms = (int)Math.Round(LatencyProbe.LastRttMs),
-                    send_at_offset_ms = LatencyProbe.SendAtOffsetMs
-                };
-
-                var options = new JsonSerializerOptions
-                {
-                    NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
-                };
-                var json = JsonSerializer.Serialize(finalResult, options);
-                return Results.Content(json, "application/json", Encoding.UTF8);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[API ERR] /api/analyze failed: {ex}");
-                return Results.Json(new
-                {
-                    error = ex.Message
-                });
-            }
-        }).RequireRateLimiting("Global");
-
-        app.MapGet("/api/chart-ohlc", async Task<IResult> (HttpContext context, string? asset, string? timeframe, ValutaBot.MiniApp.MarketDataFetcher fetcher) =>
-        {
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
-
-            if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(timeframe))
-                return Results.Json(Array.Empty<OhlcCandle>());
-            try
-            {
-                string clean = ValutaBot.MiniApp.AssetSanitizer.Sanitize(asset);
-                DayOfWeek day = DateTime.UtcNow.DayOfWeek;
-                string? symbol = ValutaBot.MiniApp.AssetSanitizer.MapSymbolByDayOfWeek(clean, day);
-                var ohlc = await fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, asset, 30);
-                var payload = (ohlc ?? Array.Empty<OhlcCandle>())
-                    .TakeLast(30)
-                    .Select(c => new
-                    {
-                        open = c.Open,
-                        high = c.High,
-                        low = c.Low,
-                        close = c.Close,
-                        time = c.Timestamp != default ? new DateTimeOffset(c.Timestamp).ToUnixTimeSeconds() : 0
-                    }).ToArray();
-                return Results.Json(payload);
-            }
-            catch
-            {
-                return Results.Json(Array.Empty<object>());
-            }
-        }).RequireRateLimiting("Global");
-
-        app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
-        app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
-
-        // Internal endpoint for ML service -> Telegram admin notifications
-        app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
-        {
-            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? Guid.NewGuid().ToString();
-            if (!context.Request.Headers.TryGetValue("X-Internal-Secret", out var providedSecret) || providedSecret != expectedSecret)
-            {
-                BotLogger.Warn($"[Security] Blocked unauthorized access to /notify-admins from {context.Connection.RemoteIpAddress}");
-                return Results.Json(new { error = "Forbidden" }, statusCode: 403);
-            }
-
-            try
-            {
-                var body = await System.Text.Json.JsonSerializer.DeserializeAsync<NotifyAdminsRequest>(
-                    context.Request.Body,
-                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }
-                );
-                if (body == null || string.IsNullOrWhiteSpace(body.Message))
-                    return Results.Json(new { error = "empty message" }, statusCode: 400);
-
-                await TelegramBotService.SendMessageToAdmins(body.Message);
-                return Results.Json(new { ok = true });
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Error("[InternalNotify] Error", ex);
-                return Results.Json(new { error = ex.Message }, statusCode: 500);
-            }
-        });
-
-        app.MapGet("/api/fear-greed", async Task<IResult> (HttpContext context) =>
-        {
-            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
-
-            var fng = await GetFearGreedIndex();
-            return Results.Json(fng);
-        });
-
-        /* Postback Endpoint */
-        app.MapGet("/api/postback", async Task<IResult> (HttpContext context) =>
-        {
-            var query = context.Request.Query;
-            
-            // SECURITY: Verify Postback Secret
-            string expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET") ?? Guid.NewGuid().ToString();
-            string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
-            
-            if (string.IsNullOrEmpty(providedSecret) || providedSecret != expectedSecret)
-            {
-                BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
-                return Results.Unauthorized();
-            }
-
-            string pocketId = query.TryGetValue("pocketId", out var pVal) ? pVal.ToString().Trim() : "";
-            string status = query.TryGetValue("status", out var sVal) ? sVal.ToString().Trim().ToLower() : "";
-            
-            double deposit = 0;
-            if (query.TryGetValue("deposit", out var dVal))
-            {
-                double.TryParse(dVal.ToString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out deposit);
-            }
-
-            long chatId = 0;
-            if (query.TryGetValue("chatId", out var cVal))
-            {
-                long.TryParse(cVal.ToString(), out chatId);
-            }
-
-            if (string.IsNullOrEmpty(pocketId))
-            {
-                return Results.BadRequest(new { success = false, error = "pocketId is required" });
-            }
-
-            BotLogger.Info($"[Postback] Verified Postback: pocketId={pocketId}, chatId={chatId}, status={status}, deposit={deposit}");
-
-            await TelegramBotService.ProcessPostback(chatId, pocketId, status, deposit);
-
-            return Results.Ok(new { success = true, message = "Postback processed successfully" });
-        });
+        RegisterRoutes(app);
 
         app.Run($"http://0.0.0.0:{port}");
     }
-    private static string? LowerTf(string tf) => tf.ToLower() switch
-    {
-        "m1" => null, // Prevents duplicate fetching of 1m candles for lower TF
-        "m2" => "m1", "m3" => "m1",
-        "m5" => "m1", "m15" => "m5", "m30" => "m15",
-        "h1" => "m30", "h4" => "h1",
-        "d1" => "h4", _ => null
-    };
 
     private static async Task<object> GetFearGreedIndex()
     {

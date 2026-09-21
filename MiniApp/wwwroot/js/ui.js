@@ -1,4 +1,4 @@
-﻿import { lastPriceVal } from './api.js?v=20260918_3';
+import { lastPriceVal } from './api.js?v=20260920_1';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');
@@ -63,7 +63,6 @@ export function clearResults() {
     safeSetStyle('reasoningCard', 'display', 'none');
     safeSetStyle('newsCard', 'display', 'none');
     safeSetStyle('welcomeSec', 'display', 'flex');
-    safeSetStyle('topCategories', 'display', 'none');
     document.querySelectorAll('.res-card').forEach(c => c.classList.remove('flash'));
 }
 

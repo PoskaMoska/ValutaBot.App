@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
-using ValutaBot.MiniApp.CQRS.Handlers;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using ValutaBot.App.MiniApp.Services;
+using ValutaBot.App.MiniApp.Models;
 
 namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 
@@ -19,9 +21,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private readonly IMathEngine _mathEngine;
     private readonly IMarketAnalyzer _marketAnalyzer;
     private readonly IConfluenceMatrixEngine _cmEngine;
-        private readonly ITradeTimeoutEngine _timeoutEngine;
+    private readonly ITradeTimeoutEngine _timeoutEngine;
     private readonly IMonteCarloEngine _mcEngine;
     private readonly TradingBotSettings _settings;
+    private readonly ILogger<MarketAnalysisOrchestrator> _logger;
 
     public MarketAnalysisOrchestrator(
         MarketDataFetcher fetcher,
@@ -31,7 +34,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         IConfluenceMatrixEngine cmEngine,
         ITradeTimeoutEngine timeoutEngine,
         IMonteCarloEngine mcEngine,
-        Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings
+        Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings,
+        ILogger<MarketAnalysisOrchestrator> logger
     )
     {
         _fetcher = fetcher;
@@ -42,6 +46,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _timeoutEngine = timeoutEngine;
         _mcEngine = mcEngine;
         _settings = settings.Value;
+        _logger = logger;
     }
 
     private double GetSafeLimit(double value)
@@ -52,8 +57,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         return value;
     }
 
-    public async Task<object> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null)
+    public async Task<AnalysisResponseDto> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null)
     {
+        var sw = Stopwatch.StartNew();
+        string traceId = Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
+        _logger.LogInformation("[TRACE {TraceId}] Analysis started for Asset: {Asset}, TF: {Timeframe}", traceId, asset, timeframe);
+
         // 1. Sanitize (Immutable Step)
         string cleanAsset = asset.Replace(" OTC", "").Replace("OTC", "").Trim();
         string clean = AssetSanitizer.Sanitize(cleanAsset);
@@ -65,9 +74,14 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         int limit = (tfLower.StartsWith("s") || tfLower.StartsWith("m1") || tfLower.StartsWith("m5")) ? 160 : 200;
 
         // 2. Fetch Data (Locals only, no class fields)
+        var fetchSw = Stopwatch.StartNew();
         var candles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, cleanAsset, limit);
         if (candles == null || candles.Length == 0)
+        {
+            _logger.LogWarning("[TRACE {TraceId}] Failed to fetch data after {Ms}ms", traceId, fetchSw.ElapsedMilliseconds);
             throw new Exception("Не удалось получить данные от API.");
+        }
+        _logger.LogInformation("[TRACE {TraceId}] Data fetched: {Count} candles in {Ms}ms", traceId, candles.Length, fetchSw.ElapsedMilliseconds);
 
         double[] mainPrices = candles.Select(c => c.Close).ToArray();
         double currentLivePrice = mainPrices[^1];
@@ -82,7 +96,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         // 3. Risk Gatekeeper
         var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(cleanAsset, timeframe, mainPrices, candles);
         if (!gatekeeper.IsTradeable)
+        {
+            _logger.LogWarning("[TRACE {TraceId}] Risk Gatekeeper blocked trade: {Reason}", traceId, gatekeeper.Reason);
             throw new Exception(gatekeeper.Reason);
+        }
 
         // 4. Continuous State
         var state = ContinuousStateEngine.EvaluateContinuousState(mainPrices, cleanAsset, timeframe);
@@ -98,6 +115,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             : Array.Empty<MiniAppController.OhlcCandle>();
 
         // 6. Engines (Parallel)
+        var engSw = Stopwatch.StartNew();
         var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, candles, currentLivePrice));
         var ofTask = Task.Run(() => OrderFlowEngine.AnalyzeOrderFlow(cleanAsset, timeframe, closedCandles, currentLivePrice));
         // TA Scoring
@@ -117,6 +135,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         await Task.WhenAll(smcTask, ofTask);
         var smcResult = await smcTask;
         var ofResult = await ofTask;
+        
+        _logger.LogInformation("[TRACE {TraceId}] Engines finished in {Ms}ms. TA={TAScore:F2}, SMC={SMCDir}, OF={OFScore:F2}, ML={MLDir}({MLConf:F0}%)", 
+            traceId, engSw.ElapsedMilliseconds, taResult.score, smcResult.BosDirection, ofResult.ScoreContribution, lgbmDir, lgbmConf);
 
         // 7. Matrix & Consensus
         double conflictPenalty = 1.0;
@@ -137,8 +158,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
 
+        _logger.LogInformation("[TRACE {TraceId}] Consensus reached: {Dir} ({Prob}%). Total pipeline time: {Ms}ms", 
+            traceId, consensus.FinalDirection, consensus.Probability, sw.ElapsedMilliseconds);
+
         // 8. Final Formatting & UI Fix
-        var timeout = _timeoutEngine.CalculateTimeout(cleanAsset, timeframe, mainAtr, 1.0, smcResult, currentLivePrice, isForex);
+        var timeout = _timeoutEngine.CalculateTimeout(cleanAsset, timeframe, mainAtr, 1.0, smcResult, currentLivePrice, state, isForex);
         var mc = new MonteCarloResult(1000, 0, 0, 0, "", "", ""); // Placeholder
 
         // FIX: Передаём направления каждого источника для per-source калибровки
@@ -188,7 +212,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
         else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
 
-        return new {
+        return new AnalysisResponseDto
+        {
             tfConflict = conflictPenalty < 1.0,
             uiMarketSession = uiMarketSession,
             uiMarketPhase = uiMarketPhase,
@@ -198,7 +223,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             duration = timeout.TimeoutText,
             expiryCandles = timeout.TimeoutCandles,
             adaptiveReasoning = consensus.CombinedReasoningText,
-            taDirection = consensus.FinalTotalScore > 0.02 ? "BUY" : consensus.FinalTotalScore < -0.02 ? "PUT" : "NEUTRAL",
+            taDirection = consensus.TaScore > 0.02 ? "BUY" : consensus.TaScore < -0.02 ? "PUT" : "NEUTRAL",
             taConfidence = (int)Math.Clamp(Math.Abs(consensus.TaScore * 100), 0, 100),
             ofDirection = ofSignal.ScoreContribution > 0.02 ? "BUY" : ofSignal.ScoreContribution < -0.02 ? "PUT" : "NEUTRAL",
             ofConfidence = (int)Math.Clamp(Math.Abs(ofSignal.ScoreContribution * 100), 0, 100),

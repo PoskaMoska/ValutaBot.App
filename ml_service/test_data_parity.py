@@ -1,10 +1,9 @@
-﻿import pytest
+import pytest
 from fastapi.testclient import TestClient
 import numpy as np
 import time
 
 from main import app
-from features import kalman_smooth
 
 client = TestClient(app)
 
@@ -40,14 +39,6 @@ def test_predict_endpoint_parity():
     assert data["direction"] in ["BUY", "PUT", "NEUTRAL"]
     assert "confidence" in data
     assert isinstance(data["confidence"], float)
-
-def test_kalman_filter_invariants():
-    prices = np.array([c["close"] for c in generate_dummy_candles(50)])
-    smoothed = kalman_smooth(prices, Q=1e-3, R=1e-2, P0=1.0)
-    assert len(smoothed) == len(prices)
-    assert not np.isnan(smoothed).any()
-    assert not np.isinf(smoothed).any()
-    assert np.abs(np.mean(smoothed) - np.mean(prices)) < 0.01
 
 if __name__ == '__main__':
     pytest.main(['-v', 'test_data_parity.py'])

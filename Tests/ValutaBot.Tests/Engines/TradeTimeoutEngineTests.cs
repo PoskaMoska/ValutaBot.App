@@ -39,7 +39,7 @@ namespace ValutaBot.Tests.Engines
                 var smcResult = new SmcEngine.SmcAnalysisResult { HasOrderBlock = isSmc };
                 
                 // Get dynamic timeout
-                int dynamicCandles = _engine.CalculateTimeout("EURUSDT", "m5", atr, volRatio, smcResult, 1.1000).TimeoutCandles;
+                int dynamicCandles = _engine.CalculateTimeout("EURUSDT", "m5", atr, volRatio, smcResult, 1.1000, null!).TimeoutCandles;
                 int staticCandles = 15; // Hardcoded old way
 
                 // When does the trade naturally resolve?

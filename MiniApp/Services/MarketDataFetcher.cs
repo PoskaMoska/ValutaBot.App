@@ -279,7 +279,7 @@ public class MarketDataFetcher
         return finalCandles;
     }
 
-    public virtual async Task<(double[] prices, double[] volumes)> FetchBinanceWithFallback(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
+    public virtual async Task<(double[] prices, double[] volumes)> FetchPricesAndVolumesAsync(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         var candles = await FetchOhlcWithFallbackAsync(symbol, rawInterval, originalAsset, limit);
         var prices = candles.Select(c => c.Close).ToArray();

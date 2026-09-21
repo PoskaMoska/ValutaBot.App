@@ -62,20 +62,18 @@ public class PendingTradeVerificationService : BackgroundService
         try
         {
             string cleanAsset = record.Asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
-            DateTime targetStart = record.VerifyAt.AddSeconds(-5);
-            
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
             var candle = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<dynamic>(conn, @"
                 SELECT close_price as Close
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
-                  AND open_time >= @Start
-                ORDER BY open_time ASC LIMIT 1
+                  AND open_time <= @VerifyAt
+                ORDER BY open_time DESC LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
-                Start = targetStart.ToString("O")
+                VerifyAt = record.VerifyAt.ToString("O")
             });
 
             if (candle != null)

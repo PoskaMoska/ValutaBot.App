@@ -1,32 +1,42 @@
-using System.Threading.Tasks;
+﻿using System.Threading.Tasks;
 
 namespace ValutaBot.MiniApp;
 
 // Signal records for unified confluence scoring
 public record TaSignal(double Score, double Confidence, double Rsi, double Ema, double Volatility, double Atr, double Adx = 20.0);
+
+// D2-3 FIX: SmcSignal strings are guaranteed non-null at construction via Orchestrator sanitization.
+// All comparison sites use == against known literals — null-safe by C# spec (null != "BULLISH_BOS").
+// However canonical empty value is "" (not null, not "NONE") — enforced at Orchestrator call site.
 public record SmcSignal(string BosDirection, string SweepDirection, string OrderBlockType, string FvgType, string Reasoning);
+
 public record OrderflowSignal(double ScoreContribution, string Description);
+
+// D2-2 FIX: MlSignal.Confidence is ALWAYS in [0..1] (Python confidence, not a logit).
+// Enforcement happens at Orchestrator level before construction. This comment is the contract.
 public record MlSignal(string Direction, double Confidence, double? Accuracy, string ModelVersion);
+
 public record StateSignal(string Regime, double VelocityBpsPerSec, double MomentumContribution);
 
 public interface IConfluenceMatrixEngine
 {
-    // FIX PRIORITY-1: Перегрузка с уже загруженными свечами (избегает 3 лишних HTTP-запроса).
-    // primaryCandles и macroCandles уже загружены Orchestrator'ом — передаём их напрямую.
-    // Только microTF требует отдельного fetch (1 запрос вместо 3).
+    // D2-1 FIX: Parameter names now exactly match ConfluenceMatrixEngine implementation.
+    // Old names 'primaryCandles/macroCandles' renamed to 'currentCandles/higherCandles'.
+    // This prevents CS1739 errors if callers use named arguments, and removes the
+    // semantic confusion between 'macro' (long-term TF) vs 'higher' (one step up).
     Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
         string asset,
         string primaryTimeframe,
         bool isForex = false,
         string? binanceSymbol = null,
-        MiniAppController.OhlcCandle[]? primaryCandles = null,
-        double[]? primaryPrices = null,
-        double[]? primaryVolumes = null,
-        MiniAppController.OhlcCandle[]? macroCandles = null,
-        double[]? macroPrices = null,
-        double[]? macroVolumes = null);
+        MiniAppController.OhlcCandle[]? currentCandles = null,
+        double[]? currentPrices = null,
+        double[]? currentVolumes = null,
+        MiniAppController.OhlcCandle[]? higherCandles = null,
+        double[]? higherPrices = null,
+        double[]? higherVolumes = null);
 
-    // The new unified Confluence hub method
+    // The unified Confluence hub method
     Task<ConsensusDecision> EvaluateMatrixAsync(
         string asset,
         string timeframe,
@@ -54,5 +64,3 @@ public record ConsensusDecision(
     double MlProb = 0.0,
     double MlScoreRaw = 0.0
 );
-
-

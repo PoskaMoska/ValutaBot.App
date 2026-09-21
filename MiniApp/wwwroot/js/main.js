@@ -1,5 +1,5 @@
-﻿import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20260918_3';
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20260918_3';
+import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20260920_1';
+import { switchResultTab, updateTrafficLight } from './ui.js?v=20260920_1';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
@@ -22,20 +22,7 @@ export function getCustomInitData() {
 export let currentAsset = 'EUR/USD OTC';
 export let currentTf = 'm1';
 
-const assetsData = {
-    fiat: {
-        otc: ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC']
-    },
-    commodities: {
-        otc: []
-    },
-    crypto: {
-        otc: []
-    },
-    stocks: {
-        otc: []
-    }
-};
+const assetsList = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
 
 function getTopAssets() {
     try {
@@ -56,19 +43,11 @@ function renderAssets(arr) {
     }).join('');
 }
 
-function changeTopCategory(el) {
-    if (!el) return;
-    el = el.closest('.top-cat-btn') || el;
-    document.querySelectorAll('.top-cat-btn').forEach(c => c.classList.remove('active'));
-    el.classList.add('active');
-    let cat = el.getAttribute('data-cat') || 'fiat';
-    if (!assetsData[cat]) cat = 'fiat';
+function initAssetGrid() {
     const gridEl = document.getElementById('assetGrid');
     if (gridEl) {
-        gridEl.innerHTML = `<div class='otc-scroll' style='grid-column:1/-1'><div class='asset-grid'>${renderAssets(assetsData[cat].otc)}</div></div>`;
+        gridEl.innerHTML = `<div class='otc-scroll' style='grid-column:1/-1'><div class='asset-grid'>${renderAssets(assetsList)}</div></div>`;
     }
-    let firstAssetEl = document.querySelector('.asset-item');
-    if (firstAssetEl) setAsset(firstAssetEl);
 }
 
 function toggleMenu(m, b) {
@@ -122,12 +101,6 @@ function handleGlobalInteraction(e) {
     const btnGet = target.closest('#btnGet');
     if (btnGet) {
         executeAnalysis();
-        return;
-    }
-
-    const catBtn = target.closest('.top-cat-btn');
-    if (catBtn) {
-        changeTopCategory(catBtn);
         return;
     }
 
@@ -188,7 +161,8 @@ document.addEventListener('click', handleGlobalInteraction);
 })();
 
 const topCatInitial = document.querySelector('.top-cat-btn');
-if (topCatInitial) changeTopCategory(topCatInitial);
+if (topCatInitial) initAssetGrid();
+else initAssetGrid();
 syncTime();
 initPriceWebSocket();
 

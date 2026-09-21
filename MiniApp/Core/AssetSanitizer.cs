@@ -15,6 +15,8 @@ public static class AssetSanitizer
             .Replace("ОТК", "") // Replace Cyrillic OTC
             .Replace("ОТС", "")
             .Replace("OTC", "")
+            .Replace("Р С›Р СћР РЋ", "") // Misencoded ОТС
+            .Replace("Р С›Р СЋР РЋ", "") // Misencoded ОТС
             .Replace(" ", "")
             .Replace("/", "")
             .Replace("-", "")
@@ -52,14 +54,14 @@ public static class AssetSanitizer
     }
 
     /// <summary>
-    /// Map normalized asset to Binance symbol on weekends or return null for TwelveData fetching.
+    /// Map normalized asset to Broker symbol on weekends or return null for TwelveData fetching.
     /// </summary>
     public static string? MapSymbolByDayOfWeek(string cleanAsset, DayOfWeek day)
     {
         bool isWeekend = day == DayOfWeek.Saturday || day == DayOfWeek.Sunday;
         if (!isWeekend) return null; // 100% TwelveData on weekdays
 
-        // On weekends, map Forex assets to their Binance equivalents (e.g., EURUSD -> EURUSDT)
+        // On weekends, map Forex assets to their crypto equivalents (e.g., EURUSD -> EURUSDT)
         if (IsForexAsset(cleanAsset))
         {
             return cleanAsset switch

@@ -8,6 +8,7 @@ namespace ValutaBot.MiniApp;
 public static class TradeOutcomeTracker
 {
     public static ValutaBot.MiniApp.Features.MarketAnalysis.Engines.IOnlineMetaLearner? MetaLearner { get; set; }
+    public static IAutoCalibrationEngine? AutoCalib { get; set; }
     private static volatile bool _initialized = false;
     private static readonly SemaphoreSlim _initSemaphore = new(1, 1);
     private static readonly SemaphoreSlim _csvSemaphore = new(1, 1); // B5-FIX: Concurrent CSV write lock
@@ -46,7 +47,7 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             var calibStates = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
             foreach (var state in calibStates)
             {
-                
+                AutoCalib?.RestoreState(state.sourceName, state.asset, state.timeframe, state.totalTrades, state.emaWinRate);
             }
             BotLogger.Info($"[TradeOutcomeTracker] Restored {calibStates.Count} EMA calibration states from PostgreSQL.");
 
@@ -86,6 +87,7 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                 OfScore = record.OfScore,
                 SmcScore = record.SmcScore,
                 MlProb = record.MlProb,
+                MlScore = record.MlScore,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };
@@ -96,17 +98,6 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
             _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
 
             bool wasCorrect = record.WasCorrect ?? false;
-            
-            // 🔥 META-LEARNER TRAINING 🔥
-            MetaLearner?.PartialFit(
-                record.Asset, 
-                record.Timeframe, 
-                record.TaScore, 
-                record.OfScore, 
-                record.SmcScore, 
-                record.MlProb, 
-                wasCorrect, 
-                record.Direction);
 
             double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
             
@@ -150,6 +141,8 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                     {
                         bool wasSourceCorrect = (kv.Value == winDirection);
                         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kv.Key, wasSourceCorrect);
+                        // Feed result back into AutoCalibrationEngine so it keeps win-rate EMA per source
+                        AutoCalib?.RecordSourceOutcome(kv.Key, record.Asset, record.Timeframe, wasSourceCorrect);
                     }
                 }
             }

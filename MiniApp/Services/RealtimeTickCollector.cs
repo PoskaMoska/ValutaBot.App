@@ -84,32 +84,49 @@ namespace ValutaBot.MiniApp
             var buffer = new List<TickEvent>(1000);
             while (await _tickChannel.Reader.WaitToReadAsync())
             {
-                buffer.Clear();
-                while (buffer.Count < 1000 && _tickChannel.Reader.TryRead(out var tick))
+                if (buffer.Count == 0)
                 {
-                    buffer.Add(tick);
+                    while (buffer.Count < 1000 && _tickChannel.Reader.TryRead(out var tick))
+                    {
+                        buffer.Add(tick);
+                    }
                 }
 
                 if (buffer.Count > 0)
                 {
+                    bool success = false;
                     try
                     {
                         using var conn = DbConnectionFactory.GetConnection();
                         await conn.OpenAsync();
                         using var tx = conn.BeginTransaction();
                         
-                        // Aggregate in-memory before saving to reduce DB commands
-                        var grouped = buffer.GroupBy(t => new { t.Asset, t.Interval, t.OpenTime })
-                            .Select(g => new {
-                                Asset = g.Key.Asset,
-                                Interval = g.Key.Interval,
-                                OpenTime = g.Key.OpenTime.ToString("o"),
-                                Open = g.First().Price,
-                                High = g.Max(t => t.Price),
-                                Low = g.Min(t => t.Price),
-                                Close = g.Last().Price,
-                                Volume = g.Count()
+                        // D1-1 FIX: Materialise each group into a List before First/Last.
+                        // Channel.CreateBounded with DropOldest evicts the oldest entries when full,
+                        // but the items already consumed into 'buffer' retain their insertion (FIFO) order.
+                        // Since Channel is SingleReader, buffer preserves the order ticks arrived from WS.
+                        // Calling g.ToList() locks in that FIFO order so First()=oldest=Open, Last()=newest=Close.
+                        var grouped = buffer
+                            .GroupBy(t => new { t.Asset, t.Interval, t.OpenTime })
+                            .Select(g =>
+                            {
+                                var ordered = g.ToList(); // FIFO insertion order = chronological
+                                return new {
+                                    Asset    = g.Key.Asset,
+                                    Interval = g.Key.Interval,
+                                    OpenTime = g.Key.OpenTime.ToString("o"),
+                                    Open     = ordered.First().Price,  // chronologically first tick
+                                    High     = ordered.Max(t => t.Price),
+                                    Low      = ordered.Min(t => t.Price),
+                                    Close    = ordered.Last().Price,   // chronologically last tick
+                                    Volume   = ordered.Count
+                                };
                             });
+
+                        // D1-3 FIX: commandTimeout=8s prevents the consumer loop from blocking
+                        // for Npgsql's default 30s ConnectTimeout when PostgreSQL is flapping.
+                        // With 8s cap: retry cycle is 8s + 0.5s delay = ~8.5s max blocked per attempt.
+                        const int DbCommandTimeoutSecs = 8;
 
                         foreach (var batchItem in grouped)
                         {
@@ -121,19 +138,29 @@ namespace ValutaBot.MiniApp
                                     low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
                                     close_price = EXCLUDED.close_price,
                                     volume      = subminute_candles.volume + EXCLUDED.volume;
-                            ", batchItem, tx);
+                            ", batchItem, tx, commandTimeout: DbCommandTimeoutSecs);
                         }
                         
                         tx.Commit();
+                        success = true;
                     }
                     catch (Exception ex)
                     {
-                        BotLogger.Warn($"[TickSync] Failed to batch save ticks: {ex.Message}");
+                        BotLogger.Warn($"[TickSync] Failed to batch save ticks: {ex.Message}. Retrying...");
+                    }
+
+                    if (success)
+                    {
+                        buffer.Clear(); // Only clear on success to prevent tick loss
                     }
                 }
                 
-                // Throttle batch commits to every 500ms
-                await Task.Delay(500);
+                // Throttle conditionally: if buffer has items (error retry), wait 500ms.
+                // If channel is empty, wait 500ms to allow batching.
+                if (buffer.Count > 0 || _tickChannel.Reader.Count == 0)
+                {
+                    await Task.Delay(500);
+                }
             }
         }
 
@@ -167,8 +194,19 @@ namespace ValutaBot.MiniApp
 
                 if (liveAcc != null)
                 {
-                    string liveOpenTimeStr = liveAcc.OpenTime.ToString("o");
-                    records.RemoveAll(r => (string)r.OpenTime == liveOpenTimeStr);
+                    // D1-4 FIX: Convert both sides to DateTime (UTC ticks) before comparing.
+                    // Old code: Convert.ToString(r.OpenTime) == liveOpenTimeStr
+                    //   → Culture-dependent: on Railway Linux (non en-US) the DB DateTime
+                    //     formats differently than "o" (ISO-8601), so RemoveAll never matched
+                    //     → liveAcc candle AND the same DB candle both appeared → duplicate last candle.
+                    DateTime liveOpenTime = liveAcc.OpenTime.ToUniversalTime();
+                    records.RemoveAll(r =>
+                    {
+                        DateTime dbTime = r.OpenTime is string s
+                            ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal)
+                            : Convert.ToDateTime(r.OpenTime).ToUniversalTime();
+                        return dbTime.Ticks == liveOpenTime.Ticks;
+                    });
                 }
 
                 int totalCount = records.Count + (liveAcc != null ? 1 : 0);
@@ -180,9 +218,18 @@ namespace ValutaBot.MiniApp
                 
                 for (int i = dbRecordsToTake - 1; i >= 0; i--)
                 {
-                    var r = records[i]; 
-                    result[resultIdx++] = new MiniAppController.OhlcCandle((double)r.Open, (double)r.High, (double)r.Low, (double)r.Close, (double)r.Volume,
-                        DateTime.Parse((string)r.OpenTime, null, System.Globalization.DateTimeStyles.AdjustToUniversal));
+                    var r = records[i];
+                    DateTime parsedTime = r.OpenTime is string s
+                        ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal)
+                        : Convert.ToDateTime(r.OpenTime);
+
+                    result[resultIdx++] = new MiniAppController.OhlcCandle(
+                        Convert.ToDouble(r.Open), 
+                        Convert.ToDouble(r.High), 
+                        Convert.ToDouble(r.Low), 
+                        Convert.ToDouble(r.Close), 
+                        Convert.ToDouble(r.Volume),
+                        parsedTime);
                 }
 
                 if (liveAcc != null && resultIdx < resultSize)

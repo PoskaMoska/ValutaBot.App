@@ -113,11 +113,13 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_prob DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN of_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN smc_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ml_prob DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN ml_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                 END $$;
 
                 CREATE TABLE IF NOT EXISTS signal_votes (
@@ -186,6 +188,10 @@ namespace ValutaBot.App.MiniApp.Data
             ");
 
             BotLogger.Info("[PostgreSQL DB] Database tables initialized successfully.");
+
+            // Wire AutoCalibrationEngine into TradeOutcomeTracker before initializing
+            // so that RestoreState() calls during Init correctly land in the engine.
+            TradeOutcomeTracker.AutoCalib = new AutoCalibrationEngine();
 
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();
