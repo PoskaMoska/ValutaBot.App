@@ -85,13 +85,34 @@ async def _train_all():
 async def lifespan(app: FastAPI):
     log.info("[Startup] Launching background pre-training for all timeframes...")
     asyncio.create_task(_train_all())
+    asyncio.create_task(_auto_crawler_loop())
     asyncio.create_task(_weekly_global_retrain_loop())
     yield
 
 
-# ┌────────────────────────────────────────────────────────────────────────┐
-# │ Weekly Global Retrain                                                  │
-# └────────────────────────────────────────────────────────────────────────┘
+# -------------------------------------------------------------------------
+#   Autonomous Background Tasks
+# -------------------------------------------------------------------------
+
+async def _auto_crawler_loop():
+    """Autonomously fetches 1m REST data to prevent database gaps."""
+    # Wait 30 seconds after startup
+    await asyncio.sleep(30)
+    
+    while True:
+        log.info("[AutoCrawler] Starting scheduled REST backfill for historical gaps.")
+        try:
+            # We import here so we don't pollute global namespace
+            import twelvedata_crawler_pg
+            loop = asyncio.get_running_loop()
+            # run_crawler is blocking, so run in executor
+            await loop.run_in_executor(None, twelvedata_crawler_pg.run_crawler)
+            log.info("[AutoCrawler] Backfill complete. Sleeping for 4 hours.")
+        except Exception as e:
+            log.error(f"[AutoCrawler] Error running crawler: {e}")
+            
+        # Run every 4 hours (ensures no gaps larger than 240 candles, perfectly safe for 5000 API limit)
+        await asyncio.sleep(4 * 3600)
 
 WEEKLY_RETRAIN_INTERVAL_H = int(os.getenv("WEEKLY_RETRAIN_INTERVAL_H", "168"))  # 7 days
 _BOT_BASE_URL = os.getenv("BOT_BASE_URL", "")   # e.g. https://valutatbot.railway.app
