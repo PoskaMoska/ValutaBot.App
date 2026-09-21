@@ -530,7 +530,7 @@ async def predict(request: Request):
     mtf_candles = data.get("mtf_candles")
     is_forex = data.get("is_forex", False)
 
-    n_candles = len(candles.get("open", [])) if candles else 0
+    n_candles = len(candles) if candles else 0
     if n_candles < 60:
         raise HTTPException(
             status_code=422,
@@ -562,10 +562,10 @@ async def predict(request: Request):
         from features import build_features
         from model import get_regime_router
         
-        # FIX: Drop volatile unclosed candle to prevent Train-Serve Skew
-        # The actively forming candle has incomplete volume/price action.
-        closed_candles = candle_dicts[:-1] if len(candle_dicts) > 1 else candle_dicts
-        closed_mtf = mtf_candle_dicts[:-1] if mtf_candle_dicts and len(mtf_candle_dicts) > 1 else mtf_candle_dicts
+        # C# already drops the actively forming unclosed candle before sending the payload.
+        # We use the payload directly to avoid double-dropping and Train-Serve skew.
+        closed_candles = candle_dicts
+        closed_mtf = mtf_candle_dicts
         
         feats = build_features(closed_candles, closed_mtf)
         if not feats.empty:
