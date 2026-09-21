@@ -5,4 +5,6 @@ scratch/
 .git/
 node_modules/
 ml_service/__pycache__/
-ml_service/data/
+ml_service/data/*.db
+ml_service/data/*.db.poisoned
+ml_service/data/models/*.pkl
