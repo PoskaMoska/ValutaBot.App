@@ -65,6 +65,27 @@ BINANCE_BASE = "https://api.binance.com"
 TWELVE_DATA_BASE = "https://api.twelvedata.com"
 TWELVE_DATA_API_KEY = os.getenv("TwelveDataApiKey") or os.getenv("TWELVE_DATA_API_KEY")
 
+RETRAIN_INTERVAL_H = 1.0  # (Original value restored for prod)
+_DEFAULT_SYMBOLS = ["EURUSD", "GBPUSD", "AUDUSD", "USDCAD", "USDCHF", "USDJPY"]
+_DEFAULT_INTERVALS = ["1m", "s30", "s15", "s10", "s5"]
+
+def parse_candle_timestamp_ms(raw_time) -> float:
+    """Pure function to safely parse heterogeneous DB timestamps into milliseconds.
+       Crucial for SOLID testability of the staleness check."""
+    if isinstance(raw_time, str):
+        import pandas as pd
+        try:
+            return pd.to_datetime(raw_time, utc=True).timestamp() * 1000.0
+        except Exception:
+            return 0.0
+    elif hasattr(raw_time, "timestamp"):
+        return raw_time.timestamp() * 1000.0
+    else:
+        try:
+            return float(raw_time)
+        except Exception:
+            return 0.0
+
 TD_INTERVAL_MAP = {
     "1m": "1min", "2m": "2min", "3m": "5min", "5m": "5min",
     "10m": "10min", "15m": "15min", "30m": "30min", "45m": "45min",
@@ -804,20 +825,7 @@ class ForexPredictor:
             # If the newest candle is older than 24 hours, skip training to prevent
             # fitting on stale market conditions while we wait for backfill/live data.
             last_time_raw = candles[-1].get("openTime", 0)
-            last_time_ms = 0
-            if isinstance(last_time_raw, str):
-                import pandas as pd
-                try:
-                    last_time_ms = pd.to_datetime(last_time_raw, utc=True).timestamp() * 1000.0
-                except Exception:
-                    pass
-            elif hasattr(last_time_raw, "timestamp"):
-                last_time_ms = last_time_raw.timestamp() * 1000.0
-            else:
-                try:
-                    last_time_ms = float(last_time_raw)
-                except Exception:
-                    pass
+            last_time_ms = parse_candle_timestamp_ms(last_time_raw)
                     
             if last_time_ms > 0:
                 age_hours = (time.time() - (last_time_ms / 1000.0)) / 3600.0
