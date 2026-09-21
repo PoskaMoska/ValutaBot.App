@@ -809,6 +809,17 @@ class ForexPredictor:
                 if age_hours > 24.0:
                     msg = f"Data too old ({age_hours:.1f}h). Waiting for crawler."
                     log.warning(f"[Train] Aborting training for {self._key}: {msg}")
+                    
+                    # Notify Admins via Telegram
+                    bot_url = os.getenv("BOT_BASE_URL", "")
+                    secret = os.getenv("INTERNAL_API_SECRET", "default_secret")
+                    if bot_url:
+                        tg_msg = f"🚨 <b>Сбой автоматического переобучения ({self.symbol})</b>\nОбучение отменено. Самая свежая свеча в базе старше 24 часов (возраст: {age_hours:.1f} ч). Проверьте работу краулера и лимиты TwelveData!"
+                        try:
+                            requests.post(f"{bot_url}/internal/notify-admins", json={"Message": tg_msg}, headers={"X-Internal-Secret": secret}, timeout=5)
+                        except Exception as e:
+                            log.error(f"[Train] Failed to send Telegram alert: {e}")
+                            
                     return {"error": msg}
 
             feats = build_features(candles, mtf_candles)
