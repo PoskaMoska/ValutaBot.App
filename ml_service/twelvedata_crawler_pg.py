@@ -60,7 +60,7 @@ def run_crawler():
 
     for symbol in TWELVEDATA_PAIRS:
         last_time = get_latest_time(cursor, symbol)
-        start_str = last_time.strftime("%Y-%m-%d %H:%M:%S") if last_time else None
+        start_str = str(last_time) if last_time else None
         
         print(f"Fetching {symbol} 1m history starting from {start_str or 'origin'}...")
         candles = fetch_batch(symbol, start_str)
