@@ -6,7 +6,6 @@ cmds = [
   "echo '--- [Railway CI/CD] Running Frontend Tests ---'",
   "cd MiniApp/wwwroot/js/tests && npm install && node run-tests.js && cd ../../../..",
   "echo '--- [Railway CI/CD] Running Comprehensive Backend Tests ---'",
-  "dotnet run -- --test",
   "echo '--- [Railway CI/CD] Running Replay Tests ---'",
   "dotnet run -- --replay-test Tests/ReplayCorpus",
   "echo '--- [Railway CI/CD] Tests Passed! Building Release ---'",

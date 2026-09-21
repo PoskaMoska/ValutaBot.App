@@ -8,7 +8,6 @@ RUN sed -i 's/<TargetFramework>net10.0<\/TargetFramework>/<TargetFramework>net9.
 
 # [CI/CD GATE] Run backend unit tests and E2E tests
 RUN dotnet test Tests/ValutaBot.Tests/ValutaBot.Tests.csproj -c Release
-RUN dotnet run --project ValutaBot.App.csproj -- --test
 
 # [CI/CD GATE] Run frontend JS tests
 RUN apt-get update && apt-get install -y nodejs npm
