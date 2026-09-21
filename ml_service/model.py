@@ -124,6 +124,36 @@ def to_twelvedata_symbol(symbol: str) -> str:
 
 
 
+# Parameters optimized for high-noise, sub-minute data (stronger regularization)
+LGBM_PARAMS_SUBMINUTE = {
+    'objective': 'binary',
+    'metric': 'binary_logloss',
+    'boosting_type': 'gbdt',
+    'learning_rate': 0.01,
+    'num_leaves': 15,
+    'max_depth': 5,
+    'min_child_samples': 50,
+    'n_estimators': 150,
+    'random_state': 42,
+    'verbose': -1,
+    'n_jobs': -1
+}
+
+# Parameters optimized for standard timeframes (1m, 5m, 1h, etc.)
+LGBM_PARAMS_STANDARD = {
+    'objective': 'binary',
+    'metric': 'binary_logloss',
+    'boosting_type': 'gbdt',
+    'learning_rate': 0.05,
+    'num_leaves': 31,
+    'max_depth': -1,
+    'min_child_samples': 20,
+    'n_estimators': 200,
+    'random_state': 42,
+    'verbose': -1,
+    'n_jobs': -1
+}
+
 def get_lgbm_params(interval: str) -> dict:
     if interval.lower().startswith('s'):
         return LGBM_PARAMS_SUBMINUTE
