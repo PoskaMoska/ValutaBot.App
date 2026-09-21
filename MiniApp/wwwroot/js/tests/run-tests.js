@@ -137,7 +137,7 @@ try {
 
 async function runTest() {
     let passed = 0;
-    let total = 14; // 12 for success, 2 for error
+    let total = 16; // 14 for success, 2 for error
 
     function assertEq(name, actual, expected) {
         if (actual === expected) {
