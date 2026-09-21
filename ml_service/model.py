@@ -803,7 +803,22 @@ class ForexPredictor:
             # --- STALENESS CHECK (Защита от устаревших данных) ---
             # If the newest candle is older than 24 hours, skip training to prevent
             # fitting on stale market conditions while we wait for backfill/live data.
-            last_time_ms = candles[-1].get("openTime", 0)
+            last_time_raw = candles[-1].get("openTime", 0)
+            last_time_ms = 0
+            if isinstance(last_time_raw, str):
+                import pandas as pd
+                try:
+                    last_time_ms = pd.to_datetime(last_time_raw, utc=True).timestamp() * 1000.0
+                except Exception:
+                    pass
+            elif hasattr(last_time_raw, "timestamp"):
+                last_time_ms = last_time_raw.timestamp() * 1000.0
+            else:
+                try:
+                    last_time_ms = float(last_time_raw)
+                except Exception:
+                    pass
+                    
             if last_time_ms > 0:
                 age_hours = (time.time() - (last_time_ms / 1000.0)) / 3600.0
                 if age_hours > 24.0:
