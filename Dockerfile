@@ -10,7 +10,9 @@ RUN sed -i 's/<TargetFramework>net10.0<\/TargetFramework>/<TargetFramework>net9.
 RUN dotnet test Tests/ValutaBot.Tests/ValutaBot.Tests.csproj -c Release
 
 # [CI/CD GATE] Run frontend JS tests
-RUN apt-get update && apt-get install -y nodejs npm
+RUN apt-get update && apt-get install -y curl && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs
 RUN cd MiniApp/wwwroot/js/tests && npm install && node run-tests.js
 
 # If tests pass, publish the app
