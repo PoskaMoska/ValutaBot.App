@@ -800,6 +800,17 @@ class ForexPredictor:
             if len(candles) < 150:
                 return {"error": f"Not enough candles: {len(candles)} < 150"}
 
+            # --- STALENESS CHECK (Защита от устаревших данных) ---
+            # If the newest candle is older than 24 hours, skip training to prevent
+            # fitting on stale market conditions while we wait for backfill/live data.
+            last_time_ms = candles[-1].get("openTime", 0)
+            if last_time_ms > 0:
+                age_hours = (time.time() - (last_time_ms / 1000.0)) / 3600.0
+                if age_hours > 24.0:
+                    msg = f"Data too old ({age_hours:.1f}h). Waiting for crawler."
+                    log.warning(f"[Train] Aborting training for {self._key}: {msg}")
+                    return {"error": msg}
+
             feats = build_features(candles, mtf_candles)
             if feats.empty or len(feats) < 100:
                 return {"error": "Feature engineering yielded too few rows"}
