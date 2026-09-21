@@ -100,7 +100,7 @@ public class SelfDiagnosticService : BackgroundService
                     if (!_mlWasHealthy)
                     {
                         _mlWasHealthy = true;
-                        await TelegramBotService.SendMessageToAdmins("✅ <b>ML Python Service Restored</b>\nNeural Network is online again.");
+                        await TelegramBotService.SendMessageToAdmins("✅ <b>Нейросеть снова в строю</b>\nСвязь с сервером машинного обучения успешно восстановлена.");
                     }
                 }
                 else
@@ -114,7 +114,7 @@ public class SelfDiagnosticService : BackgroundService
             if (_mlWasHealthy)
             {
                 _mlWasHealthy = false;
-                await TelegramBotService.SendMessageToAdmins($"🚨 <b>ML Python Service Unreachable</b>\nBackend self-scan failed to reach Neural Network:\n<code>{ex.Message}</code>\nTrading will continue via TA+SMC fallback.");
+                await TelegramBotService.SendMessageToAdmins($"🚨 <b>Нейросеть временно недоступна</b>\nВключен резервный алгоритм базовых индикаторов (TA+SMC).\nОшибка: <code>{ex.Message}</code>");
             }
         }
 
