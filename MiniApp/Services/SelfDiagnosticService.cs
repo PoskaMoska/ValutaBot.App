@@ -25,10 +25,22 @@ public class SelfDiagnosticService : BackgroundService
     private bool _mlWasHealthy = true;
     private bool _memWasHealthy = true;
 
+    private readonly string _mlStateFilePath = "ml_service/data/ml_health_state.txt";
+
     public SelfDiagnosticService(IServiceProvider serviceProvider, IConfiguration configuration)
     {
         _serviceProvider = serviceProvider;
         _configuration = configuration;
+
+        try 
+        {
+            if (System.IO.File.Exists(_mlStateFilePath))
+            {
+                var txt = System.IO.File.ReadAllText(_mlStateFilePath).Trim();
+                if (txt == "false") _mlWasHealthy = false;
+            }
+        }
+        catch { }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -100,6 +112,7 @@ public class SelfDiagnosticService : BackgroundService
                     if (!_mlWasHealthy)
                     {
                         _mlWasHealthy = true;
+                        try { System.IO.File.WriteAllText(_mlStateFilePath, "true"); } catch { }
                         await TelegramBotService.SendMessageToAdmins("✅ <b>Нейросеть снова в строю</b>\nСвязь с сервером машинного обучения успешно восстановлена.");
                     }
                 }
@@ -114,6 +127,7 @@ public class SelfDiagnosticService : BackgroundService
             if (_mlWasHealthy)
             {
                 _mlWasHealthy = false;
+                try { System.IO.File.WriteAllText(_mlStateFilePath, "false"); } catch { }
                 await TelegramBotService.SendMessageToAdmins($"🚨 <b>Нейросеть временно недоступна</b>\nВключен резервный алгоритм базовых индикаторов (TA+SMC).\nОшибка: <code>{ex.Message}</code>");
             }
         }
