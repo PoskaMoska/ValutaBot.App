@@ -371,10 +371,30 @@ public class ConfluenceMatrixEngine(
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"--- Сигнальный анализ ({asset} {timeframe}) ---");
+        
+        // --- ДИНАМИЧЕСКИЙ FEEDBACK LOOP ---
+        if (autoCalib != null)
+        {
+            double mlWr = autoCalib.GetEmpiricalWinRate("LIGHTGBM", asset, timeframe) * 100;
+            double taWr = autoCalib.GetEmpiricalWinRate("TechAnalysis", asset, timeframe) * 100;
+            double smcWr = autoCalib.GetEmpiricalWinRate("SMC", asset, timeframe) * 100;
+            double ofWr = autoCalib.GetEmpiricalWinRate("OrderFlow", asset, timeframe) * 100;
+
+            sb.AppendLine("[Feedback Loop / Рейтинг модулей]");
+            sb.AppendLine($" - ML (Нейросеть): WinRate {mlWr:F1}% -> {(mlWr > 52 ? "Доверие УВЕЛИЧЕНО" : (mlWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
+            sb.AppendLine($" - Tech Analysis: WinRate {taWr:F1}% -> {(taWr > 52 ? "Доверие УВЕЛИЧЕНО" : (taWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
+            sb.AppendLine($" - Smart Money: WinRate {smcWr:F1}% -> {(smcWr > 52 ? "Доверие УВЕЛИЧЕНО" : (smcWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
+            sb.AppendLine($" - OrderFlow: WinRate {ofWr:F1}% -> {(ofWr > 52 ? "Доверие УВЕЛИЧЕНО" : (ofWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("[Базовые оценки]");
         sb.AppendLine($"- ML (LightGBM): {mlScore:F2} {(mlSignal.Direction != "NEUTRAL" ? mlSignal.Direction : "")}");
         sb.AppendLine($"- Tech Analysis: {taScore:F2} {(taScore > 0 ? "BUY" : (taScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine($"- Smart Money: {smcScore:F2} {(smcScore > 0 ? "BUY" : (smcScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine($"- OrderFlow: {ofScore:F2} {(ofScore > 0 ? "BUY" : (ofScore < 0 ? "PUT" : "NEUTRAL"))}");
+        sb.AppendLine();
+        sb.AppendLine("[Динамические фильтры]");
         sb.AppendLine($"- Базовая уверенность: {(0.5 + margin)*100:F1}% {finalDir}");
 
         // 1. Штраф конфликта таймфреймов

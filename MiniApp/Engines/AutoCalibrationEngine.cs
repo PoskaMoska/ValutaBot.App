@@ -198,13 +198,22 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
         {
             stats.TotalTrades++;
             
-            // EMA: alpha=0.2 (период ~5 сделок). Прежний alpha=0.1 (~10 сделок) был слишком
-            // медленным при редкой торговле — режим менялся раньше, чем EMA успевала адаптироваться.
-            double alpha = 0.2;
+            // EMA: alpha=0.05 (~20 trades) to prevent overfitting
+            double alpha = 0.05;
             double outcomeVal = isWin ? 1.0 : 0.0;
             
             stats.EmaWinRate = (alpha * outcomeVal) + ((1.0 - alpha) * stats.EmaWinRate);
+            
+            // Persist to DB asynchronously
+            _ = Task.Run(() => ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveCalibrationStateAsync(
+                sourceName, asset, timeframe, stats.TotalTrades, stats.EmaWinRate));
         }
+    }
+
+    public double GetEmpiricalWinRate(string sourceName, string asset, string timeframe)
+    {
+        var statsKey = new SignalKey(sourceName, asset, timeframe);
+        return _statsMap.TryGetValue(statsKey, out var stats) ? stats.EmaWinRate : 0.50;
     }
 
     public string GetStatsReport(string sourceName, string asset, string timeframe)

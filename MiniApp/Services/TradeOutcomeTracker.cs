@@ -36,10 +36,18 @@ public static int GetConsecutiveLosses(string asset, string timeframe)
                 return;
             }
 
-            // L2-FIX: Создаём таблицу calibration_state если не существует
+            // L2-FIX: Создание таблиц
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureCalibrationTableAsync();
+            var calibData = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
+            if (AutoCalib != null)
+            {
+                foreach (var item in calibData)
+                {
+                    AutoCalib.RestoreState(item.sourceName, item.asset, item.timeframe, item.totalTrades, item.emaWinRate);
+                }
+            }
 
-            // MetaLearner: создаём таблицу весов и восстанавливаем из PostgreSQL
+            // MetaLearner: Создание таблиц
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureMetaWeightsTableAsync();
             // MetaLearner db init removed
 
