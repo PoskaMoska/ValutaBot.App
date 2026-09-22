@@ -372,11 +372,23 @@ public class ConfluenceMatrixEngine(
             finalScore *= 0.5;
         }
 
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"--- Сигнальный анализ ({asset} {timeframe}) ---");
+        sb.AppendLine($"- ML (LightGBM): {mlScore:F2} {(mlSignal.Direction != "NEUTRAL" ? mlSignal.Direction : "")}");
+        sb.AppendLine($"- Tech Analysis: {taScore:F2} {(taScore > 0 ? "BUY" : (taScore < 0 ? "PUT" : "NEUTRAL"))}");
+        sb.AppendLine($"- Smart Money: {smcScore:F2} {(smcScore > 0 ? "BUY" : (smcScore < 0 ? "PUT" : "NEUTRAL"))}");
+        sb.AppendLine($"- OrderFlow: {ofScore:F2} {(ofScore > 0 ? "BUY" : (ofScore < 0 ? "PUT" : "NEUTRAL"))}");
+        sb.AppendLine($"- MTF Conflict: {(tfConflict ? "YES (Penalty Applied)" : "NO")}");
+        sb.AppendLine($"-> Итог (MetaLearner): {finalDir} {(int)(finalScore * 100)}%");
+
+        string reasoningText = sb.ToString();
+        BotLogger.Info($"\n{reasoningText}");
+
         return new ConsensusDecision(
             CandidateDirection: finalDir,
             FinalDirection: finalDir,
             Probability: (int)Math.Clamp(finalScore * 100, 0, 100),
-            CombinedReasoningText: $"MetaLearner Consensus (Prob: {finalScore:P1})",
+            CombinedReasoningText: reasoningText,
             FinalTotalScore: (metaProb - 0.5) * 2.0,
             RecommendedExpiryText: "",
             TaScore: taScore,
