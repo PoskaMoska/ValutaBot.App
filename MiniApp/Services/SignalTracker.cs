@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace ValutaBot.MiniApp;
 
@@ -12,8 +13,8 @@ namespace ValutaBot.MiniApp;
 /// </summary>
 public static class SignalTracker
 {
-    // Cooldown map to prevent duplicate signals spam (fine to stay in memory)
-    private static readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
+    // Cooldown map using MemoryCache to automatically handle expiry without O(N) sweeping
+    private static readonly Microsoft.Extensions.Caching.Memory.MemoryCache _cooldownCache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
     // FIX #6: internal чтобы PendingTradeVerificationService мог читать цены без дублирования кода
     internal static readonly ConcurrentDictionary<string, double> _livePrices = new();
 
@@ -54,41 +55,17 @@ public static class SignalTracker
         DateTime verifyAt = gridTime.AddSeconds(expiryCandles * timeframeSecs);
 
         string cooldownKey = $"{asset}_{timeframe}";
-        bool isOnCooldown = true;
-
-        _cooldowns.AddOrUpdate(cooldownKey,
-            _ => { isOnCooldown = false; return now; },
-            (_, lastSignalAt) =>
-            {
-                // FIX PRIORITY-6: Cooldown увеличен с 3 до 10 секунд
-                // 3 секунды слишком мало: race condition при быстрых последовательных запросах (клик+клик)
-                // приводил к дублированию сигналов в БД, что ломало AutoCalibration и ML RL.
-                if ((now - lastSignalAt).TotalSeconds >= 10)
-                {
-                    isOnCooldown = false;
-                    return now;
-                }
-                return lastSignalAt;
-            });
-
-        // BUG-2 FIX: Evict expired entries to prevent unbounded memory growth.
-        // Without this, _cooldowns accumulates keys forever (1 per asset/timeframe pair seen).
-        // Over weeks on Railway this causes slow OOM and silent container restarts.
-        if (_cooldowns.Count > 30)
-        {
-            var expired = _cooldowns
-                .Where(kv => (now - kv.Value).TotalSeconds > 120)
-                .Select(kv => kv.Key)
-                .ToList();
-            foreach (var key in expired)
-                _cooldowns.TryRemove(key, out _);
-        }
-
+        
+        bool isOnCooldown = _cooldownCache.TryGetValue(cooldownKey, out _);
         if (isOnCooldown)
         {
             BotLogger.Warn($"[Tracker] Cooldown active for {cooldownKey}. Skipping duplicate signal recording.");
             return;
         }
+
+        // FIX PRIORITY-6: Cooldown увеличен до 10 секунд
+        // MemoryCache автоматически удалит ключ через 10 секунд без ручного O(N) прохода сборщика мусора.
+        _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(10));
 
         var record = new PredictionRecord
         {

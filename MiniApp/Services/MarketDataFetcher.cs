@@ -130,48 +130,18 @@ public class MarketDataFetcher
                 return liveCandles;
             }
 
-            BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length}/{limit} ticks in DB). Bridging gap.");
-
-            // Use 50 as fixed limit and "1min" to match the exact cache key of _higherTf ("m1").
-            // This prevents duplicate TwelveData requests when _timeframe="s15" and _higherTf="m1".
-            int m1FixedLimit = 50;
-            var m1Result = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1min", m1FixedLimit, cacheTtlSeconds: 60);
-
-            if (m1Result != null && m1Result.Value.candles.Length > 0)
-            {
-                var s5Candles = ValutaBot.App.MiniApp.Backtesting.S5CandleSynthesizer.SynthesizeFromM1(m1Result.Value.candles);
-                int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
-                var aggregated = groupSize == 1 ? s5Candles : AggregateCandles(s5Candles, groupSize);
-                
-                var synthPart = aggregated.TakeLast(limit).ToArray();
-                if (liveCandles.Length == 0) return synthPart;
-
-                var merged = new System.Collections.Generic.List<MiniAppController.OhlcCandle>();
-                DateTime firstLiveTime = liveCandles[0].Timestamp;
-                
-                // Only take synthetic candles that occurred BEFORE our first real live candle
-                var validSynth = synthPart.Where(c => c.Timestamp < firstLiveTime).ToList();
-                
-                int synthToTake = limit - liveCandles.Length;
-                if (validSynth.Count > synthToTake) 
-                {
-                    merged.AddRange(validSynth.Skip(validSynth.Count - synthToTake));
-                }
-                else 
-                {
-                    merged.AddRange(validSynth);
-                }
-                
-                merged.AddRange(liveCandles);
-                
-                return merged.TakeLast(limit).ToArray();
-            }
-
-            if (liveCandles.Length > 0) return liveCandles;
-
-            BotLogger.Warn($"[MarketDataFetcher] 1m cold-start data unavailable for {cleanAsset}.");
-            RecordFailureAndAlert("Sub-minute Data / TwelveData API Unavailable");
-            throw new ExchangeUnavailableException("TwelveData API Unavailable", "Не удалось загрузить живые котировки (TwelveData). API недоступен.");
+            // CRITICAL ARCHITECTURE FIX: Prevent Data Hallucination
+            // Instead of synthesizing fake Brownian motion candles from 1m data and poisoning the ML model,
+            // we safely abort and ask the user to wait while RealtimeTickCollector gathers real historical ticks.
+            BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length}/{limit} ticks in DB). Aborting to prevent ML hallucination.");
+            
+            // Do not call RecordFailureAndAlert here, as a cold start is normal and shouldn't spam admins.
+            int missing = limit - liveCandles.Length;
+            int waitSecs = missing * TimeframeSeconds(rawInterval);
+            int waitMins = (int)Math.Ceiling(waitSecs / 60.0);
+            string waitText = waitMins > 0 ? $"подождите ~{waitMins} мин." : "подождите пару минут.";
+            
+            throw new ExchangeUnavailableException("Insufficient subminute ticks", $"Идет сбор микро-тиков ({liveCandles.Length}/{limit}). Пожалуйста, {waitText}");
         }
 
         string interval = IntervalMap(rawInterval);
