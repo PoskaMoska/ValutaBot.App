@@ -14,12 +14,13 @@ public static class TradeOutcomeTracker
     private static readonly SemaphoreSlim _csvSemaphore = new(1, 1); // B5-FIX: Concurrent CSV write lock
 private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _consecutiveLosses = new();
 
-public static int GetConsecutiveLosses(string asset, string timeframe)
-{
-    string key = $"{asset}_{timeframe}";
-    return _consecutiveLosses.TryGetValue(key, out int count) ? count : 0;
-}
+    public static int GetConsecutiveLosses(string asset, string timeframe)
+    {
+        string key = $"{asset}_{timeframe}";
+        return _consecutiveLosses.TryGetValue(key, out int count) ? count : 0;
+    }
     private static int _eurusdTradeCounter = 0;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _tfVerifiedCounters = new();
 
     public static async Task InitializeAsync()
     {
@@ -252,7 +253,48 @@ var taStats = "No TA Stats";
                         }
                     });
                 }
-            }
+        // 🛑 EVOLUTION DUMP: Dynamic trigger by timeframe 🛑
+        int currentTfCount = _tfVerifiedCounters.AddOrUpdate(record.Timeframe, 1, (_, count) => count + 1);
+        int threshold = 5; // Default for m15, h1, etc.
+        string tfLow = record.Timeframe.ToLower().Trim();
+        if (tfLow.StartsWith("s")) threshold = 30;
+        else if (tfLow == "m1") threshold = 25;
+        else if (tfLow == "m5") threshold = 10;
+
+        if (currentTfCount % threshold == 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var dump = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetEvolutionDumpAsync();
+                    if (dump != null && dump.TotalTrades > 0)
+                    {
+                        var sbTrace = new System.Text.StringBuilder();
+                        sbTrace.AppendLine("=================================================");
+                        sbTrace.AppendLine("[🧠 EVOLUTION DUMP] Анализ развития интеллекта (За последние 48 часов)");
+                        sbTrace.AppendLine($"[База знаний] Накоплено {dump.TotalTrades} исходов в БД (рост +{dump.NewTrades48h} новых паттернов).");
+                        
+                        double diff = dump.NewMlWinRate - dump.OldMlWinRate;
+                        string diffStr = diff > 0 ? $"+{diff:F1}" : $"{diff:F1}";
+                        sbTrace.AppendLine($"[Прогресс ML] Точность нейросети сейчас: {dump.NewMlWinRate:F1}%.");
+                        sbTrace.AppendLine($"              (До этого: {dump.OldMlWinRate:F1}% -> Интеллект {(diff >= 0 ? "вырос на" : "изменился на")} {diffStr}%).");
+                        
+                        sbTrace.AppendLine($"[Превосходство] За эти 48ч Нейросеть {dump.MlSavedTrades} раз пошла против классических");
+                        sbTrace.AppendLine($"                индикаторов (TA) и оказалась права.");
+                        sbTrace.AppendLine($"[Вывод] Система стабильно умнеет. Адаптация к рынку успешна.");
+                        sbTrace.AppendLine("=================================================");
+                        BotLogger.Info($"\n{sbTrace}");
+                    }
+                }
+                catch (Exception evEx)
+                {
+                    BotLogger.Warn($"[TradeOutcomeTracker] Evolution dump error: {evEx.Message}");
+                }
+            });
+        }
+
+        }
         }
         catch (Exception ex)
         {

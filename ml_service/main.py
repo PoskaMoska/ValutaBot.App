@@ -22,10 +22,12 @@ import orjson
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from concurrent.futures import ProcessPoolExecutor
 
 from model import ForexPredictor, TF_MAP, is_forex_symbol
 
 _API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
+_process_pool = None
 
 def verify_secret(x_internal_secret: str = Header(None)):
     if x_internal_secret != _API_SECRET:
@@ -72,22 +74,68 @@ async def _train_all():
                 
                 log.info(f"[Startup] Training {sym} ({tf}) | is_forex={is_forex}. Stagger delay={delay}s")
                 
-                t = threading.Thread(
-                    target=_background_train,
-                    args=(sym, tf, None),
-                    daemon=True,
-                )
-                t.start()
+                _background_train(sym, tf, None)
                 
                 await asyncio.sleep(delay)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _process_pool
+    _process_pool = ProcessPoolExecutor(max_workers=2)
     log.info("[Startup] Launching background pre-training for all timeframes...")
     asyncio.create_task(_train_all())
     asyncio.create_task(_auto_crawler_loop())
     asyncio.create_task(_weekly_global_retrain_loop())
     yield
+    if _process_pool is not None:
+        _process_pool.shutdown(wait=False)
+
+def _run_training_worker(symbol: str, interval: str, regime: str, candles: Optional[list], mtf_candles: Optional[list], challenger_mode: bool):
+    """Executes the actual training in a separate process."""
+    from main import _get_predictor
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    predictor = _get_predictor(symbol, interval, regime)
+    if challenger_mode:
+        return predictor.train_challenger(candles, mtf_candles)
+    else:
+        return predictor.train(candles, mtf_candles, _challenger_mode=False)
+
+def _dispatch_training_to_pool(symbol: str, interval: str, regime: str, candles: Optional[list], mtf_candles: Optional[list], challenger_mode: bool):
+    global _process_pool
+    predictor = _get_predictor(symbol, interval, regime)
+    
+    with predictor._lock:
+        if predictor.is_training:
+            return
+        predictor.is_training = True
+
+    def on_done(future):
+        try:
+            report = future.result()
+            log.info(f"[BG Train Worker] finished for {symbol}_{interval}_{regime}: {report}")
+            predictor._try_load()
+        except Exception as e:
+            log.error(f"[BG Train Worker] failed for {symbol}_{interval}_{regime}: {e}")
+        finally:
+            with predictor._lock:
+                predictor.is_training = False
+
+    if _process_pool is None:
+        log.warning("Process pool not initialized, falling back to sync thread")
+        try:
+            if challenger_mode:
+                predictor.train_challenger(candles, mtf_candles)
+            else:
+                predictor.train(candles, mtf_candles)
+            predictor._try_load()
+        finally:
+            with predictor._lock:
+                predictor.is_training = False
+        return
+
+    future = _process_pool.submit(_run_training_worker, symbol, interval, regime, candles, mtf_candles, challenger_mode)
+    future.add_done_callback(on_done)
 
 
 # -------------------------------------------------------------------------
@@ -163,7 +211,16 @@ async def _weekly_global_retrain_loop():
                         try:
                             with predictor._lock:
                                 predictor._meta = None
-                            predictor.train(candles=None)
+                            
+                            global _process_pool
+                            if _process_pool:
+                                loop = asyncio.get_running_loop()
+                                await loop.run_in_executor(_process_pool, _run_training_worker, sym, tf, regime, None, None, False)
+                                predictor._try_load()
+                            else:
+                                predictor.train(candles=None)
+                                predictor._try_load()
+
                             if predictor._meta:
                                 results.append({
                                     "symbol": sym,
@@ -334,40 +391,7 @@ def _normalize_interval(interval: str) -> str:
     return TF_MAP.get(iv, "1m")
 
 
-def _fetch_local_sqlite_main(symbol: str, interval: str, limit: int) -> list:
-    """Read recent candles from SQLite for SGD partial_fit in /feedback."""
-    import sqlite3 as _sqlite3
-    db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
-    if not os.path.exists(db_path):
-        return []
-    try:
-        conn = _sqlite3.connect(db_path, timeout=10.0)
-        # Try HistoricalCandles first (larger dataset)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
-        if cursor.fetchone():
-            norm = _normalize_interval(interval)
-            df = __import__("pandas").read_sql_query(
-                "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
-                "FROM HistoricalCandles WHERE Asset=? AND Interval=? ORDER BY OpenTime DESC LIMIT ?",
-                conn, params=(symbol, norm, limit)
-            )
-            if not df.empty and interval.startswith("s"):
-                from model import _interpolate_subminute
-                dicts = df.iloc[::-1].to_dict(orient="records")
-                dicts = _interpolate_subminute(dicts, interval)
-                df = __import__("pandas").DataFrame(dicts[-limit:][::-1])
-        else:
-            df = __import__("pandas").read_sql_query(
-                "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
-                "FROM SubminuteCandles WHERE Asset=? AND Interval=? ORDER BY OpenTime DESC LIMIT ?",
-                conn, params=(symbol, interval, limit)
-            )
-        conn.close()
-        return df.iloc[::-1].to_dict(orient="records")
-    except Exception as e:
-        log.warning(f"[SQLite] fetch for SGD failed: {e}")
-        return []
+
 
 
 def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, limit: int = 200) -> list:
@@ -418,8 +442,8 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                     """
                     df = _pd.read_sql_query(query, conn, params=(symbol, interval, cutoff_str, limit))
                 
-                # Если пустой датафрейм (или не s-таймфрейм), берем historical_candles
-                if df.empty:
+                else:
+                    # Если не s-таймфрейм, берем historical_candles
                     query = """
                         SELECT open_time as "openTime", open as "open", high as "high",
                                low as "low", close as "close", volume as "volume"
@@ -428,60 +452,20 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                         ORDER BY open_time DESC LIMIT %s
                     """
                     df = _pd.read_sql_query(query, conn, params=(symbol, norm, cutoff_str, limit))
-                    
-                    if not df.empty and interval.startswith("s"):
-                        # FIX BUG-3: Если мы взяли 1m свечи для s5/s10/s15/s30, их ОБЯЗАТЕЛЬНО
-                        # нужно проинтерполировать. Иначе SGD учится на 1m свечах, а предиктит на s10.
-                        # Это ломало distribution всех индикаторов.
-                        from model import _interpolate_subminute
-                        dicts = df.iloc[::-1].to_dict(orient="records")
-                        dicts = _interpolate_subminute(dicts, interval)
-                        # Берем последние limit штук, и переворачиваем обратно как ожидает логика ниже
-                        df = _pd.DataFrame(dicts[-limit:][::-1])
                 
                 conn.close()
             except Exception as e:
                 log.warning(f"PostgreSQL fetch failed in _fetch_candles_at_entry: {e}")
         
-        # Fallback to local SQLite if PostgreSQL not available or failed
         if df.empty:
-            import sqlite3 as _sqlite3
-            db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
-            if os.path.exists(db_path):
-                conn = _sqlite3.connect(db_path, timeout=10.0)
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
-                norm = _normalize_interval(interval)
-                if cursor.fetchone():
-                    df = _pd.read_sql_query(
-                        "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
-                        "FROM HistoricalCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
-                        "ORDER BY OpenTime DESC LIMIT ?",
-                        conn, params=(symbol, norm, cutoff_str, limit)
-                    )
-                    if not df.empty and interval.startswith("s"):
-                        from model import _interpolate_subminute
-                        dicts = df.iloc[::-1].to_dict(orient="records")
-                        dicts = _interpolate_subminute(dicts, interval)
-                        df = _pd.DataFrame(dicts[-limit:][::-1])
-                else:
-                    df = _pd.read_sql_query(
-                        "SELECT Open as open, High as high, Low as low, Close as close, Volume as volume "
-                        "FROM SubminuteCandles WHERE Asset=? AND Interval=? AND OpenTime <= ? "
-                        "ORDER BY OpenTime DESC LIMIT ?",
-                        conn, params=(symbol, interval, cutoff_unix, limit)
-                    )
-                conn.close()
-
-        if df.empty:
-            log.warning(f"[SGD] No candles before entry for {symbol}/{interval}. Fallback to recent.")
-            return _fetch_local_sqlite_main(symbol, interval, limit)
+            log.warning(f"[SGD] No candles before entry for {symbol}/{interval}. PostgreSQL returned empty.")
+            return []
 
         # Переворачиваем колонки в нужный реверс, если не высшие алиасы уже заданы
         return df.iloc[::-1].to_dict(orient="records")
     except Exception as e:
-        log.warning(f"[SGD] _fetch_candles_at_entry failed: {e}. Fallback to recent.")
-        return _fetch_local_sqlite_main(symbol, interval, limit)
+        log.warning(f"[SGD] _fetch_candles_at_entry failed: {e}.")
+        return []
 
 
 def _candles_to_dicts(items: List[CandleItem]) -> List[dict]:
@@ -586,15 +570,8 @@ async def predict(request: Request):
 
     # Auto-train in background if model is missing.
     if predictor._model is None and not predictor.is_training:
-        predictor.is_training = True
         log.info(f"[Predict] Model missing for {symbol} ({interval}). Triggering background training.")
-        import threading
-        t = threading.Thread(
-            target=_background_train, 
-            args=(symbol, interval, None, None), 
-            daemon=True
-        )
-        t.start()
+        _dispatch_training_to_pool(symbol, interval, regime, None, None, False)
 
     direction, confidence, version = predictor.predict(candle_dicts, mtf_candle_dicts)
 
@@ -631,7 +608,7 @@ def train(req: TrainRequest, background_tasks: BackgroundTasks):
     interval = _normalize_interval(req.interval)
     candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
     mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
-    background_tasks.add_task(_background_train, req.symbol, interval, candle_dicts, mtf_candle_dicts)
+    _background_train(req.symbol, interval, candle_dicts, mtf_candle_dicts)
     return TrainResponse(
         symbol=req.symbol,
         interval=interval,
@@ -646,7 +623,14 @@ def train_sync(req: TrainRequest):
     predictor = _get_predictor(req.symbol, interval)
     candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
     mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
-    report = predictor.train(candle_dicts, mtf_candle_dicts)
+    
+    global _process_pool
+    if _process_pool:
+        future = _process_pool.submit(_run_training_worker, req.symbol, interval, "ALL", candle_dicts, mtf_candle_dicts, False)
+        report = future.result()
+        predictor._try_load()
+    else:
+        report = predictor.train(candle_dicts, mtf_candle_dicts)
 
     if "error" in report:
         return TrainResponse(symbol=req.symbol, interval=interval, error=report["error"])
@@ -662,11 +646,9 @@ def train_sync(req: TrainRequest):
 
 
 def _background_train(symbol: str, interval: str, candles: Optional[list] = None, mtf_candles: Optional[list] = None):
-    log.info(f"[BG Train] Starting clustered training for {symbol}_{interval}")
+    log.info(f"[BG Train] Starting clustered training for {symbol}_{interval} in process pool")
     for regime in ["ALL", "FLAT", "TREND", "CHAOS"]:
-        predictor = _get_predictor(symbol, interval, regime)
-        report = predictor.train(candles, mtf_candles)
-        log.info(f"[BG Train] Done {regime}: {report}")
+        _dispatch_training_to_pool(symbol, interval, regime, candles, mtf_candles, False)
 
 
 # ┌────────────────────────────────────────────────────────────────────────┐
@@ -688,16 +670,7 @@ def challenger_train(req: ChallengerTrainRequest, background_tasks: BackgroundTa
     statistically superior (auto-promotion) or is replaced by a newer challenger.
     """
     interval = _normalize_interval(req.interval)
-    predictor = _get_predictor(req.symbol, interval, req.regime)
-
-    def _run():
-        try:
-            report = predictor.train_challenger()
-            log.info(f"[ShadowChallenger] Background challenger train done: {report}")
-        except Exception as e:
-            log.error(f"[ShadowChallenger] Background challenger train failed: {e}")
-
-    background_tasks.add_task(_run)
+    _dispatch_training_to_pool(req.symbol, interval, req.regime, None, None, True)
     return {"status": "challenger-training-started", "symbol": req.symbol,
             "interval": interval, "regime": req.regime}
 
@@ -734,30 +707,7 @@ def feedback(req: TrainFeedback, background_tasks: BackgroundTasks):
              f"| Dir: {req.direction} Entry: {req.entry_price} Exit: {req.exit_price}")
     
     def process_feedback_bg():
-        db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         try:
-            conn = sqlite3.connect(db_path, timeout=30.0)
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS OnlineFeedback (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Asset TEXT NOT NULL,
-                    Interval TEXT NOT NULL,
-                    Direction TEXT NOT NULL,
-                    EntryPrice REAL NOT NULL,
-                    ExitPrice REAL NOT NULL,
-                    WasWin INTEGER NOT NULL,
-                    Timestamp TEXT NOT NULL
-                )
-            ''')
-            cursor.execute('''
-                INSERT INTO OnlineFeedback (Asset, Interval, Direction, EntryPrice, ExitPrice, WasWin, Timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (req.asset, req.timeframe, req.direction, req.entry_price, req.exit_price, int(req.was_win), req.timestamp))
-            conn.commit()
-            conn.close()
-
             norm_interval = req.timeframe.replace("s", "") if req.timeframe.endswith("s") else req.timeframe
             from model import ForexPredictor
             regime = "TREND"

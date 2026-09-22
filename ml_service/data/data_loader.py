@@ -8,75 +8,7 @@ log = logging.getLogger("DataLoader")
 
 TICKS_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "ValutaTicks.db")
 
-def _interpolate_subminute(m1_candles: List[Dict], interval: str) -> List[Dict]:
-    """Interpolate 1-minute candles into sub-minute steps (s5, s10, s15, s30).
-       Uses a Brownian Bridge to generate stochastic micro-paths that respect OHLC boundaries
-       without injecting artificial deterministic patterns (like sine waves)."""
-    sec = int(interval[1:]) if (interval.startswith("s") and len(interval) > 1) else 60
-    if sec >= 60:
-        return m1_candles
-        
-    sub_per_min = 60 // sec
-    interpolated = []
-    
-    import math
-    import random
-    
-    for m in m1_candles:
-        start_price = m["open"]
-        end_price = m["close"]
-        high_limit = m["high"]
-        low_limit = m["low"]
-        vol_step = m["volume"] / sub_per_min
-        
-        # Generate standard Brownian motion
-        dW = [random.gauss(0, 1) for _ in range(sub_per_min)]
-        W = [0.0]
-        for dw in dW:
-            W.append(W[-1] + dw)
-            
-        # Bridge it so it ends exactly at 0 variance from the target
-        W = W[1:]
-        T = sub_per_min
-        bridge = [W[i] - ((i + 1) / T) * W[-1] for i in range(T)]
-        
-        # Scale bridge to fit within the candle's High-Low range safely
-        max_b = max(bridge) if bridge else 0
-        min_b = min(bridge) if bridge else 0
-        range_b = max_b - min_b + 1e-10
-        
-        candle_range = high_limit - low_limit
-        scale = (candle_range * 0.5) / range_b # Scale to 50% of the true range to avoid boundary breaks
-        
-        for i in range(sub_per_min):
-            frac_end = (i + 1) / sub_per_min
-            
-            # Linear drift + stochastic bridge
-            c = start_price + (end_price - start_price) * frac_end + (bridge[i] * scale)
-            
-            # Clamp to limits
-            c = max(min(c, high_limit), low_limit)
-            
-            if i == 0:
-                o = start_price
-            else:
-                o = interpolated[-1]["close"]
-                
-            h = max(o, c) + (candle_range * 0.1 * random.random())
-            l = min(o, c) - (candle_range * 0.1 * random.random())
-            
-            h = min(h, high_limit)
-            l = max(l, low_limit)
-            
-            interpolated.append({
-                "open": o,
-                "high": h,
-                "low": l,
-                "close": c,
-                "volume": vol_step
-            })
-            
-    return interpolated
+
 
 
 def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
@@ -98,32 +30,9 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
             if not df.empty:
                 return df.iloc[::-1].to_dict(orient='records')
     except Exception as e:
-        print(f"  [WARN] PostgreSQL subminute fetch failed: {e}")
+        log.warning(f"  [WARN] PostgreSQL subminute fetch failed: {e}")
 
-    # Fallback to SQLite
-    db_path = TICKS_DB_PATH
-    if not os.path.exists(db_path):
-        return []
-    try:
-        conn = sqlite3.connect(db_path, timeout=30.0)
-        query = '''
-            SELECT OpenTime as openTime, Open as open, High as high, Low as low, Close as close, Volume as volume 
-            FROM SubminuteCandles 
-            WHERE Asset = ? AND Interval = ? 
-            ORDER BY OpenTime DESC 
-            LIMIT ?
-        '''
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
-        conn.close()
-        
-        # DataFrame is fetched descending, we reverse it to ascending time order
-        return df.iloc[::-1].to_dict(orient='records')
-    except Exception as e:
-        log.error(f"SQLite Fetch Error: {e}")
-        return []
+    return []
 
 
 
@@ -151,25 +60,6 @@ def _query_historical_candles_db(symbol: str, norm_interval: str, limit: int) ->
         except Exception as e:
             log.warning(f"[HistoricalCandles] PostgreSQL fetch failed: {e}")
 
-    db_path = TICKS_DB_PATH
-    if os.path.exists(db_path):
-        try:
-            conn = sqlite3.connect(db_path, timeout=30.0)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='HistoricalCandles'")
-            if cursor.fetchone():
-                query = """
-                    SELECT OpenTime as openTime, Open as open, High as high, Low as low, Close as close, Volume as volume
-                    FROM HistoricalCandles WHERE Asset = ? AND Interval = ? ORDER BY OpenTime DESC LIMIT ?
-                """
-                df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
-                conn.close()
-                if not df.empty:
-                    return df
-            else:
-                conn.close()
-        except Exception as e:
-            log.error(f"[HistoricalCandles] SQLite fetch error: {e}")
     return pd.DataFrame()
 
 
@@ -240,28 +130,23 @@ def _fetch_historical_candles(symbol: str, interval: str, limit: int) -> List[Di
 
 
 def _fetch_rl_feedback(symbol: str, interval: str) -> List[Dict]:
-    db_path = TICKS_DB_PATH
-    if not os.path.exists(db_path):
-        return []
-    try:
-        conn = sqlite3.connect(db_path, timeout=30.0)
-        
-        # Check if table exists
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='OnlineFeedback'")
-        if not cursor.fetchone():
-            conn.close()
-            return []
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url)
             
-        # Bug1 fix: fetch Timestamp for time-based matching instead of EntryPrice
-        query = "SELECT Timestamp as ts, Direction as dir, WasWin as win FROM OnlineFeedback WHERE Asset=? AND Interval=?"
-        df = pd.read_sql_query(query, conn, params=(symbol, interval))
-        conn.close()
-        
-        return df.to_dict(orient='records')
-    except Exception as e:
-        log.error(f"SQLite RL Fetch Error: {e}")
-        return []
+            # Bug1 fix: fetch Timestamp for time-based matching instead of EntryPrice
+            # trade_outcomes in Postgres uses 'created_at' for the entry timestamp
+            query = "SELECT created_at as ts, direction as dir, was_win as win FROM trade_outcomes WHERE asset=%s AND timeframe=%s"
+            df = pd.read_sql_query(query, conn, params=(symbol, interval))
+            conn.close()
+            
+            return df.to_dict(orient='records')
+        except Exception as e:
+            log.error(f"PostgreSQL RL Fetch Error: {e}")
+            return []
+    return []
 
 # в”Ђв”Ђ Timeframe в†’ Binance interval string в”Ђв”Ђ
 TF_MAP = {

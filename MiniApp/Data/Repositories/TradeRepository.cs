@@ -26,8 +26,75 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public string VerifiedAt { get; set; } = "";
     }
 
+    public class EvolutionDumpDto
+    {
+        public int TotalTrades { get; set; }
+        public int NewTrades48h { get; set; }
+        public double OldMlWinRate { get; set; }
+        public double NewMlWinRate { get; set; }
+        public int MlSavedTrades { get; set; }
+    }
+
     public static class TradeRepository
     {
+        public static async Task<EvolutionDumpDto?> GetEvolutionDumpAsync()
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return null;
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                var dto = await conn.QueryFirstOrDefaultAsync<EvolutionDumpDto>(@"
+WITH outcome_data AS (
+    SELECT 
+        id,
+        created_at::timestamp as dt,
+        CASE 
+            WHEN direction = 'BUY' AND was_win = true THEN 'BUY'
+            WHEN direction = 'BUY' AND was_win = false THEN 'PUT'
+            WHEN direction = 'PUT' AND was_win = true THEN 'PUT'
+            WHEN direction = 'PUT' AND was_win = false THEN 'BUY'
+            ELSE 'NEUTRAL'
+        END as win_dir,
+        CASE 
+            WHEN ml_score > 0 THEN 'BUY'
+            WHEN ml_score < 0 THEN 'PUT'
+            ELSE 'NEUTRAL'
+        END as ml_dir,
+        CASE 
+            WHEN ta_score > 0 THEN 'BUY'
+            WHEN ta_score < 0 THEN 'PUT'
+            ELSE 'NEUTRAL'
+        END as ta_dir
+    FROM trade_outcomes
+)
+SELECT 
+    COUNT(id) as TotalTrades,
+    COUNT(id) FILTER (WHERE dt >= NOW() - INTERVAL '48 hours') as NewTrades48h,
+    
+    COALESCE(
+        COUNT(id) FILTER (WHERE dt < NOW() - INTERVAL '48 hours' AND ml_dir = win_dir AND ml_dir != 'NEUTRAL') * 100.0 / 
+        NULLIF(COUNT(id) FILTER (WHERE dt < NOW() - INTERVAL '48 hours' AND ml_dir != 'NEUTRAL'), 0), 
+        50.0
+    ) as OldMlWinRate,
+    
+    COALESCE(
+        COUNT(id) FILTER (WHERE dt >= NOW() - INTERVAL '48 hours' AND ml_dir = win_dir AND ml_dir != 'NEUTRAL') * 100.0 / 
+        NULLIF(COUNT(id) FILTER (WHERE dt >= NOW() - INTERVAL '48 hours' AND ml_dir != 'NEUTRAL'), 0), 
+        50.0
+    ) as NewMlWinRate,
+
+    COUNT(id) FILTER (WHERE dt >= NOW() - INTERVAL '48 hours' AND ml_dir = win_dir AND ta_dir != win_dir AND ta_dir != 'NEUTRAL' AND ml_dir != 'NEUTRAL') as MlSavedTrades
+
+FROM outcome_data;");
+                return dto;
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] GetEvolutionDump notice: {ex.Message}");
+                return null;
+            }
+        }
+
         public static async Task SaveTradeOutcomeAsync(TradeOutcomeRecord outcome)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;

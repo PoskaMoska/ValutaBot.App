@@ -6,7 +6,7 @@ Final signal = 0.70 * LightGBM_prob + 0.30 * SGD_prob.
 """
 
 from __future__ import annotations
-from data.data_loader import TF_MAP, _fetch_local_sqlite, _fetch_historical_candles, _fetch_rl_feedback, _interpolate_subminute
+from data.data_loader import TF_MAP, _fetch_local_sqlite, _fetch_historical_candles, _fetch_rl_feedback
 
 import os
 import time
@@ -787,20 +787,9 @@ class ForexPredictor:
                     if self.interval.startswith("s"):
                         candles = _fetch_local_sqlite(self.symbol, self.interval, target_candles)
                         if len(candles) < 150:
-                            log.warning(
-                                f"[Train] Not enough real ticks for {self._key} (found {len(candles)}). "
-                                f"Fetching 1m proxy and interpolating to match inference timeframe."
-                            )
-                            candles = _fetch_historical_candles(self.symbol, "1m", 5000)
-                            if len(candles) < 150 and is_forex_symbol(self.symbol):
-                                candles = self._fetch_twelvedata(5000)  # Real 1m data API fallback
-                                
-                            if len(candles) > 0:
-                                from model import _interpolate_subminute
-                                candles = _interpolate_subminute(candles, self.interval)
-                                log.info(f"[Train] Proxy-1m interpolated training for {self._key} on {len(candles)} {self.interval} candles.")
-                            else:
-                                log.error(f"[Train] Could not fetch real 1m data for {self._key}. Skipping.")
+                            msg = f"Not enough real subminute ticks for {self._key} (found {len(candles)}). Interpolation is disabled to prevent data hallucination."
+                            log.error(f"[Train] {msg}")
+                            return {"error": msg}
                     else:
                         # Priority 3: TwelveData API (forex only)
                         if is_forex_symbol(self.symbol):
