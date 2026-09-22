@@ -365,12 +365,9 @@ public class ConfluenceMatrixEngine(
 
         // Пользовательское требование: Бот должен всегда давать сигнал (без NEUTRAL зоны)
         string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
-        double finalScore = metaProb >= 0.5 ? metaProb : 1.0 - metaProb;
         
-        if (Math.Abs(taScore) > 0.8 && ((taScore > 0 && finalDir == "PUT") || (taScore < 0 && finalDir == "BUY")))
-        {
-            finalScore *= 0.5;
-        }
+        // Определение маржи уверенности (от 0.0 до 0.5)
+        double margin = Math.Abs(metaProb - 0.5);
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"--- Сигнальный анализ ({asset} {timeframe}) ---");
@@ -378,8 +375,55 @@ public class ConfluenceMatrixEngine(
         sb.AppendLine($"- Tech Analysis: {taScore:F2} {(taScore > 0 ? "BUY" : (taScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine($"- Smart Money: {smcScore:F2} {(smcScore > 0 ? "BUY" : (smcScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine($"- OrderFlow: {ofScore:F2} {(ofScore > 0 ? "BUY" : (ofScore < 0 ? "PUT" : "NEUTRAL"))}");
-        sb.AppendLine($"- MTF Conflict: {(tfConflict ? "YES (Penalty Applied)" : "NO")}");
-        sb.AppendLine($"-> Итог (MetaLearner): {finalDir} {(int)(finalScore * 100)}%");
+        sb.AppendLine($"- Базовая уверенность: {(0.5 + margin)*100:F1}% {finalDir}");
+
+        // 1. Штраф конфликта таймфреймов
+        if (tfConflict) 
+        {
+            margin *= 0.8; 
+            sb.AppendLine("- Конфликт таймфреймов: Снижение уверенности");
+        }
+
+        // 2. Критический конфликт ТехАнализа (Исправление бага с 25%)
+        if (Math.Abs(taScore) > 0.8 && ((taScore > 0 && finalDir == "PUT") || (taScore < 0 && finalDir == "BUY")))
+        {
+            margin *= 0.5; // Срезаем только маржу, а не базовые 50%
+            sb.AppendLine("- Критический разворот Теханализа: Сильное снижение уверенности");
+        }
+
+        // 3. Фаза рынка (RSI)
+        if (taSignal.Rsi > 65 && finalDir == "BUY") 
+        {
+            margin *= 0.7;
+            sb.AppendLine("- Фаза рынка: Перекупленность (риск лонга на пике)");
+        }
+        else if (taSignal.Rsi < 35 && finalDir == "PUT")
+        {
+            margin *= 0.7;
+            sb.AppendLine("- Фаза рынка: Перепроданность (риск шорта на дне)");
+        }
+        else if (taSignal.Rsi > 65 && finalDir == "PUT")
+        {
+            margin = Math.Min(0.50, margin * 1.3);
+            sb.AppendLine("- Фаза рынка: Подтверждение отката вниз (Перекупленность)");
+        }
+        else if (taSignal.Rsi < 35 && finalDir == "BUY")
+        {
+            margin = Math.Min(0.50, margin * 1.3);
+            sb.AppendLine("- Фаза рынка: Подтверждение отката вверх (Перепроданность)");
+        }
+
+        // 4. Энтропия / Скорость рынка
+        double absVel = Math.Abs(stateSignal.VelocityBpsPerSec);
+        double dangerVel = isSubMinute ? 1.0 : 4.0; 
+        if (absVel >= dangerVel)
+        {
+            margin *= 0.8;
+            sb.AppendLine("- Энтропия: Экстремальная волатильность (Хаос), занижение уверенности");
+        }
+
+        double finalScore = 0.5 + margin;
+        sb.AppendLine($"-> Итог: {finalDir} {(int)Math.Clamp(Math.Round(finalScore * 100), 50, 100)}%");
 
         string reasoningText = sb.ToString();
         BotLogger.Info($"\n{reasoningText}");
@@ -387,7 +431,7 @@ public class ConfluenceMatrixEngine(
         return new ConsensusDecision(
             CandidateDirection: finalDir,
             FinalDirection: finalDir,
-            Probability: (int)Math.Clamp(finalScore * 100, 0, 100),
+            Probability: (int)Math.Clamp(Math.Round(finalScore * 100), 50, 100),
             CombinedReasoningText: reasoningText,
             FinalTotalScore: (metaProb - 0.5) * 2.0,
             RecommendedExpiryText: "",
