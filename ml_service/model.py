@@ -1142,6 +1142,17 @@ class ForexPredictor:
                     f"new_acc={avg_acc:.4f} < current_acc={current_acc:.4f} - 0.02. "
                     f"Keeping old model."
                 )
+                
+                # Notify Admins via Telegram
+                bot_url = os.getenv("BOT_BASE_URL", "")
+                secret = os.getenv("INTERNAL_API_SECRET", "default_secret")
+                if bot_url:
+                    tg_msg = f"⚠️ <b>Обучение отменено (Quality Gate)</b>\nПара: {self.symbol} {self.interval}\nНовая точность: {avg_acc*100:.1f}% (было {current_acc*100:.1f}%).\n<i>Оставляем старую стабильную версию.</i>"
+                    try:
+                        requests.post(f"{bot_url}/internal/notify-admins", json={"Message": tg_msg}, headers={"X-Internal-Secret": secret}, timeout=5)
+                    except Exception as e:
+                        log.error(f"[Train] Failed to send Telegram alert: {e}")
+
                 return {
                     "symbol": self.symbol, "interval": self.interval,
                     "n_train": len(X), "accuracy": round(avg_acc, 4),

@@ -32,6 +32,24 @@ public class MarketClosedException : Exception
 
 public class MarketDataFetcher
 {
+    private static int _consecutiveFailures = 0;
+    private static DateTime _lastAlertTime = DateTime.MinValue;
+
+    private static void RecordSuccess()
+    {
+        _consecutiveFailures = 0;
+    }
+
+    private static void RecordFailureAndAlert(string reason)
+    {
+        _consecutiveFailures++;
+        if (_consecutiveFailures >= 3 && (DateTime.UtcNow - _lastAlertTime).TotalMinutes > 5)
+        {
+            _lastAlertTime = DateTime.UtcNow;
+            _ = Task.Run(() => ValutaBot.MiniApp.TelegramBotService.SendMessageToAdmins($"🚨 <b>Отвал Котировок!</b>\nБот не может получить свечи ({reason}) уже 3 раза подряд. Торговля заблокирована."));
+        }
+    }
+
     // Caches mappings for standard intervals
     public string IntervalMap(string tf) => tf.ToLower() switch
     {
@@ -108,6 +126,7 @@ public class MarketDataFetcher
             if (liveCandles.Length >= limit)
             {
                 BotLogger.Info($"[MarketDataFetcher] Using {liveCandles.Length} live {rawInterval} candles for {cleanKey}.");
+                RecordSuccess();
                 return liveCandles;
             }
 
@@ -151,7 +170,8 @@ public class MarketDataFetcher
             if (liveCandles.Length > 0) return liveCandles;
 
             BotLogger.Warn($"[MarketDataFetcher] 1m cold-start data unavailable for {cleanAsset}.");
-            throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData). API лимит или недоступен.");
+            RecordFailureAndAlert("Sub-minute Data / TwelveData API Unavailable");
+            throw new ExchangeUnavailableException("TwelveData API Unavailable", "Не удалось загрузить живые котировки (TwelveData). API недоступен.");
         }
 
         string interval = IntervalMap(rawInterval);
@@ -195,10 +215,12 @@ public class MarketDataFetcher
                     };
                 }
             }
+            RecordSuccess();
             return candles;
         }
 
-        throw new ExchangeUnavailableException("TwelveData API Unavailable", "⚠️ Не удалось получить данные от брокера (TwelveData). API лимит или недоступен.");
+        RecordFailureAndAlert("TwelveData API Unavailable");
+        throw new ExchangeUnavailableException("TwelveData API Unavailable", "Не удалось загрузить живые котировки (TwelveData). API недоступен.");
     }
 
     private async Task<MiniAppController.OhlcCandle[]> FetchOtcHistoricalAsync(string asset, string rawInterval, int limit)
