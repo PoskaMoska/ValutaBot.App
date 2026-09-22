@@ -244,11 +244,14 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         string uiMarketPhase = "Боковик (Флэт)";
         string regime = state.VelocityRegime ?? "";
-        if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс (Резкий)";
-        else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс (Резкий)";
-        else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Разворот)";
-        else if (taResult.rsiVal > 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Откат)" : "Бычий тренд (Плавный)";
-        else if (taResult.rsiVal < 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Плавный)";
+        if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс (⬆)";
+        else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс (⬇)";
+        else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Коррекция)";
+        else if (taResult.rsiVal >= 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Сброс)" : "Бычий тренд (Пологий)";
+        else if (taResult.rsiVal <= 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Пологий)";
+        else if (taResult.rsiVal >= 54) uiMarketPhase = "Умеренный рост (↗)";
+        else if (taResult.rsiVal <= 46) uiMarketPhase = "Умеренное падение (↘)";
+        else uiMarketPhase = "Истинный Флэт (↔)";
 
         string uiMarketEntropy = "В норме (Безопасно)";
         double vel = Math.Abs(state.VelocityBpsPerSec);
