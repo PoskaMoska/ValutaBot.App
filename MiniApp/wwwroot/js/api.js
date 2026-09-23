@@ -295,11 +295,17 @@ export async function executeAnalysis() {
                 wEntropy.innerText = data.uiMarketEntropy;
                 let entColor = "#10b981";
                 let entLow = data.uiMarketEntropy.toLowerCase();
-                if (entLow.includes("опасн") || entLow.includes("высок") || entLow.includes("хаос")) {
-                    entColor = "#ef4444";
+                
+                // Fix for the "Безопасно" trap: explicitly check for it first,
+                // or just use exact word matching, or check "хаос" / "высокая".
+                if (entLow.includes("безопасно") || entLow.includes("в норме")) {
+                    entColor = "#10b981"; // Green
+                } else if (entLow.includes("опасн") || entLow.includes("высок") || entLow.includes("хаос")) {
+                    entColor = "#ef4444"; // Red
                 } else if (entLow.includes("мертв") || entLow.includes("слаб") || entLow.includes("переход")) {
-                    entColor = "#f59e0b";
+                    entColor = "#f59e0b"; // Yellow
                 }
+                
                 wEntropy.style.color = entColor;
                 if (wTitle) wTitle.style.color = entColor;
             }
