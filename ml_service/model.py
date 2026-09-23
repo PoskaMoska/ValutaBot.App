@@ -358,15 +358,15 @@ class ForexPredictor:
 
     # в”Ђв”Ђ Public API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
-    def predict(self, candles: List[Dict], mtf_candles: Optional[List[Dict]] = None) -> Tuple[str, float, str]:
+    def predict(self, candles: List[Dict], mtf_candles: Optional[List[Dict]] = None) -> Tuple[str, float, str, int, float]:
         """
         Predict next candle direction from supplied candle list.
-        Returns (direction, confidence, model_version).
+        Returns (direction, confidence, model_version, horizon_candles, raw_prob).
         direction: "BUY" | "PUT" | "NEUTRAL"
-        confidence: 0.0 вЂ“ 1.0
+        confidence: 0.0 – 1.0
         """
         if not HAS_LGBM:
-            return "NEUTRAL", 0.5, "no-lgbm"
+            return "NEUTRAL", 0.5, "no-lgbm", 3, 0.5
 
         with self._lock:
             model = self._model
@@ -382,7 +382,7 @@ class ForexPredictor:
                 embedder = self._embedder
 
         if model is None:
-            return "NEUTRAL", 0.5, "not-trained"
+            return "NEUTRAL", 0.5, "not-trained", 3, 0.5
 
         try:
             # FIX TRAIN-SERVE SKEW: Drop the volatile unclosed candle for prediction.
@@ -395,7 +395,7 @@ class ForexPredictor:
 
             feats = build_features(candles, mtf_candles)
             if feats.empty or len(feats) < 5:
-                return "NEUTRAL", 0.5, meta.version if meta else "no-feats"
+                return "NEUTRAL", 0.5, meta.version if meta else "no-feats", TARGET_HORIZON_CANDLES, 0.5
 
             # Use last row as the current candle state (base features — shared
             # by SGD Tactician and regime router, unchanged behavior).
@@ -450,16 +450,16 @@ class ForexPredictor:
                 log.debug(f"[SHAP] Explanation failed for {self._key}: {shap_ex}")
 
             if prob >= MIN_CONFIDENCE:
-                return "BUY", prob, version
+                return "BUY", prob, version, TARGET_HORIZON_CANDLES, prob
             elif prob <= (1.0 - MIN_CONFIDENCE):
-                return "PUT", 1.0 - prob, version
+                return "PUT", 1.0 - prob, version, TARGET_HORIZON_CANDLES, prob
             else:
                 confidence = abs(prob - 0.5) * 2
-                return "NEUTRAL", 0.5 + confidence * 0.15, version
+                return "NEUTRAL", 0.5 + confidence * 0.15, version, TARGET_HORIZON_CANDLES, prob
 
         except Exception as e:
             log.error(f"[Predict] {self._key}: {e}")
-            return "NEUTRAL", 0.5, "error"
+            return "NEUTRAL", 0.5, "error", 3, 0.5
 
     def _log_shap_explanation(self, model: "lgb.LGBMClassifier", X_last: pd.DataFrame, top_n: int = 5) -> None:
         """

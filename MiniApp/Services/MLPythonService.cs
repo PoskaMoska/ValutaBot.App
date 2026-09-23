@@ -81,7 +81,8 @@ public static class MLPythonService
         double? Auc,
         int? NTrain,
         double? VarianceEstimate = null,
-        double? RawConfidence = null
+        double? RawConfidence = null,
+        int? HorizonCandles = null
     );
 
     public static void Init(string? baseUrl)

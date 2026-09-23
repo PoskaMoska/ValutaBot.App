@@ -573,11 +573,11 @@ async def predict(request: Request):
         log.info(f"[Predict] Model missing for {symbol} ({interval}). Triggering background training.")
         _dispatch_training_to_pool(symbol, interval, regime, None, None, False)
 
-    direction, confidence, version = predictor.predict(candle_dicts, mtf_candle_dicts)
+    direction, confidence, version, horizon_candles, raw_prob = predictor.predict(candle_dicts, mtf_candle_dicts)
 
     # B6: Predictive Variance Model — estimate how uncertain this prediction is
     # given the current feature state, and dampen confidence accordingly.
-    raw_confidence = confidence
+    raw_confidence = raw_prob
     variance_estimate = None
     try:
         from model import get_variance_predictor
@@ -594,6 +594,7 @@ async def predict(request: Request):
         "direction": direction,
         "confidence": round(float(confidence), 4),
         "model_version": version,
+        "horizon_candles": horizon_candles,
         "accuracy": round(float(meta.accuracy), 4) if meta else None,
         "auc": round(float(meta.auc), 4) if meta else None,
         "n_train": meta.n_train if meta else None,

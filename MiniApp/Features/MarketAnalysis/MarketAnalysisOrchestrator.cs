@@ -177,7 +177,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.hmaVal, taResult.volStrengthVal, mainAtr, mainAdx);
         var smcSignal = new SmcSignal(smcResult.BosDirection, smcResult.SweepDirection, smcResult.OrderBlockType, smcResult.FvgType, "");
         var ofSignal = new OrderflowSignal(ofResult.ScoreContribution, ofResult.Description);
-        var mlSignal = new MlSignal(lgbmDir, lgbmConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline");
+        var mlSignal = new MlSignal(lgbmDir, lgbmConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline", mlPrediction?.HorizonCandles, mlPrediction?.RawConfidence);
         var stateSignal = new StateSignal(state.VelocityRegime, state.VelocityBpsPerSec, state.MomentumContribution);
 
         var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
@@ -206,9 +206,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
 
         // RECORD (Fire and forget)
-        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, timeout.TimeoutCandles, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw);
+        int targetHorizon = mlPrediction?.HorizonCandles ?? timeout.TimeoutCandles;
+        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw);
         dbSw.Stop();
-        traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Ожидание экспирации) -> {dbSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Ожидание экспирации: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
 
         sw.Stop();
         

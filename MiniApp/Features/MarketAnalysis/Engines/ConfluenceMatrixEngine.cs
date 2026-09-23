@@ -321,7 +321,9 @@ public class ConfluenceMatrixEngine(
         if (smcSignal.SweepDirection == "BULLISH_SWEEP") smcScore += 0.5;
         if (smcSignal.SweepDirection == "BEARISH_SWEEP") smcScore -= 0.5;
 
-        double mlScore = mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? -mlSignal.Confidence : 0);
+        // Use RawConfidence if available (defaults to 0.5 if missing)
+        double rawProb = mlSignal.RawConfidence ?? (mlSignal.Direction == "BUY" ? mlSignal.Confidence : (1.0 - mlSignal.Confidence));
+        double mlScore = (rawProb - 0.5) * 2.0; // Smooth scaling [-1.0, 1.0]
 
         // ── AutoCalibration: Regime-Aware Signal Weights ──────────────────────────
         // Only activate for minute+ timeframes. Sub-minute markets have structurally
@@ -354,8 +356,14 @@ public class ConfluenceMatrixEngine(
         double metaProb = 0.5;
         if (TradeOutcomeTracker.MetaLearner != null)
         {
+            // Normalize inputs before passing to MetaLearner to balance their impact
+            double normTa = taScore; // Already [-1.0, 1.0]
+            double normOf = Math.Clamp(ofScore / 0.5, -1.0, 1.0); // was [-0.5, 0.5], scale to [-1, 1]
+            double normSmc = Math.Clamp(smcScore, -1.0, 1.0); // was up to [-1.0, 1.0] usually
+            double normMl = mlScore; // Already smoothly [-1.0, 1.0]
+            
             metaProb = TradeOutcomeTracker.MetaLearner.Predict(
-                asset, timeframe, taScore, ofScore, smcScore, mlScore, tfConflict);
+                asset, timeframe, normTa, normOf, normSmc, normMl, tfConflict);
         }
         else
         {

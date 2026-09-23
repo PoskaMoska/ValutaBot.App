@@ -1,4 +1,4 @@
-﻿using System.Threading.Tasks;
+using System.Threading.Tasks;
 
 namespace ValutaBot.MiniApp;
 
@@ -14,7 +14,7 @@ public record OrderflowSignal(double ScoreContribution, string Description);
 
 // D2-2 FIX: MlSignal.Confidence is ALWAYS in [0..1] (Python confidence, not a logit).
 // Enforcement happens at Orchestrator level before construction. This comment is the contract.
-public record MlSignal(string Direction, double Confidence, double? Accuracy, string ModelVersion);
+public record MlSignal(string Direction, double Confidence, double? Accuracy, string ModelVersion, int? HorizonCandles = null, double? RawConfidence = null);
 
 public record StateSignal(string Regime, double VelocityBpsPerSec, double MomentumContribution);
 
