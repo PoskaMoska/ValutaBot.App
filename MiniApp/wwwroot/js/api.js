@@ -266,11 +266,11 @@ export async function executeAnalysis() {
             const wPhase = document.getElementById("weatherPhase");
             if (wPhase && data.uiMarketPhase) {
                 wPhase.innerText = data.uiMarketPhase;
-                let phaseColor = "#10b981"; // Green default
-                if (data.uiMarketPhase.includes("Замедление") || data.uiMarketPhase.includes("Переход")) {
-                    phaseColor = "#f59e0b"; // Yellow (Average)
-                } else if (data.uiMarketPhase.includes("Боковик") || data.uiMarketPhase.includes("Неопределенность") || data.uiMarketPhase.includes("Слабый") || data.uiMarketPhase.includes("Волатильный") || data.uiMarketPhase.includes("Резкий") || data.uiMarketPhase.includes("Шум")) {
-                    phaseColor = "#ef4444"; // Red (Bad)
+                let phaseColor = "#10b981"; // Green default (upward/good)
+                if (data.uiMarketPhase.includes("Замедление") || data.uiMarketPhase.includes("Переход") || data.uiMarketPhase.includes("Флэт") || data.uiMarketPhase.includes("Боковик")) {
+                    phaseColor = "#f59e0b"; // Yellow (Average / Sideways)
+                } else if (data.uiMarketPhase.includes("падение") || data.uiMarketPhase.includes("Медвеж") || data.uiMarketPhase.includes("Перепроданность") || data.uiMarketPhase.includes("Слабый") || data.uiMarketPhase.includes("Волатильный") || data.uiMarketPhase.includes("Резкий") || data.uiMarketPhase.includes("Шум")) {
+                    phaseColor = "#ef4444"; // Red (Downward / Bad)
                 }
                 wPhase.style.color = phaseColor;
             }
