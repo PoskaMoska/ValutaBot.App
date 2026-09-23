@@ -1,0 +1,319 @@
+"""
+Feature engineering for Forex/Crypto LightGBM predictor.
+Takes OHLCV candle arrays and returns a feature DataFrame.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import List, Dict
+import ta
+from datetime import datetime, timezone
+
+def _rolling_std(close: np.ndarray, period: int = 10) -> np.ndarray:
+    return pd.Series(close).rolling(period).std().values
+
+def _volume_ma(volume: np.ndarray, period: int = 20) -> np.ndarray:
+    return pd.Series(volume).rolling(period).mean().values
+
+def _linreg_slope(close: np.ndarray, period: int = 20) -> np.ndarray:
+    """Rolling linear regression slope (normalized by price) using Pandas vectorization."""
+    s = pd.Series(close)
+    x = np.arange(period, dtype=float)
+    x_centered = x - x.mean()
+    var_x = (x_centered ** 2).sum() + 1e-10
+
+    def calc_slope(y):
+        y_mean = y.mean()
+        slope = (x_centered * (y - y_mean)).sum() / var_x
+        return slope / (y_mean + 1e-10)
+        
+    return s.rolling(period).apply(calc_slope, raw=True).fillna(0.0).values
+
+def _hurst_approx(close: np.ndarray, lag_max: int = 16) -> np.ndarray:
+    """Approximate rolling Hurst exponent (simplified, window=lag_max*2)."""
+    s = pd.Series(close)
+    win = lag_max * 2
+    
+    diff2 = s.diff(2)
+    diff16 = s.diff(16)
+    
+    std2 = diff2.rolling(win).std() + 1e-12
+    std16 = diff16.rolling(win).std() + 1e-12
+    
+    h = np.log(std16 / std2) / np.log(8)
+    return h.clip(0.0, 1.0).fillna(0.5).values
+
+def _approximate_entropy(close: np.ndarray, window: int = 20, m: int = 2, r_factor: float = 0.2) -> np.ndarray:
+    """
+    Rolling Approximate Entropy (ApEn) — a regularity/predictability measure.
+    Low ApEn  -> series is regular/predictable (potential synthetic OTC pattern)
+    High ApEn -> series is irregular/random (typical of genuine market noise)
+    Fully vectorized inner loop for performance.
+    """
+    s = pd.Series(close)
+
+    def _apen(window_vals: np.ndarray) -> float:
+        n = len(window_vals)
+        std = np.std(window_vals)
+        if std < 1e-10:
+            return 0.0  # perfectly flat window = zero entropy (maximally regular)
+        r = r_factor * std
+
+        def _phi(m_dim: int) -> float:
+            xlen = n - m_dim + 1
+            if xlen <= 0:
+                return 0.0
+            # Vectorized embedding construction
+            x = np.lib.stride_tricks.sliding_window_view(window_vals, m_dim)
+            # Broadcasting for pairwise distances (xlen, xlen, m_dim)
+            dist = np.max(np.abs(x[:, None, :] - x[None, :, :]), axis=2)
+            counts = np.sum(dist <= r, axis=1) / xlen
+            return float(np.sum(np.log(counts + 1e-300)) / xlen)
+
+        return _phi(m) - _phi(m + 1)
+
+    result = s.rolling(window).apply(_apen, raw=True)
+    result = (result.clip(0.0, 2.0) / 2.0).fillna(0.5)
+    return result.values
+
+def _order_flow_features(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, v: np.ndarray, vol_ma: np.ndarray) -> tuple:
+    candle_range = (h - lo) + 1e-10
+    buy_ratio = (c - lo) / candle_range
+    sell_ratio = (h - c) / candle_range
+    
+    buy_vol = v * buy_ratio
+    sell_vol = v * sell_ratio
+    
+    delta_ratio = buy_vol / (sell_vol + 1e-10)
+    
+    # Block trade anomaly: 1 if volume > 1.7x MA, else 0
+    block_trade = (v > (vol_ma * 1.7)).astype(float)
+    
+    return buy_vol, sell_vol, delta_ratio, block_trade
+
+def _fvg_features(h: np.ndarray, lo: np.ndarray) -> tuple:
+    """Fair Value Gaps: Returns arrays for Bullish and Bearish FVG sizes via NumPy vectorization."""
+    fvg_bullish = np.zeros(len(h))
+    fvg_bearish = np.zeros(len(h))
+    
+    if len(h) < 3:
+        return fvg_bullish, fvg_bearish
+        
+    bullish_mask = lo[2:] > h[:-2]
+    fvg_bullish[2:][bullish_mask] = lo[2:][bullish_mask] - h[:-2][bullish_mask]
+    
+    bearish_mask = h[2:] < lo[:-2]
+    fvg_bearish[2:][bearish_mask] = lo[:-2][bearish_mask] - h[2:][bearish_mask]
+            
+    return fvg_bullish, fvg_bearish
+
+def _parse_timestamps_vectorized(ts_series: pd.Series) -> pd.Series:
+    """
+    Golden Standard Vectorized Timestamp Parser.
+    Enforces Numeric Unix Timestamps. Drops slow string parsing.
+    """
+    ts_numeric = pd.to_numeric(ts_series, errors='coerce').fillna(0)
+    is_ms = ts_numeric.max() > 1e11
+    return pd.to_datetime(ts_numeric, unit='ms' if is_ms else 's', utc=True)
+
+def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.DataFrame:
+    """
+    Build feature matrix from list of OHLCV candle dicts.
+    Each dict: {'open', 'high', 'low', 'close', 'volume', 'opentime'}
+    Optionally accepts mtf_candles to build Multi-Timeframe features.
+    Returns DataFrame with one row per candle, features only (no NaN rows).
+    """
+    df = pd.DataFrame(candles)
+    df.columns = [c.lower() for c in df.columns]
+
+    o = df['open'].values.astype(float)
+    h = df['high'].values.astype(float)
+    lo = df['low'].values.astype(float)
+    c = df['close'].values.astype(float)
+    v = df['volume'].values.astype(float)
+
+    feats = {}
+
+    # ━━━ Trend / Momentum (Using ta library) ━━━
+    df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
+    df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
+    df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
+    
+    feats['ema_ratio_9_21']  = df['ema9'].values / (df['ema21'].values + 1e-10) - 1
+    feats['close_vs_ema9']   = c / (df['ema9'].values + 1e-10) - 1
+    feats['close_vs_ema21']  = c / (df['ema21'].values + 1e-10) - 1
+    feats['close_vs_ema50']  = c / (df['ema50'].values + 1e-10) - 1
+
+    macd = ta.trend.MACD(df['close'], window_slow=26, window_fast=12, window_sign=9)
+    macd_line = macd.macd().values
+    macd_hist = macd.macd_diff().values
+    
+    feats['macd']       = macd_line / (np.abs(c) + 1e-10)
+    feats['macd_hist']  = macd_hist / (np.abs(c) + 1e-10)
+
+    feats['linreg_slope'] = _linreg_slope(c, 20)
+    feats['hurst']        = _hurst_approx(c, 16)
+
+    # ━━━ B7: OTC Entropy Metrics ━━━
+    feats['approximate_entropy'] = _approximate_entropy(c, window=20, m=2, r_factor=0.2)
+    feats['otc_synthetic_score'] = np.clip(
+        (1.0 - feats['approximate_entropy']) * (np.abs(feats['hurst'] - 0.5) * 2.0),
+        0.0, 1.0
+    )
+
+    # ━━━ A3: Fractional Differentiation ━━━
+    def frac_diff(series: np.ndarray, d: float, thres=0.01) -> np.ndarray:
+        w = [1.0]
+        for k in range(1, len(series)):
+            w_k = -w[-1] * (d - k + 1) / k
+            if abs(w_k) < thres:
+                break
+            w.append(w_k)
+        w = np.array(w)
+        # Vectorized convolution
+        res = np.convolve(series, w, mode='valid')
+        # Pad left to maintain array length
+        pad_size = len(series) - len(res)
+        return np.concatenate([np.zeros(pad_size), res])
+        
+    feats['frac_diff_0_4'] = frac_diff(c, 0.4)
+    
+    kalman_slope = np.zeros(len(c))
+    kalman_slope[1:] = (c[1:] - c[:-1]) / (np.abs(c[:-1]) + 1e-10)
+    feats['kalman_slope'] = kalman_slope
+
+    # ━━━ Oscillators ━━━
+    feats['rsi14'] = ta.momentum.rsi(df['close'], window=14).values / 100.0 - 0.5
+    feats['rsi7']  = ta.momentum.rsi(df['close'], window=7).values / 100.0 - 0.5
+    
+    bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
+    bb_mavg = bb.bollinger_mavg().values
+    bb_std = pd.Series(c).rolling(20).std().values
+    feats['bb_z']  = ((c - bb_mavg) / (bb_std + 1e-10))
+
+    # ━━━ Volatility & Regime ━━━
+    atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14).values
+    feats['atr_norm']     = atr / (c + 1e-10)
+    feats['rolling_std']  = _rolling_std(c, 10) / (c + 1e-10)
+    
+    adx_indicator = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
+    feats['adx']          = adx_indicator.adx().values
+
+    # ━━━ Price Returns ━━━
+    for lag in [1, 2, 3, 5, 10]:
+        ret = np.zeros(len(c))
+        ret[lag:] = (c[lag:] - c[:-lag]) / (c[:-lag] + 1e-10)
+        feats[f'ret{lag}'] = ret
+
+    # ━━━ Candle Structure ━━━
+    candle_range = (h - lo) + 1e-10
+    feats['body_ratio']    = np.abs(c - o) / candle_range
+    feats['upper_wick']    = (h - np.maximum(o, c)) / candle_range
+    feats['lower_wick']    = (np.minimum(o, c) - lo) / candle_range
+    feats['candle_dir']    = np.sign(c - o)
+
+    # ━━━ Volume & Order Flow & SMC ━━━
+    vol_ma = _volume_ma(v, 20)
+    rolling_vol_mean = pd.Series(vol_ma).rolling(20, min_periods=1).mean().values
+    feats['vol_ratio']     = v / (vol_ma + 1e-10)
+    feats['vol_ma']        = vol_ma / (rolling_vol_mean + 1e-10)
+    
+    buy_vol, sell_vol, delta_ratio, block_trade = _order_flow_features(o, h, lo, c, v, vol_ma)
+    feats['of_buy_vol_norm'] = buy_vol / (vol_ma + 1e-10)
+    feats['of_sell_vol_norm'] = sell_vol / (vol_ma + 1e-10)
+    feats['of_delta_ratio'] = np.clip(delta_ratio, 0.0, 5.0)
+    feats['of_block_trade'] = block_trade
+    
+    rolling_buy = pd.Series(buy_vol).rolling(5).sum().values
+    rolling_sell = pd.Series(sell_vol).rolling(5).sum().values
+    feats['of_rolling_delta_5'] = np.clip(rolling_buy / (rolling_sell + 1e-10), 0.0, 5.0)
+    
+    # Fair Value Gaps
+    fvg_bull, fvg_bear = _fvg_features(h, lo)
+    feats['smc_fvg_bullish'] = fvg_bull / (c + 1e-10)
+    feats['smc_fvg_bearish'] = fvg_bear / (c + 1e-10)
+
+    # ━━━ Channel Position ━━━
+    high20 = pd.Series(h).rolling(20).max().values
+    low20  = pd.Series(lo).rolling(20).min().values
+    range20 = high20 - low20 + 1e-10
+    feats['channel_pos'] = (c - low20) / range20
+
+    # ━━━ Microstructure Features ━━━
+    epsilon = 1e-8
+    feats['micro_close_pos'] = (c - lo) / (candle_range + epsilon)
+    
+    body_size = np.abs(c - o)
+    feats['micro_body_ratio'] = body_size / (candle_range + epsilon)
+    
+    prev_close = pd.Series(c).shift(1).fillna(c[0]).values
+    tr1 = h - lo
+    tr2 = np.abs(h - prev_close)
+    tr3 = np.abs(lo - prev_close)
+    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    tr_mean = pd.Series(true_range).rolling(60, min_periods=1).mean().values
+    tr_std = pd.Series(true_range).rolling(60, min_periods=1).std().fillna(1e-8).values
+    feats['micro_volatility_z'] = (true_range - tr_mean) / (tr_std + epsilon)
+    
+    direction = np.sign(c - o)
+    feats['micro_inertia_5'] = pd.Series(direction).rolling(5, min_periods=1).sum().values
+    feats['micro_inertia_15'] = pd.Series(direction).rolling(15, min_periods=1).sum().values
+    
+    vol_mean_60 = pd.Series(v).rolling(60, min_periods=1).mean().values
+    feats['micro_volume_burst'] = v / (vol_mean_60 + epsilon)
+    feats['micro_efficiency_ratio'] = body_size / (v + epsilon)
+
+    # ━━━ Time / Session (Vectorized) ━━━
+    if 'opentime' in df.columns:
+        df['opentime_dt'] = _parse_timestamps_vectorized(df['opentime'])
+        hours = df['opentime_dt'].dt.hour + df['opentime_dt'].dt.minute / 60.0
+        feats['hour_sin'] = np.sin(2 * np.pi * hours / 24.0).values
+        feats['hour_cos'] = np.cos(2 * np.pi * hours / 24.0).values
+    else:
+        feats['hour_sin'] = np.zeros(len(c))
+        feats['hour_cos'] = np.zeros(len(c))
+
+    # ━━━ MTF Integration ━━━
+    if mtf_candles and len(mtf_candles) > 10 and 'opentime' in df.columns:
+        df_mtf = pd.DataFrame(mtf_candles)
+        df_mtf.columns = [col.lower() for col in df_mtf.columns]
+        
+        if 'opentime' in df_mtf.columns:
+            df_mtf['opentime_dt'] = _parse_timestamps_vectorized(df_mtf['opentime'])
+            
+            df_mtf['mtf_ema50'] = ta.trend.ema_indicator(df_mtf['close'].astype(float), window=50)
+            df_mtf['mtf_rsi'] = ta.momentum.rsi(df_mtf['close'].astype(float), window=14)
+            df_mtf['mtf_trend'] = (df_mtf['close'].astype(float) > df_mtf['mtf_ema50']).astype(float)
+            
+            df_mtf_sub = df_mtf[['opentime_dt', 'mtf_rsi', 'mtf_trend']].dropna()
+            
+            df_sorted = df[['opentime_dt']].copy()
+            df_sorted['original_index'] = df_sorted.index
+            df_sorted = df_sorted.sort_values('opentime_dt')
+            
+            df_mtf_sub = df_mtf_sub.sort_values('opentime_dt')
+            
+            # Shift MTF timestamps to strictly prevent look-ahead bias
+            if len(df_mtf_sub) > 1:
+                mtf_interval = df_mtf_sub['opentime_dt'].diff().median()
+                df_mtf_sub['opentime_dt'] = df_mtf_sub['opentime_dt'] + mtf_interval
+            
+            merged = pd.merge_asof(df_sorted, df_mtf_sub, on='opentime_dt', direction='backward')
+            merged = merged.sort_values('original_index')
+            
+            feats['mtf_rsi'] = merged['mtf_rsi'].fillna(50.0).values / 100.0 - 0.5
+            feats['mtf_trend'] = merged['mtf_trend'].fillna(0.0).values
+        else:
+            feats['mtf_rsi'] = np.zeros(len(c))
+            feats['mtf_trend'] = np.zeros(len(c))
+    else:
+        feats['mtf_rsi'] = np.zeros(len(c))
+        feats['mtf_trend'] = np.zeros(len(c))
+
+    result = pd.DataFrame(feats, index=df.index)
+    
+    # Slice off initial rolling warmup window (first 25 rows) and fill residual NaNs
+    result = result.iloc[25:].fillna(0.0)
+
+    return result
