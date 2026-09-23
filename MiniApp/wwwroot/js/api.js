@@ -261,15 +261,29 @@ export async function executeAnalysis() {
 
             // Market Weather Bindings
             const wSession = document.getElementById("weatherSession");
-            if (wSession && data.uiMarketSession) wSession.innerText = data.uiMarketSession;
+            if (wSession && data.uiMarketSession) {
+                wSession.innerText = data.uiMarketSession;
+                let sColor = "#f59e0b"; // default yellow for quiet/range
+                let sessionLow = data.uiMarketSession.toLowerCase();
+                if (sessionLow.includes("объемы") || sessionLow.includes("лондон") || sessionLow.includes("крипто")) {
+                    sColor = "#10b981"; // green (good volume)
+                } else if (sessionLow.includes("otc")) {
+                    sColor = "#8b5cf6"; // purple (OTC)
+                } else if (sessionLow.includes("тихий")) {
+                    sColor = "#6b7280"; // gray (dead)
+                }
+                wSession.style.color = sColor;
+            }
             
             const wPhase = document.getElementById("weatherPhase");
             if (wPhase && data.uiMarketPhase) {
                 wPhase.innerText = data.uiMarketPhase;
                 let phaseColor = "#10b981"; // Green default (upward/good)
-                if (data.uiMarketPhase.includes("Замедление") || data.uiMarketPhase.includes("Переход") || data.uiMarketPhase.includes("Флэт") || data.uiMarketPhase.includes("Боковик")) {
+                let phaseLow = data.uiMarketPhase.toLowerCase();
+                
+                if (phaseLow.includes("замедление") || phaseLow.includes("переход") || phaseLow.includes("флэт") || phaseLow.includes("боковик")) {
                     phaseColor = "#f59e0b"; // Yellow (Average / Sideways)
-                } else if (data.uiMarketPhase.includes("падение") || data.uiMarketPhase.includes("Медвеж") || data.uiMarketPhase.includes("Перепроданность") || data.uiMarketPhase.includes("Слабый") || data.uiMarketPhase.includes("Волатильный") || data.uiMarketPhase.includes("Резкий") || data.uiMarketPhase.includes("Шум")) {
+                } else if (phaseLow.includes("падени") || phaseLow.includes("медвеж") || phaseLow.includes("перепроданность") || phaseLow.includes("слабый") || phaseLow.includes("волатильный") || phaseLow.includes("резкий") || phaseLow.includes("шум")) {
                     phaseColor = "#ef4444"; // Red (Downward / Bad)
                 }
                 wPhase.style.color = phaseColor;
@@ -280,9 +294,10 @@ export async function executeAnalysis() {
             if (wEntropy && data.uiMarketEntropy) {
                 wEntropy.innerText = data.uiMarketEntropy;
                 let entColor = "#10b981";
-                if (data.uiMarketEntropy.includes("Опасно") || data.uiMarketEntropy.includes("ВЫСОКАЯ")) {
+                let entLow = data.uiMarketEntropy.toLowerCase();
+                if (entLow.includes("опасн") || entLow.includes("высок") || entLow.includes("хаос")) {
                     entColor = "#ef4444";
-                } else if (data.uiMarketEntropy.includes("Мертвый") || data.uiMarketEntropy.includes("Слабая") || data.uiMarketEntropy.includes("Переход")) {
+                } else if (entLow.includes("мертв") || entLow.includes("слаб") || entLow.includes("переход")) {
                     entColor = "#f59e0b";
                 }
                 wEntropy.style.color = entColor;
