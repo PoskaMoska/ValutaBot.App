@@ -65,7 +65,7 @@ BINANCE_BASE = "https://api.binance.com"
 TWELVE_DATA_BASE = "https://api.twelvedata.com"
 TWELVE_DATA_API_KEY = os.getenv("TwelveDataApiKey") or os.getenv("TWELVE_DATA_API_KEY")
 
-RETRAIN_INTERVAL_H = 1.0  # (Original value restored for prod)
+
 _DEFAULT_SYMBOLS = ["EURUSD", "GBPUSD", "AUDUSD", "USDCAD", "USDCHF", "USDJPY"]
 _DEFAULT_INTERVALS = ["1m", "s30", "s15", "s10", "s5"]
 
@@ -1655,3 +1655,14 @@ def context_embedding_column_names(dim: int) -> List[str]:
 
 
 
+
+
+def _run_training_worker(symbol: str, interval: str, regime: str, candles: Optional[list], mtf_candles: Optional[list], challenger_mode: bool):
+    "Executes the actual training in a separate process without importing main.py."
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    predictor = ForexPredictor(symbol, interval, regime)
+    if challenger_mode:
+        return predictor.train_challenger(candles, mtf_candles)
+    else:
+        return predictor.train(candles, mtf_candles, _challenger_mode=False)

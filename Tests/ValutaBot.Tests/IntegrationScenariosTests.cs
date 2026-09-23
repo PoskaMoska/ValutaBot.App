@@ -88,7 +88,6 @@ namespace ValutaBot.Tests
                 taEngine, // IMarketAnalyzer
                 cmEngine,
                 timeoutEngine,
-                mcEngine,
                 optionsMock,
                 NullLogger<MarketAnalysisOrchestrator>.Instance
             );

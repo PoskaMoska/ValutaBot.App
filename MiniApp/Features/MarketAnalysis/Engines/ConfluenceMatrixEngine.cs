@@ -79,9 +79,9 @@ public class ConfluenceMatrixEngine(
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "рџ’  РР”Р•РђР›Р¬РќР«Р™ РЎРР“РќРђР› (3 РўР¤ - 100%)",
-                >= 0.65 => "рџ’  РЎРР›Р¬РќР«Р™ РЎРР“РќРђР› (2 РўР¤ - 67%)",
-                _       => "рџ’  РЎР›РђР‘Р«Р™ РЎРР“РќРђР› (1 РўР¤ - 33%)"
+                >= 0.99 => "💎 ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "💎 СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "💎 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
             string summary = $"вЂў 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label}";
@@ -105,7 +105,7 @@ public class ConfluenceMatrixEngine(
                 ConfluenceRatio: 0.0,
                 IsGoldenSetup: false,
                 ProbabilityBoost: 0,
-                ConfluenceLabel: "рџ’  3D Matrix Unavailable",
+                ConfluenceLabel: "💎 3D Matrix Unavailable",
                 SummaryReasoning: "MTF sync failed due to rate limits",
                 TimeframeDirections: new Dictionary<string, string>(),
                 DominantDirection: "NEUTRAL"
@@ -117,9 +117,9 @@ public class ConfluenceMatrixEngine(
     Resolve3DTimeframes(string tf) =>
     tf.ToLower() switch
     {
-        // FIX PRIORITY-1: Align the 3D Timeframe Matrix with MarketDataFetcher.HigherTf()
+    // FIX PRIORITY-1: Перегрузка принимающая уже загруженные current+higher свечи из Orchestrator'а.
         // This is required so the 1-fetch pre-loaded primaryCandles and macroCandles in Evaluate4DMatrixAsync
-        // exactly match the primaryTf and macroTf here. Otherwise, the Doppelganger Bug occurs, evaluating e.g. s5 twice.
+    // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min) и Doppelganger Bug.
         "s5"                      => ("s5",  "s10", "m1"),
         "s10"                     => ("s5",  "s10", "m1"),
         "s15"                     => ("s5",  "s15", "m1"),
@@ -144,8 +144,8 @@ public class ConfluenceMatrixEngine(
     /// candles.Length == 0 < 14 always return score=0.0 always "NEUTRAL".
     /// Now constructs a real OhlcCandle[] from price/volume arrays.
     /// </remarks>
-    // Р’ РѕС‚Р»РёС‡РёРµ РѕС‚ ScoreDirection (РєРѕС‚РѕСЂРѕРјСѓ РЅСѓР¶РµРЅ С‚РѕР»СЊРєРѕ С†РµРЅС‹ Рё РґР°РµС‚ avgDiffВ±0.5),
-    // СЌС‚РѕС‚ РјРµС‚РѕРґ РїРµСЂРµРґР°РµС‚ СЂРµР°Р»СЊРЅС‹Рµ High/Low СЃРІРµС‡Рё -> ATR/ADX РєРѕСЂСЂРµРєС‚РЅС‹ -> РЅРµС‚ С€СѓРјР° В±12%.
+    // В отличие от ScoreDirection (которому нужен только цены и дает avgDiff±0.5),
+    // этот метод передает реальные High/Low свечи -> ATR/ADX корректны -> нет шума ±12%.
     private string ScoreDirectionFromCandles(
         MiniAppController.OhlcCandle[] ohlcCandles,
         double[] prices,
@@ -161,7 +161,7 @@ public class ConfluenceMatrixEngine(
 
         try
         {
-            // РџРµСЂРµРґР°РµРј СЂРµР°Р»СЊРЅС‹Рµ OhlcCandle[] (СЃ РЅР°СЃС‚РѕСЏС‰РёРјРё High/Low) РЅР°РїСЂСЏРјСѓСЋ РІ ScoreTimeframe
+    // Передаем реальные OhlcCandle[] (с настоящими High/Low) напрямую в ScoreTimeframe
             // FIX ROOT CAUSE #3: Include asset in cache key for per-asset isolation
             var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
                 $"4dmatrix_{asset}_{tf}", tf, prices,
@@ -169,7 +169,7 @@ public class ConfluenceMatrixEngine(
                 candles: ohlcCandles.AsSpan()
             );
 
-            // РџРѕСЂРѕРі В±0.20: РїСЂРё С€РєР°Р»Рµ [-1, +1] РѕС‚СЃРµРєР°РµС‚ СЂС‹РЅРѕС‡РЅС‹Р№ С€СѓРј
+    // Порог ±0.20: при шкале [-1, +1] отсекает рыночный шум
             return score > 0.20 ? "BUY" : score < -0.20 ? "PUT" : "NEUTRAL";
         }
         catch (Exception ex)
@@ -180,9 +180,9 @@ public class ConfluenceMatrixEngine(
     }
 
 
-    // FIX PRIORITY-1: РџРµСЂРµРіСЂСѓР·РєР° РїСЂРёРЅРёРјР°СЋС‰Р°СЏ СѓР¶Рµ Р·Р°РіСЂСѓР¶РµРЅРЅС‹Рµ current+higher СЃРІРµС‡Рё РёР· Orchestrator'Р°.
-    // РЈРјРЅРѕ РјР°РїРїРёС‚ РёС… РЅР° СЃР»РѕС‚С‹ (micro/primary/macro) Рё РґРµР»Р°РµС‚ 1 HTTP-Р·Р°РїСЂРѕСЃ РґР»СЏ РЅРµРґРѕСЃС‚Р°СЋС‰РµРіРѕ С‚Р°Р№РјС„СЂРµР№РјР°.
-    // Р­С‚Рѕ СѓСЃС‚СЂР°РЅСЏРµС‚ РіР»Р°РІРЅСѓСЋ РїСЂРёС‡РёРЅСѓ РЅРµСЃС‚Р°Р±РёР»СЊРЅРѕСЃС‚Рё: TwelveData rate limit (7 req/min) Рё Doppelganger Bug.
+    // FIX PRIORITY-1: Перегрузка принимающая уже загруженные current+higher свечи из Orchestrator'а.
+    // Умно маппит их на слоты (micro/primary/macro) и делает 1 HTTP-запрос для недостающего таймфрейма.
+    // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min) и Doppelganger Bug.
     public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
         string asset,
         string primaryTimeframe,
@@ -269,9 +269,9 @@ public class ConfluenceMatrixEngine(
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "рџ’  РР”Р•РђР›Р¬РќР«Р™ РЎРР“РќРђР› (3 РўР¤ - 100%)",
-                >= 0.65 => "рџ’  РЎРР›Р¬РќР«Р™ РЎРР“РќРђР› (2 РўР¤ - 67%)",
-                _       => "рџ’  РЎР›РђР‘Р«Р™ РЎРР“РќРђР› (1 РўР¤ - 33%)"
+                >= 0.99 => "💎 ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "💎 СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "💎 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
             string summary = $"вЂў 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch smart]";

@@ -146,29 +146,7 @@ namespace ValutaBot.Tests.Engines
             Assert.True(result.TimeoutCandles >= 2);
         }
 
-        // ═══════════════════════════════════════════════════════════
-        // W-19: MonteCarloEngine — TF-aware vol normalization
-        // ═══════════════════════════════════════════════════════════
 
-        [Fact]
-        public void W19_MonteCarlo_DifferentTfs_DifferentVol_NoNaN()
-        {
-            var engine = new MonteCarloEngine();
-
-            // Before fix: both 1m and 5m used sqrt(60) → same totalVol → same EV
-            // After fix:  5m uses sqrt(300) → different normalization
-            var r1m = engine.Simulate(1.1, 0.65, "BUY", 0.001, timeInSeconds: 60,  payoutRatio: 0.85, iterations: 2000);
-            var r5m = engine.Simulate(1.1, 0.65, "BUY", 0.001, timeInSeconds: 300, payoutRatio: 0.85, iterations: 2000);
-            var rs3 = engine.Simulate(1.1, 0.65, "BUY", 0.001, timeInSeconds: 3,   payoutRatio: 0.85, iterations: 2000);
-
-            _out.WriteLine($"[W-19] 1m EV={r1m.ExpectedValuePct:F3}% | 5m EV={r5m.ExpectedValuePct:F3}% | s3 EV={rs3.ExpectedValuePct:F3}%");
-
-            Assert.False(double.IsNaN(r1m.ExpectedValuePct), "1m EV is NaN");
-            Assert.False(double.IsNaN(r5m.ExpectedValuePct), "5m EV is NaN");
-            Assert.False(double.IsNaN(rs3.ExpectedValuePct), "s3 EV is NaN");
-            Assert.True(r1m.ExpectedValuePct > 0, $"1m should be positive EV at 65%: {r1m.ExpectedValuePct}");
-            Assert.True(r5m.ExpectedValuePct > 0, $"5m should be positive EV at 65%: {r5m.ExpectedValuePct}");
-        }
 
         // ═══════════════════════════════════════════════════════════
         // W-21: NONE values in SmcSignal must not bias score
@@ -297,37 +275,7 @@ namespace ValutaBot.Tests.Engines
             _out.WriteLine($"[Stress] 20 concurrent OrderFlow.Update() — no exception. DeltaRatio={of.DeltaRatio:F4}");
         }
 
-        // ═══════════════════════════════════════════════════════════
-        // Monte Carlo backtest: Kelly > Fixed after our vol fix
-        // ═══════════════════════════════════════════════════════════
 
-        [Fact]
-        public void W19_MonteCarloKelly_OutperformsFixed_ForEachTf()
-        {
-            var engine  = new MonteCarloEngine();
-            var rand    = new Random(42);
-            double payout = 0.85;
-
-            foreach (int tf in new[] { 60, 180, 300 })
-            {
-                double kelly = 1000, fix = 1000;
-                for (int i = 0; i < 500; i++)
-                {
-                    double prob = 0.52 + rand.NextDouble() * 0.12;
-                    var mc   = engine.Simulate(1.1, prob, "BUY", 0.001, tf, payout, 300);
-                    if (mc.ExpectedValuePct <= 0 || mc.KellyRiskPct <= 0) continue;
-                    bool win = rand.NextDouble() < prob;
-                    double kb = kelly * mc.KellyRiskPct / 100.0;
-                    double fb = fix * 0.01;
-                    kelly += win ?  kb * payout : -kb;
-                    fix   += win ?  fb * payout : -fb;
-                    if (kelly < 0) kelly = 0;
-                    if (fix   < 0) fix   = 0;
-                }
-                _out.WriteLine($"[W-19 Kelly] TF={tf}s → Kelly=${kelly:F0} Fixed=${fix:F0}");
-                Assert.True(kelly > 0, $"Kelly capital went to 0 on TF={tf}s");
-            }
-        }
     }
 }
 

@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from concurrent.futures import ProcessPoolExecutor
 
-from model import ForexPredictor, TF_MAP, is_forex_symbol
+from model import ForexPredictor, TF_MAP, is_forex_symbol, _run_training_worker
 
 _API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
 _process_pool = None
@@ -90,16 +90,7 @@ async def lifespan(app: FastAPI):
     if _process_pool is not None:
         _process_pool.shutdown(wait=False)
 
-def _run_training_worker(symbol: str, interval: str, regime: str, candles: Optional[list], mtf_candles: Optional[list], challenger_mode: bool):
-    """Executes the actual training in a separate process."""
-    from main import _get_predictor
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    predictor = _get_predictor(symbol, interval, regime)
-    if challenger_mode:
-        return predictor.train_challenger(candles, mtf_candles)
-    else:
-        return predictor.train(candles, mtf_candles, _challenger_mode=False)
+
 
 def _dispatch_training_to_pool(symbol: str, interval: str, regime: str, candles: Optional[list], mtf_candles: Optional[list], challenger_mode: bool):
     global _process_pool

@@ -22,7 +22,7 @@ namespace ValutaBot.Tests.Engines
             
             var e2eSettings = new TradingBotSettings { EnableMachineLearning = false, EnableSmc = true, EnableOrderFlow = true, EnableAutoCalibration = true };
             var orch = new MarketAnalysisOrchestrator(
-                mockFetcher, ta, ta, ta, cmEngine, aeEngine, new MonteCarloEngine(), Options.Create(e2eSettings),
+                mockFetcher, ta, ta, ta, cmEngine, aeEngine, Options.Create(e2eSettings),
                 new NullLogger<MarketAnalysisOrchestrator>()
             );
             
@@ -42,7 +42,7 @@ namespace ValutaBot.Tests.Engines
             
             var e2eSettings = new TradingBotSettings { EnableMachineLearning = false, EnableSmc = true, EnableOrderFlow = true, EnableAutoCalibration = true };
             var orch = new MarketAnalysisOrchestrator(
-                mockFetcher, ta, ta, ta, cmEngine, aeEngine, new MonteCarloEngine(), Options.Create(e2eSettings),
+                mockFetcher, ta, ta, ta, cmEngine, aeEngine, Options.Create(e2eSettings),
                 new NullLogger<MarketAnalysisOrchestrator>()
             );
             
@@ -62,7 +62,7 @@ namespace ValutaBot.Tests.Engines
             
             var e2eSettings = new TradingBotSettings { EnableMachineLearning = false, EnableSmc = true, EnableOrderFlow = true, EnableAutoCalibration = true };
             var orch = new MarketAnalysisOrchestrator(
-                mockFetcher, ta, ta, ta, cmEngine, aeEngine, new MonteCarloEngine(), Options.Create(e2eSettings),
+                mockFetcher, ta, ta, ta, cmEngine, aeEngine, Options.Create(e2eSettings),
                 new NullLogger<MarketAnalysisOrchestrator>()
             );
             

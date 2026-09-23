@@ -94,7 +94,7 @@ namespace ValutaBot.MiniApp.Core
                     var cmEngine = new ConfluenceMatrixEngine(fetcher, ta, new ValutaBot.MiniApp.AutoCalibrationEngine());
                     var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder => builder.AddConsole());
                     var orchestrator = new ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator(
-                        fetcher, ta, ta, ta, cmEngine, timeoutEngine, new MonteCarloEngine(), Microsoft.Extensions.Options.Options.Create(e2eSettings),
+                        fetcher, ta, ta, ta, cmEngine, timeoutEngine, Microsoft.Extensions.Options.Options.Create(e2eSettings),
                         new Microsoft.Extensions.Logging.Abstractions.NullLogger<ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator>()
                     );
 

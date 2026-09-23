@@ -68,8 +68,7 @@ public static partial class MiniAppController
             sp.GetRequiredService<IAutoCalibrationEngine>()));
         builder.Services.AddSingleton<TradeTimeoutEngine>();
         builder.Services.AddSingleton<ITradeTimeoutEngine>(sp => sp.GetRequiredService<TradeTimeoutEngine>());
-        builder.Services.AddSingleton<MonteCarloEngine>();
-        builder.Services.AddSingleton<IMonteCarloEngine>(sp => sp.GetRequiredService<MonteCarloEngine>());
+
         
         // Register CircuitBreakerService
         builder.Services.AddSingleton<ValutaBot.MiniApp.Services.ICircuitBreakerService>(sp =>

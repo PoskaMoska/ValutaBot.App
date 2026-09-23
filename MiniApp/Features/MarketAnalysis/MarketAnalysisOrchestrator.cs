@@ -22,7 +22,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private readonly IMarketAnalyzer _marketAnalyzer;
     private readonly IConfluenceMatrixEngine _cmEngine;
     private readonly ITradeTimeoutEngine _timeoutEngine;
-    private readonly IMonteCarloEngine _mcEngine;
     private readonly TradingBotSettings _settings;
     private readonly ILogger<MarketAnalysisOrchestrator> _logger;
 
@@ -33,7 +32,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         IMarketAnalyzer marketAnalyzer,
         IConfluenceMatrixEngine cmEngine,
         ITradeTimeoutEngine timeoutEngine,
-        IMonteCarloEngine mcEngine,
         Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings,
         ILogger<MarketAnalysisOrchestrator> logger
     )
@@ -44,7 +42,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _marketAnalyzer = marketAnalyzer;
         _cmEngine = cmEngine;
         _timeoutEngine = timeoutEngine;
-        _mcEngine = mcEngine;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -187,7 +184,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         // 8. Final Formatting & Data Integrity
         var dbSw = Stopwatch.StartNew();
         var timeout = _timeoutEngine.CalculateTimeout(cleanAsset, timeframe, mainAtr, 1.0, smcResult, currentLivePrice, state, isForex);
-        var mc = new MonteCarloResult(1000, 0, 0, 0, "", "", ""); // Placeholder
 
         string finalHash = ComputeHash(candles);
         if (finalHash == dataHash) {
