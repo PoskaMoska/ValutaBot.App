@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using ValutaBot.MiniApp;
@@ -58,9 +58,20 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 if (ofState != null && ofState.Contains("BULLISH")) ofScore += 1;
                 else if (ofState != null && ofState.Contains("BEARISH")) ofScore -= 1;
                 
-                double ensemble = (taScore * 0.5) + (smcScore * 1.5) + (ofScore * 0.3);
+                // Узел 4: LightGBM (ML)
+                double mlScore = 0;
+                var mlPred = await MLPythonService.PredictAsync("EURUSD", "1m", slice.ToArray(), isForex: true);
+                if (mlPred != null && mlPred.Direction != "NEUTRAL")
+                {
+                    double conf = mlPred.Confidence;
+                    if (mlPred.Direction == "BUY") mlScore = (conf - 0.5) * 4; // Map [0.5, 1.0] to [0.0, 2.0]
+                    if (mlPred.Direction == "PUT") mlScore = -(conf - 0.5) * 4;
+                }
+                
+                double ensemble = (taScore * 0.5) + (smcScore * 1.5) + (ofScore * 0.3) + (mlScore * 1.0);
 
                 if (Math.Abs(ensemble) > 1.2) // Строгий порог 
+
                 {
                     // Узел 5: Риск-менеджмент (Walk-Forward)
                     //
@@ -85,11 +96,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
             double wr = totalTrades > 0 ? wins * 100.0 / totalTrades : 0;
             Console.WriteLine($"   Всего качественных сделок: {totalTrades} (отсеяно {(10000 - totalTrades - cooloffSkips):N0} шума)");
             Console.WriteLine($"   Сделок пропущено из-за риска (Cooloff): {cooloffSkips}");
-            Console.WriteLine($"   ИТОГОВЫЙ WIN RATE БЕЗ УЧАСТИЯ ИИ: {wr:F2}%");
-            
-            // Расчет с учетом ML (ИИ дает точность 75%+ на тех же сделках, как мы видели в Python)
-            double finalWr = wr > 0 ? Math.Min(82.2, wr + 15.4) : 0; // ИИ фильтрует 15-20% ложных
-            Console.WriteLine($"   ПРОГНОЗНЫЙ WIN RATE С ВКЛЮЧЕННЫМ ИИ: ~{finalWr:F2}%");
+            Console.WriteLine($"   ИТОГОВЫЙ WIN RATE СИСТЕМЫ (АНСАМБЛЬ + ML): {wr:F2}%");
             Console.WriteLine("---------------------------------------------------------\n");
         }
     }

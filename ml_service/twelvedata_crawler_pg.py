@@ -9,17 +9,24 @@ API_KEY = os.environ.get("TwelveDataApiKey", "")
 DB_URL = os.environ.get("DATABASE_URL")
 
 def get_latest_time(cursor, symbol):
-    # Find the last recorded candle to avoid gaps
     clean_sym = symbol.replace("/", "")
     cursor.execute("SELECT MAX(open_time) FROM historical_candles WHERE asset=%s AND interval='1m'", (clean_sym,))
     row = cursor.fetchone()
     return row[0] if row and row[0] else None
 
-def fetch_batch(symbol, start_date_str=None):
+def get_earliest_time(cursor, symbol):
+    clean_sym = symbol.replace("/", "")
+    cursor.execute("SELECT MIN(open_time) FROM historical_candles WHERE asset=%s AND interval='1m'", (clean_sym,))
+    row = cursor.fetchone()
+    return row[0] if row and row[0] else None
+
+def fetch_batch(symbol, date_str=None, mode="forward"):
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&outputsize=5000&timezone=UTC&apikey={API_KEY}"
-    if start_date_str:
-        # Fetch data going forward from the last known date
-        url += f"&start_date={start_date_str.replace(' ', '%20')}"
+    if date_str:
+        if mode == "forward":
+            url += f"&start_date={str(date_str).replace(' ', '%20')}"
+        else:
+            url += f"&end_date={str(date_str).replace(' ', '%20')}"
         
     try:
         response = requests.get(url, timeout=15)
@@ -56,42 +63,62 @@ def run_crawler():
         
     conn = psycopg2.connect(DB_URL)
     cursor = conn.cursor()
-    print("Starting smart backfill for 100,000 target...")
+    print("Starting smart backfill for 180,000 target (~6 months)...")
 
     for symbol in TWELVEDATA_PAIRS:
+        clean_sym = symbol.replace("/", "")
+        
+        # 1. FORWARD SYNC (keep up to date)
         last_time = get_latest_time(cursor, symbol)
-        start_str = str(last_time) if last_time else None
+        if last_time:
+            print(f"[{symbol}] Forward sync from {last_time}...")
+            candles = fetch_batch(symbol, last_time, mode="forward")
+            _insert_candles(conn, cursor, candles)
+            if candles:
+                time.sleep(12) # Rate limit padding
         
-        print(f"Fetching {symbol} 1m history starting from {start_str or 'origin'}...")
-        candles = fetch_batch(symbol, start_str)
-        
-        if not candles:
-            print(f"No new data for {symbol}.")
-            time.sleep(15)
-            continue
-            
-        inserted = 0
-        for c in candles:
-            try:
-                cursor.execute("""
-                    INSERT INTO historical_candles (asset, interval, open_time, open, high, low, close, volume)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (asset, interval, open_time) DO NOTHING
-                """, c)
-                if cursor.rowcount > 0: inserted += 1
-            except Exception:
-                conn.rollback()
-        conn.commit()
-        
-        cursor.execute("SELECT COUNT(*) FROM historical_candles WHERE asset=%s AND interval='1m'", (symbol.replace("/", ""),))
+        # 2. BACKWARD SYNC (fetch deep history)
+        cursor.execute("SELECT COUNT(*) FROM historical_candles WHERE asset=%s AND interval='1m'", (clean_sym,))
         total = cursor.fetchone()[0]
         
-        print(f"Saved {inserted} new candles. {symbol} now has {total}/100000 total candles.")
-        print("Waiting 15s for rate limits...")
-        time.sleep(15)
+        while total < 180000:
+            earliest_time = get_earliest_time(cursor, symbol)
+            print(f"[{symbol}] Backward sync from {earliest_time or 'NOW'} (Total: {total}/180000)...")
+            
+            candles = fetch_batch(symbol, earliest_time, mode="backward")
+            if not candles:
+                print(f"[{symbol}] No more historical data available backwards.")
+                time.sleep(12)
+                break
+                
+            inserted = _insert_candles(conn, cursor, candles)
+            if inserted == 0:
+                print(f"[{symbol}] Reached end of historical data or overlap.")
+                time.sleep(12)
+                break
+                
+            cursor.execute("SELECT COUNT(*) FROM historical_candles WHERE asset=%s AND interval='1m'", (clean_sym,))
+            total = cursor.fetchone()[0]
+            print(f"[{symbol}] Saved {inserted} older candles. Total now {total}/180000.")
+            time.sleep(12) # TwelveData 8 req/min (7.5s) limit, 12s is very safe
 
     conn.close()
     print("Backfill complete.")
+
+def _insert_candles(conn, cursor, candles):
+    inserted = 0
+    for c in candles:
+        try:
+            cursor.execute("""
+                INSERT INTO historical_candles (asset, interval, open_time, open, high, low, close, volume)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (asset, interval, open_time) DO NOTHING
+            """, c)
+            if cursor.rowcount > 0: inserted += 1
+        except Exception:
+            conn.rollback()
+    conn.commit()
+    return inserted
 
 if __name__ == "__main__":
     run_crawler()

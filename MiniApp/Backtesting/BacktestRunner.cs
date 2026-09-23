@@ -55,7 +55,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
             for (int i = WindowSize; i < total - horizon; i++)
             {
                 // Скользящее окно
-                var window = new ArraySegment<MiniAppController.OhlcCandle>(candles, i - WindowSize, WindowSize);
+                var window = new ArraySegment<MiniAppController.OhlcCandle>(candles, i - WindowSize + 1, WindowSize);
                 var ohlcSpan = window.Array!.AsSpan(window.Offset, window.Count);
 
                 double[] closePrices = new double[WindowSize];
@@ -70,9 +70,9 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 DateTime timestamp  = ohlcSpan[WindowSize - 1].Timestamp;
 
                 // ── Strip "Live" Candle for Strict Train-Serve Equivalency ──
-                var closedOhlcSpan = ohlcSpan.Slice(0, WindowSize - 1);
-                var closedPrices = closePrices.AsSpan(0, WindowSize - 1);
-                var closedVolumes = volumes.AsSpan(0, WindowSize - 1);
+                var closedOhlcSpan = ohlcSpan;
+                var closedPrices = closePrices.AsSpan();
+                var closedVolumes = volumes.AsSpan();
 
                 // ── TA Engine ────────────────────────────────────────────────
                 var (taScore, taConf, rsiVal, hmaVal, volStr, atrVal) =
