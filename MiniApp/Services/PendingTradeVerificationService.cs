@@ -65,7 +65,7 @@ public class PendingTradeVerificationService : BackgroundService
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
             var candle = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<dynamic>(conn, @"
-                SELECT close_price as "Close"
+                SELECT close_price as ""Close""
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
                   AND open_time <= @VerifyAt
