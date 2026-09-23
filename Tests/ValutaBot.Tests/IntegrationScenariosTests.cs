@@ -75,7 +75,6 @@ namespace ValutaBot.Tests
             var taEngine = new TechnicalAnalysisEngine();
             var cmEngine = new ConfluenceMatrixEngine(mockFetcher.Object, taEngine);
             var timeoutEngine = new TradeTimeoutEngine();
-            var mcEngine = new MonteCarloEngine();
             
             var mockRiskGatekeeper = new DummyGatekeeper();
             var optionsMock = Options.Create(new TradingBotSettings { FastFailTimeoutSeconds = 2 });
