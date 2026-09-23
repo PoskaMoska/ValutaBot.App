@@ -208,10 +208,10 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         if (rsi <= 30.0 || rsi >= 70.0)
             confidence += Math.Min(Math.Abs(rsi - 50.0) * 0.3, 5.0);
 
-        // FIX: The user recently increased RSI contribution (e.g. 0.75/0.8), causing the raw sum 
-        // to exceed the [-1.0, +1.0] design scale, leading to perpetual 90-95% probability.
-        // We must clamp the final score here to preserve math integrity across engines.
-        score = Math.Clamp(score, -1.0, 1.0);
+        // Phase 3: Z-Score / Sigmoid Normalization
+        // Instead of hard-clamping which destroys information at the edges,
+        // we use Hyperbolic Tangent (tanh) to smoothly map (-inf, inf) into (-1.0, 1.0).
+        score = Math.Tanh(score);
 
         // Now achievable max: 60 (base) + 20 (ADX) + 10 (volume) + 5 (RSI) = 95
         return (score, Math.Clamp(confidence, 50.0, 95.0), Math.Round(rsi, 1), Math.Round(hma, 5), Math.Round(volStrength, 2), Math.Round(atrVal, 6));

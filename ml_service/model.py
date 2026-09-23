@@ -852,21 +852,63 @@ class ForexPredictor:
             if feats.empty or len(feats) < 50:
                 return {"error": f"Too few rows after filtering for regime {self.regime}"}
 
-            # NEW: Strict Time-Barrier Target + Smart Magnitude Weights
+            
+            
+            # NEW: Phase 3 - Triple-Barrier Method + Smart Magnitude Weights
             H = TARGET_HORIZON_CANDLES
             
             # Use pandas directly for vectorized operations
             closes_s = pd.Series([cl["close"] for cl in candles])
-            future_close = closes_s.shift(-H)
+            highs_s = pd.Series([cl["high"] for cl in candles])
+            lows_s = pd.Series([cl["low"] for cl in candles])
             
-            # Binary target: strictly Higher(1) or Lower/Equal(0)
-            target_raw = (future_close > closes_s).astype(int).values
-            
-            # Calculate Absolute Return for Magnitude Weighting
-            abs_return = np.abs(np.log(future_close / closes_s))
+            # Calculate dynamic volatility for barrier width
+            abs_return = np.abs(np.log(closes_s / closes_s.shift(1).fillna(closes_s.iloc[0])))
             local_vol = abs_return.ewm(span=1000, min_periods=1).mean()
-            magnitude_weight = abs_return / (local_vol + 1e-8)
-            magnitude_weight = np.clip(magnitude_weight, 0.1, 5.0).fillna(1.0).values
+            
+            # Define barrier width (1.5x local volatility)
+            barrier_width = local_vol * 1.5
+            
+            target_raw = np.zeros(len(candles))
+            magnitude_weight = np.ones(len(candles))
+            
+            closes_np = closes_s.values
+            highs_np = highs_s.values
+            lows_np = lows_s.values
+            barrier_np = barrier_width.values
+            
+            # Vectorized Triple-Barrier Scan (Numpy Optimized)
+            for i in range(len(candles) - H):
+                close_t = closes_np[i]
+                width = barrier_np[i]
+                
+                # Barriers
+                ub = close_t * (1.0 + width)
+                lb = close_t * (1.0 - width)
+                
+                window_highs = highs_np[i+1 : i+1+H]
+                window_lows = lows_np[i+1 : i+1+H]
+                
+                hit_ub = window_highs > ub
+                hit_lb = window_lows < lb
+                
+                ub_idx = np.argmax(hit_ub) if hit_ub.any() else H + 1
+                lb_idx = np.argmax(hit_lb) if hit_lb.any() else H + 1
+                
+                if ub_idx < lb_idx:
+                    target_raw[i] = 1 # Buy wins (Take Profit hit first)
+                    magnitude_weight[i] = 1.0
+                elif lb_idx < ub_idx:
+                    target_raw[i] = 0 # Put wins (Stop Loss hit first)
+                    magnitude_weight[i] = 1.0
+                else:
+                    # Time barrier hit (neither TP nor SL was hit before H candles)
+                    future_c = closes_np[i+H]
+                    target_raw[i] = 1 if future_c > close_t else 0
+                    # Penalize magnitude weight for non-committal moves
+                    magnitude_weight[i] = 0.5
+
+
             
             # Calculate Time Decay Weight
             try:
