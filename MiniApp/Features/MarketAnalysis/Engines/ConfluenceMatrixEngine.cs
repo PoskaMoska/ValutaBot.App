@@ -321,8 +321,7 @@ public class ConfluenceMatrixEngine(
         if (smcSignal.SweepDirection == "BULLISH_SWEEP") smcScore += 0.5;
         if (smcSignal.SweepDirection == "BEARISH_SWEEP") smcScore -= 0.5;
 
-        // Use RawConfidence if available (defaults to 0.5 if missing)
-        double rawProb = mlSignal.RawConfidence ?? (mlSignal.Direction == "BUY" ? mlSignal.Confidence : (1.0 - mlSignal.Confidence));
+        double rawProb = mlSignal.RawConfidence ?? (mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? (1.0 - mlSignal.Confidence) : 0.5));
         double mlScore = (rawProb - 0.5) * 2.0; // Smooth scaling [-1.0, 1.0]
 
         // ── AutoCalibration: Regime-Aware Signal Weights ──────────────────────────
