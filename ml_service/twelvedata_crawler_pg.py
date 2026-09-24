@@ -81,9 +81,9 @@ def run_crawler():
         cursor.execute("SELECT COUNT(*) FROM historical_candles WHERE asset=%s AND interval='1m'", (clean_sym,))
         total = cursor.fetchone()[0]
         
-        while total < 180000:
+        while total < 250000:
             earliest_time = get_earliest_time(cursor, symbol)
-            print(f"[{symbol}] Backward sync from {earliest_time or 'NOW'} (Total: {total}/180000)...")
+            print(f"[{symbol}] Backward sync from {earliest_time or 'NOW'} (Total: {total}/250000)...")
             
             candles = fetch_batch(symbol, earliest_time, mode="backward")
             if not candles:
@@ -99,7 +99,7 @@ def run_crawler():
                 
             cursor.execute("SELECT COUNT(*) FROM historical_candles WHERE asset=%s AND interval='1m'", (clean_sym,))
             total = cursor.fetchone()[0]
-            print(f"[{symbol}] Saved {inserted} older candles. Total now {total}/180000.")
+            print(f"[{symbol}] Saved {inserted} older candles. Total now {total}/250000.")
             time.sleep(12) # TwelveData 8 req/min (7.5s) limit, 12s is very safe
 
     conn.close()
