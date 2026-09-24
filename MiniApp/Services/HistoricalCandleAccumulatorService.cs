@@ -17,7 +17,7 @@ namespace ValutaBot.MiniApp;
 public class HistoricalCandleAccumulatorService : BackgroundService
 {
     private static readonly string[] Assets = { "EURUSD", "GBPUSD", "AUDUSD", "USDCAD", "USDCHF", "USDJPY" };
-    private const int MaxCandlesPerAsset = 100_000;
+    private const int MaxCandlesPerAsset = 300_000;
     private const string Interval = "1m";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

@@ -10,7 +10,7 @@ namespace ValutaBot.MiniApp.Services;
 
 public class DataRetentionService : BackgroundService
 {
-    private readonly TimeSpan _retentionPeriod = TimeSpan.FromDays(30);
+    private readonly TimeSpan _retentionPeriod = TimeSpan.FromDays(200);
     private readonly TimeSpan _cleanupInterval = TimeSpan.FromHours(24);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
