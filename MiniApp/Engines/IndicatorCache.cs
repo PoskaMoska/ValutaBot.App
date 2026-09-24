@@ -36,6 +36,8 @@ internal sealed class IndicatorCache
         public StatefulHma?        HmaBase;
         public long                HmaLastClosedTick;
         public double              HmaLast;
+        public double              HmaPrev;   // предыдущий HMA — для slope-based сравнения (FIX-HMA-SLOPE)
+
 
         public StatefulEma?        EmaBase;
         public long                EmaLastClosedTick;
@@ -240,8 +242,64 @@ internal sealed class IndicatorCache
             }
 
             var liveHma = s.HmaBase.Clone();
+            // FIX-HMA-SLOPE: запоминаем предыдущее значение перед обновлением
+            s.HmaPrev = s.HmaLast;
             s.HmaLast = liveHma.Update(candles[^1].Close);
             return s.HmaLast;
+        }
+    }
+
+    // ── HMA Slope — (current, previous) для slope-based сравнения ────────────
+    // FIX-HMA-SLOPE: вместо сравнения price vs HMA (leading indicator → даёт инверсию)
+    // используем slope: HMA↑ → bullish, HMA↓ → bearish. Нейтрально к leading/lagging природе.
+    public (double current, double previous) GetHmaWithSlope(string asset, string tf,
+        ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
+    {
+        if (candles.Length < period + 1)
+            return (candles.Length > 0 ? candles[^1].Close : 0.0, candles.Length > 1 ? candles[^2].Close : 0.0);
+
+        if (_states.Count > 1000) PruneStates();
+        var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
+        lock (s)
+        {
+            int unseen = CountUnseen(candles, s.HmaLastClosedTick);
+            if (s.HmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastClosedTick) || IsStale(s))
+            {
+                s.HmaBase = new StatefulHma(period);
+                s.HmaPrev = 0.0;
+                // Прогрев на candles[0..^2] → после этого получаем HmaPrev
+                for (int i = 0; i < candles.Length - 2; i++)
+                    s.HmaBase.Update(candles[i].Close);
+
+                // Одно обновление candles[^2] → текущий base = previous HMA
+                var tempBase = s.HmaBase.Clone();
+                double prevHmaVal = tempBase.Update(candles[^2].Close);
+                s.HmaPrev = prevHmaVal;
+
+                // Полный прогрев до candles[^2] включительно
+                s.HmaBase.Update(candles[^2].Close);
+                s.HmaLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
+                s.LastFullReset = DateTime.UtcNow;
+            }
+            else if (unseen > 0)
+            {
+                for (int i = candles.Length - unseen; i < candles.Length - 1; i++)
+                {
+                    if (candles[i].Timestamp.Ticks > s.HmaLastClosedTick)
+                    {
+                        var prev = s.HmaBase.Clone();
+                        s.HmaPrev = prev.Update(candles[i].Close);
+                        s.HmaBase.Update(candles[i].Close);
+                        s.HmaLastClosedTick = candles[i].Timestamp.Ticks;
+                    }
+                }
+            }
+
+            // Live clone: вычисляем текущий HMA
+            var liveHma = s.HmaBase.Clone();
+            double currentHma = liveHma.Update(candles[^1].Close);
+            s.HmaLast = currentHma;
+            return (currentHma, s.HmaPrev > 0 ? s.HmaPrev : currentHma);
         }
     }
 

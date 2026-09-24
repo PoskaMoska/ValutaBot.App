@@ -57,8 +57,14 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
 
         double rsi        = ComputeRsi(asset, timeframe, candles, rsiPeriod);
         double connorsRsi = ComputeConnorsRsi(asset, timeframe, candles);
-        double hma        = ComputeHma(asset, timeframe, candles, hmaPeriod);
+        // FIX-HMA-SLOPE: используем slope HMA (текущий vs предыдущий) вместо price vs HMA.
+        // HMA является leading индикатором: при аптренде HMA > lastPrice, что давало score -= 0.4 (штраф BUY).
+        // Slope-based подход: HMA↑ → bullish, HMA↓ → bearish — нейтрален к leading/lagging природе.
+        var (hmaCurrent, hmaPrevious) = _cache.GetHmaWithSlope(asset, timeframe, candles, hmaPeriod);
+        double hma        = hmaCurrent; // оставляем для возврата в tuple (UI/logging)
+        double hmaSlope   = hmaCurrent - hmaPrevious; // положительный = рост HMA = bullish
         double lastPrice  = prices[^1];
+
 
         var (adxVal, pdiVal, mdiVal) = adxOverride.HasValue
             ? (adxOverride.Value, pdiOverride ?? 0.0, mdiOverride ?? 0.0)
@@ -99,9 +105,11 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
                 : 0.0;
 
             // HMA direction signal — disabled in chaos (prevents buying the top)
+            // FIX-HMA-SLOPE: используем наклон HMA вместо price vs HMA
             hmaWeight = isChaos ? 0.0 : 0.35;
-            if (lastPrice > hma) score += hmaWeight;
-            else if (lastPrice < hma) score -= hmaWeight;
+            if (hmaSlope > 0) score += hmaWeight;
+            else if (hmaSlope < 0) score -= hmaWeight;
+
 
             // Micro-velocity contribution — disabled in chaos
             double velContrib = isChaos ? 0.0 : Math.Clamp(microVel / 25.0, -0.40, 0.40);
@@ -147,15 +155,22 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             if (pdiVal > mdiVal) score += 0.6 * trendMultiplier;
             if (mdiVal > pdiVal) score -= 0.6 * trendMultiplier;
 
-            // 3. ConnorsRSI (Dynamic flip based on regime)
+            // 3. ConnorsRSI — ТОЛЬКО mean-reversion (range mode). НЕ используется в тренде.
+            // ROOT CAUSE FIX: ConnorsRSI в trend mode создавал PUT-bias асимметрию:
+            //   - При росте:   PercentileRank→0% (равные доходности не проходят строгий >),
+            //                  ConnorsRSI≈66.7 → вклад +0.05
+            //   - При падении: все 3 компонента→0, ConnorsRSI≈0 → вклад -0.15
+            // Разность 0.20 в pre-tanh пространстве систематически занижала BUY-сигналы.
+            // PDI/MDI и HMA уже полностью покрывают трендовое направление.
             double connorsSignal = (connorsRsi - 50.0) / 50.0;
-            score += Math.Clamp(connorsSignal * 0.15, -0.15, 0.15) * trendMultiplier;
-            score -= Math.Clamp(connorsSignal * 0.10, -0.10, 0.10) * rangeMultiplier; // subtracts (reversion) in range
+            score -= Math.Clamp(connorsSignal * 0.15, -0.15, 0.15) * rangeMultiplier; // mean-reversion only
 
-            // 4. HMA Trend Signal
+            // 4. HMA Trend Signal — slope-based (FIX-HMA-SLOPE)
+            // HMA↑ = тренд набирает силу = bullish; HMA↓ = тренд разворачивается = bearish
             hmaWeight = 0.40 * trendMultiplier;
-            if (lastPrice > hma) score += hmaWeight;
-            else if (lastPrice < hma) score -= hmaWeight;
+            if (hmaSlope > 0) score += hmaWeight;
+            else if (hmaSlope < 0) score -= hmaWeight;
+
         } // end else (minute+ regime)
 
         if (adxVal > 25.0 && !isSubMinute)
