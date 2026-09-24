@@ -29,19 +29,16 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 Console.WriteLine($"Успешно загружено: {candles.Length} свечей для {asset}.");
 
                 var taEngine = new TechnicalAnalysisEngine();
-                int horizon = 5;
+                var timeoutEngine = new TradeTimeoutEngine();
                 int totalTrades = 0, wins = 0;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
 
                 int startIdx = 200; 
                 
-                for (int i = startIdx; i < candles.Length - horizon; i++)
+                for (int i = startIdx; i < candles.Length - 5; i++)
                 {
                     var slice = candles.AsSpan(0, i + 1);
                     var currentPrice = candles[i].Close;
-                    var futurePrice = candles[i + horizon].Close;
-                    bool actualUp = futurePrice > currentPrice;
-
                     double[] closes = new double[60], vols = new double[60];
                     int start = Math.Max(0, i - 59);
                     for (int j = 0; j < 60 && start + j <= i; j++)
@@ -53,6 +50,14 @@ namespace ValutaBot.App.MiniApp.Backtesting
                     double taScore = taScoreResult.score;
 
                     var smcResult = SmcEngine.AnalyzeSmcStructure(asset, "1m", slice, currentPrice);
+                    
+                    var state = ContinuousStateEngine.EvaluateContinuousState(closes, asset, "1m");
+                    var timeout = timeoutEngine.CalculateTimeout(asset, "1m", taScoreResult.atrVal, 1.0, smcResult, currentPrice, state, isForex: true);
+                    int dynamicHorizon = timeout.TimeoutCandles;
+                    
+                    var futurePrice = candles[i + dynamicHorizon].Close;
+                    bool actualUp = futurePrice > currentPrice;
+
                     double smcScore = 0;
                     if (smcResult.BosDirection == "BULLISH" || smcResult.SweepDirection == "BULLISH_SWEEP") smcScore += 1;
                     else if (smcResult.BosDirection == "BEARISH" || smcResult.SweepDirection == "BEARISH_SWEEP") smcScore -= 1;
@@ -101,7 +106,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                             MlScore = mlScore,
                             MlProb = mlPred?.Confidence ?? 0.5,
                             CreatedAt = candles[i].Timestamp.ToString("O"),
-                            VerifiedAt = candles[i + horizon].Timestamp.ToString("O")
+                            VerifiedAt = candles[i + dynamicHorizon].Timestamp.ToString("O")
                         };
 
                         await TradeRepository.SaveTradeOutcomeAsync(record);

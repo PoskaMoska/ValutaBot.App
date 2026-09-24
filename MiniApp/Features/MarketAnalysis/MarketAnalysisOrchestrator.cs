@@ -202,7 +202,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
 
         // RECORD (Fire and forget)
-        int targetHorizon = mlPrediction?.HorizonCandles ?? timeout.TimeoutCandles;
+        int targetHorizon = timeout.TimeoutCandles;
         _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw);
         dbSw.Stop();
         traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Ожидание экспирации: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
