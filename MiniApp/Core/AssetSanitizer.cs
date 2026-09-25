@@ -15,8 +15,6 @@ public static class AssetSanitizer
             .Replace("ОТК", "") // Replace Cyrillic OTC
             .Replace("ОТС", "")
             .Replace("OTC", "")
-            .Replace("Р С›Р СћР РЋ", "") // Misencoded ОТС
-            .Replace("Р С›Р СЋР РЋ", "") // Misencoded ОТС
             .Replace(" ", "")
             .Replace("/", "")
             .Replace("-", "")
@@ -30,27 +28,18 @@ public static class AssetSanitizer
     /// </summary>
     public static bool IsForexAsset(string cleanAsset)
     {
-        // Crypto assets — NOT forex
-        if (cleanAsset is "BTCUSDT" or "BTC" or "BTCUSD"
-                       or "ETHUSDT" or "ETH" or "ETHUSD"
-                       or "SOLUSDT" or "SOL" or "SOLUSD"
-                       or "BNBUSDT" or "BNB"
-                       or "XRPUSDT" or "XRP"
-                       or "ADAUSDT" or "ADA"
-                       or "DOGEUSDT" or "DOGE")
-            return false;
-
         // Forex pairs, commodities — YES
         if (cleanAsset.StartsWith("EUR") || cleanAsset.StartsWith("GBP") ||
             cleanAsset.StartsWith("AUD") || cleanAsset.StartsWith("NZD") ||
             cleanAsset.StartsWith("USD") || cleanAsset.StartsWith("JPY") ||
             cleanAsset.StartsWith("CHF") || cleanAsset.StartsWith("CAD") ||
             cleanAsset.StartsWith("XAU") || cleanAsset.StartsWith("XAG") ||
-            cleanAsset.StartsWith("GOLD") || cleanAsset.StartsWith("SILVER"))
+            cleanAsset.StartsWith("GOLD") || cleanAsset.StartsWith("SILVER") ||
+            cleanAsset.StartsWith("BRENT") || cleanAsset.StartsWith("WTI"))
             return true;
 
-        // Default: if ends in USDT and not in crypto list above → treat as crypto
-        return !cleanAsset.EndsWith("USDT");
+        // Default: if it does not start with a known fiat/commodity base, treat as Crypto
+        return false;
     }
 
     /// <summary>

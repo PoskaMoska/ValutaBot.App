@@ -43,7 +43,7 @@ def fetch_batch(symbol, date_str=None, mode="forward"):
                 candles.append((
                     symbol.replace("/", ""),
                     "1m",
-                    dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    dt.strftime("%Y-%m-%dT%H:%M:%S.0000000Z"),
                     float(v["open"]),
                     float(v["high"]),
                     float(v["low"]),

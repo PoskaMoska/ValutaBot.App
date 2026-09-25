@@ -126,13 +126,16 @@ public static class MLPythonService
                 try
                 {
                     var testClient = _httpFactory?.CreateClient("MLPythonService");
-                    if (testClient != null) testClient.Timeout = TimeSpan.FromSeconds(3);
-                    var res = await testClient.GetAsync(new Uri($"{_baseUrl}/health"));
-                    if (res.IsSuccessStatusCode)
+                    if (testClient != null) 
                     {
-                        BotLogger.Info("[MLPython] Local LightGBM service is active.");
-                        StartPythonWatchdog();
-                        return;
+                        testClient.Timeout = TimeSpan.FromSeconds(3);
+                        var res = await testClient.GetAsync(new Uri($"{_baseUrl}/health"));
+                        if (res.IsSuccessStatusCode)
+                        {
+                            BotLogger.Info("[MLPython] Local LightGBM service is active.");
+                            StartPythonWatchdog();
+                            return;
+                        }
                     }
                 }
                 catch
@@ -244,19 +247,27 @@ public static class MLPythonService
                 try
                 {
                     var hc = _httpFactory?.CreateClient("MLPythonService");
-                    if (hc != null) hc.Timeout = TimeSpan.FromSeconds(HealthTimeoutSeconds);
-                    var resp = await hc.GetAsync(new Uri($"{_baseUrl}/health"), token);
-
-                    if (resp.IsSuccessStatusCode)
+                    if (hc != null) 
                     {
-                        if (consecutiveFails > 0)
-                            BotLogger.Info($"[MLPython Watchdog] Service recovered after {consecutiveFails} failed check(s).");
-                        consecutiveFails = 0;
+                        hc.Timeout = TimeSpan.FromSeconds(HealthTimeoutSeconds);
+                        var resp = await hc.GetAsync(new Uri($"{_baseUrl}/health"), token);
+
+                        if (resp.IsSuccessStatusCode)
+                        {
+                            if (consecutiveFails > 0)
+                                BotLogger.Info($"[MLPython Watchdog] Service recovered after {consecutiveFails} failed check(s).");
+                            consecutiveFails = 0;
+                        }
+                        else
+                        {
+                            consecutiveFails++;
+                            BotLogger.Warn($"[MLPython Watchdog] Health check returned {(int)resp.StatusCode} ({consecutiveFails}/{MaxConsecutiveFails}).");
+                        }
                     }
                     else
                     {
+                        BotLogger.Warn("[MLPython Watchdog] IHttpClientFactory not initialized yet.");
                         consecutiveFails++;
-                        BotLogger.Warn($"[MLPython Watchdog] Health check returned {(int)resp.StatusCode} ({consecutiveFails}/{MaxConsecutiveFails}).");
                     }
                 }
                 catch (OperationCanceledException) { break; }
@@ -396,7 +407,8 @@ public static class MLPythonService
                     Auc:              result.Auc,
                     NTrain:           result.NTrain,
                     VarianceEstimate: result.VarianceEstimate,
-                    RawConfidence:    result.RawConfidence
+                    RawConfidence:    result.RawConfidence,
+                    HorizonCandles:   result.HorizonCandles
                 );
             }
             return null;
@@ -441,7 +453,13 @@ public static class MLPythonService
 
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = await MiniAppController.HttpFactory!.CreateClient("MLPythonService").PostAsync(new Uri($"{_baseUrl}/feedback"), content);
+            
+            if (_httpFactory == null)
+            {
+                BotLogger.Warn("[MLPython] IHttpClientFactory not initialized yet. Skipping feedback.");
+                return;
+            }
+            var response = await _httpFactory.CreateClient("MLPythonService").PostAsync(new Uri($"{_baseUrl}/feedback"), content);
             
             if (response.IsSuccessStatusCode)
             {
@@ -478,8 +496,13 @@ public static class MLPythonService
             var json = JsonSerializer.Serialize(payload);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             
+            if (_httpFactory == null)
+            {
+                BotLogger.Warn("[MLPython] IHttpClientFactory not initialized yet. Skipping force train.");
+                return false;
+            }
             // Use long-running client bypassing Polly short timeouts
-            var response = await MiniAppController.HttpFactory!.CreateClient("MLPythonLongRunning")
+            var response = await _httpFactory.CreateClient("MLPythonLongRunning")
                                         .PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
 
             if (response.IsSuccessStatusCode)

@@ -22,6 +22,7 @@ public static partial class MiniAppController
     private static readonly IMemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
 
     public static string? LastExceptionMessage { get; set; }
+    private static readonly string _internalApiSecretFallback = Guid.NewGuid().ToString();
 
     public record OhlcCandle(double Open, double High, double Low, double Close, double Volume, DateTime Timestamp = default);
     public record NotifyAdminsRequest(string Message, string ParseMode = "HTML");
@@ -29,7 +30,7 @@ public static partial class MiniAppController
     public static System.Net.Http.IHttpClientFactory? HttpFactory { get; set; }
     public static IServiceProvider? Services { get; set; }
 
-    public static void Start(string[] args, int port = 5000)
+    public static async Task StartAsync(string[] args, int port = 5000)
     {
         Console.WriteLine("========================================");
         Console.WriteLine("[Live Core] TradeBE_bot \"v\" MiniApp Server");
@@ -176,9 +177,8 @@ public static partial class MiniAppController
         MLPythonService.SetFactory(HttpFactory);
         Services    = app.Services;
 
-        // Initialize CircuitBreaker (Creates DB Table)
         var cbService = app.Services.GetRequiredService<ValutaBot.MiniApp.Services.ICircuitBreakerService>();
-        cbService.InitializeAsync().GetAwaiter().GetResult();
+        await cbService.InitializeAsync();
 
         LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
         app.UseStaticFiles();
@@ -200,7 +200,7 @@ public static partial class MiniAppController
 
         RegisterRoutes(app);
 
-        app.Run($"http://0.0.0.0:{port}");
+        await app.RunAsync($"http://0.0.0.0:{port}");
     }
 
     private static async Task<object> GetFearGreedIndex()

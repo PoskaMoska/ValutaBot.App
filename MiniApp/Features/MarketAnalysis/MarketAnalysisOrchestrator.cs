@@ -1,4 +1,4 @@
-﻿using ValutaBot.Core;
+using ValutaBot.Core;
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
@@ -88,17 +88,17 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (candles == null || candles.Length == 0)
         {
             _logger.LogWarning("[TRACE {TraceId}] Failed to fetch data after {Ms}ms", traceId, fetchSw.ElapsedMilliseconds);
-            throw new Exception("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ СЃРІРµС‡РЅС‹Рµ РґР°РЅРЅС‹Рµ РѕС‚ API.");
+            throw new Exception("Не удалось получить свечные данные от API.");
         }
         
         double[] mainPrices = candles.Select(c => c.Close).ToArray();
         double currentLivePrice = mainPrices[^1];
         string dataHash = ComputeHash(candles);
-        traceLines.Add($"[1. РСЃС‚РѕС‡РЅРёРє Р”Р°РЅРЅС‹С…] {candles.Length} СЃРІРµС‡РµР№. Live Р¦РµРЅР°: {currentLivePrice} | РњР°СЃСЃРёРІ Hash: [{dataHash}] -> {fetchSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[1. Источник Данных] {candles.Length} свечей. Live Цена: {currentLivePrice} | Массив Hash: [{dataHash}] -> {fetchSw.ElapsedMilliseconds}ms");
 
         // Prepare closed candles
         int intervalSecs = _fetcher.TimeframeSeconds(timeframe);
-        bool isLastClosed = candles[^1].Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
+        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
         var closedCandles = isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
         double[] closedPrices = closedCandles.Select(c => c.Close).ToArray();
         double[] closedVolumes = closedCandles.Select(c => c.Volume).ToArray();
@@ -113,7 +113,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             _logger.LogWarning("[TRACE {TraceId}] Risk Gatekeeper blocked trade: {Reason}", traceId, gatekeeper.Reason);
             throw new Exception(gatekeeper.Reason);
         }
-        traceLines.Add($"[2. Gatekeeper]      Р РёСЃРє-РєРѕРЅС‚СЂРѕР»СЊ РїСЂРѕР№РґРµРЅ ({(string.IsNullOrEmpty(gatekeeper.Reason) ? "Р’РѕР»Р°С‚РёР»СЊРЅРѕСЃС‚СЊ РІ РЅРѕСЂРјРµ" : gatekeeper.Reason)}) -> {gatekeeperSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[2. Gatekeeper]      Риск-контроль пройден ({(string.IsNullOrEmpty(gatekeeper.Reason) ? "Волатильность в норме" : gatekeeper.Reason)}) -> {gatekeeperSw.ElapsedMilliseconds}ms");
 
         // 4. Continuous State
         var state = ContinuousStateEngine.EvaluateContinuousState(mainPrices, cleanAsset, timeframe);
@@ -124,8 +124,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (higherTf != null) {
             higherCandles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, higherTf, cleanAsset, 100);
         }
-        var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1) 
-            ? (higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= DateTime.UtcNow ? higherCandles : higherCandles.Take(higherCandles.Length - 1).ToArray())
+        var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1 && higherTf != null) 
+            ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= DateTime.UtcNow) ? higherCandles : higherCandles.Take(higherCandles.Length - 1).ToArray())
             : Array.Empty<MiniAppController.OhlcCandle>();
 
         // 6. Engines (Parallel)
@@ -172,14 +172,14 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(cleanAsset, timeframe, isForex, symbol, closedCandles, closedPrices, closedVolumes, closedHigherCandles, closedHigherCandles.Select(c=>c.Close).ToArray(), closedHigherCandles.Select(c=>c.Volume).ToArray());
         
         var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.hmaVal, taResult.volStrengthVal, mainAtr, mainAdx);
-        var smcSignal = new SmcSignal(smcResult.BosDirection, smcResult.SweepDirection, smcResult.OrderBlockType, smcResult.FvgType, "");
+        var smcSignal = new SmcSignal(smcResult.BosDirection ?? "", smcResult.SweepDirection ?? "", smcResult.OrderBlockType ?? "", smcResult.FvgType ?? "", "");
         var ofSignal = new OrderflowSignal(ofResult.ScoreContribution, ofResult.Description);
         var mlSignal = new MlSignal(lgbmDir, lgbmConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline", mlPrediction?.HorizonCandles, mlPrediction?.RawConfidence);
         var stateSignal = new StateSignal(state.VelocityRegime, state.VelocityBpsPerSec, state.MomentumContribution);
 
         var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
         matrixSw.Stop();
-        traceLines.Add($"[6. РљРѕРЅСЃРµРЅСЃСѓСЃ]       РњР°С‚СЂРёС†Р° СЃРІРµРґРµРЅР° (Р¤Р°Р·Р°: {state.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[6. Консенсус]       Матрица сведена (Фаза: {state.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
 
         // 8. Final Formatting & Data Integrity
         var dbSw = Stopwatch.StartNew();

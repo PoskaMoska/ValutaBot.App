@@ -4,12 +4,12 @@ namespace ValutaBot.MiniApp;
 
 internal static class Program
 {
-    public static void Main(string[] args)
+    public static async Task Main(string[] args)
     {
         if (args.Length >= 2 && args[0] == "--backtest")
         {
 #if DEBUG
-            ValutaBot.App.MiniApp.Backtesting.BacktestEntryPoint.RunAsync(args).GetAwaiter().GetResult();
+            await ValutaBot.App.MiniApp.Backtesting.BacktestEntryPoint.RunAsync(args);
 #else
             Console.WriteLine("[Backtest] Not available in production build. Use Debug configuration.");
 #endif
@@ -19,7 +19,7 @@ internal static class Program
         if (args.Length >= 2 && args[0] == "--replay-test")
         {
             string corpusPath = args[1];
-            bool success = ValutaBot.MiniApp.Core.ReplayTestEngine.RunAllAsync(corpusPath).GetAwaiter().GetResult();
+            bool success = await ValutaBot.MiniApp.Core.ReplayTestEngine.RunAllAsync(corpusPath);
             Environment.Exit(success ? 0 : 1);
             return;
         }
@@ -30,13 +30,13 @@ internal static class Program
             string symbol = args[1];
             string interval = args[2];
             string outPath = args[3];
-            ValutaBot.MiniApp.Core.ReplayTestEngine.ExportCsvAsync(symbol, interval, outPath).GetAwaiter().GetResult();
+            await ValutaBot.MiniApp.Core.ReplayTestEngine.ExportCsvAsync(symbol, interval, outPath);
             return;
         }
 
         if (args.Length >= 1 && args[0] == "--diag")
         {
-            DiagRunner.RunAsync().GetAwaiter().GetResult();
+            await DiagRunner.RunAsync();
             return;
         }
 
@@ -48,7 +48,7 @@ internal static class Program
         {
             try
             {
-                MiniAppController.Start(args, port);
+                await MiniAppController.StartAsync(args, port);
                 break;
             }
             catch (Exception ex)

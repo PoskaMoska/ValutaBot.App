@@ -35,11 +35,13 @@ public partial class TelegramBotService : BackgroundService
         string? token = TelegramNotifier.GetToken();
         if (string.IsNullOrEmpty(token)) return;
 
-        long[] coreAdmins = { 1103551505, 901492845 };
-
-        foreach (long adminId in coreAdmins)
+        string envAdmin = Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? Environment.GetEnvironmentVariable("ADMIN_IDS") ?? "";
+        foreach (var part in envAdmin.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
         {
-            await SendMessage(token, adminId, text);
+            if (long.TryParse(part, out long adminId))
+            {
+                await SendMessage(token, adminId, text);
+            }
         }
     }
 
@@ -74,9 +76,7 @@ public partial class TelegramBotService : BackgroundService
 
         await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync();
 
-        // Auto-seed admin IDs 1103551505, 901492845 and any env ADMIN_CHAT_ID / ADMIN_IDS
-        await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAdminAsync(1103551505);
-        await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAdminAsync(901492845);
+        // Auto-seed admin IDs from env ADMIN_CHAT_ID / ADMIN_IDS
 
         string envAdmin = Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? Environment.GetEnvironmentVariable("ADMIN_IDS") ?? "";
         foreach (var part in envAdmin.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))

@@ -401,10 +401,12 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
         
         # Calculate strict closed-candle cutoff (ROOT CAUSE #2 FIX)
         def _get_sec(iv: str) -> int:
-            val = int(iv[1:])
-            if iv.startswith("s"): return val
-            if iv.startswith("m"): return val * 60
-            if iv.startswith("h"): return val * 3600
+            if iv.endswith("m"): return int(iv[:-1]) * 60
+            if iv.endswith("h"): return int(iv[:-1]) * 3600
+            if iv.endswith("d"): return int(iv[:-1]) * 86400
+            if iv.startswith("s"): return int(iv[1:])
+            if iv.startswith("m"): return int(iv[1:]) * 60
+            if iv.startswith("h"): return int(iv[1:]) * 3600
             return 60
             
         interval_sec = _get_sec(interval)

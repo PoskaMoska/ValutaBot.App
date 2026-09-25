@@ -371,8 +371,7 @@ def main():
     train_window, retrain_every = get_window_params(interval)
     limit    = max(args.candles, train_window + FORECAST_HORIZON + 100)
 
-    print(f"
-[Setup] Symbol={symbol} | Interval={interval} | Candles={limit} | Payout={args.payout*100:.0f}%")
+    print(f"\n[Setup] Symbol={symbol} | Interval={interval} | Candles={limit} | Payout={args.payout*100:.0f}%")
     is_forex = is_forex_symbol(symbol)
     print(f"[Fetch] {'TwelveData (Forex)' if is_forex else 'Binance (Crypto)'}...")
     t0 = time.time()

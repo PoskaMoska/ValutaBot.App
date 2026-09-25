@@ -278,8 +278,8 @@ FROM outcome_data;");
                 Timeframe = r.Timeframe ?? "",
                 BrokerSymbol = r.BinanceSymbol ?? "",
                 EntryPrice = r.EntryPrice != null ? Convert.ToDouble(r.EntryPrice) : 0.0,
-                CreatedAt = string.IsNullOrEmpty(r.CreatedAtStr) ? DateTime.MinValue : DateTime.Parse(r.CreatedAtStr).ToUniversalTime(),
-                VerifyAt = string.IsNullOrEmpty(r.VerifyAtStr) ? DateTime.MinValue : DateTime.Parse(r.VerifyAtStr).ToUniversalTime(),
+                CreatedAt = string.IsNullOrEmpty(r.CreatedAtStr) ? DateTime.MinValue : DateTime.Parse(r.CreatedAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),
+                VerifyAt = string.IsNullOrEmpty(r.VerifyAtStr) ? DateTime.MinValue : DateTime.Parse(r.VerifyAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),
                 IsForex = r.IsForex != null ? Convert.ToBoolean(r.IsForex) : false,
                 SourceDirections = string.IsNullOrEmpty(r.SourceDirectionsStr) ? new Dictionary<string, string>() : 
                     System.Text.Json.JsonSerializer.Deserialize(r.SourceDirectionsStr, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>(),

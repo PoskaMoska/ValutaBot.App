@@ -16,10 +16,11 @@ public static class BotLogger
     private static readonly string LogFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "valuta_bot.log");
     
     // Unbounded channel for high-performance non-blocking fire-and-forget logging
-    private static readonly Channel<string> _logChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+    private static readonly Channel<string> _logChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(10000)
     {
         SingleReader = true,
-        SingleWriter = false
+        SingleWriter = false,
+        FullMode = BoundedChannelFullMode.DropOldest
     });
 
     static BotLogger()

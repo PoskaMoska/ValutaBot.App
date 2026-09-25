@@ -31,14 +31,9 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
         {
             if (_initialized) return;
 
-            if (false)
-            {
-                
-                return;
-            }
-
             // L2-FIX: Создание таблиц
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureCalibrationTableAsync();
+            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureMetaWeightsTableAsync();
             var calibData = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
             if (AutoCalib != null)
             {
@@ -47,18 +42,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                     AutoCalib.RestoreState(item.sourceName, item.asset, item.timeframe, item.totalTrades, item.emaWinRate);
                 }
             }
-
-            // MetaLearner: Создание таблиц
-            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureMetaWeightsTableAsync();
-            // MetaLearner db init removed
-
-            // L2-FIX: Загружаем сохранённые EMA-веса из PostgreSQL
-            var calibStates = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
-            foreach (var state in calibStates)
-            {
-                AutoCalib?.RestoreState(state.sourceName, state.asset, state.timeframe, state.totalTrades, state.emaWinRate);
-            }
-            BotLogger.Info($"[TradeOutcomeTracker] Restored {calibStates.Count} EMA calibration states from PostgreSQL.");
+            BotLogger.Info($"[TradeOutcomeTracker] Restored {calibData.Count} EMA calibration states from PostgreSQL.");
 
             var outcomes = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadTradeOutcomesAsync(1000);
             BotLogger.Info($"[TradeOutcomeTracker] Loaded {outcomes.Count} historical outcomes from PostgreSQL DB (for reporting only).");
@@ -167,9 +151,9 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             {
                 try
                 {
-                    if (false)
+                    if (AutoCalib != null)
                     {
-                        foreach (var stat in new System.Collections.Generic.List<dynamic>())
+                        foreach (var stat in AutoCalib.GetAllStats())
                         {
                             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveCalibrationStateAsync(
                                 stat.key.Source, stat.key.Asset, stat.key.Timeframe,
@@ -201,7 +185,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 }
                 catch (Exception mlEx)
                 {
-                    Console.WriteLine($"[TradeOutcomeTracker] Online ML update notice: {mlEx.Message}");
+                    BotLogger.Warn($"[TradeOutcomeTracker] Online ML update notice: {mlEx.Message}");
                 }
             });
 
@@ -253,8 +237,10 @@ var taStats = "No TA Stats";
                         }
                     });
                 }
-        // 🛑 EVOLUTION DUMP: Dynamic trigger by timeframe 🛑
-        int currentTfCount = _tfVerifiedCounters.AddOrUpdate(record.Timeframe, 1, (_, count) => count + 1);
+            } // Close EUR/USD OTC block here
+
+            // 🛑 EVOLUTION DUMP: Dynamic trigger by timeframe 🛑
+            int currentTfCount = _tfVerifiedCounters.AddOrUpdate(record.Timeframe, 1, (_, count) => count + 1);
         int threshold = 5; // Default for m15, h1, etc.
         string tfLow = record.Timeframe.ToLower().Trim();
         if (tfLow.StartsWith("s")) threshold = 30;
@@ -294,7 +280,6 @@ var taStats = "No TA Stats";
             });
         }
 
-        }
         }
         catch (Exception ex)
         {

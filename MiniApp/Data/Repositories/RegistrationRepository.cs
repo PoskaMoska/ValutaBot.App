@@ -9,11 +9,11 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
 {
     public static class RegistrationRepository
     {
-        public static async Task<int> GetRegistrationsCountAsync()
+        public static async Task<long> GetRegistrationsCountAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
             using var conn = DbConnectionFactory.GetConnection();
-            return (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM registrations");
+            return await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM registrations");
         }
 
         public static async Task<List<TelegramBotService.PocketRegistration>> GetLatestRegistrationsAsync(int limit = 15)

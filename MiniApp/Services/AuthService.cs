@@ -11,7 +11,8 @@ public static class AuthService
 {
     public static async Task<(bool isAuthorized, string? errorMessage)> IsRequestAuthorized(HttpContext context)
     {
-        if (context.Request.Host.Host == "localhost" || context.Request.Host.Host == "127.0.0.1")
+        var remoteIp = context.Connection.RemoteIpAddress;
+        if (remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp))
         {
             context.Items["userId"] = 123456789L; // Mock user ID for DB settings
             return (true, null);

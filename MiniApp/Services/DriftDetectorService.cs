@@ -10,8 +10,8 @@ namespace ValutaBot.MiniApp
     {
         private static readonly ConcurrentDictionary<string, DateTime> _lastRetrainTime = new();
         
-        private const int WINDOW_SIZE = 20;
-        private const double MIN_WIN_RATE = 0.48;
+        private const int WINDOW_SIZE = 50;
+        private const double MIN_WIN_RATE = 0.44;
         private const int COOLDOWN_HOURS = 4;
 
         public static async Task AnalyzeAssetDriftAsync(string asset, string timeframe)

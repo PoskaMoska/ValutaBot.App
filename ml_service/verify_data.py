@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import pandas as pd
 from datetime import datetime
 import os
@@ -16,7 +16,7 @@ def verify_data():
             print(f"❌ Ошибка PostgreSQL: {e}")
             return
     else:
-        db_path = "/app/data/models/ValutaTicks.db"
+        db_path = os.path.join(os.path.dirname(__file__), "data", "ValutaTicks.db")
         print(f"🔍 Проверка базы данных: SQLite ({db_path})\n" + "="*40)
         try:
             conn = sqlite3.connect(db_path)

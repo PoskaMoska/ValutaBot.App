@@ -102,7 +102,8 @@ public static class TelegramInitDataValidator
             }
 
             var authTime = DateTimeOffset.FromUnixTimeSeconds(authDate).UtcDateTime;
-            if (Math.Abs((DateTime.UtcNow - authTime).TotalHours) > 24)
+            var elapsedHours = (DateTime.UtcNow - authTime).TotalHours;
+            if (elapsedHours < 0 || elapsedHours > 24)
             {
                 Console.WriteLine($"[InitData] Session expired or invalid time: authTime={authTime}, current={DateTime.UtcNow}");
                 return false;

@@ -102,7 +102,7 @@ public class SelfDiagnosticService : BackgroundService
             var mlUrl = _configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
             if (httpFactory != null)
             {
-                var hc = httpFactory.CreateClient();
+                var hc = httpFactory.CreateClient("MLPythonService");
                 hc.Timeout = TimeSpan.FromSeconds(5);
                 var mlResponse = await hc.GetAsync(new Uri($"{mlUrl.TrimEnd('/')}/health"), stoppingToken);
                 
@@ -183,6 +183,11 @@ public class SelfDiagnosticService : BackgroundService
         catch
         {
             // Ignore if OS doesn't support reading memory counters gracefully
+        }
+        
+        if (!currentDbHealthy || !currentMlHealthy)
+        {
+            BotLogger.Warn($"[Diagnostics] Health scan complete. DB: {currentDbHealthy}, ML: {currentMlHealthy}");
         }
     }
 }

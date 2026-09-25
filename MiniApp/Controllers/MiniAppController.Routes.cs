@@ -194,7 +194,7 @@ public static partial class MiniAppController
         // Internal endpoint for ML service -> Telegram admin notifications
         app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
         {
-            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? Guid.NewGuid().ToString();
+            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
             if (!context.Request.Headers.TryGetValue("X-Internal-Secret", out var providedSecret) || providedSecret != expectedSecret)
             {
                 BotLogger.Warn($"[Security] Blocked unauthorized access to /notify-admins from {context.Connection.RemoteIpAddress}");

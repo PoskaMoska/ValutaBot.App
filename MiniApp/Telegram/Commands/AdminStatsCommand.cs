@@ -29,7 +29,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
 
             int totalUsers = await UserRepository.GetTotalUsersCountAsync();
             int allowedUsersCount = await UserRepository.GetAllowedUsersCountAsync();
-            int regsCount = await RegistrationRepository.GetRegistrationsCountAsync();
+            long regsCount = await RegistrationRepository.GetRegistrationsCountAsync();
             var latestRegs = (await RegistrationRepository.GetLatestRegistrationsAsync(15)).ToList();
 
             var sb = new StringBuilder();
