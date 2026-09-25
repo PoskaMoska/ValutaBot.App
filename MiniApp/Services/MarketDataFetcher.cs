@@ -82,9 +82,11 @@ public class MarketDataFetcher
     {
         var utcNow = DateTime.UtcNow;
         var dayOfWeek = utcNow.DayOfWeek;
-        return (dayOfWeek == DayOfWeek.Friday && utcNow.Hour >= 22) ||
+        // Forex markets close at 17:00 EST on Friday, which is 21:00 UTC (Summer) or 22:00 UTC (Winter).
+        // Using 21:00 UTC safely switches to OTC mode without hitting the 1-hour dead zone.
+        return (dayOfWeek == DayOfWeek.Friday && utcNow.Hour >= 21) ||
                (dayOfWeek == DayOfWeek.Saturday) ||
-               (dayOfWeek == DayOfWeek.Sunday && utcNow.Hour < 22);
+               (dayOfWeek == DayOfWeek.Sunday && utcNow.Hour < 21);
     }
 
     public int TimeframeSeconds(string rawInterval)
@@ -130,18 +132,57 @@ public class MarketDataFetcher
                 return liveCandles;
             }
 
-            // CRITICAL ARCHITECTURE FIX: Prevent Data Hallucination
-            // Instead of synthesizing fake Brownian motion candles from 1m data and poisoning the ML model,
-            // we safely abort and ask the user to wait while RealtimeTickCollector gathers real historical ticks.
-            BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length}/{limit} ticks in DB). Aborting to prevent ML hallucination.");
-            
-            // Do not call RecordFailureAndAlert here, as a cold start is normal and shouldn't spam admins.
+            // CRITICAL UX FIX: Cold Start Backfill
+            // Instead of aborting and forcing the user to wait 15+ minutes, we backfill the missing
+            // older candles by synthesizing them from 1min data, and append whatever true live ticks we have.
             int missing = limit - liveCandles.Length;
-            int waitSecs = missing * TimeframeSeconds(rawInterval);
-            int waitMins = (int)Math.Ceiling(waitSecs / 60.0);
-            string waitText = waitMins > 0 ? $"подождите ~{waitMins} мин." : "подождите пару минут.";
+            BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length}/{limit} live ticks). Backfilling {missing} from 1m...");
+
+            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
+            int subCandlesPerM1 = 12 / groupSize; 
+            int m1Needed = Math.Max(10, (int)Math.Ceiling((double)(missing + 10) / subCandlesPerM1));
+
+            var tdResult1m = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1min", m1Needed, cacheTtlSeconds: 15);
+            if (tdResult1m == null)
+            {
+                throw new ExchangeUnavailableException("TwelveData API Unavailable", "Не удалось загрузить минутные котировки для генерации микро-тиков.");
+            }
+
+            var m1Candles = tdResult1m.Value.candles.ToArray();
+            var s5 = ValutaBot.App.MiniApp.Backtesting.S5CandleSynthesizer.SynthesizeFromM1(m1Candles);
+            var synthesized = groupSize == 1 ? s5 : AggregateCandles(s5, groupSize);
+
+            // Stitch together
+            var finalCandles = new MiniAppController.OhlcCandle[limit];
+            int synthCount = Math.Min(missing, synthesized.Length);
             
-            throw new ExchangeUnavailableException("Insufficient subminute ticks", $"Идет сбор микро-тиков ({liveCandles.Length}/{limit}). Пожалуйста, {waitText}");
+            // If API didn't return enough 1m history, we just serve what we could build
+            if (synthCount < missing)
+            {
+                finalCandles = new MiniAppController.OhlcCandle[synthCount + liveCandles.Length];
+            }
+
+            // Take from the end of the synthesized array (the most recent synthesized candles)
+            for (int i = 0; i < synthCount; i++)
+            {
+                finalCandles[i] = synthesized[synthesized.Length - synthCount + i];
+            }
+
+            for (int i = 0; i < liveCandles.Length; i++)
+            {
+                finalCandles[synthCount + i] = liveCandles[i];
+            }
+
+            // Fix timestamps to be perfectly continuous
+            DateTime lastTime = liveCandles.Length > 0 ? liveCandles[^1].Timestamp : DateTime.UtcNow;
+            int intervalSeconds = TimeframeSeconds(rawInterval);
+            for (int i = finalCandles.Length - 1; i >= 0; i--)
+            {
+                finalCandles[i] = finalCandles[i] with { Timestamp = lastTime.AddSeconds(-(finalCandles.Length - 1 - i) * intervalSeconds) };
+            }
+
+            RecordSuccess();
+            return finalCandles;
         }
 
         string interval = IntervalMap(rawInterval);
