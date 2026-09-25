@@ -13,22 +13,40 @@ API_SECRET = os.getenv("INTERNAL_API_SECRET", "default_secret")
 HEADERS = {"X-Internal-Secret": API_SECRET}
 
 def test_predict_endpoint_candles():
+    # E2E Parity Test: C# sends candles as an array of anonymous objects.
+    # Python consumes it as a list of dicts. We must generate exactly 60 objects.
+    mock_candles = []
+    for i in range(60):
+        mock_candles.append({
+            "openTime": 1700000000 + (i * 60),
+            "open": 1.0,
+            "high": 1.1,
+            "low": 0.9,
+            "close": 1.05 + (i * 0.001), # Create tiny synthetic trend
+            "volume": 100
+        })
+
     req = {
         "symbol": "EURUSD",
         "interval": "1m",
-        "candles": {
-            "openTime": [1000] * 60,
-            "open": [1.0] * 60,
-            "high": [1.1] * 60,
-            "low": [0.9] * 60,
-            "close": [1.05] * 60,
-            "volume": [100] * 60
-        },
-        "is_forex": True
+        "candles": mock_candles,
+        "is_forex": True,
+        "smc_bos_dir": "BUY",
+        "smc_has_ob": True,
+        "smc_has_fvg": False,
+        "of_delta_ratio": 1.2,
+        "of_state": "BULLISH"
     }
     resp = client.post("/predict", json=req, headers=HEADERS)
-    # The endpoint might return 200 or 500 depending on model loading, but should not crash with AttributeError
-    assert resp.status_code != 500
+    
+    # We must explicitly demand 200 OK. If it's 422 (validation), it must fail the deploy.
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}. Response: {resp.text}"
+    
+    # Assert output structure is correct for C# to deserialize
+    data = resp.json()
+    assert "direction" in data
+    assert "confidence" in data
+    assert data["direction"] in ["BUY", "PUT", "NEUTRAL"]
 
 def test_feedback_endpoint_types():
     req = {
@@ -45,7 +63,7 @@ def test_feedback_endpoint_types():
     resp = client.post("/feedback", json=req, headers=HEADERS)
     assert resp.status_code == 200
 
-    # Test that passing a string for was_win fails validation (Pydantic will auto-convert "true", but let's pass something invalid)
+    # Test that passing a string for was_win fails validation
     invalid_req = req.copy()
     invalid_req["was_win"] = "not_a_boolean"
     resp_invalid = client.post("/feedback", json=invalid_req, headers=HEADERS)
