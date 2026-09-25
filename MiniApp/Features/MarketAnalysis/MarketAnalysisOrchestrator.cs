@@ -139,13 +139,13 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         double mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(cleanAsset, timeframe, closedCandles) : 0;
         var taResult = _marketAnalyzer.ScoreTimeframe(cleanAsset, timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: mainAdx, atrOverride: mainAtr, isForex: isForex, pdiOverride: mainPdi, mdiOverride: mainMdi);
         taSw.Stop();
-        traceLines.Add($"[3. Р Р°СЃС‡РµС‚С‹ TA]      РРЅРґРёРєР°С‚РѕСЂС‹, ADX ({mainAdx:F1}) Рё ATR РІС‹С‡РёСЃР»РµРЅС‹ -> {taSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[3. Расчеты TA]      Индикаторы, ADX ({mainAdx:F1}) и ATR вычислены -> {taSw.ElapsedMilliseconds}ms");
 
         await Task.WhenAll(smcTask, ofTask);
         var smcResult = await smcTask;
         var ofResult = await ofTask;
         engSw.Stop();
-        traceLines.Add($"[4. РЎС‚СЂСѓРєС‚СѓСЂР°]       SMC Рё OrderFlow РѕС‚СЂРёСЃРѕРІР°РЅС‹ -> {engSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[4. Структура]       SMC и OrderFlow отрисованы -> {engSw.ElapsedMilliseconds}ms");
 
         // ML
         var mlSw = Stopwatch.StartNew();
@@ -157,7 +157,15 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmConf = mlPrediction.Confidence;
         }
         mlSw.Stop();
-        if (mlPrediction != null) { string hasOb = smcResult.OrderBlockType != null ? "Yes" : "No"; traceLines.Add($"[5. PREDICT ML] Scenario (BOS={smcResult.BosDirection}, OB={hasOb}). Verdict: {lgbmDir} ({lgbmConf*100:F1}%) -> {mlSw.ElapsedMilliseconds}ms"); } else { traceLines.Add($"[5. PREDICT ML] Python result (conf: {lgbmConf:F2}) -> {mlSw.ElapsedMilliseconds}ms"); }
+        if (mlPrediction != null) {
+            string hasOb = smcResult.OrderBlockType != null ? "Yes" : "No";
+            string mlLgbmTrace = mlPrediction.TopFeatures != null && mlPrediction.TopFeatures.Count >= 3 
+                ? $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {lgbmDir} ({lgbmConf*100:F1}%) | Explainer: {mlPrediction.TopFeatures[0]}, {mlPrediction.TopFeatures[1]}, {mlPrediction.TopFeatures[2]}" 
+                : $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {lgbmDir} ({lgbmConf*100:F1}%)";
+            traceLines.Add($"[5. PREDICT ML] {mlLgbmTrace} -> {mlSw.ElapsedMilliseconds}ms");
+        } else {
+            traceLines.Add($"[5. PREDICT ML] Python result (conf: {lgbmConf:F2}) -> {mlSw.ElapsedMilliseconds}ms");
+        }
         
         // 7. Matrix & Consensus
         var matrixSw = Stopwatch.StartNew();
@@ -187,12 +195,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         string finalHash = ComputeHash(candles);
         if (finalHash == dataHash) {
-            traceLines.Add($"[7. Data Integrity]  РџСЂРѕРІРµСЂРєР°: Hash [{finalHash}] СЃРѕРІРїР°РґР°РµС‚. РСЃРєР°Р¶РµРЅРёР№ РЅРµС‚. -> {dbSw.ElapsedMilliseconds}ms");
+            traceLines.Add($"[7. Data Integrity]  Проверка: Hash [{finalHash}] совпадает. Искажений нет. -> {dbSw.ElapsedMilliseconds}ms");
         } else {
-            traceLines.Add($"[7. Data Integrity]  [Р’РќРРњРђРќРР•! Р”РђРќРќР«Р• РРЎРљРђР–Р•РќР«] РћР¶РёРґР°Р»СЃСЏ {dataHash}, РїРѕР»СѓС‡РµРЅ {finalHash} -> {dbSw.ElapsedMilliseconds}ms");
+            traceLines.Add($"[7. Data Integrity]  [ВНИМАНИЕ! ДАННЫЕ ИСКАЖЕНЫ] Ожидался {dataHash}, получен {finalHash} -> {dbSw.ElapsedMilliseconds}ms");
         }
 
-        // FIX: РџРµСЂРµРґР°С‘Рј РЅР°РїСЂР°РІР»РµРЅРёСЏ РєР°Р¶РґРѕРіРѕ РёСЃС‚РѕС‡РЅРёРєР° РґР»СЏ per-source РєР°Р»РёР±СЂРѕРІРєРё
+        // FIX: Передаём направления каждого источника для per-source калибровки
         var sourceDirections = new Dictionary<string, string>
         {
             ["TechAnalysis"] = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
@@ -205,59 +213,59 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         int targetHorizon = timeout.TimeoutCandles;
         _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw);
         dbSw.Stop();
-        traceLines.Add($"[8. Р‘Р°Р·Р° РґР°РЅРЅС‹С…]     Р—Р°РїРёСЃР°РЅ Entry Price: {currentLivePrice} (РћР¶РёРґР°РЅРёРµ СЌРєСЃРїРёСЂР°С†РёРё: {targetHorizon} СЃРІРµС‡РµР№) -> {dbSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Ожидание экспирации: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
 
         sw.Stop();
         
         // Print Pipeline Trace Block
         var sbTrace = new System.Text.StringBuilder();
         sbTrace.AppendLine("=================================================");
-        sbTrace.AppendLine($"[PIPELINE TRACE: {traceId}] Р—Р°РїСЂРѕСЃ СЃРёРіРЅР°Р»Р°: {cleanAsset} {timeframe}");
+        sbTrace.AppendLine($"[PIPELINE TRACE: {traceId}] Запрос сигнала: {cleanAsset} {timeframe}");
         foreach (var line in traceLines) {
             sbTrace.AppendLine(line);
         }
         sbTrace.AppendLine("-------------------------------------------------");
-        sbTrace.AppendLine($"РРўРћР“: Р’СЂРµРјСЏ: {sw.ElapsedMilliseconds}ms | Р РµР·СѓР»СЊС‚Р°С‚: {consensus.FinalDirection} {consensus.Probability}%");
+        sbTrace.AppendLine($"ИТОГ: Время: {sw.ElapsedMilliseconds}ms | Результат: {consensus.FinalDirection} {consensus.Probability}%");
         sbTrace.AppendLine("=================================================");
         Console.WriteLine(sbTrace.ToString());
 
         var stats = await SignalTracker.GetOverallStatsAsync();
         var assetStats = await SignalTracker.GetStatsAsync(cleanAsset, timeframe);
 
-        string uiMarketSession = "Р’РќР•Р‘РР Р–Р•Р’РђРЇ (OTC)";
+        string uiMarketSession = "ВНЕБИРЖЕВАЯ (OTC)";
         if (!cleanAsset.Contains("BTC") && !cleanAsset.Contains("ETH") && !cleanAsset.Contains("SOL"))
         {
             int h = DateTime.UtcNow.Hour;
-            if (h >= 21 || h < 2) uiMarketSession = "РќРѕС‡СЊ (РўРёС…РёР№ СЂС‹РЅРѕРє)";
-            else if (h >= 2 && h < 8) uiMarketSession = "РђР·РёСЏ (РџРёР»Р°)";
-            else if (h >= 8 && h < 13) uiMarketSession = "Р›РѕРЅРґРѕРЅ (РќР°С‡Р°Р»Рѕ)";
-            else if (h >= 13 && h < 17) uiMarketSession = "РќСЊСЋ-Р™РѕСЂРє (РћР±СЉРµРјС‹)";
-            else if (h >= 17 && h < 21) uiMarketSession = "РќСЊСЋ-Р™РѕСЂРє (Р’РµС‡РµСЂ)";
+            if (h >= 21 || h < 2) uiMarketSession = "Ночь (Тихий рынок)";
+            else if (h >= 2 && h < 8) uiMarketSession = "Азия (Пила)";
+            else if (h >= 8 && h < 13) uiMarketSession = "Лондон (Начало)";
+            else if (h >= 13 && h < 17) uiMarketSession = "Нью-Йорк (Объемы)";
+            else if (h >= 17 && h < 21) uiMarketSession = "Нью-Йорк (Вечер)";
         }
         else 
         {
-            uiMarketSession = "РљР РРџРўРћ";
+            uiMarketSession = "КРИПТО";
         }
 
-        string uiMarketPhase = "Р‘РѕРєРѕРІРёРє (Р¤Р»СЌС‚)";
+        string uiMarketPhase = "Боковик (Флэт)";
         string regime = state.VelocityRegime ?? "";
-        if (regime.Contains("UP")) uiMarketPhase = "Р‘С‹С‡РёР№ РёРјРїСѓР»СЊСЃ";
-        else if (regime.Contains("DOWN")) uiMarketPhase = "РњРµРґРІРµР¶РёР№ РёРјРїСѓР»СЊСЃ";
-        else if (regime == "DECELERATING") uiMarketPhase = "Р—Р°РјРµРґР»РµРЅРёРµ (РљРѕСЂСЂРµРєС†РёСЏ)";
-        else if (taResult.rsiVal >= 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "РџРµСЂРµРєСѓРїР»РµРЅРЅРѕСЃС‚СЊ (РЎР±СЂРѕСЃ)" : "Р‘С‹С‡РёР№ С‚СЂРµРЅРґ (РџРѕР»РѕРіРёР№)";
-        else if (taResult.rsiVal <= 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "РџРµСЂРµРїСЂРѕРґР°РЅРЅРѕСЃС‚СЊ (РћС‚СЃРєРѕРє)" : "РњРµРґРІРµР¶РёР№ С‚СЂРµРЅРґ (РџРѕР»РѕРіРёР№)";
-        else if (taResult.rsiVal >= 54) uiMarketPhase = "РЈРјРµСЂРµРЅРЅС‹Р№ СЂРѕСЃС‚";
-        else if (taResult.rsiVal <= 46) uiMarketPhase = "РЈРјРµСЂРµРЅРЅРѕРµ РїР°РґРµРЅРёРµ";
-        else uiMarketPhase = "РСЃС‚РёРЅРЅС‹Р№ Р¤Р»СЌС‚";
+        if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс";
+        else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс";
+        else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Коррекция)";
+        else if (taResult.rsiVal >= 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Сброс)" : "Бычий тренд (Пологий)";
+        else if (taResult.rsiVal <= 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Пологий)";
+        else if (taResult.rsiVal >= 54) uiMarketPhase = "Умеренный рост";
+        else if (taResult.rsiVal <= 46) uiMarketPhase = "Умеренное падение";
+        else uiMarketPhase = "Истинный Флэт";
 
-        string uiMarketEntropy = "Р’ РЅРѕСЂРјРµ (Р‘РµР·РѕРїР°СЃРЅРѕ)";
+        string uiMarketEntropy = "В норме (Безопасно)";
         double vel = Math.Abs(state.VelocityBpsPerSec);
         bool isSub = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
         double dangerVel = isSub ? 0.3 : 3.0; 
         double deadVel   = isSub ? 0.02 : 0.1;
 
-        if (vel >= dangerVel) uiMarketEntropy = "Р’Р«РЎРћРљРђРЇ (РҐР°РѕСЃ / РћРїР°СЃРЅРѕ!)";
-        else if (vel < deadVel) uiMarketEntropy = "РњРµСЂС‚РІС‹Р№ СЂС‹РЅРѕРє";
+        if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
+        else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
 
         return new AnalysisResponseDto
         {
