@@ -383,7 +383,11 @@ public static class MLPythonService
             
             if (result != null && result.Direction != "NEUTRAL")
             {
-                BotLogger.Info($"[MLPython] {binanceSymbol}/{interval} -> {result.Direction} (Conf: {result.Confidence:F2}) [v:{result.ModelVersion}]");
+                string smcBos = smcResult?.BosDirection ?? "NONE";
+                string smcOb = (smcResult?.OrderBlockType != null) ? "OB_PRESENT" : "NO_OB";
+                double ofRat = ofResult?.ScoreContribution ?? 0.0;
+                
+                BotLogger.Info($"[ML Insights] {binanceSymbol}/{interval} | СЦЕНАРИЙ: Слом={smcBos}, Блок={smcOb}, ОФ={ofRat:F1} | ВЕРДИКТ: {result.Direction} (Уверенность: {result.Confidence*100:F1}%) [v:{result.ModelVersion}]");
                 return new MLPythonPrediction(
                     Direction:        result.Direction,
                     Confidence:       result.Confidence,
