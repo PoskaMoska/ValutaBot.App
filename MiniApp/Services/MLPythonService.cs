@@ -82,7 +82,8 @@ public static class MLPythonService
         int? NTrain,
         double? VarianceEstimate = null,
         double? RawConfidence = null,
-        int? HorizonCandles = null
+        int? HorizonCandles = null,
+        System.Collections.Generic.List<string>? TopFeatures = null
     );
 
     public static void Init(string? baseUrl)
@@ -378,7 +379,9 @@ public static class MLPythonService
             content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
             var client = _httpFactory?.CreateClient("MLPythonService") ?? throw new InvalidOperationException("HttpFactory not set");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var response = await client.PostAsync(new Uri($"{_baseUrl}/predict"), content);
+            sw.Stop();
             
             if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
             {
@@ -390,6 +393,7 @@ public static class MLPythonService
             }
             
             var responseBody = await response.Content.ReadAsStringAsync();
+            BotLogger.Info($"[MLPythonService] PredictAsync completed in {sw.ElapsedMilliseconds}ms for {symbol} {interval}");
             var result = JsonSerializer.Deserialize<MLPythonPrediction>(responseBody, _jsonOptions);
             
             if (result != null && result.Direction != "NEUTRAL")

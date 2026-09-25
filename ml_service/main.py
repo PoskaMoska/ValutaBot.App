@@ -338,7 +338,8 @@ class PredictResponse(BaseModel):
     auc: Optional[float] = None
     n_train: Optional[int] = None
     variance_estimate: Optional[float] = None   # B6: predicted uncertainty [0,1], higher = less reliable
-    raw_confidence: Optional[float] = None       # B6: confidence before variance-based dampening
+    raw_confidence: Optional[float] = None
+    top_features: Optional[List[str]] = None       # B6: confidence before variance-based dampening
 
 
 class TrainRequest(BaseModel):
@@ -581,7 +582,12 @@ async def predict(request: Request):
         log.info(f"[Predict] Model missing for {symbol} ({interval}). Triggering background training.")
         _dispatch_training_to_pool(symbol, interval, regime, None, None, False)
 
-    direction, confidence, version, horizon_candles, raw_prob = predictor.predict(candle_dicts, mtf_candle_dicts)
+    res = predictor.predict(candle_dicts, mtf_candle_dicts)
+    if len(res) == 6:
+        direction, confidence, version, horizon_candles, raw_prob, top_features = res
+    else:
+        direction, confidence, version, horizon_candles, raw_prob = res
+        top_features = []
 
     # B6: Predictive Variance Model — estimate how uncertain this prediction is
     # given the current feature state, and dampen confidence accordingly.
@@ -608,6 +614,7 @@ async def predict(request: Request):
         "n_train": meta.n_train if meta else None,
         "variance_estimate": round(float(variance_estimate), 4) if variance_estimate is not None else None,
         "raw_confidence": round(float(raw_confidence), 4),
+        "top_features": top_features,
     }
     return Response(content=orjson.dumps(resp), media_type="application/json")
 

@@ -110,6 +110,21 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             else
             {
                 _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
+
+                // DUMP POST-MORTEM SNAPSHOT ON LOSS
+                try
+                {
+                    string dumpDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "losses");
+                    System.IO.Directory.CreateDirectory(dumpDir);
+                    string dumpFile = System.IO.Path.Combine(dumpDir, $"loss_{record.Asset}_{record.Timeframe}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.json");
+                    string json = System.Text.Json.JsonSerializer.Serialize(outcomeRecord, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                    await System.IO.File.WriteAllTextAsync(dumpFile, json);
+                    BotLogger.Warn($"[PostMortem] Snapshot saved for loss on {record.Asset} at {dumpFile}");
+                }
+                catch (Exception ex)
+                {
+                    BotLogger.Error("Failed to write post-mortem snapshot", ex);
+                }
             }
 
             // ── TRAINING DOJI FILTER (Dynamic Noise Threshold) ──

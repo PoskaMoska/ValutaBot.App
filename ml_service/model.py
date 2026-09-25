@@ -461,7 +461,7 @@ class ForexPredictor:
             log.error(f"[Predict] {self._key}: {e}")
             return "NEUTRAL", 0.5, "error", 3, 0.5
 
-    def _log_shap_explanation(self, model: "lgb.LGBMClassifier", X_last: pd.DataFrame, top_n: int = 5) -> None:
+    def _log_shap_explanation(self, model: "lgb.LGBMClassifier", X_last: pd.DataFrame, top_n: int = 3) -> list:
         """
         D10: SHAP Explainer.
         Computes per-feature contribution to this specific prediction using
@@ -481,6 +481,7 @@ class ForexPredictor:
 
         top_str = ", ".join(f"{name}={val:+.4f}" for name, val in top)
         log.info(f"[SHAP] {self._key} | bias={bias:+.4f} | top_{top_n}_features: {top_str}")
+        return [f"{name} ({val:+.2f})" for name, val in top]
 
     def _with_context_embedding(self, X_last_base: pd.DataFrame,
                                  mtf_candles: Optional[List[Dict]],
