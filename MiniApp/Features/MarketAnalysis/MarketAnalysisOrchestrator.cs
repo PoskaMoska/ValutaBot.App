@@ -157,7 +157,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmConf = mlPrediction.Confidence;
         }
         mlSw.Stop();
-        if (mlPrediction != null) { traceLines.Add($"[5. ПРЕДИКТ ML] Сценарий (Слом={smcResult.BosDirection}, OB={(smcResult.OrderBlockType != null ? ""Да"" : ""Нет"")}). Вердикт: {lgbmDir} ({lgbmConf*100:F1}%) -> {mlSw.ElapsedMilliseconds}ms"); } else { traceLines.Add($"[5. ПРЕДИКТ ML] Python выдал ответ (уверенность: {lgbmConf:F2}) -> {mlSw.ElapsedMilliseconds}ms"); }
+        if (mlPrediction != null) { string hasOb = smcResult.OrderBlockType != null ? "Yes" : "No"; traceLines.Add($"[5. PREDICT ML] Scenario (BOS={smcResult.BosDirection}, OB={hasOb}). Verdict: {lgbmDir} ({lgbmConf*100:F1}%) -> {mlSw.ElapsedMilliseconds}ms"); } else { traceLines.Add($"[5. PREDICT ML] Python result (conf: {lgbmConf:F2}) -> {mlSw.ElapsedMilliseconds}ms"); }
         
         // 7. Matrix & Consensus
         var matrixSw = Stopwatch.StartNew();
