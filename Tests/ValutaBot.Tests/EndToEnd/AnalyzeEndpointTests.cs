@@ -91,6 +91,7 @@ public class AnalyzeEndpointTests : IClassFixture<ValutaBotTestFactory>
     {
         // Запросы идут на localhost → AuthService автоматически пропускает (строка 14 AuthService.cs)
         _client = factory.CreateClient();
+        _client.DefaultRequestHeaders.Add("X-Test-Bypass", "true");
         _output = output;
     }
 

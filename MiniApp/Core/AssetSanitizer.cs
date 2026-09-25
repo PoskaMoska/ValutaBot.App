@@ -11,16 +11,16 @@ public static class AssetSanitizer
     public static string Sanitize(string? asset)
     {
         if (string.IsNullOrWhiteSpace(asset)) return "EURUSD";
-        return asset.ToUpperInvariant()
-            .Replace("ОТК", "") // Replace Cyrillic OTC
-            .Replace("ОТС", "")
-            .Replace("OTC", "")
-            .Replace(" ", "")
-            .Replace("/", "")
-            .Replace("-", "")
-            .Replace("_", "")
-            .Trim();
+        return System.Text.RegularExpressions.Regex.Replace(asset.ToUpperInvariant().Replace("OTC", "").Replace("\u041E\u0422\u0421", "").Replace("\u041E\u0422\u041A", ""), @"[^A-Z0-9]", "");
     }
+
+
+
+
+
+
+
+
 
     /// <summary>
     /// Determines if a sanitized asset is a forex/commodity pair (not crypto).
