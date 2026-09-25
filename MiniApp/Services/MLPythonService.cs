@@ -412,7 +412,8 @@ public static class MLPythonService
                     NTrain:           result.NTrain,
                     VarianceEstimate: result.VarianceEstimate,
                     RawConfidence:    result.RawConfidence,
-                    HorizonCandles:   result.HorizonCandles
+                    HorizonCandles:   result.HorizonCandles,
+                    TopFeatures:      result.TopFeatures
                 );
             }
             return null;

@@ -409,27 +409,31 @@ class ForexPredictor:
             X_arr_lgbm, X_last_lgbm = self._with_context_embedding(
                 X_last_base, mtf_candles, model, embedder)
 
+            # Align features exactly as the model expects to prevent shape mismatches
+            # for older pretrained models when new features are added.
+            if hasattr(model, 'booster_'):
+                expected_cols = model.booster_.feature_name()
+                # Ensure all expected columns are present (fill missing with 0.0)
+                missing_cols = [c for c in expected_cols if c not in X_last_lgbm.columns]
+                if missing_cols:
+                    for c in missing_cols:
+                        X_last_lgbm[c] = 0.0
+                X_last_lgbm_aligned = X_last_lgbm[expected_cols]
+                X_arr_lgbm = X_last_lgbm_aligned.values.astype(np.float32)
+            else:
+                X_last_lgbm_aligned = X_last_lgbm
+                
             # Tier 1: LightGBM (Global Strategist)
             prob_lgbm = float(model.predict_proba(X_arr_lgbm)[0, 1])
             if meta and getattr(meta, 'calibrator', None) is not None:
                 prob_lgbm = float(meta.calibrator.predict([prob_lgbm])[0])
 
             # Tier 2: SGD (Local Tactician) — blend if available
-            # Bug3 fix: dynamic weight 0%→30% based on real trade count (prevents noise at low sample count)
             prob_sgd = self.tactician.predict_proba(X_arr_base)
             if prob_sgd is not None:
                 try:
                     sgd_weight = self.tactician.get_weight()  # max 5%, grows very slowly
                     lgbm_weight = 1.0 - sgd_weight
-                    # C9: Bayesian Fusion (logarithmic opinion pool) replaces naive linear
-                    # weighted average (0.7*A + 0.3*B). Linear pooling has no probabilistic
-                    # justification and can be disproportionately swayed by an overconfident
-                    # minority-weight model near the probability extremes. Combining in
-                    # log-odds space corresponds to a Bayes-consistent combination of
-                    # independent evidence (product-of-experts), weighted by reliability.
-                    # Empirically validated: -2.3% mean log-loss vs linear pooling across
-                    # 30 randomized synthetic trials (100% win rate), incl. adversarial case
-                    # where SGD is systematically wrong.
                     prob = bayesian_fusion(prob_lgbm, prob_sgd, lgbm_weight, sgd_weight)
                     log.debug(f"[Predict] {self._key} lgbm={prob_lgbm:.3f} sgd={prob_sgd:.3f} sgd_w={sgd_weight:.2f} bayes_fused={prob:.3f}")
                 except Exception:
@@ -439,27 +443,23 @@ class ForexPredictor:
 
             version = meta.version if meta else self._key
 
-            # D10: SHAP Explainer — log which features drove this specific prediction.
-            # Uses LightGBM's native pred_contrib (mathematically equivalent to TreeSHAP,
-            # no extra dependency needed). Logged at INFO level so operators can see
-            # WHY the model gave a signal, not just what the signal was.
-            # Runs on the full LGBM input (incl. ctx_emb_* when present).
+            top_features = []
             try:
-                self._log_shap_explanation(model, X_last_lgbm)
+                top_features = self._log_shap_explanation(model, X_last_lgbm_aligned)
             except Exception as shap_ex:
                 log.debug(f"[SHAP] Explanation failed for {self._key}: {shap_ex}")
 
             if prob >= MIN_CONFIDENCE:
-                return "BUY", prob, version, TARGET_HORIZON_CANDLES, prob
+                return "BUY", prob, version, TARGET_HORIZON_CANDLES, prob, top_features
             elif prob <= (1.0 - MIN_CONFIDENCE):
-                return "PUT", 1.0 - prob, version, TARGET_HORIZON_CANDLES, prob
+                return "PUT", 1.0 - prob, version, TARGET_HORIZON_CANDLES, prob, top_features
             else:
                 confidence = abs(prob - 0.5) * 2
-                return "NEUTRAL", 0.5 + confidence * 0.15, version, TARGET_HORIZON_CANDLES, prob
+                return "NEUTRAL", 0.5 + confidence * 0.15, version, TARGET_HORIZON_CANDLES, prob, top_features
 
         except Exception as e:
             log.error(f"[Predict] {self._key}: {e}")
-            return "NEUTRAL", 0.5, "error", 3, 0.5
+            return "NEUTRAL", 0.5, "error", 3, 0.5, []
 
     def _log_shap_explanation(self, model: "lgb.LGBMClassifier", X_last: pd.DataFrame, top_n: int = 3) -> list:
         """
