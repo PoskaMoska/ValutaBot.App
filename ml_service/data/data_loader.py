@@ -136,9 +136,26 @@ def _fetch_rl_feedback(symbol: str, interval: str) -> List[Dict]:
             import psycopg2
             conn = psycopg2.connect(db_url)
             
-            # Bug1 fix: fetch Timestamp for time-based matching instead of EntryPrice
-            # trade_outcomes in Postgres uses 'created_at' for the entry timestamp
-            query = "SELECT created_at as ts, direction as dir, was_win as win FROM trade_outcomes WHERE asset=%s AND timeframe=%s"
+            # Extended: fetch rich SMC/OF features so LightGBM can learn from them
+            query = """
+                SELECT
+                    created_at         AS ts,
+                    direction          AS dir,
+                    was_win            AS win,
+                    ta_score           AS ta_score,
+                    of_score           AS of_score,
+                    smc_score          AS smc_score,
+                    ml_score           AS ml_score,
+                    smc_bos_dir        AS smc_bos_dir,
+                    smc_has_ob         AS smc_has_ob,
+                    smc_has_fvg        AS smc_has_fvg,
+                    of_delta_ratio     AS of_delta_ratio,
+                    of_state           AS of_state,
+                    dynamic_horizon    AS dynamic_horizon
+                FROM trade_outcomes
+                WHERE asset=%s AND timeframe=%s
+                ORDER BY created_at ASC
+            """
             df = pd.read_sql_query(query, conn, params=(symbol, interval))
             conn.close()
             

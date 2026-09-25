@@ -114,6 +114,13 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_prob DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    -- Rich LightGBM features (migration-safe)
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_bos_dir TEXT NOT NULL DEFAULT 'NONE'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_has_ob BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_has_fvg BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_delta_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_state TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN dynamic_horizon INT NOT NULL DEFAULT 3; EXCEPTION WHEN duplicate_column THEN END;
                     
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN of_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;

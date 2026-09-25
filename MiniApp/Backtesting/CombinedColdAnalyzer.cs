@@ -34,6 +34,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 var sw = System.Diagnostics.Stopwatch.StartNew();
 
                 int startIdx = 200; 
+                var pendingBatch = new List<TradeOutcomeRecord>();
                 
                 for (int i = startIdx; i < candles.Length - 5; i++)
                 {
@@ -69,15 +70,8 @@ namespace ValutaBot.App.MiniApp.Backtesting
                     else if (ofState != null && ofState.Contains("BEARISH")) ofScore -= 1;
                     
                     double mlScore = 0;
-                    int mlStart = Math.Max(0, i + 1 - 200);
-                    var mlSlice = candles.AsSpan(mlStart, i + 1 - mlStart);
-                    var mlPred = await MLPythonService.PredictAsync(asset, "1m", mlSlice.ToArray(), isForex: true);
-                    if (mlPred != null && mlPred.Direction != "NEUTRAL")
-                    {
-                        double conf = mlPred.Confidence;
-                        if (mlPred.Direction == "BUY") mlScore = (conf - 0.5) * 4;
-                        if (mlPred.Direction == "PUT") mlScore = -(conf - 0.5) * 4;
-                    }
+                    // (ML Python Service call is bypassed during cold backtest generation 
+                    // to prevent 1.5 million slow HTTP requests. We only need TA/SMC/OF features)
                     
                     double ensemble = (taScore * 0.5) + (smcScore * 1.5) + (ofScore * 0.3) + (mlScore * 1.0);
 
@@ -92,7 +86,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
 
                         var record = new TradeOutcomeRecord
                         {
-                            Id = Guid.NewGuid().ToString(),
+                            Id = $"BT_{asset}_{candles[i].Timestamp.Ticks}",
                             Asset = asset,
                             Timeframe = "1m",
                             Direction = isBuy ? "BUY" : "PUT",
@@ -104,18 +98,36 @@ namespace ValutaBot.App.MiniApp.Backtesting
                             OfScore = ofScore,
                             SmcScore = smcScore,
                             MlScore = mlScore,
-                            MlProb = mlPred?.Confidence ?? 0.5,
+                            MlProb = 0.5, // ML prediction bypassed
                             CreatedAt = candles[i].Timestamp.ToString("O"),
-                            VerifiedAt = candles[i + dynamicHorizon].Timestamp.ToString("O")
+                            VerifiedAt = candles[i + dynamicHorizon].Timestamp.ToString("O"),
+                            // === Rich Features for LightGBM ===
+                            SmcBosDir = smcResult.BosDirection ?? "NONE",
+                            SmcHasOb  = smcResult.HasOrderBlock,
+                            SmcHasFvg = smcResult.HasFvg,
+                            OfDeltaRatio = ofResult.DeltaRatio,
+                            OfState   = ofResult.OrderFlowState ?? "NEUTRAL",
+                            DynamicHorizon = dynamicHorizon
                         };
 
-                        await TradeRepository.SaveTradeOutcomeAsync(record);
+                        pendingBatch.Add(record);
                     }
 
                     if (i % 1000 == 0)
                     {
+                        if (pendingBatch.Count > 0)
+                        {
+                            await TradeRepository.SaveTradeOutcomesBatchAsync(pendingBatch);
+                            pendingBatch.Clear();
+                        }
                         Console.WriteLine($"[{asset}] Обработано {i} / {candles.Length} свечей. Сделок: {totalTrades}. Время: {sw.ElapsedMilliseconds / 1000.0:F1} сек.");
                     }
+                }
+                
+                if (pendingBatch.Count > 0)
+                {
+                    await TradeRepository.SaveTradeOutcomesBatchAsync(pendingBatch);
+                    pendingBatch.Clear();
                 }
 
                 Console.WriteLine($"\n[{asset}] Завершен прогон за {sw.ElapsedMilliseconds / 1000.0} сек.");

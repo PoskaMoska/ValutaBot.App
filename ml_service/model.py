@@ -56,7 +56,7 @@ SGD_MODEL_DIR = MODEL_DIR / "sgd"
 TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "3"))
 RETRAIN_INTERVAL_H = int(os.environ.get("RETRAIN_INTERVAL_H", "168")) # 1 неделя
 SGD_WEIGHT_MAX = float(os.environ.get("SGD_WEIGHT_MAX", "0.05")) # 5% вклад онлайн-обучения
-MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "100000"))  # Global Strategist window
+MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "250000"))  # Global Strategist window
 MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.50"))  # below → NEUTRAL
 
 BINANCE_BASE = "https://api.binance.com"
@@ -770,9 +770,9 @@ class ForexPredictor:
                 if interval_lower.startswith("s"):
                     target_candles = 300000  # ~17 days for Global Strategist memory
                 elif interval_lower in ("1m", "m1"):
-                    target_candles = 40320   # ~4 weeks for 1m
+                    target_candles = 250000  # Train on full half-year backtest data
                 elif interval_lower in ("5m", "m5"):
-                    target_candles = 25000   # ~3 months for 5m
+                    target_candles = 60000   # ~8 months for 5m
                 elif interval_lower in ("15m", "m15"):
                     target_candles = 17000   # ~6 months for 15m
                 else:
@@ -803,9 +803,56 @@ class ForexPredictor:
 
             if mtf_candles is None:
                 higher_tf = self._get_higher_tf()
-                mtf_candles = _fetch_historical_candles(self.symbol, higher_tf, 10000)
+                # Must fetch enough MTF candles to cover the same time span as target_candles
+                # e.g., 250k 1m candles = 50k 5m candles. Using target_candles is safe.
+                mtf_candles = _fetch_historical_candles(self.symbol, higher_tf, target_candles)
                 if len(mtf_candles) < 50:
                     log.warning(f"[Train] Could not fetch enough MTF candles for {higher_tf}. MTF features will be neutral.")
+
+            # === INJECT RL FEEDBACK FEATURES INTO CANDLES ===
+            rl_feedbacks = _fetch_rl_feedback(self.symbol, self.interval)
+            if rl_feedbacks:
+                from datetime import datetime, timezone
+                # Build hash map of timestamp -> feedback
+                fb_map = {}
+                for f in rl_feedbacks:
+                    try:
+                        ts_str = str(f.get("ts", "")).strip().replace("Z", "+00:00")
+                        if not ts_str: continue
+                        ts = datetime.fromisoformat(ts_str)
+                        if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
+                        fb_map[int(ts.timestamp())] = f
+                    except Exception:
+                        pass
+                        
+                # Inject into candles
+                for c in candles:
+                    raw_time = c.get("openTime")
+                    if raw_time is None: continue
+                    try:
+                        if isinstance(raw_time, (int, float)):
+                            if raw_time > 1e11: raw_time /= 1000.0
+                            unix_s = int(raw_time)
+                        else:
+                            ts = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+                            if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
+                            unix_s = int(ts.timestamp())
+                            
+                        # Allow 5 sec slop
+                        best_f = None
+                        for slop in (0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5):
+                            if (unix_s + slop) in fb_map:
+                                best_f = fb_map[unix_s + slop]
+                                break
+                        if best_f:
+                            c["smc_bos_dir"] = best_f.get("smc_bos_dir", "NONE")
+                            c["smc_has_ob"] = bool(best_f.get("smc_has_ob", False))
+                            c["smc_has_fvg"] = bool(best_f.get("smc_has_fvg", False))
+                            c["of_delta_ratio"] = float(best_f.get("of_delta_ratio", 0.0))
+                            c["of_state"] = best_f.get("of_state", "NEUTRAL")
+                            c["dynamic_horizon"] = int(best_f.get("dynamic_horizon", 3))
+                    except Exception:
+                        pass
 
             if len(candles) < 150:
                 return {"error": f"Not enough candles: {len(candles)} < 150"}
@@ -1022,7 +1069,12 @@ class ForexPredictor:
 
                 if parsed_feedbacks:
                     match_count = 0
-                    used_fb_ids = set()
+                    
+                    # O(1) Lookup Map to prevent 15 Billion iterations (O(N^2) hang)
+                    fast_lookup = {}
+                    for fb in parsed_feedbacks:
+                        fast_lookup[int(fb["ts"].timestamp())] = fb
+
                     for i, orig_idx in enumerate(feat_indices_valid):
                         raw_time = candles[orig_idx].get("openTime")
                         if raw_time is None:
@@ -1030,36 +1082,40 @@ class ForexPredictor:
                         try:
                             # openTime can be Unix timestamp (int/float) or ISO string
                             if isinstance(raw_time, (int, float)):
-                                candle_dt = datetime.fromtimestamp(raw_time, tz=timezone.utc)
+                                if raw_time > 1e11: raw_time /= 1000.0
+                                candle_unix = int(raw_time)
                             else:
                                 ts_str = str(raw_time).replace(" ", "T").replace("Z", "+00:00")
                                 candle_dt = datetime.fromisoformat(ts_str)
                                 if candle_dt.tzinfo is None:
                                     candle_dt = candle_dt.replace(tzinfo=timezone.utc)
+                                candle_unix = int(candle_dt.timestamp())
                         except Exception:
                             continue
 
                         best_fb, best_diff = None, float("inf")
-                        for fb in parsed_feedbacks:
-                            diff = abs((fb["ts"] - candle_dt).total_seconds())
-                            if diff < best_diff:
-                                best_diff, best_fb = diff, fb
+                        
+                        # Check exact match and immediate neighbors (up to 5s slop)
+                        for slop in range(-5, 6):
+                            check_ts = candle_unix + slop
+                            if check_ts in fast_lookup:
+                                best_fb = fast_lookup[check_ts]
+                                best_diff = abs(slop)
+                                break
 
                         # FIX LABEL SMEARING: Match window must be strict (0.9x tf) and 1:1.
                         tf_seconds = {"s5": 5, "s10": 10, "s15": 15, "s30": 30, "1m": 60, "m1": 60, "5m": 300, "m5": 300}.get(self.interval, 60)
                         max_diff = tf_seconds * 0.9  # Strictly match only the closest candle
                         
                         if best_fb and best_diff < max_diff:
-                            # Ensure this feedback is only consumed ONCE (ArgMin by distance prevents cloning)
-                            if id(best_fb) not in used_fb_ids:
-                                used_fb_ids.add(id(best_fb))
-                                match_count += 1
-                                sample_weights[i] = 5.0  # x5 weight
-                                win, dir_ = best_fb["win"], best_fb["dir"]
-                                if win == 0:
-                                    y[i] = 0 if dir_ == "BUY" else 1
-                                else:
-                                    y[i] = 1 if dir_ == "BUY" else 0
+                            # Direct mapping from O(1) lookup
+                            match_count += 1
+                            sample_weights[i] = 5.0  # x5 weight
+                            win, dir_ = best_fb["win"], best_fb["dir"]
+                            if win == 0:
+                                y[i] = 0 if dir_ == "BUY" else 1
+                            else:
+                                y[i] = 1 if dir_ == "BUY" else 0
                     if match_count > 0:
                         log.info(f"[Online RL] {self._key}: matched {match_count} feedback samples by timestamp (В±5 min window) with x5 weight.")
                     else:

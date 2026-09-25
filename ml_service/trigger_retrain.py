@@ -1,9 +1,9 @@
-﻿import os
+import os
 from model import ForexPredictor
 
 def retrain():
-    pairs = ["EURUSD", "GBPUSD", "USDJPY", "EURUSD_OTC"]
-    intervals = ["1m", "5m", "15m"]
+    pairs = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
+    intervals = ["1m"]
     
     for pair in pairs:
         for interval in intervals:

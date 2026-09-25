@@ -24,6 +24,14 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public double MlScore { get; set; }
         public string CreatedAt { get; set; } = "";
         public string VerifiedAt { get; set; } = "";
+
+        // === Rich Features for LightGBM ===
+        public string SmcBosDir { get; set; } = "NONE";   // BULLISH_BOS | BEARISH_BOS | NONE
+        public bool SmcHasOb { get; set; }                // Order Block detected
+        public bool SmcHasFvg { get; set; }               // Fair Value Gap detected
+        public double OfDeltaRatio { get; set; }           // buy/sell volume ratio (e.g. 2.3 = 2.3x buyers)
+        public string OfState { get; set; } = "NEUTRAL";  // STRONG_BULLISH_FLOW | BEARISH_ABSORPTION | etc.
+        public int DynamicHorizon { get; set; }            // candles until expiry (1-4)
     }
 
     public class EvolutionDumpDto
@@ -95,6 +103,26 @@ FROM outcome_data;");
             }
         }
 
+        public static async Task SaveTradeOutcomesBatchAsync(IEnumerable<TradeOutcomeRecord> outcomes)
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.ExecuteAsync(@"
+                    INSERT INTO trade_outcomes 
+                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, created_at, verified_at,
+                     smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @CreatedAt, @VerifiedAt,
+                            @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
+                    ON CONFLICT (id) DO NOTHING", outcomes); // Dapper handles the loop
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Error($"[PostgreSQL DB] Failed to save batch trade outcome records | Details: {ex.Message}");
+            }
+        }
+
         public static async Task SaveTradeOutcomeAsync(TradeOutcomeRecord outcome)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
@@ -103,8 +131,10 @@ FROM outcome_data;");
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                     INSERT INTO trade_outcomes 
-                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, created_at, verified_at)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @CreatedAt, @VerifiedAt)
+                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, created_at, verified_at,
+                     smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @CreatedAt, @VerifiedAt,
+                            @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
                         timeframe = EXCLUDED.timeframe,
@@ -119,7 +149,13 @@ FROM outcome_data;");
                         ml_prob = EXCLUDED.ml_prob,
                         ml_score = EXCLUDED.ml_score,
                         created_at = EXCLUDED.created_at,
-                        verified_at = EXCLUDED.verified_at
+                        verified_at = EXCLUDED.verified_at,
+                        smc_bos_dir = EXCLUDED.smc_bos_dir,
+                        smc_has_ob = EXCLUDED.smc_has_ob,
+                        smc_has_fvg = EXCLUDED.smc_has_fvg,
+                        of_delta_ratio = EXCLUDED.of_delta_ratio,
+                        of_state = EXCLUDED.of_state,
+                        dynamic_horizon = EXCLUDED.dynamic_horizon
                 ", new
                 {
                     outcome.Id,
@@ -136,7 +172,13 @@ FROM outcome_data;");
                     outcome.MlProb,
                     outcome.MlScore,
                     outcome.CreatedAt,
-                    outcome.VerifiedAt
+                    outcome.VerifiedAt,
+                    outcome.SmcBosDir,
+                    outcome.SmcHasOb,
+                    outcome.SmcHasFvg,
+                    outcome.OfDeltaRatio,
+                    outcome.OfState,
+                    outcome.DynamicHorizon
                 });
             }
             catch (Exception ex)

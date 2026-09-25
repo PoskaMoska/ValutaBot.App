@@ -141,9 +141,15 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         taSw.Stop();
         traceLines.Add($"[3. Расчеты TA]      Индикаторы, ADX ({mainAdx:F1}) и ATR вычислены -> {taSw.ElapsedMilliseconds}ms");
 
+        await Task.WhenAll(smcTask, ofTask);
+        var smcResult = await smcTask;
+        var ofResult = await ofTask;
+        engSw.Stop();
+        traceLines.Add($"[4. Структура]       SMC и OrderFlow отрисованы -> {engSw.ElapsedMilliseconds}ms");
+
         // ML
         var mlSw = Stopwatch.StartNew();
-        var mlPrediction = await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles);
+        var mlPrediction = await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult, ofResult);
         string lgbmDir = "NEUTRAL";
         double lgbmConf = 0.5;
         if (mlPrediction != null) {
@@ -151,13 +157,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             lgbmConf = mlPrediction.Confidence;
         }
         mlSw.Stop();
-        traceLines.Add($"[4. Нейросеть ML]    Python выдал ответ (Конфиденс: {lgbmConf:F2}) -> {mlSw.ElapsedMilliseconds}ms");
-
-        await Task.WhenAll(smcTask, ofTask);
-        var smcResult = await smcTask;
-        var ofResult = await ofTask;
-        engSw.Stop();
-        traceLines.Add($"[5. Структура]       SMC и OrderFlow отрисованы -> {engSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[5. Нейросеть ML]    Python выдал ответ (Конфиденс: {lgbmConf:F2}) -> {mlSw.ElapsedMilliseconds}ms");
         
         // 7. Matrix & Consensus
         var matrixSw = Stopwatch.StartNew();

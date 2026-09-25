@@ -23,7 +23,8 @@ namespace ValutaBot.App.MiniApp.Backtesting
             Console.WriteLine("в•љв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ќ");
             Console.WriteLine();
 
-            // Init HTTP and ML
+            // Init HTTP and ML and DB
+            await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync();
             var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
             services.AddHttpClient();
             var sp = services.BuildServiceProvider();
@@ -60,27 +61,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
             Console.WriteLine($"  РљСЌС€:      {(forceRefresh ? "РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ" : "РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РµСЃР»Рё РµСЃС‚СЊ")}");
             Console.WriteLine();
 
-            // в”Ђв”Ђ Р—Р°РіСЂСѓР·РєР° РґР°РЅРЅС‹С… в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-            var m1Candles = await HistoricalDataLoader.LoadAsync(
-                totalCandles: m1Count,
-                interval:     tdInterval,
-                forceRefresh: forceRefresh);
-
-            if (m1Candles.Length < 100)
-            {
-                Console.WriteLine("[BacktestEntryPoint] РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С…. РџСЂРѕРІРµСЂСЊС‚Рµ API РєР»СЋС‡ Рё СЃРѕРµРґРёРЅРµРЅРёРµ.");
-                return;
-            }
-
-            Console.WriteLine($"[BacktestEntryPoint] Р—Р°РіСЂСѓР¶РµРЅРѕ M1 СЃРІРµС‡РµР№: {m1Candles.Length}");
-
-            // в”Ђв”Ђ РЎРёРЅС‚РµР· S5 РµСЃР»Рё РЅСѓР¶РЅРѕ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-            var candles = isS5
-                ? S5CandleSynthesizer.SynthesizeFromM1(m1Candles)
-                : m1Candles;
-
-            if (isS5)
-                Console.WriteLine($"[BacktestEntryPoint] S5-СЃРёРЅС‚РµР·: {m1Candles.Length} M1 в†’ {candles.Length} S5 СЃРІРµС‡РµР№");
+            // (Загрузка данных делегирована CombinedColdAnalyzer)
 
             // в”Ђв”Ђ Р—Р°РїСѓСЃРє Р±РµРєС‚РµСЃС‚Р° в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
             await CombinedColdAnalyzer.RunAsync(candleCount);

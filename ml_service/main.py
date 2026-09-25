@@ -505,12 +505,27 @@ async def predict(request: Request):
     mtf_candles = data.get("mtf_candles")
     is_forex = data.get("is_forex", False)
 
+    # Extract rich SMC/OF features
+    smc_bos_dir = data.get("smc_bos_dir", "NONE")
+    smc_has_ob = data.get("smc_has_ob", False)
+    smc_has_fvg = data.get("smc_has_fvg", False)
+    of_delta_ratio = data.get("of_delta_ratio", 1.0)
+    of_state = data.get("of_state", "NEUTRAL")
+
     n_candles = len(candles) if candles else 0
     if n_candles < 60:
         raise HTTPException(
             status_code=422,
             detail=f"Need at least 60 candles for reliable prediction, got {n_candles}",
         )
+        
+    # Attach rich features to the LAST candle in the list (so build_features sees it)
+    candles[-1]['smc_bos_dir'] = smc_bos_dir
+    candles[-1]['smc_has_ob'] = smc_has_ob
+    candles[-1]['smc_has_fvg'] = smc_has_fvg
+    candles[-1]['of_delta_ratio'] = of_delta_ratio
+    candles[-1]['of_state'] = of_state
+    candles[-1]['dynamic_horizon'] = 3  # default since we don't know it live yet
 
     # Forex-only policy: block crypto symbols
     if not is_forex_symbol(symbol):

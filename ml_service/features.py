@@ -363,7 +363,45 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     result = pd.DataFrame(feats, index=df.index)
-    
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Rich pre-computed features (from trade_outcomes via _fetch_rl_feedback)
+    # These are passed in as extra columns on the candle dicts when training.
+    # At inference time (live prediction), they are absent -> filled with 0.
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # smc_bos_dir: encoded as  1.0=BULLISH_BOS, -1.0=BEARISH_BOS, 0.0=NONE
+    if 'smc_bos_dir' in df.columns:
+        bos_map = {'BULLISH_BOS': 1.0, 'BULLISH': 1.0, 'BEARISH_BOS': -1.0, 'BEARISH': -1.0, 'NONE': 0.0}
+        result['smc_bos_dir'] = df['smc_bos_dir'].map(bos_map).fillna(0.0).values
+    else:
+        result['smc_bos_dir'] = 0.0
+
+    result['smc_has_ob']  = df['smc_has_ob'].astype(float).values  if 'smc_has_ob'  in df.columns else 0.0
+    result['smc_has_fvg'] = df['smc_has_fvg'].astype(float).values if 'smc_has_fvg' in df.columns else 0.0
+
+    # of_delta_ratio: clip to [-3, 3] range to prevent outlier trees
+    if 'of_delta_ratio' in df.columns:
+        result['of_delta_ratio'] = np.clip(df['of_delta_ratio'].astype(float).values, 0.0, 5.0) / 5.0 - 0.5
+    else:
+        result['of_delta_ratio'] = 0.0
+
+    # of_state: encoded as directional signal
+    if 'of_state' in df.columns:
+        of_map = {
+            'STRONG_BULLISH_FLOW': 1.0, 'BULLISH_ABSORPTION': 0.5,
+            'STRONG_BEARISH_FLOW': -1.0, 'BEARISH_ABSORPTION': -0.5,
+            'NEUTRAL': 0.0
+        }
+        result['of_state'] = df['of_state'].map(of_map).fillna(0.0).values
+    else:
+        result['of_state'] = 0.0
+
+    # dynamic_horizon: normalized 1-4 → 0.0-1.0
+    if 'dynamic_horizon' in df.columns:
+        result['dynamic_horizon'] = (df['dynamic_horizon'].astype(float).values - 1.0) / 3.0
+    else:
+        result['dynamic_horizon'] = 0.5  # default = 2.5 candles (midpoint)
+
     # Slice off initial rolling warmup window (first 25 rows) and fill residual NaNs
     result = result.iloc[25:].fillna(0.0)
 
