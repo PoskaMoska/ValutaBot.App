@@ -396,13 +396,18 @@ public static class MLPythonService
             BotLogger.Info($"[MLPythonService] PredictAsync completed in {sw.ElapsedMilliseconds}ms for {symbol} {interval}");
             var result = JsonSerializer.Deserialize<MLPythonPrediction>(responseBody, _jsonOptions);
             
-            if (result != null && result.Direction != "NEUTRAL")
+            // Fix #3: Previously returned null for NEUTRAL direction, causing mlScore=0.
+            // Now ALWAYS return the prediction so ConfluenceMatrixEngine gets the real
+            // raw_confidence even when the ML is uncertain (prob near 0.5).
+            // The Confluence Matrix uses RawConfidence to compute mlScore = (rawProb-0.5)*2,
+            // which correctly contributes a near-zero (but not zero) signal when ML is neutral.
+            if (result != null)
             {
                 string smcBos = smcResult?.BosDirection ?? "NONE";
                 string smcOb = (smcResult?.OrderBlockType != null) ? "OB_PRESENT" : "NO_OB";
                 double ofRat = ofResult?.ScoreContribution ?? 0.0;
                 
-                BotLogger.Info($"[ML Insights] {binanceSymbol}/{interval} | СЦЕНАРИЙ: Слом={smcBos}, Блок={smcOb}, ОФ={ofRat:F1} | ВЕРДИКТ: {result.Direction} (Уверенность: {result.Confidence*100:F1}%) [v:{result.ModelVersion}]");
+                BotLogger.Info($"[ML Insights] {binanceSymbol}/{interval} | СЦЕНАРИЙ: Слом={smcBos}, Блок={smcOb}, ОФ={ofRat:F1} | ВЕРДИКТ: {result.Direction} (Уверенность: {result.Confidence*100:F1}%) | RawConf: {result.RawConfidence:F4} [v:{result.ModelVersion}]");
                 return new MLPythonPrediction(
                     Direction:        result.Direction,
                     Confidence:       result.Confidence,

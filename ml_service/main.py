@@ -724,7 +724,10 @@ def feedback(req: TrainFeedback, background_tasks: BackgroundTasks):
     
     def process_feedback_bg():
         try:
-            norm_interval = req.timeframe.replace("s", "") if req.timeframe.endswith("s") else req.timeframe
+            # Fix #2: endswith(s) never matched s30/s15 (they START with s).
+            # Sub-minute intervals were not normalized -> SGD trained on wrong key.
+            # Use canonical normalizer (same as /predict).
+            norm_interval = _normalize_interval(req.timeframe)
             from model import ForexPredictor
             regime = "TREND"
             recent_candles = _fetch_candles_at_entry(req.asset, norm_interval, req.timestamp, limit=200)

@@ -57,7 +57,9 @@ TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "3"))
 RETRAIN_INTERVAL_H = int(os.environ.get("RETRAIN_INTERVAL_H", "168")) # 1 неделя
 SGD_WEIGHT_MAX = float(os.environ.get("SGD_WEIGHT_MAX", "0.05")) # 5% вклад онлайн-обучения
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "250000"))  # Global Strategist window
-MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.50"))  # below → NEUTRAL
+# Fix #5: was 0.50 (zero neutral zone). Now 0.48 = +-2% band around 0.5.
+# C# ConfluenceMatrix receives RawConfidence so NEUTRAL ML still contributes.
+MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.48"))  # below -> NEUTRAL
 
 BINANCE_BASE = "https://api.binance.com"
 
@@ -385,13 +387,19 @@ class ForexPredictor:
             return "NEUTRAL", 0.5, "not-trained", 3, 0.5
 
         try:
-            # FIX TRAIN-SERVE SKEW: Drop the volatile unclosed candle for prediction.
-            # During training, features are built from fully formed, closed candles.
-            # We must not predict using features from an actively forming candle.
-            if len(candles) > 1:
-                candles = candles[:-1]
-            if mtf_candles is not None and len(mtf_candles) > 1:
-                mtf_candles = mtf_candles[:-1]
+            # NOTE (Fix #1 — Double-Drop Bug):
+            # C# Orchestrator already strips the unclosed candle BEFORE calling this endpoint
+            # (see MarketAnalysisOrchestrator.cs: closedCandles = candles.Take(N-1)).
+            # DO NOT drop another candle here — it causes predict() to use features
+            # from candle[-2] instead of [-1], systematically shifting the prediction
+            # one candle into the past and breaking temporal alignment.
+            #
+            # The only caller that sends RAW (including unclosed) candles is the
+            # /train/sync endpoint — but that endpoint calls predictor.train(), not predict().
+            # So this guard is safe to remove for the predict() path.
+            #
+            # If you add a new caller that sends raw candles, pass already_closed=False
+            # and re-enable the drop selectively.
 
             feats = build_features(candles, mtf_candles)
             if feats.empty or len(feats) < 5:
@@ -1034,6 +1042,13 @@ class ForexPredictor:
                     fitted_embedder = None
             # ── End D12 ───────────────────────────────────────────────────
 
+            # Fix #8 (ROOT CAUSE — Feature Name Mismatch):
+            # LightGBM trained on numpy arrays -> stores generic "Column_0", "Column_1" names.
+            # At inference, the alignment code looked for "Column_N" in the named feature
+            # DataFrame (with columns like "rsi14", "macd_hist", "raw_close_1") -> all missing
+            # -> all filled with 0.0 -> model predicted on zeros -> noise near 0.5.
+            # Fix: always pass feature_name= to .fit() so LightGBM stores real column names.
+            feat_names = list(feats.columns)  # preserved for all .fit() calls below
             X = feats.values.astype(np.float32)
             y = target_aligned.copy()  # copy so RL can modify labels safely
             base_weights = weights_aligned.copy()
@@ -1145,6 +1160,7 @@ class ForexPredictor:
                     sample_weight=sample_weights[train_idx],
                     eval_set=[(X_val, y_val)],
                     eval_sample_weight=[sample_weights[val_idx]],
+                    feature_name=feat_names,  # Fix #8: store real column names
                     callbacks=[lgb.early_stopping(50, verbose=False),
                                lgb.log_evaluation(period=-1)]
                 )
@@ -1178,7 +1194,7 @@ class ForexPredictor:
 
             # Final model on all data
             final_model = lgb.LGBMClassifier(**get_lgbm_params(self.interval))
-            final_model.fit(X, y, sample_weight=sample_weights)
+            final_model.fit(X, y, sample_weight=sample_weights, feature_name=feat_names)  # Fix #8
 
             version = f"lgbm-v1-{self._key}-{int(time.time())}"
             meta = ModelMeta(
