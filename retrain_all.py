@@ -21,18 +21,15 @@ def retrain_all(base_url: str):
         print(f"[ERROR] ML service unavailable at {base_url}: {e}")
         sys.exit(1)
 
-    symbols = [
-        {"symbol": "EURUSD",  "interval": "1m",  "is_forex": True, "limit": 5000},
-        {"symbol": "EURUSD",  "interval": "s30", "is_forex": True, "limit": 5000},
-        {"symbol": "EURUSD",  "interval": "s15", "is_forex": True, "limit": 5000},
-        {"symbol": "EURUSD",  "interval": "s10", "is_forex": True, "limit": 5000},
-        {"symbol": "EURUSD",  "interval": "s5",  "is_forex": True, "limit": 5000},
-        {"symbol": "GBPUSD",  "interval": "1m",  "is_forex": True, "limit": 5000},
-        {"symbol": "USDCAD",  "interval": "1m",  "is_forex": True, "limit": 5000},
-        {"symbol": "USDJPY",  "interval": "1m",  "is_forex": True, "limit": 5000},
-        {"symbol": "USDCHF",  "interval": "1m",  "is_forex": True, "limit": 5000},
-        {"symbol": "AUDUSD",  "interval": "1m",  "is_forex": True, "limit": 5000},
-    ]
+    PAIRS    = ["EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD"]
+    SUB_TFS  = ["s5", "s10", "s15", "s30"]
+    MAIN_TFS = ["1m"]
+
+    symbols = []
+    for pair in PAIRS:
+        for tf in MAIN_TFS + SUB_TFS:
+            symbols.append({"symbol": pair, "interval": tf, "is_forex": True, "limit": 5000})
+
 
     print(f"\nStarting retraining of {len(symbols)} symbol/interval pairs...")
     print("This uses background /train (non-blocking). Models ready in ~10-30 min.\n")
