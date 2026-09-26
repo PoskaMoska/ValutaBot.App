@@ -184,7 +184,7 @@ export async function executeAnalysis() {
                 if (smcCard) smcCard.style.display = config.smc ? 'block' : 'none';
                 
                 const ofCard = document.getElementById('orderFlowCard');
-                if (ofCard) ofCard.style.display = config.of ? 'block' : 'none';
+                if (ofCard) ofCard.style.display = 'none'; // OF отключён (35.8% anti-signal)
             }
 
             const resDir = document.getElementById('resDir');
@@ -431,7 +431,7 @@ export async function executeAnalysis() {
                     if (rSmc) rSmc.innerHTML = formatDir(data.smcDirection, data.smcConfidence);
 
                     const rOf = document.getElementById('radarOf');
-                    if (rOf) rOf.innerHTML = formatDir(data.ofDirection, data.ofConfidence);
+                    if (rOf) { rOf.closest('[data-module="of"]')?.style.setProperty('display','none'); rOf.innerHTML = ''; } // OF отключён
 
                     const rTa = document.getElementById('radarTa');
                     if (rTa) rTa.innerHTML = formatDir(data.taDirection, data.taConfidence);
