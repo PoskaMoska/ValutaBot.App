@@ -313,8 +313,11 @@ public class ConfluenceMatrixEngine(
         ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0)
     {
         double taScore = taSignal.Score;
-        double ofScore = ofSignal.ScoreContribution;
-        
+        // OF DISABLED: 35.8% empirical win-rate (5.5σ anti-signal, 369 trades).
+        // Volume Delta is meaningless on OTC/Forex without a real order book.
+        // LightGBM already captures volume patterns via raw_vol_1..60 features.
+        double ofScore = 0.0;
+
         double smcScore = 0;
         if (smcSignal.BosDirection == "BULLISH_BOS") smcScore += 0.5;
         if (smcSignal.BosDirection == "BEARISH_BOS") smcScore -= 0.5;
@@ -366,8 +369,9 @@ public class ConfluenceMatrixEngine(
         }
         else
         {
-            // ML-FALLBACK LOBOTOMY FIX: weight TA, SMC, OF, and ML when MetaLearner is offline.
-            metaProb = Math.Clamp(0.5 + (taScore * 0.2) + (smcScore * 0.2) + (ofScore * 0.1) + (mlScore * 0.2), 0.0, 1.0);
+            // Fallback when MetaLearner is offline.
+            // OF removed (35.8% anti-signal). ML gets highest weight (AUC 78%, empirical 58.6%).
+            metaProb = Math.Clamp(0.5 + (mlScore * 0.35) + (taScore * 0.20) + (smcScore * 0.15), 0.0, 1.0);
         }
 
         // Пользовательское требование: Бот должен всегда давать сигнал (без NEUTRAL зоны)
@@ -418,18 +422,17 @@ public class ConfluenceMatrixEngine(
             sb.AppendLine("- Критический разворот Теханализа: Сильное снижение уверенности");
         }
 
-        // 2.5. Защита от "Ловли Ножей" (Anti-Knife Filter) - Внедрено по требованию пользователя
-        // Если бот пытается развернуть сделку против фазы рынка, а объемы (OrderFlow) не дают поддержки,
-        // это ловля падающего ножа. Жестко режем уверенность до нейтральной зоны.
-        if (finalDir == "BUY" && taSignal.Rsi < 48 && ofScore <= 0)
+        // 2.5. Защита от "Ловли Ножей" (Anti-Knife Filter) — только RSI.
+        // OF убран (35.8% anti-signal). RSI<48 при BUY и RSI>52 при PUT достаточно.
+        if (finalDir == "BUY" && taSignal.Rsi < 48)
         {
             margin *= 0.3;
-            sb.AppendLine("- Anti-Knife: Попытка лонга против падающей фазы без поддержки объемов. Уверенность срезана.");
+            sb.AppendLine("- Anti-Knife: Попытка лонга при перепроданности RSI. Уверенность срезана.");
         }
-        else if (finalDir == "PUT" && taSignal.Rsi > 52 && ofScore >= 0)
+        else if (finalDir == "PUT" && taSignal.Rsi > 52)
         {
             margin *= 0.3;
-            sb.AppendLine("- Anti-Knife: Попытка шорта против растущей фазы без поддержки объемов. Уверенность срезана.");
+            sb.AppendLine("- Anti-Knife: Попытка шорта при перекупленности RSI. Уверенность срезана.");
         }
 
         // 3. Фаза рынка (RSI)
