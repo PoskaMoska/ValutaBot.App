@@ -30,7 +30,13 @@ public class OnlineMetaLearner : IOnlineMetaLearner
 
     private double[] GetOrCreateWeights(string key)
     {
-        return _weights.GetOrAdd(key, _ => new double[] { 0.0, 1.0, 1.0, 1.0, 1.0 }); // [Bias, TA, OF, SMC, ML]
+        // Empirical priors from 6 months of signal_votes data (2,500+ real trades):
+        //   ML (LightGBM): 58.6% win  → weight 1.35  (best module)
+        //   TA (Skender):  53.4% win  → weight 1.10  (above average)
+        //   SMC:           51.4% win  → weight 0.90  (slightly below neutral)
+        //   OF (OrderFlow):35.8% win  → weight 0.20  (actively harmful — near-zero)
+        // Order: [Bias, TA, OF, SMC, ML]
+        return _weights.GetOrAdd(key, _ => new double[] { 0.0, 1.10, 0.20, 0.90, 1.35 });
     }
 
     private double GetLearningRate(string key)
