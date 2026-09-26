@@ -22,6 +22,7 @@ public class AutoTradingScannerService : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AutoTradingScannerService> _logger;
     private static readonly string[] _targetPairs = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
+    private static readonly string[] _targetTimeframes = { "s5", "s10", "s15", "s30" };
 
     public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger)
     {
@@ -31,7 +32,7 @@ public class AutoTradingScannerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("[AutoScanner] Service started. Will scan 6 pairs on s5 every 5 seconds.");
+        _logger.LogInformation("[AutoScanner] Service started. Will scan 6 pairs on s5/s10/s15/s30.");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -41,40 +42,31 @@ public class AutoTradingScannerService : BackgroundService
             {
                 using var scope = _serviceProvider.CreateScope();
                 var orchestrator = scope.ServiceProvider.GetRequiredService<IMarketAnalysisOrchestrator>();
-                
-                // Get default user settings (userId = 0 is system default)
                 var userSettings = await UserRepository.GetSettingsAsync(0);
 
                 var tasks = new List<Task>();
                 foreach (var pair in _targetPairs)
                 {
-                    // Fire and forget analysis for each pair concurrently
-                    tasks.Add(Task.Run(async () =>
+                    foreach (var tf in _targetTimeframes)
                     {
-                        try
+                        tasks.Add(Task.Run(async () =>
                         {
-                            // Safety Check: Verify we have LIVE data for this pair before analyzing.
-                            // TwelveData free tier limits WS symbols, so some pairs might be stale.
-                            // If we pass stale data, we generate bad signals. 
-                            // If MarketDataFetcher falls back to REST, we burn the 800/day limit.
-                            var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, "s5", 1);
-                            if (recentCandles.Length == 0) return;
-                            
-                            var lastCandleTime = recentCandles[^1].timestamp;
-                            if ((DateTime.UtcNow - lastCandleTime).TotalSeconds > 30)
+                            try
                             {
-                                // Stale data (no WS ticks recently). Skip to save REST limit and avoid bad trades.
-                                return;
-                            }
+                                var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 1);
+                                if (recentCandles.Length == 0) return;
+                                
+                                var lastCandleTime = recentCandles[^1].timestamp;
+                                if ((DateTime.UtcNow - lastCandleTime).TotalSeconds > 30) return;
 
-                            // ExecuteAnalysisAsync triggers SignalTracker.RecordPredictionAsync internally if valid
-                            await orchestrator.ExecuteAnalysisAsync(pair, "s5", userSettings);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning($"[AutoScanner] Error analyzing {pair}: {ex.Message}");
-                        }
-                    }, stoppingToken));
+                                await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning($"[AutoScanner] Error analyzing {pair} {tf}: {ex.Message}");
+                            }
+                        }, stoppingToken));
+                    }
                 }
 
                 await Task.WhenAll(tasks);
