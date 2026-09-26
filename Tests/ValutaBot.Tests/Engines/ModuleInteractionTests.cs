@@ -199,7 +199,7 @@ namespace ValutaBot.Tests.Engines
         static readonly ConfluenceMatrixResult _neutralMtf = new(0.33, false, 0, "", "", new(), "NEUTRAL");
 
         [Fact]
-        public async Task OF_PositiveContribution_PassesToConsensus()
+        public async Task OF_IsDisabled_ZeroContribution()
         {
             var of  = new OrderflowSignal(0.4, "BULLISH_ABSORPTION");
             var ta  = new TaSignal(0.0, 0.5, 50.0, 1.1, 0.0, 0.0001, 20.0);
@@ -211,7 +211,7 @@ namespace ValutaBot.Tests.Engines
                 ta, smc, of, ml, st, _neutralMtf);
 
             output.WriteLine($"OfScore: {dec.OfScore:F3}");
-            Assert.True(dec.OfScore > 0, "Положительный OFScore должен пройти в ConsensusDecision");
+            Assert.Equal(0.0, dec.OfScore);
         }
 
         [Fact]
