@@ -345,6 +345,7 @@ class PredictResponse(BaseModel):
 class TrainRequest(BaseModel):
     symbol: str
     interval: str
+    regime: str = "ALL"
     candles: Optional[List[CandleItem]] = None   # if None -> fetch from DB
     mtf_candles: Optional[List[CandleItem]] = None
 
@@ -636,13 +637,13 @@ def train(req: TrainRequest, background_tasks: BackgroundTasks):
 def train_sync(req: TrainRequest):
     """Blocking train (useful for testing / initial setup)."""
     interval = _normalize_interval(req.interval)
-    predictor = _get_predictor(req.symbol, interval)
+    predictor = _get_predictor(req.symbol, interval, req.regime)
     candle_dicts = _candles_to_dicts(req.candles) if req.candles else None
     mtf_candle_dicts = _candles_to_dicts(req.mtf_candles) if req.mtf_candles else None
     
     global _process_pool
     if _process_pool:
-        future = _process_pool.submit(_run_training_worker, req.symbol, interval, "ALL", candle_dicts, mtf_candle_dicts, False)
+        future = _process_pool.submit(_run_training_worker, req.symbol, interval, req.regime, candle_dicts, mtf_candle_dicts, False)
         report = future.result()
         predictor._try_load()
     else:
