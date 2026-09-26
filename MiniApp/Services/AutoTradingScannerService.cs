@@ -53,6 +53,20 @@ public class AutoTradingScannerService : BackgroundService
                     {
                         try
                         {
+                            // Safety Check: Verify we have LIVE data for this pair before analyzing.
+                            // TwelveData free tier limits WS symbols, so some pairs might be stale.
+                            // If we pass stale data, we generate bad signals. 
+                            // If MarketDataFetcher falls back to REST, we burn the 800/day limit.
+                            var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, "s5", 1);
+                            if (recentCandles.Length == 0) return;
+                            
+                            var lastCandleTime = recentCandles[^1].timestamp;
+                            if ((DateTime.UtcNow - lastCandleTime).TotalSeconds > 30)
+                            {
+                                // Stale data (no WS ticks recently). Skip to save REST limit and avoid bad trades.
+                                return;
+                            }
+
                             // ExecuteAnalysisAsync triggers SignalTracker.RecordPredictionAsync internally if valid
                             await orchestrator.ExecuteAnalysisAsync(pair, "s5", userSettings);
                         }
