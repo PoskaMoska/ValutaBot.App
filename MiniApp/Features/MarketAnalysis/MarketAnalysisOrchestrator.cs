@@ -217,11 +217,19 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             ["LIGHTGBM"]     = lgbmDir,
         };
 
-        // RECORD (Fire and forget)
+        // RECORD (Fire and forget) ONLY IF CONFIDENCE IS HIGH ENOUGH
         int targetHorizon = timeout.TimeoutCandles;
-        _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw);
-        dbSw.Stop();
-        traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Ожидание экспирации: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
+        if (consensus.Probability >= 53)
+        {
+            _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw);
+            dbSw.Stop();
+            traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
+        }
+        else
+        {
+            dbSw.Stop();
+            traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 53% -> {dbSw.ElapsedMilliseconds}ms");
+        }
 
         sw.Stop();
         
