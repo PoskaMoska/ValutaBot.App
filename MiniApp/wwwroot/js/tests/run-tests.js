@@ -177,7 +177,7 @@ async function runTest() {
     assertEq("ML Radar is BUY", getVal('radarMl').includes('ВВЕРХ (85%)'), true);
     assertEq("TA Radar is BUY", getVal('radarTa').includes('ВВЕРХ (80%)'), true);
     assertEq("SMC Radar is PUT", getVal('radarSmc').includes('ВНИЗ (65%)'), true);
-    assertEq("OrderFlow Radar is NEUTRAL", getVal('radarOf').includes('НЕЙТРАЛЬНО'), true);
+    assertEq("OrderFlow Radar is DISABLED", getVal('radarOf') === '', true);
     assertEq("Confluence Card display", document.getElementById('confluenceCard').style.display, 'block');
 
 
