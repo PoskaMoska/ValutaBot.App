@@ -32,7 +32,7 @@ namespace ValutaBot.Core
             return Direction.Neutral;
         }
 
-        public static Direction FromMlConfidence(string directionString, double confidence, double threshold = 0.52)
+        public static Direction FromMlConfidence(string directionString, double confidence, double threshold = 0.55)
         {
             if (directionString == "BUY" && confidence >= threshold) return Direction.Up;
             if (directionString == "PUT" && confidence >= threshold) return Direction.Down;

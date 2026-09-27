@@ -102,7 +102,7 @@ BINANCE_BASE = "https://api.binance.com"
 
 # Fix #5: was 0.50 (zero neutral zone). Now 0.48 = +-2% band around 0.5.
 # C# ConfluenceMatrix receives RawConfidence so NEUTRAL ML still contributes.
-MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.48"))  # below -> NEUTRAL
+MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.55"))  # below -> NEUTRAL
 
 # в”Ђв”Ђ TwelveData Config в”Ђв”Ђ
 TWELVE_DATA_BASE = "https://api.twelvedata.com"
