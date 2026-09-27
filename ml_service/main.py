@@ -494,6 +494,18 @@ def list_models():
         return [p.get_status() for p in _predictors.values()]
 
 
+@app.post("/debug/clear_models")
+async def clear_models():
+    """Wipes all .pkl files from the persistent volume to start fresh."""
+    try:
+        count = 0
+        for pkl in MODEL_DIR.glob("**/*.pkl"):
+            pkl.unlink()
+            count += 1
+        return {"status": "ok", "deleted": count}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/debug/ls")
 def debug_ls():
     """List actual .pkl files on disk in MODEL_DIR. Useful to diagnose persistent volume."""
