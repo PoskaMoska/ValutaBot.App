@@ -38,6 +38,20 @@ public class AutoTradingScannerService : BackgroundService
         {
             var loopStart = DateTime.UtcNow;
 
+            // Skip weekends — forex is closed, OTC data is static/synthetic.
+            // Signals on weekend historical data are meaningless and pollute MetaLearner feedback.
+            var dayOfWeek = DateTime.UtcNow.DayOfWeek;
+            bool isWeekend = dayOfWeek == DayOfWeek.Saturday ||
+                             (dayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
+                             (dayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
+
+            if (isWeekend)
+            {
+                _logger.LogDebug("[AutoScanner] Weekend — skipping scan to avoid OTC garbage trades.");
+                await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+                continue;
+            }
+
             try
             {
                 using var scope = _serviceProvider.CreateScope();
