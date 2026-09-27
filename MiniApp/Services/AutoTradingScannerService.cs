@@ -67,8 +67,8 @@ public class AutoTradingScannerService : BackgroundService
                         {
                             try
                             {
-                                var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 1);
-                                if (recentCandles.Length == 0) return;
+                                var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
+                                if (recentCandles.Length < 160) return;
                                 
                                 var lastCandleTime = recentCandles[^1].Timestamp;
                                 if ((DateTime.UtcNow - lastCandleTime).TotalSeconds > 30) return;

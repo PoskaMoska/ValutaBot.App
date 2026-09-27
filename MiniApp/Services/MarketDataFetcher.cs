@@ -142,7 +142,7 @@ public class MarketDataFetcher
             int subCandlesPerM1 = 12 / groupSize; 
             int m1Needed = Math.Max(10, (int)Math.Ceiling((double)(missing + 10) / subCandlesPerM1));
 
-            var tdResult1m = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1min", m1Needed, cacheTtlSeconds: 15);
+            var tdResult1m = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1min", m1Needed, cacheTtlSeconds: 60);
             if (tdResult1m == null)
             {
                 throw new ExchangeUnavailableException("TwelveData API Unavailable", "Не удалось загрузить минутные котировки для генерации микро-тиков.");
@@ -191,8 +191,8 @@ public class MarketDataFetcher
         {
             "s5" or "s10"       => 5,
             "s15" or "s30"      => 10,
-            "m1"                => 15,
-            "m2" or "m3"        => 30,
+            "m1"                => 60,
+            "m2" or "m3"        => 60,
             "m5"                => 60,
             "m15" or "m30"      => 120,
             "h1" or "h4"        => 300,
