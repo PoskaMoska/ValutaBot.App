@@ -56,12 +56,53 @@ SGD_MODEL_DIR = MODEL_DIR / "sgd"
 TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "3"))
 RETRAIN_INTERVAL_H = int(os.environ.get("RETRAIN_INTERVAL_H", "168")) # 1 неделя
 SGD_WEIGHT_MAX = float(os.environ.get("SGD_WEIGHT_MAX", "0.05")) # 5% вклад онлайн-обучения
-MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "20000"))  # Reduced from 250k: Railway 512MB RAM can't train on 250k rows without OOM. 20k = ~28h of s5 data, AUC ~72-75% (vs 78% on 250k), but ACTUALLY TRAINS without crashing.
+MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "250000"))  # Full dataset for local training; set to 20000 on Railway via env var
+
+# Parameters optimized for high-noise, sub-minute data (stronger regularization)
+LGBM_PARAMS_SUBMINUTE = {
+    'objective': 'binary',
+    'metric': 'binary_logloss',
+    'boosting_type': 'gbdt',
+    'learning_rate': 0.01,
+    'num_leaves': 31,          # Increased from 15: more expressive with 250k rows
+    'max_depth': -1,            # Unconstrained: let early_stopping handle depth
+    'min_child_samples': 100,   # Increased: stronger regularization on noisy s5 data
+    'n_estimators': 500,        # Increased from 150: more trees, early_stopping prevents overfit
+    'feature_fraction': 0.7,    # Random 70% features per tree: reduces variance
+    'bagging_fraction': 0.8,    # Train on 80% of data per tree (bagging)
+    'bagging_freq': 5,          # Apply bagging every 5 trees
+    'lambda_l1': 0.1,           # L1 regularization: sparse features
+    'lambda_l2': 0.1,           # L2 regularization: small weights
+    'random_state': 42,
+    'verbose': -1,
+    'n_jobs': -1
+}
+
+# Parameters optimized for standard timeframes (1m, 5m, 1h, etc.)
+LGBM_PARAMS_STANDARD = {
+    'objective': 'binary',
+    'metric': 'binary_logloss',
+    'boosting_type': 'gbdt',
+    'learning_rate': 0.02,      # Reduced from 0.05: slower=better generalization
+    'num_leaves': 63,           # Increased from 31: more capacity for 250k 1m rows
+    'max_depth': -1,
+    'min_child_samples': 50,    # Increased from 20: prevent overfit on leaf nodes
+    'n_estimators': 500,        # Increased from 200
+    'feature_fraction': 0.7,
+    'bagging_fraction': 0.8,
+    'bagging_freq': 5,
+    'lambda_l1': 0.05,
+    'lambda_l2': 0.05,
+    'random_state': 42,
+    'verbose': -1,
+    'n_jobs': -1
+}
+
+BINANCE_BASE = "https://api.binance.com"
+
 # Fix #5: was 0.50 (zero neutral zone). Now 0.48 = +-2% band around 0.5.
 # C# ConfluenceMatrix receives RawConfidence so NEUTRAL ML still contributes.
 MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.48"))  # below -> NEUTRAL
-
-BINANCE_BASE = "https://api.binance.com"
 
 # в”Ђв”Ђ TwelveData Config в”Ђв”Ђ
 TWELVE_DATA_BASE = "https://api.twelvedata.com"

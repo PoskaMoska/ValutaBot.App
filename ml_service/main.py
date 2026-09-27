@@ -19,7 +19,7 @@ import sqlite3
 from typing import Dict, List, Optional
 
 import orjson
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from concurrent.futures import ProcessPoolExecutor
@@ -509,6 +509,47 @@ def debug_ls():
     except Exception as e:
         return {"error": str(e), "model_dir": str(MODEL_DIR)}
     return {"model_dir": str(MODEL_DIR), "count": len(result), "files": result}
+
+
+@app.post("/upload_model")
+async def upload_model(
+    symbol: str = Form(...),
+    interval: str = Form(...),
+    regime: str = Form("ALL"),
+    model_file: UploadFile = File(...)
+):
+    """
+    Accept a locally-trained .pkl file and save it to MODEL_DIR on the persistent volume.
+    After saving, reloads the predictor so it's immediately available for /predict.
+    """
+    from model import MODEL_DIR
+    interval = _normalize_interval(interval)
+    suffix = f"_{regime}" if regime != "ALL" else ""
+    key = f"{symbol.upper()}_{interval}{suffix}"
+    dest = MODEL_DIR / f"{key}.pkl"
+
+    try:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        content = await model_file.read()
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_bytes(content)
+        tmp.replace(dest)  # atomic replace
+
+        # Reload into memory
+        predictor = _get_predictor(symbol.upper(), interval, regime)
+        predictor._try_load()
+
+        log.info(f"[UploadModel] Saved and reloaded {key}.pkl ({len(content)//1024} KB)")
+        return {
+            "status": "ok",
+            "key": key,
+            "size_kb": round(len(content) / 1024, 1),
+            "path": str(dest),
+            "auc": predictor._meta.auc if predictor._meta else None
+        }
+    except Exception as e:
+        log.error(f"[UploadModel] Failed for {key}: {e}")
+        return {"status": "error", "key": key, "error": str(e)}
 
 
 # Cache to hold the latest live candles per symbol/interval for truthful SGD feedback
