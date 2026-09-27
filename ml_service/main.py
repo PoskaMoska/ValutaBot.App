@@ -377,6 +377,8 @@ class TrainFeedback(BaseModel):
 def _normalize_interval(interval: str) -> str:
     """Unify interval string: 'm1'->'1m', '5m'->'5m', etc."""
     iv = interval.lower().strip()
+    if iv.startswith("s") and iv[1:].isdigit():
+        return iv
     # Already canonical (Binance-style): "1m", "5m", "15m", "1h" etc.
     if iv in TF_MAP.values():
         return iv
