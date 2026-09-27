@@ -494,6 +494,23 @@ def list_models():
         return [p.get_status() for p in _predictors.values()]
 
 
+@app.get("/debug/ls")
+def debug_ls():
+    """List actual .pkl files on disk in MODEL_DIR. Useful to diagnose persistent volume."""
+    from model import MODEL_DIR
+    import os
+    result = []
+    try:
+        for root, dirs, files in os.walk(MODEL_DIR):
+            for f in sorted(files):
+                full = os.path.join(root, f)
+                size_kb = round(os.path.getsize(full) / 1024, 1)
+                result.append({"file": f, "path": full, "size_kb": size_kb})
+    except Exception as e:
+        return {"error": str(e), "model_dir": str(MODEL_DIR)}
+    return {"model_dir": str(MODEL_DIR), "count": len(result), "files": result}
+
+
 # Cache to hold the latest live candles per symbol/interval for truthful SGD feedback
 _live_candles_cache = {}
 _cache_lock = threading.Lock()
