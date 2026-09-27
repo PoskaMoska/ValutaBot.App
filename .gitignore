@@ -11,7 +11,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-#*.pkl
+# Trained ML model files — stored on Railway Volume, not in git
+*.pkl
+retrain_v3.log
 .venv/
 venv/
 ValutaBot.db
