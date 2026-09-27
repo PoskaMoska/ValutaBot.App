@@ -915,7 +915,7 @@ class ForexPredictor:
                     
             if last_time_ms > 0:
                 age_hours = (time.time() - (last_time_ms / 1000.0)) / 3600.0
-                if age_hours > 24.0:
+                if age_hours > 120.0:
                     msg = f"Data too old ({age_hours:.1f}h). Waiting for crawler."
                     log.warning(f"[Train] Aborting training for {self._key}: {msg}")
                     
@@ -1199,8 +1199,7 @@ class ForexPredictor:
                 m.fit(
                     X_tr, y_tr,
                     sample_weight=sample_weights[train_idx],
-                    eval_set=[(X_val, y_val)],
-                    eval_sample_weight=[sample_weights[val_idx]],
+                    eval_X=X_val, eval_y=y_val,
                     feature_name=feat_names,  # Fix #8: store real column names
                     callbacks=[lgb.early_stopping(50, verbose=False),
                                lgb.log_evaluation(period=-1)]
