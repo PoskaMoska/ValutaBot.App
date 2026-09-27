@@ -56,7 +56,7 @@ SGD_MODEL_DIR = MODEL_DIR / "sgd"
 TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "3"))
 RETRAIN_INTERVAL_H = int(os.environ.get("RETRAIN_INTERVAL_H", "168")) # 1 неделя
 SGD_WEIGHT_MAX = float(os.environ.get("SGD_WEIGHT_MAX", "0.05")) # 5% вклад онлайн-обучения
-MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "250000"))  # Global Strategist window
+MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "20000"))  # Reduced from 250k: Railway 512MB RAM can't train on 250k rows without OOM. 20k = ~28h of s5 data, AUC ~72-75% (vs 78% on 250k), but ACTUALLY TRAINS without crashing.
 # Fix #5: was 0.50 (zero neutral zone). Now 0.48 = +-2% band around 0.5.
 # C# ConfluenceMatrix receives RawConfidence so NEUTRAL ML still contributes.
 MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.48"))  # below -> NEUTRAL
