@@ -236,8 +236,8 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             using var conn = DbConnectionFactory.GetConnection();
             await conn.ExecuteAsync(@"
-                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, ta_score, of_score, smc_score, ml_prob, ml_score)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore)
+                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, ta_score, of_score, smc_score, ml_prob, ml_score, features_json)
+                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson)
                 ON CONFLICT (id) DO NOTHING", 
                 new {
                     record.Id,
@@ -254,7 +254,8 @@ FROM outcome_data;");
                     record.OfScore,
                     record.SmcScore,
                     record.MlProb,
-                    record.MlScore
+                    record.MlScore,
+                    record.FeaturesJson
                 });
         }
 
