@@ -225,7 +225,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 Smc = smcResult,
-                Of = ofResult
+                Of = ofResult,
+                Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
@@ -239,7 +240,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 Smc = smcResult,
-                Of = ofResult
+                Of = ofResult,
+                Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
@@ -260,7 +262,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                     MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                     Smc = smcResult,
-                    Of = ofResult
+                    Of = ofResult,
+                    Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
                 };
                 string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
