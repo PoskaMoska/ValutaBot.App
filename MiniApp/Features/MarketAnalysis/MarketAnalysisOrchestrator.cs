@@ -233,9 +233,39 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
+        else if (consensus.Probability >= 45 && consensus.Probability < 53)
+        {
+            var mlFeatures = new {
+                Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+                MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+                Smc = smcResult,
+                Of = ofResult
+            };
+            string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
+
+            _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson);
+            dbSw.Stop();
+            traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}) -> {dbSw.ElapsedMilliseconds}ms");
+        }
         else
         {
             dbSw.Stop();
+            
+            // --- TRUE NEGATIVE NOISE COLLECTION (For 3-system Transformer architecture) ---
+            // AutoScanner makes ~288 checks per minute. A 0.5% chance gives ~1.4 random HOLD samples per minute globally.
+            // This prevents the 5GB DB from bloating while providing baseline states.
+            if (System.Random.Shared.NextDouble() < 0.005)
+            {
+                var mlFeatures = new {
+                    Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+                    MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+                    Smc = smcResult,
+                    Of = ofResult
+                };
+                string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
+
+                _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson);
+            }
             traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 53% -> {dbSw.ElapsedMilliseconds}ms");
         }
 

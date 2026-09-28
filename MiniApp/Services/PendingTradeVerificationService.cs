@@ -114,8 +114,8 @@ public class PendingTradeVerificationService : BackgroundService
             return;
         }
 
-        bool isCorrect = (record.Direction == "BUY" && exitPrice.Value > record.EntryPrice)
-                      || (record.Direction == "PUT" && exitPrice.Value < record.EntryPrice);
+        bool isCorrect = (record.Direction.EndsWith("BUY") && exitPrice.Value > record.EntryPrice)
+                      || (record.Direction.EndsWith("PUT") && exitPrice.Value < record.EntryPrice);
 
         record.ExitPrice = exitPrice.Value;
         record.PnlBps = Math.Round(priceDiff * 10000, 2);
