@@ -22,6 +22,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public double SmcScore { get; set; }
         public double MlProb { get; set; }
         public double MlScore { get; set; }
+        public string FeaturesJson { get; set; } = "";
         public string CreatedAt { get; set; } = "";
         public string VerifiedAt { get; set; } = "";
 
@@ -111,9 +112,9 @@ FROM outcome_data;");
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                     INSERT INTO trade_outcomes 
-                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, created_at, verified_at,
+                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @CreatedAt, @VerifiedAt,
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
                     ON CONFLICT (id) DO NOTHING", outcomes); // Dapper handles the loop
             }
@@ -131,9 +132,9 @@ FROM outcome_data;");
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                     INSERT INTO trade_outcomes 
-                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, created_at, verified_at,
+                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @CreatedAt, @VerifiedAt,
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
@@ -148,6 +149,7 @@ FROM outcome_data;");
                         smc_score = EXCLUDED.smc_score,
                         ml_prob = EXCLUDED.ml_prob,
                         ml_score = EXCLUDED.ml_score,
+                        features_json = EXCLUDED.features_json,
                         created_at = EXCLUDED.created_at,
                         verified_at = EXCLUDED.verified_at,
                         smc_bos_dir = EXCLUDED.smc_bos_dir,

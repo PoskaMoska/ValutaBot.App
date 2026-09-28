@@ -81,6 +81,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 SmcScore = record.SmcScore,
                 MlProb = record.MlProb,
                 MlScore = record.MlScore,
+                FeaturesJson = record.FeaturesJson,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };

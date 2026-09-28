@@ -45,7 +45,7 @@ public static class SignalTracker
         double taScore = 0.0,
         double ofScore = 0.0,
         double smcScore = 0.0,
-        double mlProb = 0.0, double mlScore = 0.0)
+        double mlProb = 0.0, double mlScore = 0.0, string featuresJson = "")
     {
         string sym = asset.ToUpper();
         var now = DateTime.UtcNow;
@@ -83,7 +83,8 @@ public static class SignalTracker
             OfScore = ofScore,
             SmcScore = smcScore,
             MlProb = mlProb,
-            MlScore = mlScore
+            MlScore = mlScore,
+            FeaturesJson = featuresJson
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
@@ -210,6 +211,7 @@ public static class SignalTracker
         public double SmcScore { get; set; }
         public double MlProb { get; set; }
         public double MlScore { get; set; }
+        public string FeaturesJson { get; set; } = "";
     }
 
     public class AccuracyStats
