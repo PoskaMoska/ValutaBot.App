@@ -104,7 +104,7 @@ public static partial class MiniAppController
         builder.Services.AddHostedService<HistoricalCandleAccumulatorService>();
         builder.Services.AddHostedService<ValutaBot.MiniApp.Services.DataRetentionService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
         builder.Services.AddHostedService<ValutaBot.App.MiniApp.Services.SelfDiagnosticService>(); // Post-deploy self-scanner
-        builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerService>(); // Scans 6 pairs continuously for fast out-of-sample generation
+        // builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerService>(); // Temporarily disabled to save API limits
 
         builder.Services.AddHttpClient("TwelveData").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
