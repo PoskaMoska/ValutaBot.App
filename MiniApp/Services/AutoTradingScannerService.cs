@@ -32,6 +32,12 @@ public class AutoTradingScannerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (Environment.GetEnvironmentVariable("AUTOSCANNER_DISABLED") == "true")
+        {
+            _logger.LogWarning("[AutoScanner] Disabled via AUTOSCANNER_DISABLED=true. Exiting.");
+            return;
+        }
+
         _logger.LogInformation("[AutoScanner] Service started. Will scan 6 pairs on s5/s10/s15/s30.");
 
         while (!stoppingToken.IsCancellationRequested)
