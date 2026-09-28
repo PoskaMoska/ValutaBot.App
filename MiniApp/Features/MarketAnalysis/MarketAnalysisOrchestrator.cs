@@ -223,7 +223,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         {
             var mlFeatures = new {
                 Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-                MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray()
+                MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+                Smc = smcResult,
+                Of = ofResult
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
