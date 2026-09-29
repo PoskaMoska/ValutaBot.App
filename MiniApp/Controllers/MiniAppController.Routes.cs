@@ -188,7 +188,28 @@ public static partial class MiniAppController
             }
         }).RequireRateLimiting("Global");
 
+        
+        app.MapGet("/api/stats/dataset", async (HttpContext context) =>
+        {
+            try
+            {
+                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                int tradeOutcomesCount = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL");
+                int pendingTradesCount = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM pending_trades WHERE features_json IS NOT NULL");
+                return Microsoft.AspNetCore.Http.Results.Json(new {
+                    trade_outcomes = tradeOutcomesCount,
+                    pending_trades = pendingTradesCount,
+                    total = tradeOutcomesCount + pendingTradesCount
+                });
+            }
+            catch (System.Exception ex)
+            {
+                return Microsoft.AspNetCore.Http.Results.Json(new { error = ex.Message }, statusCode: 500);
+            }
+        });
+
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
+
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
 
         // Internal endpoint for ML service -> Telegram admin notifications
