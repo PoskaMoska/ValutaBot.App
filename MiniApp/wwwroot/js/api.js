@@ -265,12 +265,12 @@ export async function executeAnalysis() {
                 wSession.innerText = data.uiMarketSession;
                 let sColor = "#f59e0b"; // default yellow for quiet/range
                 let sessionLow = data.uiMarketSession.toLowerCase();
-                if (sessionLow.includes("объемы") || sessionLow.includes("лондон") || sessionLow.includes("крипто")) {
-                    sColor = "#10b981"; // green (good volume)
+                if (sessionLow.includes("\u0435\u0432\u0440\u043e\u043f\u0430") || sessionLow.includes("\u0430\u043c\u0435\u0440\u0438\u043a\u0430") || sessionLow.includes("\u043d\u044c\u044e-\u0439\u043e\u0440\u043a") || sessionLow.includes("\u043b\u043e\u043d\u0434\u043e\u043d")) {
+                    sColor = "#10b981"; // green
                 } else if (sessionLow.includes("otc")) {
-                    sColor = "#8b5cf6"; // purple (OTC)
-                } else if (sessionLow.includes("тихий")) {
-                    sColor = "#6b7280"; // gray (dead)
+                    sColor = "#8b5cf6"; // purple
+                } else if (sessionLow.includes("\u043c\u0435\u0440\u0442\u0432") || sessionLow.includes("\u043f\u0438\u043b") || sessionLow.includes("\u0430\u0437\u0438")) {
+                    sColor = "#f59e0b"; // yellow
                 }
                 wSession.style.color = sColor;
             }
@@ -280,11 +280,12 @@ export async function executeAnalysis() {
                 wPhase.innerText = data.uiMarketPhase;
                 let phaseColor = "#10b981"; // Green default (upward/good)
                 let phaseLow = data.uiMarketPhase.toLowerCase();
-                
-                if (phaseLow.includes("замедление") || phaseLow.includes("переход") || phaseLow.includes("флэт") || phaseLow.includes("боковик")) {
-                    phaseColor = "#f59e0b"; // Yellow (Average / Sideways)
-                } else if (phaseLow.includes("падени") || phaseLow.includes("медвеж") || phaseLow.includes("перепроданность") || phaseLow.includes("слабый") || phaseLow.includes("волатильный") || phaseLow.includes("резкий") || phaseLow.includes("шум")) {
-                    phaseColor = "#ef4444"; // Red (Downward / Bad)
+                if (phaseLow.includes("\u0444\u043b\u044d\u0442") || phaseLow.includes("\u0437\u0430\u043c\u0435\u0434\u043b\u0435\u043d\u0438\u0435") || phaseLow.includes("\u043a\u043e\u043d\u0441\u043e\u043b\u0438\u0434\u0430\u0446\u0438\u044f") || phaseLow.includes("\u0431\u043e\u043a\u043e\u0432\u0438\u043a")) {
+                    phaseColor = "#f59e0b"; // Yellow
+                } else if (phaseLow.includes("\u043c\u0435\u0434\u0432\u0435\u0436") || phaseLow.includes("\u043f\u0435\u0440\u0435\u043f\u0440\u043e\u0434\u0430\u043d") || phaseLow.includes("\u043f\u0430\u0434\u0435\u043d\u0438") || phaseLow.includes("\u0441\u0431\u0440\u043e\u0441")) {
+                    phaseColor = "#ef4444"; // Red
+                } else if (phaseLow.includes("\u0431\u044b\u0447") || phaseLow.includes("\u043f\u0435\u0440\u0435\u043a\u0443\u043f\u043b\u0435\u043d") || phaseLow.includes("\u0440\u043e\u0441\u0442")) {
+                    phaseColor = "#10b981"; // Green
                 }
                 wPhase.style.color = phaseColor;
             }
@@ -295,17 +296,13 @@ export async function executeAnalysis() {
                 wEntropy.innerText = data.uiMarketEntropy;
                 let entColor = "#10b981";
                 let entLow = data.uiMarketEntropy.toLowerCase();
-                
-                // Fix for the "Безопасно" trap: explicitly check for it first,
-                // or just use exact word matching, or check "хаос" / "высокая".
-                if (entLow.includes("безопасно") || entLow.includes("в норме")) {
+                if (entLow.includes("\u043d\u043e\u0440\u043c") || entLow.includes("\u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d")) {
                     entColor = "#10b981"; // Green
-                } else if (entLow.includes("опасн") || entLow.includes("высок") || entLow.includes("хаос")) {
+                } else if (entLow.includes("\u0445\u0430\u043e\u0441") || entLow.includes("\u043e\u043f\u0430\u0441\u043d") || entLow.includes("\u0448\u0442\u043e\u0440\u043c")) {
                     entColor = "#ef4444"; // Red
-                } else if (entLow.includes("мертв") || entLow.includes("слаб") || entLow.includes("переход")) {
+                } else if (entLow.includes("\u043c\u0435\u0440\u0442\u0432") || entLow.includes("\u0441\u043e\u043d\u043d") || entLow.includes("\u0448\u0442\u0438\u043b\u044c")) {
                     entColor = "#f59e0b"; // Yellow
                 }
-                
                 wEntropy.style.color = entColor;
                 if (wTitle) wTitle.style.color = entColor;
             }

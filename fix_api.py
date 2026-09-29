@@ -1,67 +1,76 @@
-п»їimport os
-import re
+with open('MiniApp/wwwroot/js/api.js', 'r', encoding='utf-8') as f:
+    lines = f.readlines()
 
-file = 'MiniApp/wwwroot/js/api.js'
-with open(file, 'r', encoding='utf-8') as f:
-    text = f.read()
+new_lines = []
+skip = False
+for line in lines:
+    if "let sessionLow = data.uiMarketSession.toLowerCase();" in line:
+        new_lines.append(line)
+        new_lines.append('                if (sessionLow.includes("европа") || sessionLow.includes("америка") || sessionLow.includes("нью-йорк") || sessionLow.includes("лондон")) {\n')
+        new_lines.append('                    sColor = "#10b981"; // green\n')
+        new_lines.append('                } else if (sessionLow.includes("otc")) {\n')
+        new_lines.append('                    sColor = "#8b5cf6"; // purple\n')
+        new_lines.append('                } else if (sessionLow.includes("мертв") || sessionLow.includes("пил") || sessionLow.includes("ази")) {\n')
+        new_lines.append('                    sColor = "#f59e0b"; // yellow\n')
+        new_lines.append('                }\n')
+        skip = True
+        continue
+    
+    if skip and "wSession.style.color" in line:
+        skip = False
+        new_lines.append(line)
+        continue
+    
+    if not skip:
+        new_lines.append(line)
 
-new_session = '''
-            const wSession = document.getElementById("weatherSession");
-            if (wSession && data.uiMarketSession) {
-                wSession.innerText = data.uiMarketSession;
-                let sColor = "#f59e0b"; // default yellow for quiet/range
-                let sessionLow = data.uiMarketSession.toLowerCase();
-                if (sessionLow.includes("РѕР±СЉРµРјС‹") || sessionLow.includes("Р»РѕРЅРґРѕРЅ") || sessionLow.includes("РєСЂРёРїС‚Рѕ")) {
-                    sColor = "#10b981"; // green (good volume)
-                } else if (sessionLow.includes("otc")) {
-                    sColor = "#8b5cf6"; // purple (OTC)
-                } else if (sessionLow.includes("С‚РёС…РёР№")) {
-                    sColor = "#6b7280"; // gray (dead)
-                }
-                wSession.style.color = sColor;
-            }
-'''
+lines = new_lines
+new_lines = []
+skip = False
+for line in lines:
+    if "let phaseLow = data.uiMarketPhase.toLowerCase();" in line:
+        new_lines.append(line)
+        new_lines.append('                if (phaseLow.includes("флэт") || phaseLow.includes("замедление") || phaseLow.includes("консолидация") || phaseLow.includes("боковик")) {\n')
+        new_lines.append('                    phaseColor = "#f59e0b"; // Yellow\n')
+        new_lines.append('                } else if (phaseLow.includes("медвеж") || phaseLow.includes("перепродан") || phaseLow.includes("падени") || phaseLow.includes("сброс")) {\n')
+        new_lines.append('                    phaseColor = "#ef4444"; // Red\n')
+        new_lines.append('                } else if (phaseLow.includes("быч") || phaseLow.includes("перекуплен") || phaseLow.includes("рост")) {\n')
+        new_lines.append('                    phaseColor = "#10b981"; // Green\n')
+        new_lines.append('                }\n')
+        skip = True
+        continue
+    
+    if skip and "wPhase.style.color" in line:
+        skip = False
+        new_lines.append(line)
+        continue
+    
+    if not skip:
+        new_lines.append(line)
+        
+lines = new_lines
+new_lines = []
+skip = False
+for line in lines:
+    if "let entLow = data.uiMarketEntropy.toLowerCase();" in line:
+        new_lines.append(line)
+        new_lines.append('                if (entLow.includes("норм") || entLow.includes("безопасн")) {\n')
+        new_lines.append('                    entColor = "#10b981"; // Green\n')
+        new_lines.append('                } else if (entLow.includes("хаос") || entLow.includes("опасн") || entLow.includes("шторм")) {\n')
+        new_lines.append('                    entColor = "#ef4444"; // Red\n')
+        new_lines.append('                } else if (entLow.includes("мертв") || entLow.includes("сонн") || entLow.includes("штиль")) {\n')
+        new_lines.append('                    entColor = "#f59e0b"; // Yellow\n')
+        new_lines.append('                }\n')
+        skip = True
+        continue
+    
+    if skip and "wEntropy.style.color" in line:
+        skip = False
+        new_lines.append(line)
+        continue
+    
+    if not skip:
+        new_lines.append(line)
 
-text = re.sub(r'const wSession = document\.getElementById\("weatherSession"\);\s*if \(wSession && data\.uiMarketSession\) wSession\.innerText = data\.uiMarketSession;', new_session.strip(), text)
-
-
-new_phase = '''
-            const wPhase = document.getElementById("weatherPhase");
-            if (wPhase && data.uiMarketPhase) {
-                wPhase.innerText = data.uiMarketPhase;
-                let phaseColor = "#10b981"; // Green default (upward/good)
-                let phaseLow = data.uiMarketPhase.toLowerCase();
-                
-                if (phaseLow.includes("Р·Р°РјРµРґР»РµРЅРёРµ") || phaseLow.includes("РїРµСЂРµС…РѕРґ") || phaseLow.includes("С„Р»СЌС‚") || phaseLow.includes("Р±РѕРєРѕРІРёРє")) {
-                    phaseColor = "#f59e0b"; // Yellow (Average / Sideways)
-                } else if (phaseLow.includes("РїР°РґРµРЅРё") || phaseLow.includes("РјРµРґРІРµР¶") || phaseLow.includes("РїРµСЂРµРїСЂРѕРґР°РЅРЅРѕСЃС‚СЊ") || phaseLow.includes("СЃР»Р°Р±С‹Р№") || phaseLow.includes("РІРѕР»Р°С‚РёР»СЊРЅС‹Р№") || phaseLow.includes("СЂРµР·РєРёР№") || phaseLow.includes("С€СѓРј")) {
-                    phaseColor = "#ef4444"; // Red (Downward / Bad)
-                }
-                wPhase.style.color = phaseColor;
-            }
-'''
-
-text = re.sub(r'const wPhase = document\.getElementById\("weatherPhase"\);\s*if \(wPhase && data\.uiMarketPhase\) \{.*?wPhase\.style\.color = phaseColor;\s*\}', new_phase.strip(), text, flags=re.DOTALL)
-
-new_entropy = '''
-            const wEntropy = document.getElementById("weatherEntropy");
-            const wTitle = document.getElementById("weatherTitle");
-            if (wEntropy && data.uiMarketEntropy) {
-                wEntropy.innerText = data.uiMarketEntropy;
-                let entColor = "#10b981";
-                let entLow = data.uiMarketEntropy.toLowerCase();
-                if (entLow.includes("РѕРїР°СЃРЅ") || entLow.includes("РІС‹СЃРѕРє") || entLow.includes("С…Р°РѕСЃ")) {
-                    entColor = "#ef4444";
-                } else if (entLow.includes("РјРµСЂС‚РІ") || entLow.includes("СЃР»Р°Р±") || entLow.includes("РїРµСЂРµС…РѕРґ")) {
-                    entColor = "#f59e0b";
-                }
-                wEntropy.style.color = entColor;
-                if (wTitle) wTitle.style.color = entColor;
-            }
-'''
-
-text = re.sub(r'const wEntropy = document\.getElementById\("weatherEntropy"\);\s*const wTitle = document\.getElementById\("weatherTitle"\);\s*if \(wEntropy && data\.uiMarketEntropy\) \{.*?if \(wTitle\) wTitle\.style\.color = entColor;\s*\}', new_entropy.strip(), text, flags=re.DOTALL)
-
-with open(file, 'w', encoding='utf-8') as f:
-    f.write(text)
-
+with open('MiniApp/wwwroot/js/api.js', 'w', encoding='utf-8') as f:
+    f.writelines(new_lines)
