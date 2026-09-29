@@ -189,6 +189,13 @@ public static partial class MiniAppController
         }).RequireRateLimiting("Global");
 
         
+                app.MapGet("/api/stats/weights", (HttpContext context) =>
+        {
+            var ml = ValutaBot.MiniApp.TradeOutcomeTracker.MetaLearner as ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner;
+            if (ml == null) return Results.Json(new { status = "offline", message = "MetaLearner is currently offline waiting for calibration data." });
+            return Results.Json(new { status = "online", weights = ml.GetCurrentWeights() });
+        });
+        
         app.MapGet("/api/stats/ml", async (HttpContext context) =>
         {
             try

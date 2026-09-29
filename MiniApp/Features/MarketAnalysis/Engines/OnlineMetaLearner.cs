@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
@@ -81,6 +81,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
     }
 
     
+    public System.Collections.Generic.Dictionary<string, double[]> GetCurrentWeights() { return new System.Collections.Generic.Dictionary<string, double[]>(_weights); }
     public void PartialFit(string asset, string timeframe, double ta, double of, double smc, double ml, bool wasWin, string direction)
     {
         if (direction == "NEUTRAL") return;
