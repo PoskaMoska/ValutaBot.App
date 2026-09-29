@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -189,7 +189,18 @@ public static partial class MiniAppController
         }).RequireRateLimiting("Global");
 
         
-                app.MapGet("/api/stats/weights", (HttpContext context) =>
+                        // Endpoint for Tampermonkey PO Data Vacuum
+        app.MapPost("/api/collector/tick", async (HttpContext context) =>
+        {
+            using var reader = new System.IO.StreamReader(context.Request.Body);
+            var body = await reader.ReadToEndAsync();
+            // Log to a dedicated file so it doesn't spam the main console too much
+            System.IO.File.AppendAllText("po_vacuum_ticks.log", $"{DateTime.UtcNow:O} | {body}\n");
+            BotLogger.Debug($"[PO Vacuum] Captured raw tick: {body}");
+            return Results.Ok();
+        });
+
+        app.MapGet("/api/stats/weights", (HttpContext context) =>
         {
             var ml = ValutaBot.MiniApp.TradeOutcomeTracker.MetaLearner as ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner;
             if (ml == null) return Results.Json(new { status = "offline", message = "MetaLearner is currently offline waiting for calibration data." });
