@@ -106,10 +106,10 @@ public static class TwelveDataWebSocketStream
                     using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     _ = Task.Run(async () =>
                     {
-                        const int SilenceThresholdSeconds = 30;
+                        const int SilenceThresholdSeconds = 300;
                         while (!watchdogCts.Token.IsCancellationRequested)
                         {
-                            try { await Task.Delay(10_000, watchdogCts.Token); }
+                            try { await Task.Delay(30_000, watchdogCts.Token); }
                             catch (OperationCanceledException) { break; }
 
                             double silenceSecs = (DateTime.UtcNow - _lastTickTime).TotalSeconds;

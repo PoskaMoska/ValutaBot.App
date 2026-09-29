@@ -11,18 +11,18 @@ using ValutaBot.App.MiniApp.Data.Repositories;
 namespace ValutaBot.MiniApp.Services;
 
 /// <summary>
-/// Background service that actively scans all 6 machine-learning pairs 
-/// on the 's5' timeframe every 5 seconds.
-/// This allows the bot to continuously accumulate live trades in PostgreSQL 
-/// (via MarketAnalysisOrchestrator -> SignalTracker) even when the frontend is closed,
-/// speeding up the collection of out-of-sample data.
+/// Background service that actively scans machine-learning pairs.
+/// Uses a dual-engine architecture:
+/// 1. Fast, free subminute scanner (s5-s30) relying on local WS ticks.
+/// 2. Slow, throttled minute scanner (m1) using REST API to preserve 800/day limits.
 /// </summary>
 public class AutoTradingScannerService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AutoTradingScannerService> _logger;
     private static readonly string[] _targetPairs = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
-    private static readonly string[] _targetTimeframes = { "s5", "s10", "s15", "s30", "m1" };
+    private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
+    private static readonly string[] _minuteTfs = { "m1" };
 
     public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger)
     {
@@ -38,22 +38,23 @@ public class AutoTradingScannerService : BackgroundService
             return;
         }
 
-        _logger.LogInformation("[AutoScanner] Service started. Will scan 6 pairs on s5/s10/s15/s30/m1.");
+        _logger.LogInformation("[AutoScanner] Dual-Engine Service started. Starting Subminute (Free) and Minute (Paid) streams.");
 
-        
+        var subminuteTask = RunSubminuteScannerAsync(stoppingToken);
+        var minuteTask = RunMinuteScannerAsync(stoppingToken);
+
+        await Task.WhenAll(subminuteTask, minuteTask);
+    }
+
+    private async Task RunSubminuteScannerAsync(CancellationToken stoppingToken)
+    {
         int currentPairIndex = 0;
         int currentTfIndex = 0;
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var dayOfWeek = DateTime.UtcNow.DayOfWeek;
-            bool isWeekend = dayOfWeek == DayOfWeek.Saturday ||
-                             (dayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
-                             (dayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
-
-            if (isWeekend)
+            if (IsWeekendPause())
             {
-                _logger.LogDebug("[AutoScanner] Weekend - skipping scan.");
                 await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
                 continue;
             }
@@ -65,45 +66,75 @@ public class AutoTradingScannerService : BackgroundService
                 var userSettings = await UserRepository.GetSettingsAsync(0);
 
                 string pair = _targetPairs[currentPairIndex];
-                string tf = _targetTimeframes[currentTfIndex];
+                string tf = _subminuteTfs[currentTfIndex];
 
-                _logger.LogInformation($"[AutoScanner] Scanning {pair} on {tf}...");
+                var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
                 
-                if (tf.StartsWith("s"))
+                // Only scan if we have enough fresh WebSocket data
+                if (recentCandles.Length >= 160)
                 {
-                    var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
-                    if (recentCandles.Length < 160)
-                    {
-                        MoveToNextCycle(ref currentTfIndex, ref currentPairIndex);
-                        continue;
-                    }
                     var lastCandleTime = recentCandles[^1].Timestamp;
-                    if ((DateTime.UtcNow - lastCandleTime).TotalSeconds > 30)
+                    if ((DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30)
                     {
-                        MoveToNextCycle(ref currentTfIndex, ref currentPairIndex);
-                        continue;
+                        _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf}...");
+                        await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
                     }
                 }
 
-                await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
-
-                // Move to next TF/Pair
-                MoveToNextCycle(ref currentTfIndex, ref currentPairIndex);
+                MoveToNextCycle(ref currentTfIndex, ref currentPairIndex, _subminuteTfs.Length);
             }
             catch (Exception ex)
             {
-                _logger.LogError($"[AutoScanner] Exception during cycle: {ex.Message}");
+                _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
             }
 
-            // Drip-feed: 1 scan every 20 seconds. 
-            await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
+            // Fast loop: 10 seconds between checks (safe because it relies on local RAM/DB)
+            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
         }
     }
 
-    private void MoveToNextCycle(ref int currentTfIndex, ref int currentPairIndex)
+    private async Task RunMinuteScannerAsync(CancellationToken stoppingToken)
+    {
+        int currentPairIndex = 0;
+        int currentTfIndex = 0;
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (IsWeekendPause())
+            {
+                await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+                continue;
+            }
+
+            try
+            {
+                using var scope = _serviceProvider.CreateScope();
+                var orchestrator = scope.ServiceProvider.GetRequiredService<IMarketAnalysisOrchestrator>();
+                var userSettings = await UserRepository.GetSettingsAsync(0);
+
+                string pair = _targetPairs[currentPairIndex];
+                string tf = _minuteTfs[currentTfIndex];
+
+                _logger.LogInformation($"[AutoScanner-Slow] Scanning {pair} on {tf} (Consumes API Limits)...");
+                await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
+
+                MoveToNextCycle(ref currentTfIndex, ref currentPairIndex, _minuteTfs.Length);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"[AutoScanner-Slow] Exception: {ex.Message}");
+            }
+
+            // Slow loop: 4 minutes between REST API calls. 
+            // 15 requests per hour * 2 (base+mtf) = 30 req/hour = 720/day.
+            await Task.Delay(TimeSpan.FromMinutes(4), stoppingToken);
+        }
+    }
+
+    private void MoveToNextCycle(ref int currentTfIndex, ref int currentPairIndex, int tfLength)
     {
         currentTfIndex++;
-        if (currentTfIndex >= _targetTimeframes.Length)
+        if (currentTfIndex >= tfLength)
         {
             currentTfIndex = 0;
             currentPairIndex++;
@@ -112,5 +143,13 @@ public class AutoTradingScannerService : BackgroundService
                 currentPairIndex = 0;
             }
         }
+    }
+
+    private bool IsWeekendPause()
+    {
+        var dayOfWeek = DateTime.UtcNow.DayOfWeek;
+        return dayOfWeek == DayOfWeek.Saturday ||
+               (dayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
+               (dayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
     }
 }
