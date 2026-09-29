@@ -22,7 +22,7 @@ public class AutoTradingScannerService : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AutoTradingScannerService> _logger;
     private static readonly string[] _targetPairs = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
-    private static readonly string[] _targetTimeframes = { "s5", "s10", "s15", "s30" };
+    private static readonly string[] _targetTimeframes = { "s5", "s10", "s15", "s30", "m1" };
 
     public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger)
     {
@@ -38,7 +38,7 @@ public class AutoTradingScannerService : BackgroundService
             return;
         }
 
-        _logger.LogInformation("[AutoScanner] Service started. Will scan 6 pairs on s5/s10/s15/s30.");
+        _logger.LogInformation("[AutoScanner] Service started. Will scan 6 pairs on s5/s10/s15/s30/m1.");
 
         
         int currentPairIndex = 0;
@@ -68,19 +68,27 @@ public class AutoTradingScannerService : BackgroundService
                 string tf = _targetTimeframes[currentTfIndex];
 
                 _logger.LogInformation($"[AutoScanner] Scanning {pair} on {tf}...");
+                
+                if (tf.StartsWith("s"))
+                {
+                    var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
+                    if (recentCandles.Length < 160)
+                    {
+                        MoveToNextCycle(ref currentTfIndex, ref currentPairIndex);
+                        continue;
+                    }
+                    var lastCandleTime = recentCandles[^1].Timestamp;
+                    if ((DateTime.UtcNow - lastCandleTime).TotalSeconds > 30)
+                    {
+                        MoveToNextCycle(ref currentTfIndex, ref currentPairIndex);
+                        continue;
+                    }
+                }
+
                 await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
 
                 // Move to next TF/Pair
-                currentTfIndex++;
-                if (currentTfIndex >= _targetTimeframes.Length)
-                {
-                    currentTfIndex = 0;
-                    currentPairIndex++;
-                    if (currentPairIndex >= _targetPairs.Length)
-                    {
-                        currentPairIndex = 0;
-                    }
-                }
+                MoveToNextCycle(ref currentTfIndex, ref currentPairIndex);
             }
             catch (Exception ex)
             {
@@ -88,9 +96,21 @@ public class AutoTradingScannerService : BackgroundService
             }
 
             // Drip-feed: 1 scan every 20 seconds. 
-            // 3 requests a minute maximum, leaving 5 requests/minute for the user.
             await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
         }
     }
+
+    private void MoveToNextCycle(ref int currentTfIndex, ref int currentPairIndex)
+    {
+        currentTfIndex++;
+        if (currentTfIndex >= _targetTimeframes.Length)
+        {
+            currentTfIndex = 0;
+            currentPairIndex++;
+            if (currentPairIndex >= _targetPairs.Length)
+            {
+                currentPairIndex = 0;
+            }
+        }
     }
 }
