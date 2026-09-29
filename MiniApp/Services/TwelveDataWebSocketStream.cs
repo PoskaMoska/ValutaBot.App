@@ -80,6 +80,7 @@ public static class TwelveDataWebSocketStream
                     continue;
                 }
 
+                var connectTime = DateTime.UtcNow;
                 using (_ws = new ClientWebSocket())
                 {
                     string url = $"wss://ws.twelvedata.com/v1/quotes/price?apikey={apiKey}";
@@ -146,6 +147,18 @@ public static class TwelveDataWebSocketStream
                     }
                     exitLoop:;
                     watchdogCts.Cancel(); // Stop watchdog when connection loop ends
+                }
+                
+                double aliveSeconds = (DateTime.UtcNow - connectTime).TotalSeconds;
+                if (aliveSeconds < 10) 
+                {
+                    BotLogger.Error($"[TwelveData WS] Server rejected connection instantly ({aliveSeconds:F1}s). Limit likely exceeded. Sleeping 1 hour.");
+                    await Task.Delay(TimeSpan.FromHours(1), ct);
+                }
+                else 
+                {
+                    BotLogger.Warn($"[TwelveData WS] Disconnected after {aliveSeconds:F1}s. Waiting 15s...");
+                    await Task.Delay(15000, ct);
                 }
             }
             catch (OperationCanceledException) { break; }
