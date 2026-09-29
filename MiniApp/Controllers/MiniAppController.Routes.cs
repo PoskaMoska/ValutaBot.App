@@ -196,7 +196,7 @@ public static partial class MiniAppController
             var body = await reader.ReadToEndAsync();
             // Log to a dedicated file so it doesn't spam the main console too much
             System.IO.File.AppendAllText("po_vacuum_ticks.log", $"{DateTime.UtcNow:O} | {body}\n");
-            BotLogger.Debug($"[PO Vacuum] Captured raw tick: {body}");
+            BotLogger.Info($"[PO Vacuum] Captured raw tick: {body}");
             return Results.Ok();
         });
 
