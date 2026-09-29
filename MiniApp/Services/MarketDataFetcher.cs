@@ -138,7 +138,7 @@ public class MarketDataFetcher
             int missing = limit - liveCandles.Length;
             BotLogger.Warn($"[MarketDataFetcher] Cold start for {rawInterval} ({liveCandles.Length}/{limit} live ticks). Backfilling {missing} from 1m...");
 
-            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
+            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, "1min" => 12, "m1" => 12, _ => 1 };
             int subCandlesPerM1 = 12 / groupSize; 
             int m1Needed = Math.Max(10, (int)Math.Ceiling((double)(missing + 10) / subCandlesPerM1));
 
@@ -242,7 +242,7 @@ public class MarketDataFetcher
 
         if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
         {
-            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
+            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, "1min" => 12, "m1" => 12, _ => 1 };
             int subCandlesPerM1 = 12 / groupSize; 
             m1Needed = Math.Max(10, (int)Math.Ceiling((double)(limit + 10) / subCandlesPerM1));
         }
@@ -271,7 +271,7 @@ public class MarketDataFetcher
         if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
         {
             var s5 = ValutaBot.App.MiniApp.Backtesting.S5CandleSynthesizer.SynthesizeFromM1(m1Candles);
-            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, _ => 1 };
+            int groupSize = rawInterval.ToLower() switch { "s5" => 1, "s10" => 2, "s15" => 3, "s30" => 6, "1min" => 12, "m1" => 12, _ => 1 };
             var allSubCandles = groupSize == 1 ? s5 : AggregateCandles(s5, groupSize);
             
             int subInterval = groupSize * 5; 

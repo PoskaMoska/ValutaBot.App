@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -48,6 +48,7 @@ namespace ValutaBot.MiniApp
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s10 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s15 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s30 = new();
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _m1 = new();
 
         // FIX 4 (2026-09-13): Bounded channel prevents unbounded memory growth during DB outages.
         // With CreateUnbounded, a PostgreSQL outage at ~100 ticks/sec fills ~30k events in 5min → OOM.
@@ -183,7 +184,7 @@ namespace ValutaBot.MiniApp
 
                 ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch
                 {
-                    "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, _ => null
+                    "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, "m1" => _m1, "1min" => _m1, _ => null
                 };
 
                 CandleAccumulator? liveAcc = null;
