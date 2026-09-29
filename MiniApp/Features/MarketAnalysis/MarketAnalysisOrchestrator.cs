@@ -131,7 +131,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         // 6. Engines (Parallel)
         var engSw = Stopwatch.StartNew();
         var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, candles, currentLivePrice));
-        var ofTask = Task.Run(() => OrderFlowEngine.AnalyzeOrderFlow(cleanAsset, timeframe, closedCandles, currentLivePrice));
+        var ofResult = new ValutaBot.MiniApp.OrderFlowEngine.OrderFlowResult { ScoreContribution = 0, Description = "REMOVED", DeltaRatio = 1.0, OrderFlowState = "NEUTRAL" };
         
         // TA Scoring
         var taSw = Stopwatch.StartNew();
@@ -141,9 +141,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         taSw.Stop();
         traceLines.Add($"[3. Расчеты TA]      Индикаторы, ADX ({mainAdx:F1}) и ATR вычислены -> {taSw.ElapsedMilliseconds}ms");
 
-        await Task.WhenAll(smcTask, ofTask);
+        await smcTask;
         var smcResult = await smcTask;
-        var ofResult = await ofTask;
         engSw.Stop();
         traceLines.Add($"[4. Структура]       SMC и OrderFlow отрисованы -> {engSw.ElapsedMilliseconds}ms");
 
@@ -225,7 +224,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 Smc = smcResult,
-                Of = ofResult,
                 Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
@@ -240,7 +238,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                 Smc = smcResult,
-                Of = ofResult,
                 Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
@@ -262,7 +259,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                     Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                     MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
                     Smc = smcResult,
-                    Of = ofResult,
                     Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
                 };
                 string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
