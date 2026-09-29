@@ -12,10 +12,10 @@ namespace ValutaBot.MiniApp.Services
 {
     public class NewsEvent
     {
-        public string Title { get; set; } = """";
-        public string Country { get; set; } = """";
+        public string Title { get; set; } = "";
+        public string Country { get; set; } = "";
         public DateTime UtcTime { get; set; }
-        public string Impact { get; set; } = """"; // High, Medium, Low
+        public string Impact { get; set; } = ""; // High, Medium, Low
     }
 
     public interface INewsCalendarService
@@ -51,25 +51,27 @@ namespace ValutaBot.MiniApp.Services
         {
             try
             {
-                var response = await _httpClient.GetStringAsync(""https://nfs.faireconomy.media/ff_calendar_thisweek.xml"", stoppingToken);
+                var response = await _httpClient.GetStringAsync("https://nfs.faireconomy.media/ff_calendar_thisweek.xml", stoppingToken);
                 var doc = XDocument.Parse(response);
                 
                 var events = new List<NewsEvent>();
-                var estZone = TimeZoneInfo.FindSystemTimeZoneById(""Eastern Standard Time""); // Windows 
+                TimeZoneInfo estZone;
+                try { estZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"); }
+                catch { estZone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York"); } 
 
-                foreach (var ev in doc.Descendants(""event""))
+                foreach (var ev in doc.Descendants("event"))
                 {
-                    string dateStr = ev.Element(""date"")?.Value?.Trim() ?? """";
-                    string timeStr = ev.Element(""time"")?.Value?.Trim() ?? """";
-                    string country = ev.Element(""country"")?.Value?.Trim() ?? """";
-                    string impact = ev.Element(""impact"")?.Value?.Trim() ?? """";
-                    string title = ev.Element(""title"")?.Value?.Trim() ?? """";
+                    string dateStr = ev.Element("date")?.Value?.Trim() ?? "";
+                    string timeStr = ev.Element("time")?.Value?.Trim() ?? "";
+                    string country = ev.Element("country")?.Value?.Trim() ?? "";
+                    string impact = ev.Element("impact")?.Value?.Trim() ?? "";
+                    string title = ev.Element("title")?.Value?.Trim() ?? "";
 
-                    if (impact != ""High"") continue; // We only care about high impact for the shield
-                    if (timeStr == ""All Day"" || timeStr == ""Tentative"") continue;
+                    if (impact != "High") continue; // We only care about high impact for the shield
+                    if (timeStr == "All Day" || timeStr == "Tentative") continue;
 
-                    string dateTimeStr = $""{dateStr} {timeStr}"";
-                    if (DateTime.TryParseExact(dateTimeStr, ""MM-dd-yyyy hh:mmtt"", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsedEst))
+                    string dateTimeStr = $"{dateStr} {timeStr}";
+                    if (DateTime.TryParseExact(dateTimeStr, "MM-dd-yyyy hh:mmtt", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsedEst))
                     {
                         var utcTime = TimeZoneInfo.ConvertTimeToUtc(parsedEst, estZone);
                         events.Add(new NewsEvent
@@ -93,18 +95,18 @@ namespace ValutaBot.MiniApp.Services
                     _lock.Release();
                 }
 
-                _logger.LogInformation($""[NewsCalendar] Downloaded {_events.Count} High-Impact news events for this week."");
+                _logger.LogInformation($"[NewsCalendar] Downloaded {_events.Count} High-Impact news events for this week.");
             }
             catch (Exception ex)
             {
-                _logger.LogError($""[NewsCalendar] Failed to update: {ex.Message}"");
+                _logger.LogError($"[NewsCalendar] Failed to update: {ex.Message}");
             }
         }
 
         public NewsEvent? GetNextHighImpactNews(string asset)
         {
             // Asset is e.g. "EUR/USD" or "EUR/USD OTC"
-            var parts = asset.Replace("" OTC"", """").Split('/');
+            var parts = asset.Replace(" OTC", "").Split('/');
             if (parts.Length != 2) return null;
 
             var c1 = parts[0];
