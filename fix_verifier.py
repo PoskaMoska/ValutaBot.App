@@ -1,24 +1,10 @@
-﻿import os
 import re
 
-file = 'MiniApp/Services/PendingTradeVerificationService.cs'
-with open(file, 'r', encoding='utf-8') as f:
-    text = f.read()
+with open('MiniApp/Services/PendingTradeVerificationService.cs', 'r', encoding='utf-8') as f:
+    content = f.read()
 
-new_query = '''
-            var candle = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<dynamic>(conn, @"
-                SELECT close_price as ""Close""
-                FROM subminute_candles
-                WHERE asset = @Asset AND interval = @Interval
-                  AND open_time <= @VerifyAt
-                ORDER BY open_time DESC LIMIT 1
-            ", new { 
-'''
-
-text = re.sub(r'SELECT close_price as Close.*?FROM subminute_candles', 'SELECT close_price as \"Close\"\n                FROM subminute_candles', text, flags=re.DOTALL)
-
-# Let's also make it robust:
-robust_cast = '''
+# Fix the dynamic Dapper cast
+old_code = '''
             if (candle != null)
             {
                 var val = candle.Close ?? candle.close ?? candle.close_price;
@@ -27,8 +13,22 @@ robust_cast = '''
                 }
             }
 '''
-text = re.sub(r'if \(candle != null\)\s*\{\s*exitPrice = \(double\)candle\.Close;\s*\}', robust_cast.strip(), text, flags=re.DOTALL)
 
-with open(file, 'w', encoding='utf-8') as f:
-    f.write(text)
+new_code = '''
+            if (candle != null)
+            {
+                var dict = (System.Collections.Generic.IDictionary<string, object>)candle;
+                if (dict.TryGetValue("Close", out var val) || dict.TryGetValue("close", out val) || dict.TryGetValue("close_price", out val))
+                {
+                    if (val != null)
+                    {
+                        exitPrice = Convert.ToDouble(val);
+                    }
+                }
+            }
+'''
 
+content = content.replace(old_code, new_code)
+
+with open('MiniApp/Services/PendingTradeVerificationService.cs', 'w', encoding='utf-8') as f:
+    f.write(content)

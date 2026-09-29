@@ -78,9 +78,13 @@ public class PendingTradeVerificationService : BackgroundService
 
             if (candle != null)
             {
-                var val = candle.Close ?? candle.close ?? candle.close_price;
-                if (val != null) {
-                    exitPrice = Convert.ToDouble(val);
+                var dict = (System.Collections.Generic.IDictionary<string, object>)candle;
+                if (dict.TryGetValue("Close", out var val) || dict.TryGetValue("close", out val) || dict.TryGetValue("close_price", out val))
+                {
+                    if (val != null)
+                    {
+                        exitPrice = Convert.ToDouble(val);
+                    }
                 }
             }
         }
