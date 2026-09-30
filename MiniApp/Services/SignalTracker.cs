@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -65,7 +65,7 @@ public static class SignalTracker
 
         // FIX PRIORITY-6: Cooldown увеличен до 10 секунд
         // MemoryCache автоматически удалит ключ через 10 секунд без ручного O(N) прохода сборщика мусора.
-        _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(10));
+        _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(expiryCandles * timeframeSecs));
 
         var record = new PredictionRecord
         {
