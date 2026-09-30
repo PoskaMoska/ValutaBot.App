@@ -125,7 +125,7 @@ public class MarketDataFetcher
             string cleanKey = cleanAsset.Replace("/", "").ToUpper();
             var liveCandles = await RealtimeTickCollector.GetRecentCandles(cleanKey, rawInterval, limit);
 
-            if (liveCandles.Length >= limit)
+            if (liveCandles.Length >= limit || liveCandles.Length >= 25)
             {
                 BotLogger.Info($"[MarketDataFetcher] Using {liveCandles.Length} live {rawInterval} candles for {cleanKey}.");
                 RecordSuccess();
