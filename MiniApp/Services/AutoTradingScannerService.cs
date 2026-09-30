@@ -20,7 +20,7 @@ public class AutoTradingScannerService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AutoTradingScannerService> _logger;
-    private static readonly string[] _targetPairs = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
+    private static readonly string[] _targetPairs = { "EUR/USD" };
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
 
