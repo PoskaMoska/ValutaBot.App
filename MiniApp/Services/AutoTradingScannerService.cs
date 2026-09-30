@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,9 +41,10 @@ public class AutoTradingScannerService : BackgroundService
         _logger.LogInformation("[AutoScanner] Dual-Engine Service started. Starting Subminute (Free) and Minute (Paid) streams.");
 
         var subminuteTask = RunSubminuteScannerAsync(stoppingToken);
-        var minuteTask = RunMinuteScannerAsync(stoppingToken);
+        // var minuteTask = RunMinuteScannerAsync(stoppingToken);
 
-        await Task.WhenAll(subminuteTask, minuteTask);
+        // await Task.WhenAll(subminuteTask, minuteTask);
+        await subminuteTask; // Circuit 2 disabled at user request to save API limits
     }
 
     private async Task RunSubminuteScannerAsync(CancellationToken stoppingToken)
