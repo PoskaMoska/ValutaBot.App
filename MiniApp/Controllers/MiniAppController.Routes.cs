@@ -200,6 +200,40 @@ public static partial class MiniAppController
             return Results.Ok();
         });
 
+                app.MapGet("/api/stats/overnight", async (HttpContext context) =>
+        {
+            try
+            {
+                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                await conn.OpenAsync();
+                
+                var total = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes;");
+                var lastNight = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours');");
+                var wins = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND is_win = true;");
+                var losses = lastNight - wins;
+                
+                var candles = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM subminute_candles;");
+                var ticks = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM subminute_candles WHERE open_time >= (NOW() - INTERVAL '12 hours');");
+                
+                double winrate = lastNight > 0 ? (double)wins / lastNight * 100 : 0;
+                
+                return Results.Ok(new {
+                    TotalTradesInDb = total,
+                    TradesOvernight12h = lastNight,
+                    WinsOvernight = wins,
+                    LossesOvernight = losses,
+                    WinRateOvernight = Math.Round(winrate, 1) + "%",
+                    TotalSubminuteCandles = candles,
+                    CandlesGatheredOvernight = ticks,
+                    Status = "Database connection stable."
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem("DB Error: " + ex.Message);
+            }
+        });
+
         app.MapGet("/api/stats/weights", (HttpContext context) =>
         {
             var ml = ValutaBot.MiniApp.TradeOutcomeTracker.MetaLearner as ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner;
