@@ -132,6 +132,11 @@ public class MarketDataFetcher
                 return liveCandles;
             }
 
+            if (rawInterval == "1min") {
+                BotLogger.Warn("[MarketDataFetcher] WALL OFF: Prevented TwelveData API call for 1min. Returning incomplete local candles to save limits.");
+                return liveCandles;
+            }
+
             // CRITICAL UX FIX: Cold Start Backfill
             // Instead of aborting and forcing the user to wait 15+ minutes, we backfill the missing
             // older candles by synthesizing them from 1min data, and append whatever true live ticks we have.
