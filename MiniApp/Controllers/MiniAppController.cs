@@ -165,7 +165,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         // FIX: Removed 'isWeekend' check so the stream always starts. If booted on a weekend, 
         // it simply idles until Monday morning when ticks resume.
         string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
-        TwelveDataWebSocketStream.StartStream(topStreamSymbols);
+        TiingoWebSocketStream.StartStream(topStreamSymbols);
 
         // Init Telegram notifier from config or env (set in Railway dashboard)
         TelegramNotifier.Init(builder.Configuration["TelegramBotToken"] ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));

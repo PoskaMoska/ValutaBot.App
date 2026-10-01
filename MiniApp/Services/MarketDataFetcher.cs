@@ -112,7 +112,7 @@ public class MarketDataFetcher
         bool isWeekend = IsWeekendNow();
 
         // Убрана привязка к OTC по просьбе пользователя.
-        // Теперь в будние дни для OTC пар будут загружаться реальные котировки TwelveData.
+        // Теперь в будние дни для OTC пар будут загружаться реальные котировки Tiingo.
         if (isWeekend)
         {
             BotLogger.Info($"[SmartRouting] Weekend detected. Routing {assetToFetch} to local historical DB as {cleanAsset}.");
@@ -142,7 +142,7 @@ public class MarketDataFetcher
             }
 
             if (rawInterval == "1min") {
-                BotLogger.Warn("[MarketDataFetcher] WALL OFF: Prevented TwelveData API call for 1min. Returning incomplete local candles to save limits.");
+                BotLogger.Warn("[MarketDataFetcher] WALL OFF: Prevented Tiingo API call for 1min. Returning incomplete local candles to save limits.");
                 return liveCandles;
             }
 
@@ -156,10 +156,10 @@ public class MarketDataFetcher
             int subCandlesPerM1 = 12 / groupSize; 
             int m1Needed = Math.Max(10, (int)Math.Ceiling((double)(missing + 10) / subCandlesPerM1));
 
-            var tdResult1m = await TwelveDataService.FetchCandlesAsync(cleanAsset, "1min", m1Needed, cacheTtlSeconds: 300);
+            var tdResult1m = await TiingoService.FetchCandlesAsync(cleanAsset, "1min", m1Needed, cacheTtlSeconds: 300);
             if (tdResult1m == null)
             {
-                throw new ExchangeUnavailableException("TwelveData API Unavailable", "Не удалось загрузить минутные котировки для генерации микро-тиков.");
+                throw new ExchangeUnavailableException("Tiingo API Unavailable", "Не удалось загрузить минутные котировки для генерации микро-тиков.");
             }
 
             var m1Candles = tdResult1m.Value.candles.ToArray();
@@ -212,14 +212,14 @@ public class MarketDataFetcher
             "h1" or "h4"        => 300,
             _                   => 300
         };
-        var tdResult = await TwelveDataService.FetchCandlesAsync(cleanAsset, interval, limit, cacheTtlSeconds: cacheTtl);
+        var tdResult = await TiingoService.FetchCandlesAsync(cleanAsset, interval, limit, cacheTtlSeconds: cacheTtl);
         
         if (tdResult != null)
         {
             var candles = tdResult.Value.candles.ToArray();
             // ROOT CAUSE FIX: Ghost Pricing. Overwrite the final (forming) candle's Close/High/Low with real WS tick.
             // This prevents a 15-second stale cache from causing ML entries & targets to be completely disjointed from reality.
-            if (candles.Length > 0 && TwelveDataWebSocketStream.TryGetLivePrice(cleanAsset, out double realPrice))
+            if (candles.Length > 0 && TiingoWebSocketStream.TryGetLivePrice(cleanAsset, out double realPrice))
             {
                 var last = candles[^1];
                 int intervalSecs = TimeframeSeconds(rawInterval);
@@ -244,8 +244,8 @@ public class MarketDataFetcher
             return candles;
         }
 
-        RecordFailureAndAlert("TwelveData API Unavailable");
-        throw new ExchangeUnavailableException("TwelveData API Unavailable", "Не удалось загрузить живые котировки (TwelveData). API недоступен.");
+        RecordFailureAndAlert("Tiingo API Unavailable");
+        throw new ExchangeUnavailableException("Tiingo API Unavailable", "Не удалось загрузить живые котировки (Tiingo). API недоступен.");
     }
 
     private async Task<MiniAppController.OhlcCandle[]> FetchOtcHistoricalAsync(string asset, string rawInterval, int limit)
