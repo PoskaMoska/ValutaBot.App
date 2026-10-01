@@ -273,13 +273,16 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         double priceRange = maxPrice - minPrice;
         // Fix: when ATR = 0 (not yet warmed up), fallback to an asset-appropriate
         // minimum pip range so the dead-market check is never silently disabled.
-        double fallbackThreshold = asset.Length == 6 && asset.Contains("JPY") ? 0.005 : 0.00005;
-        double deadMarketThreshold = atr > 0 ? Math.Max(1e-10, atr * 0.10) : fallbackThreshold;
-
-        if (priceRange < deadMarketThreshold)
+        int zeroRangeCount = 0;
+        for (int i = startIdx; i < prices.Length; i++)
         {
-            BotLogger.Warn($"[Gatekeeper] Market is completely flat / frozen. PriceRange={priceRange}, Threshold={deadMarketThreshold}. Aborting analysis.");
-            return new GatekeeperResult(false, "⚠️ Рынок в состоянии застоя (нет колебаний цены).", atr, adx);
+            if (Math.Abs(candles[i].High - candles[i].Low) < 1e-10) zeroRangeCount++;
+        }
+
+        if (priceRange < deadMarketThreshold || zeroRangeCount >= 10)
+        {
+            BotLogger.Warn($"[Gatekeeper] Market is completely flat / frozen. PriceRange={priceRange}, ZeroRangeCandles={zeroRangeCount}/15. Aborting analysis.");
+            return new GatekeeperResult(false, "⚠️ Рынок в состоянии застоя (искусственные или пустые свечи).\n\nДля пар кроме EUR/USD на субминутных таймфреймах (s5-s30) необходим платный API-ключ TwelveData (бесплатный тариф транслирует WebSocket тики только для EUR/USD).", atr, adx);
         }
 
         double maxCandleRange = 0;

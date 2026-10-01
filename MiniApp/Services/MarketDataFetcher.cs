@@ -127,9 +127,17 @@ public class MarketDataFetcher
 
             if (liveCandles.Length >= limit || liveCandles.Length >= 25)
             {
-                BotLogger.Info($"[MarketDataFetcher] Using {liveCandles.Length} live {rawInterval} candles for {cleanKey}.");
-                RecordSuccess();
-                return liveCandles;
+                var lastTime = liveCandles[^1].Timestamp;
+                if ((DateTime.UtcNow - lastTime).TotalMinutes <= 5)
+                {
+                    BotLogger.Info($"[MarketDataFetcher] Using {liveCandles.Length} live {rawInterval} candles for {cleanKey}.");
+                    RecordSuccess();
+                    return liveCandles;
+                }
+                else
+                {
+                    BotLogger.Warn($"[MarketDataFetcher] Live candles for {cleanKey} are STALE (last: {lastTime:O}). Proceeding to backfill.");
+                }
             }
 
             if (rawInterval == "1min") {
