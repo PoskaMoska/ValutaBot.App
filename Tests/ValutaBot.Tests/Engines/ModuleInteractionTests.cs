@@ -199,7 +199,7 @@ namespace ValutaBot.Tests.Engines
         static readonly ConfluenceMatrixResult _neutralMtf = new(0.33, false, 0, "", "", new(), "NEUTRAL");
 
         [Fact]
-        public async Task OF_IsInverted_AntiSignalContribution()
+        public async Task OF_IsRemoved_ZeroContribution()
         {
             var of  = new OrderflowSignal(0.4, "BULLISH_ABSORPTION");
             var ta  = new TaSignal(0.0, 0.5, 50.0, 1.1, 0.0, 0.0001, 20.0);
@@ -211,7 +211,7 @@ namespace ValutaBot.Tests.Engines
                 ta, smc, of, ml, st, _neutralMtf);
 
             output.WriteLine($"OfScore: {dec.OfScore:F3}");
-            Assert.Equal(-0.4, dec.OfScore); // The signal was 0.4, it should be inverted to -0.4 as an anti-signal
+            Assert.Equal(0.0, dec.OfScore); // OF is removed completely
         }
 
         [Fact]

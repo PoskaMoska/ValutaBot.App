@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
@@ -322,10 +322,10 @@ public class ConfluenceMatrixEngine(
             taScore *= 0.5; // Режем уверенность TA на 50% при экстремальной волатильности
         }
 
-        // --- ORDER FLOW (OF) ANTI-SIGNAL ---
-        // Ранее был отключен из-за винрейта 35.8%. Но 35.8% — это статистический грааль, если его перевернуть!
-        // Включаем OF обратно, но ИНВЕРТИРУЕМ его скор. Ложный сигнал превращается в мощный анти-сигнал.
-        double ofScore = -ofSignal.ScoreContribution;
+        // --- ORDER FLOW (OF) REMOVED ---
+        // Исключаем тиковый объем из расчетов. На Форексе (без стакана) он дает лишь математический шум.
+        // Убираем эту фичу, чтобы ML модель обучалась эффективнее (меньше измерений - меньше переобучения).
+        double ofScore = 0.0;
 
         double smcScore = 0;
         if (smcSignal.BosDirection == "BULLISH_BOS") smcScore += 0.5;
@@ -424,7 +424,6 @@ public class ConfluenceMatrixEngine(
             sb.AppendLine($" - ML (Нейросеть): WinRate {mlWr:F1}% -> {(mlWr > 52 ? "Доверие УВЕЛИЧЕНО" : (mlWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
             sb.AppendLine($" - Tech Analysis: WinRate {taWr:F1}% -> {(taWr > 52 ? "Доверие УВЕЛИЧЕНО" : (taWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
             sb.AppendLine($" - Smart Money: WinRate {smcWr:F1}% -> {(smcWr > 52 ? "Доверие УВЕЛИЧЕНО" : (smcWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
-            sb.AppendLine($" - OrderFlow: WinRate {ofWr:F1}% -> {(ofWr > 52 ? "Доверие УВЕЛИЧЕНО" : (ofWr < 48 ? "Доверие СНИЖЕНО" : "Норма"))}");
             sb.AppendLine();
         }
 
@@ -432,7 +431,6 @@ public class ConfluenceMatrixEngine(
         sb.AppendLine($"- ML (LightGBM): {mlScore:F2} {(mlSignal.Direction != "NEUTRAL" ? mlSignal.Direction : "")}");
         sb.AppendLine($"- Tech Analysis: {taScore:F2} {(taScore > 0 ? "BUY" : (taScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine($"- Smart Money: {smcScore:F2} {(smcScore > 0 ? "BUY" : (smcScore < 0 ? "PUT" : "NEUTRAL"))}");
-        sb.AppendLine($"- OrderFlow: {ofScore:F2} {(ofScore > 0 ? "BUY" : (ofScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine();
         sb.AppendLine("[Динамические фильтры]");
         sb.AppendLine($"- Базовая уверенность: {(0.5 + margin)*100:F1}% {finalDir}");
