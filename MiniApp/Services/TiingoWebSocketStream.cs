@@ -155,7 +155,7 @@ public static class TiingoWebSocketStream
                         if (midPrice > 0)
                         {
                             _livePrices[ticker] = midPrice;
-                            RealtimeTickCollector.AddTick(ticker, midPrice);
+                            _ = RealtimeTickCollector.OnPriceUpdateAsync(ticker, midPrice);
                         }
                     }
                 }

@@ -25,7 +25,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
     private readonly TradingBotSettings _settings;
     private readonly ILogger<MarketAnalysisOrchestrator> _logger;
 
-        private readonly ValutaBot.MiniApp.Services.INewsCalendarService _newsCalendar;
+        private readonly ValutaBot.MiniApp.Services.INewsCalendarService? _newsCalendar;
 
     public MarketAnalysisOrchestrator(
         MarketDataFetcher fetcher,
