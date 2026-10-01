@@ -10,12 +10,13 @@ namespace ValutaBot.MiniApp.Services;
 
 public class DataRetentionService : BackgroundService
 {
-    private readonly TimeSpan _retentionPeriod = TimeSpan.FromDays(200);
-    private readonly TimeSpan _cleanupInterval = TimeSpan.FromHours(24);
+    private readonly TimeSpan _historicalRetention = TimeSpan.FromDays(30);
+    private readonly TimeSpan _subminuteRetention = TimeSpan.FromDays(3); // Оставляем только 3 дня (чтобы покрыть выходные), так как это гигантский объем тиков
+    private readonly TimeSpan _cleanupInterval = TimeSpan.FromHours(1); // Чистим каждый час, а не раз в сутки
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        BotLogger.Info("[DataRetention] Service started. Will clean old data every 24h.");
+        BotLogger.Info("[DataRetention] Service started. Will clean subminute data (3d) and historical data (30d) every hour.");
         
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -36,16 +37,17 @@ public class DataRetentionService : BackgroundService
     {
         if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
         
-        var cutoff = DateTime.UtcNow.Subtract(_retentionPeriod).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        var histCutoff = DateTime.UtcNow.Subtract(_historicalRetention).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        var subCutoff = DateTime.UtcNow.Subtract(_subminuteRetention).ToString("yyyy-MM-ddTHH:mm:ssZ");
         
         using var conn = DbConnectionFactory.GetConnection();
         
-        int histDeleted = await conn.ExecuteAsync("DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff });
-        int subDeleted = await conn.ExecuteAsync("DELETE FROM subminute_candles WHERE open_time < @cutoff", new { cutoff });
+        int histDeleted = await conn.ExecuteAsync("DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff = histCutoff });
+        int subDeleted = await conn.ExecuteAsync("DELETE FROM subminute_candles WHERE open_time < @cutoff", new { cutoff = subCutoff });
         
         if (histDeleted > 0 || subDeleted > 0)
         {
-            BotLogger.Info($"[DataRetention] Pruned old data (older than 30d): {histDeleted} historical candles, {subDeleted} subminute candles.");
+            BotLogger.Info($"[DataRetention] Pruned old data: {histDeleted} historical (>30d), {subDeleted} subminute (>3d).");
         }
     }
 }
