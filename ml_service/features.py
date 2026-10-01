@@ -212,23 +212,7 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
     feats['lower_wick']    = (np.minimum(o, c) - lo) / candle_range
     feats['candle_dir']    = np.sign(c - o)
 
-    # ━━━ Volume & Order Flow & SMC ━━━
-    vol_ma = _volume_ma(v, 20)
-    rolling_vol_mean = pd.Series(vol_ma).rolling(20, min_periods=1).mean().values
-    feats['vol_ratio']     = v / (vol_ma + 1e-10)
-    feats['vol_ma']        = vol_ma / (rolling_vol_mean + 1e-10)
-    
-    buy_vol, sell_vol, delta_ratio, block_trade = _order_flow_features(o, h, lo, c, v, vol_ma)
-    feats['of_buy_vol_norm'] = buy_vol / (vol_ma + 1e-10)
-    feats['of_sell_vol_norm'] = sell_vol / (vol_ma + 1e-10)
-    feats['of_delta_ratio'] = np.clip(delta_ratio, 0.0, 5.0)
-    feats['of_block_trade'] = block_trade
-    
-    rolling_buy = pd.Series(buy_vol).rolling(5).sum().values
-    rolling_sell = pd.Series(sell_vol).rolling(5).sum().values
-    feats['of_rolling_delta_5'] = np.clip(rolling_buy / (rolling_sell + 1e-10), 0.0, 5.0)
-    
-    # Fair Value Gaps
+    # ━━━ SMC (Fair Value Gaps) ━━━
     fvg_bull, fvg_bear = _fvg_features(h, lo)
     feats['smc_fvg_bullish'] = fvg_bull / (c + 1e-10)
     feats['smc_fvg_bearish'] = fvg_bear / (c + 1e-10)
@@ -259,10 +243,6 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
     direction = np.sign(c - o)
     feats['micro_inertia_5'] = pd.Series(direction).rolling(5, min_periods=1).sum().values
     feats['micro_inertia_15'] = pd.Series(direction).rolling(15, min_periods=1).sum().values
-    
-    vol_mean_60 = pd.Series(v).rolling(60, min_periods=1).mean().values
-    feats['micro_volume_burst'] = v / (vol_mean_60 + epsilon)
-    feats['micro_efficiency_ratio'] = body_size / (v + epsilon)
 
     # ━━━ Time / Session (Vectorized) ━━━
     if 'opentime' in df.columns:
