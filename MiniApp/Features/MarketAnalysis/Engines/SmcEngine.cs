@@ -44,20 +44,20 @@ public static class SmcEngine
         var (hasBullFvg, hasBearFvg, nearestFvg) = smc.GetNearestFvg(currentPrice);
         var (hasBullOb, hasBearOb, nearestOb) = smc.GetNearestOb(currentPrice);
 
-        string fvgType = hasBullFvg ? "BULLISH_FVG" : hasBearFvg ? "BEARISH_FVG" : "NONE";
-        string obType = hasBullOb ? "BULLISH_OB" : hasBearOb ? "BEARISH_OB" : "NONE";
+        string fvgType = nearestFvg.HasValue ? (nearestFvg.Value.IsBullish ? "BULLISH_FVG" : "BEARISH_FVG") : "NONE";
+        string obType = nearestOb.HasValue ? (nearestOb.Value.IsBullish ? "BULLISH_OB" : "BEARISH_OB") : "NONE";
 
         return new SmcAnalysisResult(
             smc.HasLiquiditySweep,
             smc.SweepDirection,
-            hasBullFvg || hasBearFvg,
+            nearestFvg.HasValue,
             fvgType,
             nearestFvg?.Top ?? 0,
             nearestFvg?.Bottom ?? 0,
             nearestFvg.HasValue ? Math.Abs(nearestFvg.Value.Top - nearestFvg.Value.Bottom) : 0,
-            hasBullOb || hasBearOb,
+            nearestOb.HasValue,
             obType,
-            hasBullOb ? (nearestOb?.Top ?? 0) : (hasBearOb ? (nearestOb?.Bottom ?? 0) : 0),
+            nearestOb.HasValue ? (nearestOb.Value.IsBullish ? nearestOb.Value.Top : nearestOb.Value.Bottom) : 0,
             nearestOb.HasValue,
             smc.HasBos,
             smc.BosDirection
