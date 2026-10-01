@@ -274,9 +274,12 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         // Fix: when ATR = 0 (not yet warmed up), fallback to an asset-appropriate
         // minimum pip range so the dead-market check is never silently disabled.
         int zeroRangeCount = 0;
-        for (int i = startIdx; i < prices.Length; i++)
+        if (candles.Length >= prices.Length)
         {
-            if (Math.Abs(candles[i].High - candles[i].Low) < 1e-10) zeroRangeCount++;
+            for (int i = startIdx; i < prices.Length; i++)
+            {
+                if (Math.Abs(candles[i].High - candles[i].Low) < 1e-10) zeroRangeCount++;
+            }
         }
 
         double deadMarketThreshold = (atr > 0) ? (atr * 0.1) : (asset.Contains("JPY") ? 0.005 : 0.00005);

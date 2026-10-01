@@ -1,4 +1,4 @@
-﻿using ValutaBot.Core;
+using ValutaBot.Core;
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
@@ -36,7 +36,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         ITradeTimeoutEngine timeoutEngine,
         Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings,
         ILogger<MarketAnalysisOrchestrator> logger,
-        ValutaBot.MiniApp.Services.INewsCalendarService newsCalendar = null
+        ValutaBot.MiniApp.Services.INewsCalendarService? newsCalendar = null
     )
     {
         _newsCalendar = newsCalendar;
