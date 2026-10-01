@@ -137,6 +137,7 @@ public class MarketDataFetcher
                 else
                 {
                     BotLogger.Warn($"[MarketDataFetcher] Live candles for {cleanKey} are STALE (last: {lastTime:O}). Proceeding to backfill.");
+                    liveCandles = Array.Empty<MiniAppController.OhlcCandle>();
                 }
             }
 
