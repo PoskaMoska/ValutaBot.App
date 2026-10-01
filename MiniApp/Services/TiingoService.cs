@@ -81,43 +81,41 @@ public static class TiingoService
             
             if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 0)
             {
-                var priceData = root[0].GetProperty("priceData");
-                if (priceData.ValueKind == JsonValueKind.Array)
+                var cList = new List<MiniAppController.OhlcCandle>();
+                var pList = new List<double>();
+                var vList = new List<double>();
+
+                foreach (var element in root.EnumerateArray())
                 {
-                    var cList = new List<MiniAppController.OhlcCandle>();
-                    var pList = new List<double>();
-                    var vList = new List<double>();
+                    if (!element.TryGetProperty("open", out var openProp)) continue;
+                    
+                    double open = openProp.GetDouble();
+                    double high = element.GetProperty("high").GetDouble();
+                    double low = element.GetProperty("low").GetDouble();
+                    double close = element.GetProperty("close").GetDouble();
+                    DateTime date = element.GetProperty("date").GetDateTime().ToUniversalTime();
 
-                    foreach (var element in priceData.EnumerateArray())
+                    var candle = new MiniAppController.OhlcCandle(open, high, low, close, 0, date);
+                    cList.Add(candle);
+                    pList.Add(close);
+                    vList.Add(0);
+                }
+
+                if (cList.Count > 0)
+                {
+                    var tuple = (pList.ToArray(), vList.ToArray(), cList.ToArray());
+                    
+                    if (cacheTtlSeconds > 0)
                     {
-                        double open = element.GetProperty("open").GetDouble();
-                        double high = element.GetProperty("high").GetDouble();
-                        double low = element.GetProperty("low").GetDouble();
-                        double close = element.GetProperty("close").GetDouble();
-                        DateTime date = element.GetProperty("date").GetDateTime().ToUniversalTime();
-
-                        var candle = new MiniAppController.OhlcCandle(open, high, low, close, 0, date);
-                        cList.Add(candle);
-                        pList.Add(close);
-                        vList.Add(0);
+                        _memoryCache.Set(key, tuple, TimeSpan.FromSeconds(cacheTtlSeconds));
                     }
 
-                    if (cList.Count > 0)
-                    {
-                        var tuple = (pList.ToArray(), vList.ToArray(), cList.ToArray());
-                        
-                        if (cacheTtlSeconds > 0)
-                        {
-                            _memoryCache.Set(key, tuple, TimeSpan.FromSeconds(cacheTtlSeconds));
-                        }
-
-                        int take = Math.Min(limit, cList.Count);
-                        return (
-                            pList.TakeLast(take).ToArray(),
-                            vList.TakeLast(take).ToArray(),
-                            cList.TakeLast(take).ToArray()
-                        );
-                    }
+                    int take = Math.Min(limit, cList.Count);
+                    return (
+                        pList.TakeLast(take).ToArray(),
+                        vList.TakeLast(take).ToArray(),
+                        cList.TakeLast(take).ToArray()
+                    );
                 }
             }
             
