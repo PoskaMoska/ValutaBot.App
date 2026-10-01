@@ -65,6 +65,8 @@ public class PendingTradeVerificationService : BackgroundService
             string cleanAsset = record.Asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
+            
+            // First try to find a subminute candle (s5, s10, etc.) for high precision
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                 SELECT close_price
                 FROM subminute_candles
@@ -76,6 +78,21 @@ public class PendingTradeVerificationService : BackgroundService
                 Interval = verifyInterval, 
                 VerifyAt = record.VerifyAt.ToString("O")
             });
+
+            // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m)
+            if (!exitPrice.HasValue || exitPrice.Value <= 0)
+            {
+                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
+                    SELECT close_price
+                    FROM historical_candles
+                    WHERE asset = @Asset
+                      AND open_time::timestamp <= @VerifyAt::timestamp
+                    ORDER BY open_time DESC LIMIT 1
+                ", new { 
+                    Asset = cleanAsset, 
+                    VerifyAt = record.VerifyAt.ToString("O")
+                });
+            }
         }
         catch (Exception ex)
         {

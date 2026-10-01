@@ -402,7 +402,8 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
     else:
         result['dynamic_horizon'] = 0.5  # default = 2.5 candles (midpoint)
 
-    # Slice off initial rolling warmup window (first 25 rows) and fill residual NaNs
-    result = result.iloc[25:].fillna(0.0)
+    # Slice off initial rolling warmup window (first 65 rows) and fill residual NaNs.
+    # Must be >= RAW_WINDOW (60) so every row has a full 60-candle price action window.
+    result = result.iloc[65:].fillna(0.0)
 
     return result
