@@ -279,6 +279,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             if (Math.Abs(candles[i].High - candles[i].Low) < 1e-10) zeroRangeCount++;
         }
 
+        double deadMarketThreshold = (atr > 0) ? (atr * 0.1) : (asset.Contains("JPY") ? 0.005 : 0.00005);
         if (priceRange < deadMarketThreshold || zeroRangeCount >= 10)
         {
             BotLogger.Warn($"[Gatekeeper] Market is completely flat / frozen. PriceRange={priceRange}, ZeroRangeCandles={zeroRangeCount}/15. Aborting analysis.");
