@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using ValutaBot.App.MiniApp.Data.Repositories;
+using Dapper;
 
 namespace ValutaBot.MiniApp;
 
@@ -64,8 +65,8 @@ public class PendingTradeVerificationService : BackgroundService
             string cleanAsset = record.Asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
-            var candle = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<dynamic>(conn, @"
-                SELECT close_price as ""Close""
+            exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
+                SELECT close_price
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
                   AND open_time::timestamp <= @VerifyAt::timestamp
@@ -75,18 +76,6 @@ public class PendingTradeVerificationService : BackgroundService
                 Interval = verifyInterval, 
                 VerifyAt = record.VerifyAt.ToString("O")
             });
-
-            if (candle != null)
-            {
-                var dict = (System.Collections.Generic.IDictionary<string, object>)candle;
-                if (dict.TryGetValue("Close", out var val) || dict.TryGetValue("close", out val) || dict.TryGetValue("close_price", out val))
-                {
-                    if (val != null)
-                    {
-                        exitPrice = Convert.ToDouble(val);
-                    }
-                }
-            }
         }
         catch (Exception ex)
         {

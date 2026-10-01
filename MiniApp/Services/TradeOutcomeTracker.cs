@@ -8,6 +8,7 @@ namespace ValutaBot.MiniApp;
 public static class TradeOutcomeTracker
 {
     public static ValutaBot.MiniApp.Features.MarketAnalysis.Engines.IOnlineMetaLearner? MetaLearner { get; set; }
+    public static ValutaBot.MiniApp.Services.ICircuitBreakerService? CircuitBreaker { get; set; }
     public static IAutoCalibrationEngine? AutoCalib { get; set; }
     private static volatile bool _initialized = false;
     private static readonly SemaphoreSlim _initSemaphore = new(1, 1);
@@ -88,6 +89,11 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
 
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord);
             
+            if (CircuitBreaker != null)
+            {
+                _ = CircuitBreaker.CheckStateAsync(); // Fire and forget so it doesn't block verification
+            }
+
             // 🔥 DRIFT DETECTION 🔥
             _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
 

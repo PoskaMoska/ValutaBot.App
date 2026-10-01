@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
@@ -326,6 +326,26 @@ public class ConfluenceMatrixEngine(
 
         double rawProb = mlSignal.RawConfidence ?? (mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? (1.0 - mlSignal.Confidence) : 0.5));
         double mlScore = (rawProb - 0.5) * 2.0; // Smooth scaling [-1.0, 1.0]
+
+        // --- SMC HARD GATE (Layer 2) ---
+        // If Transformer says BUY, but there is a BEARISH_OB right above us, reject.
+        // If Transformer says PUT, but there is a BULLISH_OB right below us, reject.
+        if (mlSignal.Direction == "BUY" && smcSignal.OrderBlockType == "BEARISH_OB")
+        {
+            return new ConsensusDecision(
+                "BUY", "NEUTRAL", 50,
+                "⚠️ SMC Gate Blocked: Transformer (BUY) vs Bearish Order Block (Wall)",
+                0.0
+            );
+        }
+        if (mlSignal.Direction == "PUT" && smcSignal.OrderBlockType == "BULLISH_OB")
+        {
+            return new ConsensusDecision(
+                "PUT", "NEUTRAL", 50,
+                "⚠️ SMC Gate Blocked: Transformer (PUT) vs Bullish Order Block (Wall)",
+                0.0
+            );
+        }
 
         // ── AutoCalibration: Regime-Aware Signal Weights ──────────────────────────
         // Only activate for minute+ timeframes. Sub-minute markets have structurally

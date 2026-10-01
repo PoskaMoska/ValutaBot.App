@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
@@ -119,8 +119,8 @@ public class MarketDataFetcher
             return await FetchOtcHistoricalAsync(cleanAsset, rawInterval, limit);
         }
 
-        // For sub-minute timeframes, first try live ticks from the DB
-        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase))
+        // For sub-minute and m1 timeframes, first try live ticks from the DB to bypass REST caching
+        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase) || rawInterval == "m1" || rawInterval == "1min")
         {
             string cleanKey = cleanAsset.Replace("/", "").ToUpper();
             var liveCandles = await RealtimeTickCollector.GetRecentCandles(cleanKey, rawInterval, limit);

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,14 +20,16 @@ public class AutoTradingScannerService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AutoTradingScannerService> _logger;
-    private static readonly string[] _targetPairs = { "EUR/USD" };
+    private readonly ICircuitBreakerService _circuitBreaker;
+    private static readonly string[] _targetPairs = { "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD" };
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
 
-    public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger)
+    public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger, ICircuitBreakerService circuitBreaker)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _circuitBreaker = circuitBreaker;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -57,6 +59,13 @@ public class AutoTradingScannerService : BackgroundService
             if (IsWeekendPause())
             {
                 await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+                continue;
+            }
+
+            if (_circuitBreaker.IsHalted())
+            {
+                _logger.LogWarning($"[AutoScanner] Circuit Breaker Active: {_circuitBreaker.GetHaltedReason()}. Pausing scan...");
+                await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
                 continue;
             }
 
@@ -104,6 +113,13 @@ public class AutoTradingScannerService : BackgroundService
             if (IsWeekendPause())
             {
                 await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+                continue;
+            }
+
+            if (_circuitBreaker.IsHalted())
+            {
+                _logger.LogWarning($"[AutoScanner] Circuit Breaker Active: {_circuitBreaker.GetHaltedReason()}. Pausing scan...");
+                await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
                 continue;
             }
 

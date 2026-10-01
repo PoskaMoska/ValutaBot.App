@@ -51,7 +51,8 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
 
         // 1. Expected Distance to overcome noise/broker latency
         // A minimal target distance in price units. E.g., broker spread is around 1-3 pips.
-        double brokerSafeDistance = isForex ? 0.00003 : lastPrice * 0.0005; 
+        bool isJpy = asset.Contains("JPY");
+        double brokerSafeDistance = isForex ? (isJpy ? 0.003 : 0.00003) : lastPrice * 0.0005; 
         
         // 2. Velocity evaluation
         double velocityPerSecAbs = state != null ? Math.Abs(state.VelocityBpsPerSec) : 0; 

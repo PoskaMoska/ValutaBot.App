@@ -182,6 +182,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
 
         var cbService = app.Services.GetRequiredService<ValutaBot.MiniApp.Services.ICircuitBreakerService>();
         await cbService.InitializeAsync();
+        ValutaBot.MiniApp.TradeOutcomeTracker.CircuitBreaker = cbService;
 
         LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
         app.UseStaticFiles();
