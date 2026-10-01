@@ -325,7 +325,7 @@ public class ConfluenceMatrixEngine(
         // --- ORDER FLOW (OF) ANTI-SIGNAL ---
         // Ранее был отключен из-за винрейта 35.8%. Но 35.8% — это статистический грааль, если его перевернуть!
         // Включаем OF обратно, но ИНВЕРТИРУЕМ его скор. Ложный сигнал превращается в мощный анти-сигнал.
-        double ofScore = -ofSignal.Score;
+        double ofScore = -ofSignal.ScoreContribution;
 
         double smcScore = 0;
         if (smcSignal.BosDirection == "BULLISH_BOS") smcScore += 0.5;
