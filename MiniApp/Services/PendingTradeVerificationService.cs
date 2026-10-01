@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -68,7 +68,7 @@ public class PendingTradeVerificationService : BackgroundService
                 SELECT close_price as ""Close""
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
-                  AND open_time <= @VerifyAt
+                  AND open_time::timestamp <= @VerifyAt::timestamp
                 ORDER BY open_time DESC LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
