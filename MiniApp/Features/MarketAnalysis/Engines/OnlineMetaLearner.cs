@@ -42,7 +42,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
     private double GetLearningRate(string key)
     {
         int t = _updateCounts.GetOrAdd(key, 0);
-        return Math.Max(0.01, InitialLearningRate / (1.0 + LrDecay * t));
+        return InitialLearningRate / (1.0 + LrDecay * t);
     }
 
     public double Predict(string asset, string timeframe, double ta, double of, double smc, double ml, bool tfConflict)
