@@ -313,10 +313,19 @@ public class ConfluenceMatrixEngine(
         ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0)
     {
         double taScore = taSignal.Score;
-        // OF DISABLED: 35.8% empirical win-rate (5.5σ anti-signal, 369 trades).
-        // Volume Delta is meaningless on OTC/Forex without a real order book.
-        // LightGBM already captures volume patterns via raw_vol_1..60 features.
-        double ofScore = 0.0;
+
+        // --- VOLATILITY TA PENALTY ---
+        // Если рынок в состоянии психоза (volRatio > 2.0), классические осцилляторы типа RSI ломаются.
+        // Мы динамически "штрафуем" TA-скор, отдавая приоритет SMC (структуре) и ML.
+        if (volRatio > 2.0)
+        {
+            taScore *= 0.5; // Режем уверенность TA на 50% при экстремальной волатильности
+        }
+
+        // --- ORDER FLOW (OF) ANTI-SIGNAL ---
+        // Ранее был отключен из-за винрейта 35.8%. Но 35.8% — это статистический грааль, если его перевернуть!
+        // Включаем OF обратно, но ИНВЕРТИРУЕМ его скор. Ложный сигнал превращается в мощный анти-сигнал.
+        double ofScore = -ofSignal.Score;
 
         double smcScore = 0;
         if (smcSignal.BosDirection == "BULLISH_BOS") smcScore += 0.5;
