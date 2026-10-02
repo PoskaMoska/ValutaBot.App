@@ -263,7 +263,9 @@ public class MarketDataFetcher
         else if (rawInterval.StartsWith("m") && int.TryParse(rawInterval.Substring(1), out int m)) m1Needed = limit * m;
         else if (rawInterval.StartsWith("h") && int.TryParse(rawInterval.Substring(1), out int h)) m1Needed = limit * h * 60;
 
-        int maxIndex = 98000; 
+        // Hardcoded maxIndex to 25000 because the smallest table (USDCHF) currently has ~30,000 rows.
+        // This prevents the OFFSET from exceeding available rows, which caused "Insufficient Data".
+        int maxIndex = 25000; 
         int offset = (int)((DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute) % maxIndex);
 
         using var conn = DbConnectionFactory.GetConnection();
