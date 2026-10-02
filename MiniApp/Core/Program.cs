@@ -44,19 +44,14 @@ internal static class Program
 
         var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5000;
 
-        while (true)
+        try
         {
-            try
-            {
-                await MiniAppController.StartAsync(args, port);
-                break;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[!] Crash: {ex.Message}");
-                Console.WriteLine("[+] Auto-restart in 3s... (Ctrl+C to exit)");
-                Thread.Sleep(3000);
-            }
+            await MiniAppController.StartAsync(args, port);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[!] Fatal Crash: {ex.Message}");
+            throw; // Let the container orchestrator (Railway) handle the restart
         }
     }
 }

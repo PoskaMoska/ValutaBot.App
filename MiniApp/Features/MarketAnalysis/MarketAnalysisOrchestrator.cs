@@ -1,4 +1,4 @@
-﻿using ValutaBot.Core;
+using ValutaBot.Core;
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
@@ -134,7 +134,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         // 6. Engines (Parallel)
         var engSw = Stopwatch.StartNew();
-        var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, candles, currentLivePrice));
+        var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
         var ofResult = new ValutaBot.MiniApp.OrderFlowEngine.OrderFlowResult { ScoreContribution = 0, Description = "REMOVED", DeltaRatio = 1.0, OrderFlowState = "NEUTRAL" };
         
         // TA Scoring

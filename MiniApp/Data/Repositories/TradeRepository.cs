@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -114,7 +114,7 @@ FROM outcome_data;");
                     INSERT INTO trade_outcomes 
                     (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
                     ON CONFLICT (id) DO NOTHING", outcomes); // Dapper handles the loop
             }
@@ -134,7 +134,7 @@ FROM outcome_data;");
                     INSERT INTO trade_outcomes 
                     (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
@@ -150,8 +150,8 @@ FROM outcome_data;");
                         ml_prob = EXCLUDED.ml_prob,
                         ml_score = EXCLUDED.ml_score,
                         features_json = EXCLUDED.features_json,
-                        created_at = EXCLUDED.created_at,
-                        verified_at = EXCLUDED.verified_at,
+                        created_at = EXCLUDED.created_at::timestamptz,
+                        verified_at = EXCLUDED.verified_at::timestamptz,
                         smc_bos_dir = EXCLUDED.smc_bos_dir,
                         smc_has_ob = EXCLUDED.smc_has_ob,
                         smc_has_fvg = EXCLUDED.smc_has_fvg,
@@ -380,11 +380,11 @@ FROM outcome_data;");
             return result;
         }
 
-        // в”Ђв”Ђ L2-FIX: РџРµСЂСЃРёСЃС‚РµРЅС‚РЅРѕСЃС‚СЊ EMA-РІРµСЃРѕРІ AutoCalibrationEngine в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        // РІвЂќР‚РІвЂќР‚ L2-FIX: Р СџР ВµРЎР‚РЎРѓР С‘РЎРѓРЎвЂљР ВµР Р…РЎвЂљР Р…Р С•РЎРѓРЎвЂљРЎРЉ EMA-Р Р†Р ВµРЎРѓР С•Р Р† AutoCalibrationEngine РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
         /// <summary>
-        /// РЎРѕС…СЂР°РЅСЏРµС‚ EMA-СЃРѕСЃС‚РѕСЏРЅРёРµ РєР°Р»РёР±СЂРѕРІС‰РёРєР° РІ PostgreSQL.
-        /// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РёР· TradeOutcomeTracker РїРѕСЃР»Рµ РєР°Р¶РґРѕР№ РѕР±СЂР°Р±РѕС‚РєРё СЃРґРµР»РєРё.
+        /// Р РЋР С•РЎвЂ¦РЎР‚Р В°Р Р…РЎРЏР ВµРЎвЂљ EMA-РЎРѓР С•РЎРѓРЎвЂљР С•РЎРЏР Р…Р С‘Р Вµ Р С”Р В°Р В»Р С‘Р В±РЎР‚Р С•Р Р†РЎвЂ°Р С‘Р С”Р В° Р Р† PostgreSQL.
+        /// Р вЂ™РЎвЂ№Р В·РЎвЂ№Р Р†Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р С‘Р В· TradeOutcomeTracker Р С—Р С•РЎРѓР В»Р Вµ Р С”Р В°Р В¶Р Т‘Р С•Р в„– Р С•Р В±РЎР‚Р В°Р В±Р С•РЎвЂљР С”Р С‘ РЎРѓР Т‘Р ВµР В»Р С”Р С‘.
         /// </summary>
         public static async Task SaveCalibrationStateAsync(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate)
         {
@@ -408,8 +408,8 @@ FROM outcome_data;");
         }
 
         /// <summary>
-        /// Р—Р°РіСЂСѓР¶Р°РµС‚ СЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ EMA-РІРµСЃР° РїСЂРё СЃС‚Р°СЂС‚Рµ Р±РѕС‚Р°.
-        /// Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє Р·Р°РїРёСЃРµР№ РґР»СЏ РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёСЏ AutoCalibrationEngine._statsMap.
+        /// Р вЂ”Р В°Р С–РЎР‚РЎС“Р В¶Р В°Р ВµРЎвЂљ РЎРѓР С•РЎвЂ¦РЎР‚Р В°Р Р…РЎвЂР Р…Р Р…РЎвЂ№Р Вµ EMA-Р Р†Р ВµРЎРѓР В° Р С—РЎР‚Р С‘ РЎРѓРЎвЂљР В°РЎР‚РЎвЂљР Вµ Р В±Р С•РЎвЂљР В°.
+        /// Р вЂ™Р С•Р В·Р Р†РЎР‚Р В°РЎвЂ°Р В°Р ВµРЎвЂљ РЎРѓР С—Р С‘РЎРѓР С•Р С” Р В·Р В°Р С—Р С‘РЎРѓР ВµР в„– Р Т‘Р В»РЎРЏ Р Р†Р С•РЎРѓРЎРѓРЎвЂљР В°Р Р…Р С•Р Р†Р В»Р ВµР Р…Р С‘РЎРЏ AutoCalibrationEngine._statsMap.
         /// </summary>
         public static async Task<List<(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate)>> LoadCalibrationStateAsync()
         {
@@ -441,7 +441,7 @@ FROM outcome_data;");
         }
 
         /// <summary>
-        /// РЎРѕР·РґР°С‘С‚ С‚Р°Р±Р»РёС†Сѓ calibration_state РµСЃР»Рё РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚.
+        /// Р РЋР С•Р В·Р Т‘Р В°РЎвЂРЎвЂљ РЎвЂљР В°Р В±Р В»Р С‘РЎвЂ РЎС“ calibration_state Р ВµРЎРѓР В»Р С‘ Р Р…Р Вµ РЎРѓРЎС“РЎвЂ°Р ВµРЎРѓРЎвЂљР Р†РЎС“Р ВµРЎвЂљ.
         /// </summary>
         public static async Task EnsureCalibrationTableAsync()
         {
@@ -492,11 +492,11 @@ FROM outcome_data;");
             return rows.ToList();
         }
 
-        // ── MetaLearner Persistence ──────────────────────────────────────────────
+        // в”Ђв”Ђ MetaLearner Persistence в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
         /// <summary>
-        /// Создаёт таблицу meta_learner_weights если не существует.
-        /// Вызывается при инициализации TradeOutcomeTracker.
+        /// РЎРѕР·РґР°С‘С‚ С‚Р°Р±Р»РёС†Сѓ meta_learner_weights РµСЃР»Рё РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚.
+        /// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РїСЂРё РёРЅРёС†РёР°Р»РёР·Р°С†РёРё TradeOutcomeTracker.
         /// </summary>
         public static async Task EnsureMetaWeightsTableAsync()
         {
@@ -519,7 +519,7 @@ FROM outcome_data;");
         }
 
         /// <summary>
-        /// Сохраняет веса одного ключа MetaLearner в PostgreSQL (upsert).
+        /// РЎРѕС…СЂР°РЅСЏРµС‚ РІРµСЃР° РѕРґРЅРѕРіРѕ РєР»СЋС‡Р° MetaLearner РІ PostgreSQL (upsert).
         /// </summary>
         public static async Task SaveMetaWeightAsync(string key, double[] weights, int updateCount)
         {
@@ -544,7 +544,7 @@ FROM outcome_data;");
         }
 
         /// <summary>
-        /// Загружает все веса MetaLearner из PostgreSQL при старте.
+        /// Р—Р°РіСЂСѓР¶Р°РµС‚ РІСЃРµ РІРµСЃР° MetaLearner РёР· PostgreSQL РїСЂРё СЃС‚Р°СЂС‚Рµ.
         /// </summary>
         public static async Task<System.Collections.Generic.List<(string key, double[] weights, int updateCount)>> LoadMetaWeightsAsync()
         {

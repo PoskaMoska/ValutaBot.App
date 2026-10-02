@@ -187,12 +187,12 @@ public class MarketDataFetcher
                 finalCandles[synthCount + i] = liveCandles[i];
             }
 
-            // Fix timestamps to be perfectly continuous
-            DateTime lastTime = liveCandles.Length > 0 ? liveCandles[^1].Timestamp : DateTime.UtcNow;
+            // Fix timestamps to be perfectly continuous for synthesized candles only
+            DateTime synthEnd = liveCandles.Length > 0 ? liveCandles[0].Timestamp : DateTime.UtcNow;
             int intervalSeconds = TimeframeSeconds(rawInterval);
-            for (int i = finalCandles.Length - 1; i >= 0; i--)
+            for (int i = synthCount - 1; i >= 0; i--)
             {
-                finalCandles[i] = finalCandles[i] with { Timestamp = lastTime.AddSeconds(-(finalCandles.Length - 1 - i) * intervalSeconds) };
+                finalCandles[i] = finalCandles[i] with { Timestamp = synthEnd.AddSeconds(-(synthCount - i) * intervalSeconds) };
             }
 
             RecordSuccess();
@@ -227,7 +227,11 @@ public class MarketDataFetcher
 
                 if (isClosed)
                 {
-                    var synthetic = new MiniAppController.OhlcCandle(realPrice, realPrice, realPrice, realPrice, 0, last.Timestamp.AddSeconds(intervalSecs));
+                    // Create synthetic candle aligned to the actual current interval
+                    long ticks = DateTime.UtcNow.Ticks;
+                    long intervalTicks = TimeSpan.TicksPerSecond * intervalSecs;
+                    DateTime currentBucket = new DateTime(ticks - (ticks % intervalTicks), DateTimeKind.Utc);
+                    var synthetic = new MiniAppController.OhlcCandle(realPrice, realPrice, realPrice, realPrice, 0, currentBucket);
                     candles = candles.Append(synthetic).ToArray();
                 }
                 else

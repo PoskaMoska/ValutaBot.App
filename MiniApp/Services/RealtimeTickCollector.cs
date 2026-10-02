@@ -54,7 +54,7 @@ namespace ValutaBot.MiniApp
         // With CreateUnbounded, a PostgreSQL outage at ~100 ticks/sec fills ~30k events in 5min → OOM.
         // DropOldest: gaps in subminute_candles are acceptable; OOM is not.
         private static readonly Channel<TickEvent> _tickChannel = Channel.CreateBounded<TickEvent>(
-            new BoundedChannelOptions(10_000)
+            new BoundedChannelOptions(100_000)
             {
                 FullMode     = BoundedChannelFullMode.DropOldest,
                 SingleReader = true,   // only ProcessTickQueueAsync reads
