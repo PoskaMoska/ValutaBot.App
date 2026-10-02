@@ -44,58 +44,15 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         bool isForex = false)
     {
         int tfSeconds = TimeframeToSeconds(timeframe);
-        int baseCandles = 3;
-        string dynamicReason = "";
 
-        double lastPrice = currentPrice > 0 ? currentPrice : 1.0;
-
-        // 1. Expected Distance to overcome noise/broker latency
-        // A minimal target distance in price units. E.g., broker spread is around 1-3 pips.
-        bool isJpy = asset.Contains("JPY");
-        double brokerSafeDistance = isForex ? (isJpy ? 0.003 : 0.00003) : lastPrice * 0.0005; 
-        
-        // 2. Velocity evaluation
-        double velocityPerSecAbs = state != null ? Math.Abs(state.VelocityBpsPerSec) : 0; 
-        double expectedPriceVelocityPerSec = (velocityPerSecAbs * 0.0001) * lastPrice;
-        if (expectedPriceVelocityPerSec < 1e-9) expectedPriceVelocityPerSec = 1e-9;
-
-        // 3. Expected Time to Reach Safe Distance (in seconds)
-        double expectedSecondsToSafe = brokerSafeDistance / expectedPriceVelocityPerSec;
-        
-        // 4. Convert Expected Seconds to Candles
-        double expectedCandles = expectedSecondsToSafe / tfSeconds;
-
-        // Dynamic Expiration Logic [1..4]
-        if (state != null && state.VelocityRegime != null && state.VelocityRegime.StartsWith("HYPER_ACCELERATING"))
-        {
-            baseCandles = 1;
-            dynamicReason = "HYPER_ACCELERATING -> Снайперский пробой (1 свеча).";
-        }
-        else if (expectedCandles <= 2.0 && velocityPerSecAbs > 0.5)
-        {
-            baseCandles = 2;
-            dynamicReason = $"Высокая скорость (цель за {expectedCandles:F1} св.) -> 2 свечи.";
-        }
-        else if (expectedCandles > 4.0 || (state != null && state.VelocityRegime == "STABLE"))
-        {
-            baseCandles = 4;
-            dynamicReason = $"Вязкий рынок / STABLE (цель за {expectedCandles:F1} св.) -> 4 свечи (максимум).";
-        }
-        else 
-        {
-            if (smc.HasOrderBlock || smc.HasFvg)
-            {
-                baseCandles = 3;
-                dynamicReason = "SMC паттерн (структурный отскок) -> 3 свечи.";
-            }
-            else
-            {
-                baseCandles = 3;
-                dynamicReason = $"Стандартный тренд (цель за {expectedCandles:F1} св.) -> 3 свечи.";
-            }
-        }
-        
-        baseCandles = Math.Clamp(baseCandles, 1, 4);
+        // Expiration is always 1 candle = 1 timeframe period.
+        // The ML model (TARGET_HORIZON_CANDLES=1) predicts exactly 1 candle ahead,
+        // which matches PocketOption's real usage:
+        //   - 1m chart -> 1m expiry
+        //   - s5 chart -> 5s expiry
+        // The old dynamic 1-4 candle logic was calibrated for the old H=5 model and is no longer valid.
+        const int baseCandles = 1;
+        string dynamicReason = "Горизонт модели = 1 свеча → экспирация 1 таймфрейм.";
 
         int totalSeconds = baseCandles * tfSeconds;
         string timeoutText = FormatSeconds(totalSeconds);

@@ -52,7 +52,10 @@ public static class SignalTracker
         long currentTicks = now.Ticks;
         long intervalTicks = TimeSpan.FromSeconds(timeframeSecs).Ticks;
         DateTime gridTime = new DateTime(currentTicks - (currentTicks % intervalTicks), DateTimeKind.Utc);
-        DateTime verifyAt = gridTime.AddSeconds(expiryCandles * timeframeSecs);
+        // VerifyAt uses 1.5x the timeframe as buffer: 1 candle for the trade to expire +
+        // 0.5 candle to allow broker processing / price feed latency before we check the result.
+        // Without this buffer we could read the exit price before the broker has finalized it.
+        DateTime verifyAt = gridTime.AddSeconds((int)(timeframeSecs * 1.5));
 
         string cooldownKey = $"{asset}_{timeframe}";
         
