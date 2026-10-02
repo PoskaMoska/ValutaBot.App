@@ -286,7 +286,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         if (priceRange < deadMarketThreshold || zeroRangeCount >= maxZeroCandles)
         {
             BotLogger.Warn($"[Gatekeeper] Market is completely flat / frozen. PriceRange={priceRange}, ZeroRangeCandles={zeroRangeCount}/15. Aborting analysis.");
-            return new GatekeeperResult(false, "⚠️ Рынок в состоянии застоя (искусственные или пустые свечи).\n\nДля пар кроме EUR/USD на субминутных таймфреймах (s5-s30) необходим платный API-ключ TwelveData (бесплатный тариф транслирует WebSocket тики только для EUR/USD).", atr, adx);
+            return new GatekeeperResult(false, "⚠️ Рынок в состоянии застоя (пустые или нулевые свечи).\n\nВозможные причины: нет живых тиков от Tiingo WebSocket для данной пары, рынок закрыт, или недостаточно данных для субминутного таймфрейма. Попробуйте позже или выберите другую пару.", atr, adx);
         }
 
         double maxCandleRange = 0;

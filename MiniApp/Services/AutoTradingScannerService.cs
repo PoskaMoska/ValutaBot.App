@@ -25,6 +25,22 @@ public class AutoTradingScannerService : BackgroundService
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
 
+    // Minimum candles per timeframe to trigger a scan — capped by physical limits:
+    // s5:  12 candles/min × 30 min = 360 max → require 160
+    // s10:  6 candles/min × 30 min = 180 max → require 120
+    // s15:  4 candles/min × 30 min = 120 max → require  80
+    // s30:  2 candles/min × 30 min =  60 max → require  40
+    // FIX: Old hardcoded 160 physically blocked s15 and s30 from ever scanning.
+    private static readonly System.Collections.Generic.Dictionary<string, int> _minCandlesPerTf =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["s5"]  = 160,
+            ["s10"] = 120,
+            ["s15"] = 80,
+            ["s30"] = 40,
+        };
+
+
     public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger, ICircuitBreakerService circuitBreaker)
     {
         _serviceProvider = serviceProvider;
@@ -76,18 +92,27 @@ public class AutoTradingScannerService : BackgroundService
 
                 string pair = _targetPairs[currentPairIndex];
                 string tf = _subminuteTfs[currentTfIndex];
+                int minCandles = _minCandlesPerTf.TryGetValue(tf, out int mc) ? mc : 80;
 
                 var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
                 
                 // Only scan if we have enough fresh WebSocket data
-                if (recentCandles.Length >= 160)
+                if (recentCandles.Length >= minCandles)
                 {
                     var lastCandleTime = recentCandles[^1].Timestamp;
                     if ((DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30)
                     {
-                        _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf}...");
+                        _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles)...");
                         await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
                     }
+                    else
+                    {
+                        _logger.LogWarning($"[AutoScanner-Fast] Stale candles for {pair}/{tf}: last={lastCandleTime:HH:mm:ss}. Skipping.");
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug($"[AutoScanner-Fast] Not enough candles for {pair}/{tf}: {recentCandles.Length}/{minCandles}. Waiting...");
                 }
 
                 MoveToNextCycle(ref currentTfIndex, ref currentPairIndex, _subminuteTfs.Length);

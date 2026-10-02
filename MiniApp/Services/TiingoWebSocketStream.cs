@@ -11,8 +11,7 @@ namespace ValutaBot.MiniApp;
 
 /// <summary>
 /// WebSocket client for Tiingo.
-/// Connects to wss://api.tiingo.com/fx to stream real-time forex ticks.
-/// Overcomes TwelveData's limitation by supporting all pairs on the free tier.
+/// Connects to wss://api.tiingo.com/fx to stream real-time forex ticks for all pairs.
 /// Feeds ticks into RealtimeTickCollector for mathematically pure subminute candle generation.
 /// </summary>
 public static class TiingoWebSocketStream
@@ -23,7 +22,7 @@ public static class TiingoWebSocketStream
     private static bool _isConnecting = false;
     private static DateTime _lastMessageTime = DateTime.UtcNow;
 
-    // We store the last live price here exactly like TwelveDataWS does
+    // Live price store: last tick per symbol
     private static readonly ConcurrentDictionary<string, double> _livePrices = new(StringComparer.OrdinalIgnoreCase);
 
     public static bool TryGetLivePrice(string symbol, out double price)

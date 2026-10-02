@@ -119,7 +119,7 @@ public class ConfluenceMatrixEngine(
     {
     // FIX PRIORITY-1: Перегрузка принимающая уже загруженные current+higher свечи из Orchestrator'а.
         // This is required so the 1-fetch pre-loaded primaryCandles and macroCandles in Evaluate4DMatrixAsync
-    // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min) и Doppelganger Bug.
+    // Это устраняет главную причину нестабильности: rate limit и Doppelganger Bug.
         "s5"                      => ("s5",  "s10", "m1"),
         "s10"                     => ("s5",  "s10", "m1"),
         "s15"                     => ("s5",  "s15", "m1"),
@@ -182,7 +182,7 @@ public class ConfluenceMatrixEngine(
 
     // FIX PRIORITY-1: Перегрузка принимающая уже загруженные current+higher свечи из Orchestrator'а.
     // Умно маппит их на слоты (micro/primary/macro) и делает 1 HTTP-запрос для недостающего таймфрейма.
-    // Это устраняет главную причину нестабильности: TwelveData rate limit (7 req/min) и Doppelganger Bug.
+    // Это устраняет главную причину нестабильности: rate limit и Doppelganger Bug.
     public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
         string asset,
         string primaryTimeframe,
@@ -327,24 +327,29 @@ public class ConfluenceMatrixEngine(
         double rawProb = mlSignal.RawConfidence ?? (mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? (1.0 - mlSignal.Confidence) : 0.5));
         double mlScore = (rawProb - 0.5) * 2.0; // Smooth scaling [-1.0, 1.0]
 
-        // --- SMC HARD GATE (Layer 2) ---
-        // If Transformer says BUY, but there is a BEARISH_OB right above us, reject.
-        // If Transformer says PUT, but there is a BULLISH_OB right below us, reject.
-        if (mlSignal.Direction == "BUY" && smcSignal.OrderBlockType == "BEARISH_OB")
+        // --- SMC SOFT PENALTY (replaces Hard Gate) ---
+        // Old logic: returned hardcoded NEUTRAL 50% whenever ANY OB existed within 30 bars.
+        // Problem: on flat/ranging markets there is ALWAYS an OB in memory from both sides,
+        // so the old gate fired constantly and killed every ML signal.
+        //
+        // New logic: only penalize when SMC structure STRONGLY opposes the ML direction.
+        // "Strongly" = smcScore magnitude >= 0.5 (at least one confirmed BOS or Sweep signal).
+        // A weak smcScore (|score| < 0.5) means only an OB exists with no structural confirmation
+        // — this is not enough to override a 69% ML signal. We apply a soft penalty (×0.60)
+        // rather than a hard block, so the final probability may still exceed 53% if ML is confident.
+        double obPenalty = 1.0;
+        string obGateNote = "";
+        if (mlSignal.Direction == "BUY" && smcScore < -0.5)
         {
-            return new ConsensusDecision(
-                "BUY", "NEUTRAL", 50,
-                "⚠️ SMC Gate Blocked: Transformer (BUY) vs Bearish Order Block (Wall)",
-                0.0
-            );
+            // Strong bearish SMC structure conflicts with ML BUY — reduce margin by 40%
+            obPenalty = 0.60;
+            obGateNote = "⚠️ SMC Conflict Penalty: Сильная медвежья структура SMC против BUY (ослаблен).";
         }
-        if (mlSignal.Direction == "PUT" && smcSignal.OrderBlockType == "BULLISH_OB")
+        else if (mlSignal.Direction == "PUT" && smcScore > 0.5)
         {
-            return new ConsensusDecision(
-                "PUT", "NEUTRAL", 50,
-                "⚠️ SMC Gate Blocked: Transformer (PUT) vs Bullish Order Block (Wall)",
-                0.0
-            );
+            // Strong bullish SMC structure conflicts with ML PUT — reduce margin by 40%
+            obPenalty = 0.60;
+            obGateNote = "⚠️ SMC Conflict Penalty: Сильная бычья структура SMC против PUT (ослаблен).";
         }
 
         // ── AutoCalibration: Regime-Aware Signal Weights ──────────────────────────
@@ -428,32 +433,40 @@ public class ConfluenceMatrixEngine(
         sb.AppendLine("[Динамические фильтры]");
         sb.AppendLine($"- Базовая уверенность: {(0.5 + margin)*100:F1}% {finalDir}");
 
-        // 1. Штраф конфликта таймфреймов
-        if (tfConflict) 
+        // 0. SMC Proximity Penalty (computed above)
+        if (obPenalty < 1.0)
         {
-            margin *= 0.8; 
+            margin *= obPenalty;
+            sb.AppendLine($"- {obGateNote}");
+        }
+
+        // 1. Штраф конфликта таймфреймов
+        if (tfConflict)
+        {
+            margin *= 0.8;
             sb.AppendLine("- Конфликт таймфреймов: Снижение уверенности");
         }
 
-        // 2. Критический конфликт ТехАнализа (Исправление бага с 25%)
+        // 2. Критический конфликт ТехАнализа
         if (Math.Abs(taScore) > 0.8 && ((taScore > 0 && finalDir == "PUT") || (taScore < 0 && finalDir == "BUY")))
         {
-            margin *= 0.5; // Срезаем только маржу, а не базовые 50%
+            margin *= 0.5;
             sb.AppendLine("- Критический разворот Теханализа: Сильное снижение уверенности");
         }
 
-        // 2.5. Защита от "Ловли Ножей" (Anti-Knife Filter) — только RSI.
-        // OF убран (35.8% anti-signal). RSI<48 при BUY и RSI>52 при PUT достаточно.
-        if (finalDir == "BUY" && taSignal.Rsi < 48)
+        // 2.5. Anti-Knife Filter. Threshold widened 48/52 -> 42/58.
+        // RSI 42-58 is flat — filter must NOT fire there.
+        if (finalDir == "BUY" && taSignal.Rsi < 42)
         {
-            margin *= 0.3;
-            sb.AppendLine("- Anti-Knife: Попытка лонга при перепроданности RSI. Уверенность срезана.");
+            margin *= 0.5;
+            sb.AppendLine("- Anti-Knife: Лонг при сильной перепроданности RSI. Уверенность снижена.");
         }
-        else if (finalDir == "PUT" && taSignal.Rsi > 52)
+        else if (finalDir == "PUT" && taSignal.Rsi > 58)
         {
-            margin *= 0.3;
-            sb.AppendLine("- Anti-Knife: Попытка шорта при перекупленности RSI. Уверенность срезана.");
+            margin *= 0.5;
+            sb.AppendLine("- Anti-Knife: Шорт при сильной перекупленности RSI. Уверенность снижена.");
         }
+
 
         // 3. Фаза рынка (RSI)
         if (taSignal.Rsi > 65 && finalDir == "BUY") 
@@ -508,7 +521,6 @@ public class ConfluenceMatrixEngine(
     }
 
 }
-
 
 
 
