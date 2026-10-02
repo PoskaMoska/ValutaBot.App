@@ -805,22 +805,16 @@ class ForexPredictor:
                 if len(candles) >= 1500:
                     log.info(f"[Train] Loaded {len(candles)} candles from HistoricalCandles (Adaptive: {target_candles})")
                 else:
-                    # Priority 2: Subminute SQLite ticks (real recorded ticks from live trading)
-                    if self.interval.startswith("s"):
+                    # Priority 2: Subminute SQLite/PG ticks (real recorded ticks from live trading)
+                    if self.interval.startswith("s") or self.interval.startswith("m") or self.interval.startswith("1m"):
                         candles = _fetch_local_sqlite(self.symbol, self.interval, target_candles)
                         if len(candles) < 150:
-                            msg = f"Not enough real subminute ticks for {self._key} (found {len(candles)}). Interpolation is disabled to prevent data hallucination."
+                            msg = f"Not enough real ticks for {self._key} (found {len(candles)}). TwelveData fallback is removed."
                             log.error(f"[Train] {msg}")
                             return {"error": msg}
                     else:
-                        # Priority 3: TwelveData API (forex only)
-                        if is_forex_symbol(self.symbol):
-                            limit = 5000
-                            candles = self._fetch_twelvedata(limit)
-                            log.info(f"[Train] API fallback: fetched {len(candles)} candles for {self._key}")
-                        else:
-                            log.error(f"[Train] No local data for {self._key} and OTC cannot use TwelveData fallback.")
-                            candles = []
+                        log.error(f"[Train] No local data for {self._key} and TwelveData fallback is permanently disabled.")
+                        candles = []
 
 
             if mtf_candles is None:

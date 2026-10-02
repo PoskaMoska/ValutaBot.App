@@ -75,11 +75,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _logger.LogInformation("[TRACE {TraceId}] Analysis started for Asset: {Asset}, TF: {Timeframe}", traceId, asset, timeframe);
 
         // 1. Sanitize (Immutable Step)
-        string cleanAsset = asset.Replace(" OTC", "").Replace("OTC", "").Trim();
-        string clean = AssetSanitizer.Sanitize(cleanAsset);
+        string cleanAsset = AssetSanitizer.Sanitize(asset);
         DayOfWeek day = DateTime.UtcNow.DayOfWeek;
-        string? symbol = AssetSanitizer.MapSymbolByDayOfWeek(clean, day);
-        bool isForex = AssetSanitizer.IsForexAsset(clean);
+        string? symbol = AssetSanitizer.MapSymbolByDayOfWeek(cleanAsset, day);
+        bool isForex = AssetSanitizer.IsForexAsset(cleanAsset);
         
         string tfLower = timeframe.ToLower().Trim();
         int limit = (tfLower.StartsWith("s") || tfLower.StartsWith("m1") || tfLower.StartsWith("m5")) ? 160 : 200;
@@ -164,7 +163,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         bool hasMetaLearner = TradeOutcomeTracker.MetaLearner != null;
         double mlRawProb = mlPrediction?.RawConfidence ?? 0.5;
         double mlScoreDebug = (mlRawProb - 0.5) * 2.0;
-        _logger.LogInformation("[TRACE {TraceId}] ML RawConf={RawConf:F4} → mlScore={MlScore:F4} | MetaLearner={HasML} | Model={Version}",
+        _logger.LogInformation("[TRACE {TraceId}] ML RawConf={RawConf:F4} > mlScore={MlScore:F4} | MetaLearner={HasML} | Model={Version}",
             traceId, mlRawProb, mlScoreDebug, hasMetaLearner ? "ACTIVE" : "OFFLINE (fallback weights)", mlPrediction?.ModelVersion ?? "null");
         if (!hasMetaLearner)
             _logger.LogWarning("[TRACE {TraceId}] MetaLearner is NULL — using degraded fallback (TA*0.2 + SMC*0.2 + OF*0.1 + ML*0.2). Direction quality REDUCED.", traceId);
@@ -203,7 +202,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         if (minutesToNews.HasValue && minutesToNews.Value >= 0 && minutesToNews.Value <= 15)
         {
             var nextNews = _newsCalendar?.GetNextHighImpactNews(cleanAsset);
-            string newsWarning = $"⚠️ ВНИМАНИЕ: Через {minutesToNews.Value} мин выходит важная новость ({nextNews?.Title}). Рынок нестабилен!";
+            string newsWarning = $"?? ВНИМАНИЕ: Через {minutesToNews.Value} мин выходит важная новость ({nextNews?.Title}). Рынок нестабилен!";
             consensus = consensus with {
                 Probability = 50,
                 FinalDirection = "NEUTRAL",
