@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 
 namespace ValutaBot.MiniApp;
@@ -282,8 +282,8 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             }
         }
 
-        double deadMarketThreshold = (atr > 0) ? (atr * 0.1) : (asset.Contains("JPY") ? 0.005 : 0.00005);
-        if (priceRange < deadMarketThreshold || zeroRangeCount >= 10)
+        bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase); double deadMarketThreshold = (atr > 0) ? (atr * 0.05) : (asset.Contains("JPY") ? 0.001 : 0.00001); int maxZeroCandles = isSubMinute ? 14 : 10;
+        if (priceRange < deadMarketThreshold || zeroRangeCount >= maxZeroCandles)
         {
             BotLogger.Warn($"[Gatekeeper] Market is completely flat / frozen. PriceRange={priceRange}, ZeroRangeCandles={zeroRangeCount}/15. Aborting analysis.");
             return new GatekeeperResult(false, "⚠️ Рынок в состоянии застоя (искусственные или пустые свечи).\n\nДля пар кроме EUR/USD на субминутных таймфреймах (s5-s30) необходим платный API-ключ TwelveData (бесплатный тариф транслирует WebSocket тики только для EUR/USD).", atr, adx);
