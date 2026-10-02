@@ -111,10 +111,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(cleanAsset, timeframe, mainPrices, candles);
         gatekeeperSw.Stop();
         
-        if (!gatekeeper.IsTradeable)
+        bool isRiskBlocked = !gatekeeper.IsTradeable;
+        if (isRiskBlocked)
         {
             _logger.LogWarning("[TRACE {TraceId}] Risk Gatekeeper blocked trade: {Reason}", traceId, gatekeeper.Reason);
-            throw new Exception(gatekeeper.Reason);
+            // DO NOT THROW. We need to compute features to save negative (HOLD) samples!
         }
         traceLines.Add($"[2. Gatekeeper]      Риск-контроль пройден ({(string.IsNullOrEmpty(gatekeeper.Reason) ? "Волатильность в норме" : gatekeeper.Reason)}) -> {gatekeeperSw.ElapsedMilliseconds}ms");
 
@@ -240,6 +241,11 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         // RECORD (Fire and forget) ONLY IF CONFIDENCE IS HIGH ENOUGH
         int targetHorizon = timeout.TimeoutCandles;
+        if (isRiskBlocked)
+        {
+             consensus = consensus with { Probability = 0, FinalDirection = "NEUTRAL" }; // Force into HOLD block
+        }
+        
         if (consensus.Probability >= 53)
         {
             var mlFeatures = new {

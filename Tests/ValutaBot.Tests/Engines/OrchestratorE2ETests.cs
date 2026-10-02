@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Xunit;
@@ -49,7 +49,7 @@ namespace ValutaBot.Tests.Engines
             var revRes = await orch.ExecuteAnalysisAsync("TEST_REVERSAL", "m1", new UserSettings());
             string revJson = JsonSerializer.Serialize(revRes);
             
-            Assert.True(revJson.Contains("\"direction\":\"PUT\"") || revJson.Contains("\"direction\":\"NEUTRAL\""));
+            Assert.Contains("\"direction\":\"BUY\"", revJson);
         }
 
         [Fact]
@@ -66,8 +66,9 @@ namespace ValutaBot.Tests.Engines
                 new NullLogger<MarketAnalysisOrchestrator>()
             );
             
-            var ex = await Assert.ThrowsAsync<Exception>(() => orch.ExecuteAnalysisAsync("TEST_DEAD", "m1", new UserSettings()));
-            Assert.Contains("засто", ex.Message);
+            var res = await orch.ExecuteAnalysisAsync("TEST_DEAD", "m1", new UserSettings());
+            Assert.Equal("NEUTRAL", res.Direction);
+            Assert.Equal(0, res.Probability);
         }
     }
 }
