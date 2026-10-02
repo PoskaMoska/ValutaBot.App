@@ -1,4 +1,4 @@
-using ValutaBot.Core;
+﻿using ValutaBot.Core;
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
@@ -152,7 +152,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         // ML
         var mlSw = Stopwatch.StartNew();
-        var mlPrediction = await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult, ofResult);
+        var mlPrediction = _settings.EnableMachineLearning ? await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult, ofResult) : null;
         string lgbmDir = "NEUTRAL";
         double lgbmConf = 0.5;
         if (mlPrediction != null) {
