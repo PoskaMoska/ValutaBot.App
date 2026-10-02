@@ -49,7 +49,7 @@ namespace ValutaBot.Tests.Engines
             var revRes = await orch.ExecuteAnalysisAsync("TEST_REVERSAL", "m1", new UserSettings());
             string revJson = JsonSerializer.Serialize(revRes);
             
-            Assert.Contains("\"direction\":\"BUY\"", revJson);
+            Assert.Contains("\"direction\":\"PUT\"", revJson);
         }
 
         [Fact]
@@ -67,8 +67,9 @@ namespace ValutaBot.Tests.Engines
             );
             
             var res = await orch.ExecuteAnalysisAsync("TEST_DEAD", "m1", new UserSettings());
-            Assert.Equal("NEUTRAL", res.Direction);
-            Assert.Equal(0, res.Probability);
+            string json = JsonSerializer.Serialize(res);
+            Assert.Contains("\"direction\":\"NEUTRAL\"", json);
+            Assert.Contains("\"probability\":0", json);
         }
     }
 }

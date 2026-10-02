@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Threading.Tasks;
 using ValutaBot.MiniApp;
@@ -12,7 +12,7 @@ namespace ValutaBot.MiniApp.Tests
             var candles = new MiniAppController.OhlcCandle[200];
             string sym = originalAsset ?? symbol ?? "";
             
-            if (sym.Contains("TEST_DEAD"))
+            if (sym.Contains("TEST_DEAD") || sym.Contains("TESTDEAD"))
             {
                 for(int i = 0; i < 200; i++)
                     candles[i] = new MiniAppController.OhlcCandle(1.0, 1.0, 1.0, 1.0, 0, DateTime.UtcNow.AddMinutes(i - 200));
@@ -25,16 +25,16 @@ namespace ValutaBot.MiniApp.Tests
             {
                 double change = (r.NextDouble() - 0.5) * 0.0010;
                 
-                if (sym.Contains("TEST_TREND")) 
+                if ((sym.Contains("TEST_TREND") || sym.Contains("TESTTREND"))) 
                     change = 0.0005; // Constant upward trend
-                else if (sym.Contains("TEST_REVERSAL")) 
+                else if ((sym.Contains("TEST_REVERSAL") || sym.Contains("TESTREVERSAL"))) 
                     change = i > 180 ? -0.0020 : 0.0005; // Upward then sharp crash
 
                 double o = price;
                 double c = price + change;
-                double h = Math.Max(o, c) + (sym.Contains("TEST_DEAD") ? 0 : r.NextDouble() * 0.0005);
-                double l = Math.Min(o, c) - (sym.Contains("TEST_DEAD") ? 0 : r.NextDouble() * 0.0005);
-                double vol = sym.Contains("TEST_REVERSAL") && i > 180 ? 5000 : r.Next(100, 1000);
+                double h = Math.Max(o, c) + ((sym.Contains("TEST_DEAD") || sym.Contains("TESTDEAD")) ? 0 : r.NextDouble() * 0.0005);
+                double l = Math.Min(o, c) - ((sym.Contains("TEST_DEAD") || sym.Contains("TESTDEAD")) ? 0 : r.NextDouble() * 0.0005);
+                double vol = (sym.Contains("TEST_REVERSAL") || sym.Contains("TESTREVERSAL")) && i > 180 ? 5000 : r.Next(100, 1000);
                 
                 candles[i] = new MiniAppController.OhlcCandle(o, h, l, c, vol, DateTime.UtcNow.AddMinutes(i - 200));
                 price = c;
