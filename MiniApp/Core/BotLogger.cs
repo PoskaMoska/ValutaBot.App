@@ -4,12 +4,13 @@ using System.Text;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Telegram.Bot;
 
 namespace ValutaBot.MiniApp;
 
 /// <summary>
 /// High-performance non-blocking logger using System.Threading.Channels.
-/// Writes to the console immediately, but queues file I/O to a background worker to avoid blocking the calling thread.
+/// Writes to the console immediately, queues file I/O, and asynchronously sends ERRORS to Telegram.
 /// </summary>
 public static class BotLogger
 {
@@ -23,6 +24,16 @@ public static class BotLogger
         FullMode = BoundedChannelFullMode.DropOldest
     });
 
+    // Separate channel for Telegram alerts (smaller buffer, drops oldest if spamming)
+    private static readonly Channel<string> _tgAlertChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(100)
+    {
+        SingleReader = true,
+        SingleWriter = false,
+        FullMode = BoundedChannelFullMode.DropOldest
+    });
+
+    private static long _adminChatId = 0;
+
     static BotLogger()
     {
         try
@@ -35,8 +46,16 @@ public static class BotLogger
         }
         catch { /* Fallback to console only if filesystem restricts directory creation */ }
 
-        // Start background writer thread
+        // Attempt to parse ADMIN_CHAT_ID for Telegram routing
+        var adminIdStr = Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? Environment.GetEnvironmentVariable("TG_ADMIN_ID");
+        if (long.TryParse(adminIdStr, out long parsedId))
+        {
+            _adminChatId = parsedId;
+        }
+
+        // Start background worker threads
         Task.Factory.StartNew(ProcessLogsAsync, TaskCreationOptions.LongRunning);
+        Task.Factory.StartNew(ProcessTelegramAlertsAsync, TaskCreationOptions.LongRunning);
     }
 
     private static async Task ProcessLogsAsync()
@@ -69,13 +88,50 @@ public static class BotLogger
         catch { /* Process failure safety */ }
     }
 
+    private static async Task ProcessTelegramAlertsAsync()
+    {
+        try
+        {
+            await foreach (var alert in _tgAlertChannel.Reader.ReadAllAsync())
+            {
+                var botClient = TelegramNotifier.GetBotClient();
+                if (botClient != null && _adminChatId != 0)
+                {
+                    try
+                    {
+                        // Sanitize length for Telegram message limits (max 4096)
+                        string msg = alert.Length > 4000 ? alert.Substring(0, 4000) + "..." : alert;
+                        await botClient.SendTextMessageAsync(_adminChatId, $"вљ пёЏ *SYSTEM ALERT*\n```\n{msg}\n```", Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                    }
+                    catch { /* Ignore telegram send errors (network drop, blocked bot) */ }
+                }
+                
+                // Rate limit telegram messages to avoid API bans (max ~1 per sec for notifications)
+                await Task.Delay(1000);
+            }
+        }
+        catch { /* Process failure safety */ }
+    }
+
     public static void Info(string message) => Log("INFO", message);
     
     public static void Warn(string message, Exception? ex = null) => 
         Log("WARN", ex != null ? $"{message} | Exception: {ex.Message}" : message);
 
-    public static void Error(string message, Exception? ex = null) => 
-        Log("ERR", ex != null ? $"{message} | Details: {ex.Message}\n{ex.StackTrace}" : message);
+    public static void Error(string message, Exception? ex = null)
+    {
+        string fullMessage = ex != null ? $"{message} | Details: {ex.Message}\n{ex.StackTrace}" : message;
+        Log("ERR", fullMessage);
+        
+        // Queue to telegram dispatcher
+        _tgAlertChannel.Writer.TryWrite(fullMessage);
+    }
+
+    public static void NotifyAdmin(string message)
+    {
+        Log("NOTIFY", message);
+        _tgAlertChannel.Writer.TryWrite(message);
+    }
 
     private static void Log(string level, string message)
     {
