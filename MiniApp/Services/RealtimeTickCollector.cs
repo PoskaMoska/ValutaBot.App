@@ -170,6 +170,7 @@ namespace ValutaBot.MiniApp
             try
             {
                 string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+                string dbInterval = interval == "m1" ? "1min" : interval;
 
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 await conn.OpenAsync();
@@ -180,7 +181,7 @@ namespace ValutaBot.MiniApp
                     WHERE asset = @Asset AND interval = @Interval
                     ORDER BY open_time DESC
                     LIMIT @Limit;
-                ", new { Asset = cleanAsset, Interval = interval, Limit = limit })).ToList();
+                ", new { Asset = cleanAsset, Interval = dbInterval, Limit = limit })).ToList();
 
                 ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch
                 {
