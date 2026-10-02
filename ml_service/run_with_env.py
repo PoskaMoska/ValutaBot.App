@@ -7,4 +7,5 @@ os.environ['TARGET_HORIZON_CANDLES'] = '1'
 os.environ['MIN_CONFIDENCE'] = '0.60'
 os.chdir(r'C:\Users\bural\source\repos\ValutaBot.App\ml_service')
 sys.path.insert(0, r'C:\Users\bural\source\repos\ValutaBot.App\ml_service')
-exec(open(r'C:\Users\bural\source\repos\ValutaBot.App\ml_service\main.py').read())
+exec(open(r'C:\Users\bural\source\repos\ValutaBot.App\ml_service\main.py', encoding='utf-8').read())
+
