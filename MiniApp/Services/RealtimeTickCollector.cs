@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -175,7 +175,7 @@ namespace ValutaBot.MiniApp
                 await conn.OpenAsync();
                 
                 var records = (await Dapper.SqlMapper.QueryAsync(conn, @"
-                    SELECT open_time as OpenTime, open_price as Open, high_price as High, low_price as Low, close_price as Close, volume as Volume
+                    SELECT open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume""
                     FROM subminute_candles
                     WHERE asset = @Asset AND interval = @Interval
                     ORDER BY open_time DESC
