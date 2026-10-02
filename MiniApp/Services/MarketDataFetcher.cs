@@ -120,10 +120,10 @@ public class MarketDataFetcher
         }
 
         // For sub-minute and m1 timeframes, first try live ticks from the DB to bypass REST caching
-        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase) || rawInterval == "m1" || rawInterval == "1min")
+        if (rawInterval.StartsWith("s", StringComparison.OrdinalIgnoreCase) || rawInterval.Equals("m1", StringComparison.OrdinalIgnoreCase) || rawInterval.Equals("1min", StringComparison.OrdinalIgnoreCase))
         {
             string cleanKey = cleanAsset.Replace("/", "").ToUpper();
-            var liveCandles = await RealtimeTickCollector.GetRecentCandles(cleanKey, rawInterval, limit);
+            var liveCandles = await RealtimeTickCollector.GetRecentCandles(cleanKey, rawInterval.ToLower(), limit);
 
             if (liveCandles.Length >= limit || liveCandles.Length >= 25)
             {
@@ -141,7 +141,7 @@ public class MarketDataFetcher
                 }
             }
 
-            if (rawInterval == "1min") {
+            if (rawInterval.Equals("1min", StringComparison.OrdinalIgnoreCase)) {
                 BotLogger.Warn("[MarketDataFetcher] WALL OFF: Prevented Tiingo API call for 1min. Returning incomplete local candles to save limits.");
                 return liveCandles;
             }
