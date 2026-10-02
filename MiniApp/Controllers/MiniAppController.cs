@@ -112,7 +112,6 @@ public static partial class MiniAppController
 builder.Services.AddHostedService<ValutaBot.MiniApp.Services.NewsCalendarService>(p => (ValutaBot.MiniApp.Services.NewsCalendarService)p.GetRequiredService<ValutaBot.MiniApp.Services.INewsCalendarService>());
 builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerService>(); // Dual-engine architecture (fast subminute, slow m1)
 
-        builder.Services.AddHttpClient("TwelveData").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("MLPythonService", client => 
         {

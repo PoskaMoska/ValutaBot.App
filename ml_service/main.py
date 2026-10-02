@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
     _process_pool = ProcessPoolExecutor(max_workers=2)
     log.info("[Startup] Launching background pre-training for all timeframes...")
     asyncio.create_task(_train_all())
-    asyncio.create_task(_auto_crawler_loop())
+    # asyncio.create_task(_auto_crawler_loop()) # DISABLING: TwelveData uses too many credits; Tiingo WS fills DB now
     asyncio.create_task(_weekly_global_retrain_loop())
     yield
     if _process_pool is not None:
