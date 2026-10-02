@@ -802,8 +802,19 @@ def feedback(req: TrainFeedback, background_tasks: BackgroundTasks):
             # Use canonical normalizer (same as /predict).
             norm_interval = _normalize_interval(req.timeframe)
             from model import ForexPredictor
-            regime = "TREND"
             recent_candles = _fetch_candles_at_entry(req.asset, norm_interval, req.timestamp, limit=200)
+            # Fix: was hardcoded to "TREND" — FLAT/CHAOS SGD never received updates.
+            # Now dynamically infer regime from candles, same logic as /predict endpoint.
+            try:
+                from model import get_regime_router, build_features
+                if len(recent_candles) >= 10:
+                    router = get_regime_router(req.asset, norm_interval)
+                    feats = build_features(recent_candles, [])
+                    regime = router.predict_live(feats.iloc[-10:]) if not feats.empty else "ALL"
+                else:
+                    regime = "ALL"
+            except Exception:
+                regime = "ALL"
             predictor = _get_predictor(req.asset, norm_interval, regime)
             higher_tf = predictor._get_higher_tf()
             mtf_candles = _fetch_candles_at_entry(req.asset, higher_tf, req.timestamp, limit=100)

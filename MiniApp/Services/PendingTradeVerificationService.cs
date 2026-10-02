@@ -62,7 +62,7 @@ public class PendingTradeVerificationService : BackgroundService
 
         try
         {
-            string cleanAsset = record.Asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+            string cleanAsset = record.Asset.ToUpper().Replace("/", "").Replace("-", "").Replace(" OTC", "").Replace("_OTC", "");
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
             
