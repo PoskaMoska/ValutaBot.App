@@ -53,7 +53,7 @@ SGD_MODEL_DIR = MODEL_DIR / "sgd"
 # FIX PRIORITY-3: Горизонт изменён с 5 на 3 свечи. 
 # TradeTimeoutEngine возвращает в среднем 3 свечи для сделки.
 # Прежние 5 свечей создавали систематическую ошибку прогнозирования (разрыв шаблонов).
-TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "3"))
+TARGET_HORIZON_CANDLES = int(os.environ.get("TARGET_HORIZON_CANDLES", "1"))
 RETRAIN_INTERVAL_H = int(os.environ.get("RETRAIN_INTERVAL_H", "168")) # 1 неделя
 SGD_WEIGHT_MAX = float(os.environ.get("SGD_WEIGHT_MAX", "0.05")) # 5% вклад онлайн-обучения
 MAX_HISTORICAL_CANDLES = int(os.getenv("MAX_HISTORICAL_CANDLES", "250000"))  # Full dataset for local training; set to 20000 on Railway via env var
