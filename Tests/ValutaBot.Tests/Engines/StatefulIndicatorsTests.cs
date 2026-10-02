@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Xunit;
 using ValutaBot.MiniApp.Indicators;
 using ValutaBot.MiniApp;
@@ -141,8 +141,8 @@ namespace ValutaBot.Tests.Engines
         {
             var engine = new TechnicalAnalysisEngine();
             double[] prices = new double[20];
-            // Price range is 0.00002, which is less than EURUSD fallback threshold (0.00005)
-            for (int i = 0; i < 20; i++) prices[i] = 1.10000 + (i % 2 == 0 ? 0.00002 : 0);
+            // Price range is 0.000005, which is less than the new EURUSD fallback threshold (0.00001)
+            for (int i = 0; i < 20; i++) prices[i] = 1.10000 + (i % 2 == 0 ? 0.000005 : 0);
             
             var result = engine.ValidateMarketGatekeeper("EURUSD", "1m", prices);
             Assert.False(result.IsTradeable);
