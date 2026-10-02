@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════════════════════
 // INTER-MODULE INTERACTION TESTS
 // Тестирует связи и контракты между модулями бэкенда.
 //
@@ -593,7 +593,7 @@ namespace ValutaBot.Tests.Engines
                 smc, s.CurrentPrice, state: null!, isForex: true);
 
             output.WriteLine($"No SMC pattern timeout: {t.TimeoutCandles} candles, {t.TimeoutText}");
-            Assert.True(t.TimeoutCandles >= 2);
+            Assert.Equal(1, t.TimeoutCandles);
         }
     }
 

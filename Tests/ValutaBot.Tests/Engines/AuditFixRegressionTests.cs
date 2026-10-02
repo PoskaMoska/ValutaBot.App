@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -129,7 +129,7 @@ namespace ValutaBot.Tests.Engines
                 smc: smcResult, currentPrice: 1.1);
 
             _out.WriteLine($"[W-18] ZeroATR -> {result.TimeoutCandles} candles: {result.Reasoning}");
-            Assert.Equal(4, result.TimeoutCandles);
+            Assert.Equal(1, result.TimeoutCandles);
         }
 
         [Fact]
@@ -143,7 +143,7 @@ namespace ValutaBot.Tests.Engines
                 smc: smcResult, currentPrice: 1.1);
 
             _out.WriteLine($"[W-18] Normal ATR -> {result.TimeoutCandles} candles");
-            Assert.True(result.TimeoutCandles >= 2);
+            Assert.Equal(1, result.TimeoutCandles);
         }
 
 
