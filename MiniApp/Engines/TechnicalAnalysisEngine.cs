@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 
 namespace ValutaBot.MiniApp;
@@ -271,6 +271,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         }
         
         double priceRange = maxPrice - minPrice;
+        if (priceRange > 1.0) BotLogger.Warn($"[Gatekeeper Debug] min={minPrice}, max={maxPrice}. Last 15 prices: " + string.Join(", ", prices.Slice(prices.Length - 15).ToArray()));
         // Fix: when ATR = 0 (not yet warmed up), fallback to an asset-appropriate
         // minimum pip range so the dead-market check is never silently disabled.
         int zeroRangeCount = 0;

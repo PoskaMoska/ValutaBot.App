@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -119,7 +119,7 @@ public class AutoTradingScannerService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
+                if (ex.Message.Contains("Рынок в состоянии застоя")) _logger.LogWarning($"[AutoScanner-Fast] Blocked: {ex.Message}"); else _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
             }
 
             // Fast loop: 10 seconds between checks (safe because it relies on local RAM/DB)
