@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -101,7 +101,7 @@ public static class BotLogger
                     {
                         // Sanitize length for Telegram message limits (max 4096)
                         string msg = alert.Length > 4000 ? alert.Substring(0, 4000) + "..." : alert;
-                        await botClient.SendTextMessageAsync(_adminChatId, $"вљ пёЏ *SYSTEM ALERT*\n```\n{msg}\n```", Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                        await botClient.SendTextMessageAsync(chatId: _adminChatId, text: $"⚠️ *SYSTEM ALERT*\n```\n{msg}\n```", parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
                     }
                     catch { /* Ignore telegram send errors (network drop, blocked bot) */ }
                 }
