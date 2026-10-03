@@ -58,11 +58,17 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         smc = Math.Clamp(smc, -1.0, 1.0);
         ml = Math.Clamp(ml, -1.0, 1.0);
 
-        // Phase 3: Bayesian Log-Odds Transformation
+        // Phase 3: Adaptive Bayesian Log-Odds Transformation
         // Raw inputs [-1.0, 1.0] are mapped to probabilities, then to log-odds.
+        // ADAPTIVE FIX: By capping the internal probability strictly to [0.15, 0.85], 
+        // we prevent discrete inputs (like SMC = 1.0) from exploding to infinity (+5.29)
+        // and unilaterally crushing smooth probability models (like ML = 0.72).
         double LogOdds(double val) 
         {
-            double p = (Math.Clamp(val, -0.99, 0.99) + 1.0) / 2.0;
+            // Map [-1, 1] to [0, 1]
+            double p = (val + 1.0) / 2.0;
+            // Cap to avoid extreme log-odds dominance
+            p = Math.Clamp(p, 0.15, 0.85); 
             return Math.Log(p / (1.0 - p));
         }
 
@@ -97,10 +103,11 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         smc = Math.Clamp(smc, -1.0, 1.0);
         ml = Math.Clamp(ml, -1.0, 1.0);
 
-        // Phase 3: Bayesian Log-Odds Transformation
+        // Phase 3: Adaptive Bayesian Log-Odds Transformation
         double LogOdds(double val) 
         {
-            double prob = (Math.Clamp(val, -0.99, 0.99) + 1.0) / 2.0;
+            double prob = (val + 1.0) / 2.0;
+            prob = Math.Clamp(prob, 0.15, 0.85);
             return Math.Log(prob / (1.0 - prob));
         }
 
@@ -143,10 +150,13 @@ public class OnlineMetaLearner : IOnlineMetaLearner
             w[4] += lr * error * lo_ml;
 
             // Cap L1 Norm
+            // ADAPTIVE FIX: Never allow weights to become negative.
+            // If a weight is negative, the MetaLearner will output the exact OPPOSITE of the module's signal.
+            // If a module is performing poorly, its weight should drop to near 0, but not invert.
             for (int i = 1; i < w.Length; i++)
             {
                 if (w[i] > 4.0) w[i] = 4.0;
-                if (w[i] < -4.0) w[i] = -4.0;
+                if (w[i] < 0.05) w[i] = 0.05;
             }
         }
 

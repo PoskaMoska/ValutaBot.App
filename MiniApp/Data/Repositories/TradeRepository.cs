@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -17,6 +17,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public double ExitPrice { get; set; }
         public double PnlBps { get; set; }
         public bool WasWin { get; set; }
+        public int Probability { get; set; }
         public double TaScore { get; set; }
         public double OfScore { get; set; }
         public double SmcScore { get; set; }
@@ -112,9 +113,9 @@ FROM outcome_data;");
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                     INSERT INTO trade_outcomes 
-                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
+                    (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
                     ON CONFLICT (id) DO NOTHING", outcomes); // Dapper handles the loop
             }
@@ -132,14 +133,15 @@ FROM outcome_data;");
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                     INSERT INTO trade_outcomes 
-                    (id, asset, timeframe, direction, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
+                    (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
                         timeframe = EXCLUDED.timeframe,
                         direction = EXCLUDED.direction,
+                        probability = EXCLUDED.probability,
                         entry_price = EXCLUDED.entry_price,
                         exit_price = EXCLUDED.exit_price,
                         pnl_bps = EXCLUDED.pnl_bps,
@@ -245,8 +247,8 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             using var conn = DbConnectionFactory.GetConnection();
             await conn.ExecuteAsync(@"
-                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, ta_score, of_score, smc_score, ml_prob, ml_score, features_json)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson)
+                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, features_json)
+                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson)
                 ON CONFLICT (id) DO NOTHING", 
                 new {
                     record.Id,
@@ -258,6 +260,7 @@ FROM outcome_data;");
                     CreatedAtStr = record.CreatedAt.ToString("o"),
                     VerifyAtStr = record.VerifyAt.ToString("o"),
                     record.IsForex,
+                    record.Probability,
                     SourceDirectionsStr = System.Text.Json.JsonSerializer.Serialize(record.SourceDirections, ValutaBotJsonContext.Default.DictionaryStringString),
                     record.TaScore,
                     record.OfScore,

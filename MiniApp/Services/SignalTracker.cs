@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+п»їusing System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -15,7 +15,7 @@ public static class SignalTracker
 {
     // Cooldown map using MemoryCache to automatically handle expiry without O(N) sweeping
     private static readonly Microsoft.Extensions.Caching.Memory.MemoryCache _cooldownCache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
-    // FIX #6: internal чтобы PendingTradeVerificationService мог читать цены без дублирования кода
+    // FIX #6: internal пїЅпїЅпїЅпїЅпїЅ PendingTradeVerificationService пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
     internal static readonly ConcurrentDictionary<string, double> _livePrices = new();
 
     public static void UpdateLivePrice(string asset, double price)
@@ -42,6 +42,7 @@ public static class SignalTracker
         int timeframeSecs = 60,
         bool isForex = false,
         Dictionary<string, string>? sourceDirections = null,
+        int probability = 50,
         double taScore = 0.0,
         double ofScore = 0.0,
         double smcScore = 0.0,
@@ -67,8 +68,8 @@ public static class SignalTracker
             return;
         }
 
-        // FIX PRIORITY-6: Cooldown увеличен до 10 секунд
-        // MemoryCache автоматически удалит ключ через 10 секунд без ручного O(N) прохода сборщика мусора.
+        // FIX PRIORITY-6: Cooldown пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ 10 пїЅпїЅпїЅпїЅпїЅпїЅ
+        // MemoryCache пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ 10 пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ O(N) пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ.
         int cooldownCandles = Math.Max(expiryCandles, 3); _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(cooldownCandles * timeframeSecs));
 
         var record = new PredictionRecord
@@ -83,6 +84,7 @@ public static class SignalTracker
             VerifyAt    = verifyAt,
             IsForex     = isForex,
             SourceDirections = sourceDirections ?? new Dictionary<string, string>(),
+            Probability = probability,
             TaScore = taScore,
             OfScore = ofScore,
             SmcScore = smcScore,
@@ -96,7 +98,7 @@ public static class SignalTracker
         // Local Task.Run verification removed. PendingTradeVerificationService handles all verifications.
 
         Console.WriteLine($"[Tracker] Recorded {direction} {asset}/{timeframe} @ {price:F5} " +
-                          $"— target verify at {verifyAt:HH:mm:ss}");
+                          $"пїЅ target verify at {verifyAt:HH:mm:ss}");
     }
 
     // ---------------- Public Read API --------------------------------------------------------
@@ -210,6 +212,7 @@ public static class SignalTracker
         public bool?    WasCorrect    { get; set; }
         public Dictionary<string, string> SourceDirections { get; set; } = new();
         
+        public int Probability { get; set; }
         public double TaScore { get; set; }
         public double OfScore { get; set; }
         public double SmcScore { get; set; }

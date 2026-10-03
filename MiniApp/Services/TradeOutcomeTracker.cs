@@ -1,4 +1,4 @@
-using ValutaBot.App.MiniApp.Data.Repositories;
+﻿using ValutaBot.App.MiniApp.Data.Repositories;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -73,6 +73,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 Asset = record.Asset,
                 Timeframe = record.Timeframe,
                 Direction = record.Direction,
+                Probability = record.Probability,
                 EntryPrice = record.EntryPrice,
                 ExitPrice = record.ExitPrice ?? record.EntryPrice,
                 PnlBps = record.PnlBps,
