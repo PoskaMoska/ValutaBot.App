@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,7 +21,7 @@ public class AutoTradingScannerService : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AutoTradingScannerService> _logger;
     private readonly ICircuitBreakerService _circuitBreaker;
-    private static readonly string[] _targetPairs = { "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD" };
+    private static readonly string[] _targetPairs = { "EURUSD", "GBPUSD", "USDJPY", "AUDUSD" };
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
 
