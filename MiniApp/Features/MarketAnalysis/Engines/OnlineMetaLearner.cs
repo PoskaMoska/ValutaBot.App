@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
@@ -175,7 +175,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                 var dict = JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, double[]>>(json);
                 if (dict != null)
                 {
-                    foreach (var kvp in dict) _weights[kvp.Key] = kvp.Value;
+                    foreach (var kvp in dict) { var w = kvp.Value; for (int i = 1; i < w.Length; i++) { if (w[i] < 0.05) w[i] = 0.05; if (w[i] > 4.0) w[i] = 4.0; } _weights[kvp.Key] = w; }
                 }
             }
         }
