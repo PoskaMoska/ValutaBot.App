@@ -49,6 +49,10 @@ public static partial class MiniAppController
             Args = args,
             WebRootPath = System.IO.Path.Combine(AppContext.BaseDirectory, "MiniApp", "wwwroot")
         });
+
+        // Security: HttpClient logs full request URLs at Information level. The Telegram API URL
+        // contains the bot token, so keep these categories at Warning to avoid leaking it into logs.
+        builder.Logging.AddFilter("System.Net.Http.HttpClient", Microsoft.Extensions.Logging.LogLevel.Warning);
         
         var botSettings = builder.Configuration.GetSection("TradingBotSettings").Get<TradingBotSettings>() ?? new TradingBotSettings();
         builder.Services.Configure<TradingBotSettings>(builder.Configuration.GetSection("TradingBotSettings"));
