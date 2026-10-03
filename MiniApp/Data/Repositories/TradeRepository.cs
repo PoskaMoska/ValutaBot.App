@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -173,6 +173,7 @@ FROM outcome_data;");
                     outcome.SmcScore,
                     outcome.MlProb,
                     outcome.MlScore,
+                    outcome.FeaturesJson,
                     outcome.CreatedAt,
                     outcome.VerifiedAt,
                     outcome.SmcBosDir,

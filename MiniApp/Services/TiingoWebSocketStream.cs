@@ -13,14 +13,25 @@ namespace ValutaBot.MiniApp;
 /// WebSocket client for Tiingo.
 /// Connects to wss://api.tiingo.com/fx to stream real-time forex ticks for all pairs.
 /// Feeds ticks into RealtimeTickCollector for mathematically pure subminute candle generation.
+///
+/// Lifecycle invariant: at most ONE connection loop exists per process. All reconnects
+/// happen by iterating that single loop (with backoff) — never by spawning another loop.
 /// </summary>
 public static class TiingoWebSocketStream
 {
     private static ClientWebSocket? _webSocket;
     private static CancellationTokenSource _cts = new CancellationTokenSource();
     private static string[] _subscribedSymbols = Array.Empty<string>();
-    private static bool _isConnecting = false;
     private static DateTime _lastMessageTime = DateTime.UtcNow;
+
+    // 0 = no loop running, 1 = loop running. Guarantees a single connection loop.
+    private static int _loopRunning = 0;
+
+    // Cancelled by the watchdog to drop the CURRENT connection; the single loop then reconnects.
+    private static CancellationTokenSource? _connectionCts;
+
+    private const int MinBackoffMs = 5_000;
+    private const int MaxBackoffMs = 60_000;
 
     // Live price store: last tick per symbol
     private static readonly ConcurrentDictionary<string, double> _livePrices = new(StringComparer.OrdinalIgnoreCase);
@@ -32,101 +43,138 @@ public static class TiingoWebSocketStream
 
     public static void StartStream(string[] symbols)
     {
+        // Single-loop guard: a second StartStream call must not create a second connection.
+        if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) != 0)
+        {
+            BotLogger.Warn("[Tiingo WS] StartStream called while a stream loop is already running. Ignored.");
+            return;
+        }
+
         _subscribedSymbols = symbols.Select(s => AssetSanitizer.Sanitize(s).ToLower()).ToArray();
         _cts = new CancellationTokenSource();
-        _ = ConnectAndListenAsync();
-        _ = WatchdogLoopAsync();
+        _ = RunConnectionLoopAsync(_cts.Token);
+        _ = WatchdogLoopAsync(_cts.Token);
     }
 
     public static void StopStream()
     {
         _cts.Cancel();
-        if (_webSocket != null && _webSocket.State == WebSocketState.Open)
+        try { _connectionCts?.Cancel(); } catch { }
+        var ws = _webSocket;
+        if (ws != null && ws.State == WebSocketState.Open)
         {
-            _ = _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", CancellationToken.None);
+            _ = ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", CancellationToken.None);
         }
     }
 
-    private static async Task WatchdogLoopAsync()
+    private static async Task WatchdogLoopAsync(CancellationToken token)
     {
-        while (!_cts.IsCancellationRequested)
+        try
         {
-            await Task.Delay(15000); // Check every 15s
-
-            bool isDead = (DateTime.UtcNow - _lastMessageTime).TotalSeconds > 60;
-            if (isDead && _webSocket?.State == WebSocketState.Open)
+            while (!token.IsCancellationRequested)
             {
-                BotLogger.Warn("[Tiingo WS] Watchdog detected silent drop (no ticks for >60s). Reconnecting...");
-                try { _webSocket.Dispose(); } catch { }
-                _webSocket = null;
-                _isConnecting = false;
-                _ = ConnectAndListenAsync();
+                await Task.Delay(15000, token); // Check every 15s
+
+                bool isDead = (DateTime.UtcNow - _lastMessageTime).TotalSeconds > 60;
+                if (isDead && _webSocket?.State == WebSocketState.Open)
+                {
+                    BotLogger.Warn("[Tiingo WS] Watchdog detected silent drop (no ticks for >60s). Dropping connection to force reconnect...");
+                    // Do NOT start another loop: cancel the current connection and let the single loop reconnect.
+                    try { _connectionCts?.Cancel(); } catch { }
+                }
             }
         }
+        catch (OperationCanceledException) { /* shutdown */ }
     }
 
-    private static async Task ConnectAndListenAsync()
+    /// <summary>
+    /// The one and only connection loop. Each iteration owns exactly one socket (local variable),
+    /// so concurrent receivers on a shared socket are impossible.
+    /// </summary>
+    private static async Task RunConnectionLoopAsync(CancellationToken token)
     {
-        if (_isConnecting) return;
-        _isConnecting = true;
-
         string apiKey = TiingoService.GetApiKey();
         if (string.IsNullOrEmpty(apiKey))
         {
             BotLogger.Error("[Tiingo WS] TIINGO_API_KEY is missing. WS Aborted.");
-            _isConnecting = false;
+            Interlocked.Exchange(ref _loopRunning, 0);
             return;
         }
 
-        while (!_cts.IsCancellationRequested)
+        int backoffMs = MinBackoffMs;
+
+        try
         {
-            try
+            while (!token.IsCancellationRequested)
             {
-                _webSocket = new ClientWebSocket();
-                _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
-                
-                await _webSocket.ConnectAsync(new Uri("wss://api.tiingo.com/fx"), _cts.Token);
-                BotLogger.Info("[Tiingo WS] Connected!");
-                _lastMessageTime = DateTime.UtcNow;
+                bool wasConnected = false;
+                using var connCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                _connectionCts = connCts;
+                var ws = new ClientWebSocket();
+                ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+                _webSocket = ws;
 
-                var subscribeMessage = new
+                try
                 {
-                    eventName = "subscribe",
-                    authorization = apiKey,
-                    eventData = new
+                    await ws.ConnectAsync(new Uri("wss://api.tiingo.com/fx"), connCts.Token);
+                    BotLogger.Info("[Tiingo WS] Connected!");
+                    wasConnected = true;
+                    _lastMessageTime = DateTime.UtcNow;
+
+                    var subscribeMessage = new
                     {
-                        thresholdLevel = 5,
-                        tickers = _subscribedSymbols
-                    }
-                };
+                        eventName = "subscribe",
+                        authorization = apiKey,
+                        eventData = new
+                        {
+                            thresholdLevel = 5,
+                            tickers = _subscribedSymbols
+                        }
+                    };
 
-                string jsonSub = JsonSerializer.Serialize(subscribeMessage);
-                await _webSocket.SendAsync(Encoding.UTF8.GetBytes(jsonSub), WebSocketMessageType.Text, true, _cts.Token);
+                    string jsonSub = JsonSerializer.Serialize(subscribeMessage);
+                    await ws.SendAsync(Encoding.UTF8.GetBytes(jsonSub), WebSocketMessageType.Text, true, connCts.Token);
 
-                _isConnecting = false;
-                await ReceiveLoopAsync();
+                    await ReceiveLoopAsync(ws, connCts.Token);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    break; // shutdown
+                }
+                catch (Exception ex)
+                {
+                    BotLogger.Error($"[Tiingo WS] Connection error: {ex.Message}. Retrying in {backoffMs / 1000}s...");
+                }
+                finally
+                {
+                    try { ws.Dispose(); } catch { }
+                    if (ReferenceEquals(_webSocket, ws)) _webSocket = null;
+                }
+
+                // A connection that was established resets the backoff; repeated failures back off exponentially.
+                backoffMs = wasConnected ? MinBackoffMs : Math.Min(backoffMs * 2, MaxBackoffMs);
+                await Task.Delay(backoffMs, token);
             }
-            catch (Exception ex)
-            {
-                BotLogger.Error($"[Tiingo WS] Connection error: {ex.Message}. Retrying in 5s...");
-                _isConnecting = false;
-                await Task.Delay(5000, _cts.Token);
-            }
+        }
+        catch (OperationCanceledException) { /* shutdown */ }
+        finally
+        {
+            Interlocked.Exchange(ref _loopRunning, 0);
         }
     }
 
-    private static async Task ReceiveLoopAsync()
+    private static async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken connectionToken)
     {
         var buffer = new byte[8192];
 
         try
         {
-            while (_webSocket?.State == WebSocketState.Open && !_cts.IsCancellationRequested)
+            while (ws.State == WebSocketState.Open && !connectionToken.IsCancellationRequested)
             {
-                using var ctsTimeout = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+                using var ctsTimeout = CancellationTokenSource.CreateLinkedTokenSource(connectionToken);
                 ctsTimeout.CancelAfter(TimeSpan.FromMinutes(2));
 
-                var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ctsTimeout.Token);
+                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ctsTimeout.Token);
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
@@ -136,13 +184,13 @@ public static class TiingoWebSocketStream
 
                 _lastMessageTime = DateTime.UtcNow;
                 string message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                
+
                 // Fast path parsing
                 if (!message.Contains("\"messageType\":\"A\"")) continue;
 
                 using var doc = JsonDocument.Parse(message);
                 var root = doc.RootElement;
-                
+
                 if (root.TryGetProperty("data", out var dataArr) && dataArr.ValueKind == JsonValueKind.Array)
                 {
                     // Tiingo format: [messageType (0), ticker (1), date (2), bidSize (3), bidPrice (4), midPrice (5), askSize (6), askPrice (7)]
@@ -150,7 +198,7 @@ public static class TiingoWebSocketStream
                     {
                         string ticker = dataArr[1].GetString()?.ToUpper() ?? "";
                         double midPrice = dataArr[5].GetDouble();
-                        
+
                         if (midPrice > 0)
                         {
                             _livePrices[ticker] = midPrice;
@@ -162,20 +210,15 @@ public static class TiingoWebSocketStream
         }
         catch (OperationCanceledException)
         {
-            BotLogger.Warn("[Tiingo WS] Receive loop timed out or canceled. Dropping connection to force reconnect.");
+            // Either shutdown, a watchdog-forced drop, or a 2-minute receive timeout.
+            // The single connection loop decides whether to reconnect.
+            if (!connectionToken.IsCancellationRequested)
+                BotLogger.Warn("[Tiingo WS] Receive loop timed out. Dropping connection to force reconnect.");
         }
         catch (Exception ex)
         {
             BotLogger.Error($"[Tiingo WS] Receive error: {ex.Message}");
         }
-        finally
-        {
-            if (_webSocket != null)
-            {
-                try { _webSocket.Dispose(); } catch { }
-                _webSocket = null;
-            }
-            _ = ConnectAndListenAsync();
-        }
+        // No reconnect here. Reconnecting is the sole responsibility of RunConnectionLoopAsync.
     }
 }
