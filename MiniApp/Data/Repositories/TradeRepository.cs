@@ -190,6 +190,14 @@ FROM outcome_data;");
             }
         }
 
+        private static string TimestampToIso(object? value) => value switch
+        {
+            null => "",
+            DateTime dt => dt.ToString("o"),
+            DateTimeOffset dto => dto.ToString("o"),
+            _ => value.ToString() ?? ""
+        };
+
         public static async Task<List<TradeOutcomeRecord>> LoadTradeOutcomesAsync(int limit = 1000)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<TradeOutcomeRecord>();
@@ -221,8 +229,8 @@ FROM outcome_data;");
                     SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,
                     MlProb = r.MlProb != null ? Convert.ToDouble(r.MlProb) : 0.0,
                     MlScore = r.MlScore != null ? Convert.ToDouble(r.MlScore) : 0.0,
-                    CreatedAt = r.CreatedAt ?? "",
-                    VerifiedAt = r.VerifiedAt ?? ""
+                    CreatedAt = TimestampToIso((object?)r.CreatedAt),
+                    VerifiedAt = TimestampToIso((object?)r.VerifiedAt)
                 }).ToList();
             }
             catch (Exception ex)

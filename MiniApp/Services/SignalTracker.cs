@@ -47,7 +47,7 @@ public static class SignalTracker
         double smcScore = 0.0,
         double mlProb = 0.0, double mlScore = 0.0, string featuresJson = "")
     {
-        if (ValutaBot.MiniApp.Services.MarketDataFetcher.IsWeekendNow()) { Console.WriteLine("[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
+        if (MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
         string sym = asset.ToUpper();
         var now = DateTime.UtcNow;
         long currentTicks = now.Ticks;
