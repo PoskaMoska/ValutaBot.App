@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from concurrent.futures import ProcessPoolExecutor
 
-from model import ForexPredictor, TF_MAP, is_forex_symbol, _run_training_worker
+from model import ForexPredictor, TF_MAP, is_forex_symbol, _run_training_worker, MODEL_DIR
 
 _API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
 _process_pool = None
@@ -504,6 +504,23 @@ async def clear_models():
         for pkl in MODEL_DIR.glob("**/*.pkl"):
             pkl.unlink()
             count += 1
+        with _registry_lock:
+            _predictors.clear()
+        return {"status": "ok", "deleted": count}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/debug/clear_sgd")
+async def clear_sgd():
+    """Wipes ONLY the SGD .pkl files to reset poisoned online learning."""
+    from model import SGD_MODEL_DIR
+    try:
+        count = 0
+        for pkl in SGD_MODEL_DIR.glob("**/*.pkl"):
+            pkl.unlink()
+            count += 1
+        with _registry_lock:
+            _predictors.clear()
         return {"status": "ok", "deleted": count}
     except Exception as e:
         return {"status": "error", "message": str(e)}

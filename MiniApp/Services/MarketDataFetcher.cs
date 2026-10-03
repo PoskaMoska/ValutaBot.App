@@ -78,7 +78,7 @@ public class MarketDataFetcher
         "d1" => "h4", _ => null
     };
 
-    private static bool IsWeekendNow()
+    public static bool IsWeekendNow()
     {
         var utcNow = DateTime.UtcNow;
         var dayOfWeek = utcNow.DayOfWeek;
