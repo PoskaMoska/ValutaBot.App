@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
@@ -391,15 +391,15 @@ public class ConfluenceMatrixEngine(
         {
             // Fallback when MetaLearner is offline.
             // Here we apply AutoCalib weights manually.
-            double scaledTa = taScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, MarketRegime.Unknown) : 1.0);
-            double scaledOf = ofScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("OrderFlow", asset, timeframe, MarketRegime.Unknown) : 1.0);
-            double scaledSmc = smcScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("SMC", asset, timeframe, MarketRegime.Unknown) : 1.0);
-            double scaledMl = mlScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("LIGHTGBM", asset, timeframe, MarketRegime.Unknown) : 1.0);
+            double scaledTa = taScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
+            double scaledOf = ofScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("OrderFlow", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
+            double scaledSmc = smcScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("SMC", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
+            double scaledMl = mlScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("LIGHTGBM", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
 
             metaProb = Math.Clamp(0.5 + (scaledMl * 0.35) + (scaledTa * 0.20) + (scaledSmc * 0.15), 0.0, 1.0);
         }
         
-        // string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
+        string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
         
         // Определение маржи уверенности (от 0.0 до 0.5)
         double margin = Math.Abs(metaProb - 0.5);
