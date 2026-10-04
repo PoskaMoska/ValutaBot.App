@@ -854,11 +854,12 @@ class ForexPredictor:
                             if ts.tzinfo is None: ts = ts.replace(tzinfo=timezone.utc)
                             unix_s = int(ts.timestamp())
                             
-                        # Allow 5 sec slop
+                        # Fix RL alignment: match any signal that occurred inside this candle's duration
+                        tf_seconds = {"s5": 5, "s10": 10, "s15": 15, "s30": 30, "1m": 60, "m1": 60, "5m": 300, "m5": 300, "1h": 3600, "h1": 3600}.get(self.interval.lower(), 60)
                         best_f = None
-                        for slop in (0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5):
-                            if (unix_s + slop) in fb_map:
-                                best_f = fb_map[unix_s + slop]
+                        for offset in range(tf_seconds):
+                            if (unix_s + offset) in fb_map:
+                                best_f = fb_map[unix_s + offset]
                                 break
                         if best_f:
                             c["smc_bos_dir"] = best_f.get("smc_bos_dir", "NONE")
@@ -1116,21 +1117,17 @@ class ForexPredictor:
                         except Exception:
                             continue
 
-                        best_fb, best_diff = None, float("inf")
+                        best_fb = None
                         
-                        # Check exact match and immediate neighbors (up to 5s slop)
-                        for slop in range(-5, 6):
-                            check_ts = candle_unix + slop
+                        # FIX LABEL SMEARING: Match window must be strict (1:1).
+                        tf_seconds = {"s5": 5, "s10": 10, "s15": 15, "s30": 30, "1m": 60, "m1": 60, "5m": 300, "m5": 300, "1h": 3600, "h1": 3600}.get(self.interval.lower(), 60)
+                        for offset in range(tf_seconds):
+                            check_ts = candle_unix + offset
                             if check_ts in fast_lookup:
                                 best_fb = fast_lookup[check_ts]
-                                best_diff = abs(slop)
                                 break
-
-                        # FIX LABEL SMEARING: Match window must be strict (0.9x tf) and 1:1.
-                        tf_seconds = {"s5": 5, "s10": 10, "s15": 15, "s30": 30, "1m": 60, "m1": 60, "5m": 300, "m5": 300}.get(self.interval, 60)
-                        max_diff = tf_seconds * 0.9  # Strictly match only the closest candle
                         
-                        if best_fb and best_diff < max_diff:
+                        if best_fb:
                             # Direct mapping from O(1) lookup
                             match_count += 1
                             sample_weights[i] = 5.0  # x5 weight

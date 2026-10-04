@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -280,7 +280,7 @@ FROM outcome_data;");
                        binance_symbol as ""BinanceSymbol"", entry_price as ""EntryPrice"", 
                        created_at as ""CreatedAtStr"", verify_at as ""VerifyAtStr"", 
                        is_forex as ""IsForex"", source_directions as ""SourceDirectionsStr"",
-                       ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"", ml_prob as ""MlProb"", ml_score as ""MlScore""
+                       probability as ""Probability"", features_json as ""FeaturesJson"", ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"", ml_prob as ""MlProb"", ml_score as ""MlScore""
                 FROM pending_trades 
                 WHERE verify_at <= @UpToStr", 
                 new { UpToStr = upTo.ToString("o") });
@@ -298,6 +298,8 @@ FROM outcome_data;");
                 IsForex = r.IsForex != null ? Convert.ToBoolean(r.IsForex) : false,
                 SourceDirections = string.IsNullOrEmpty(r.SourceDirectionsStr) ? new Dictionary<string, string>() : 
                     System.Text.Json.JsonSerializer.Deserialize(r.SourceDirectionsStr, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>(),
+                Probability = r.Probability != null ? Convert.ToInt32(r.Probability) : 0,
+                FeaturesJson = r.FeaturesJson ?? "",
                 TaScore = r.TaScore != null ? Convert.ToDouble(r.TaScore) : 0.0,
                 OfScore = r.OfScore != null ? Convert.ToDouble(r.OfScore) : 0.0,
                 SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,

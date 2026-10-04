@@ -328,6 +328,12 @@ class PredictRequest(BaseModel):
     candles: List[CandleItem]       # OHLCV history, latest last
     mtf_candles: Optional[List[CandleItem]] = None # Higher timeframe OHLCV
     is_forex: bool = False
+    smc_bos_dir: str = "NONE"
+    smc_has_ob: bool = False
+    smc_has_fvg: bool = False
+    of_delta_ratio: float = 0.0
+    of_state: str = "NEUTRAL"
+    dynamic_horizon: int = 3
 
 
 class PredictResponse(BaseModel):
@@ -619,6 +625,16 @@ async def predict(request: Request):
     candles[-1]['of_delta_ratio'] = of_delta_ratio
     candles[-1]['of_state'] = of_state
     candles[-1]['dynamic_horizon'] = 3  # default since we don't know it live yet
+
+    # Fix Volume Train-Inference Skew:
+    # Historical REST candles for forex have volume=0, but live WS candles have volume=tick_count.
+    # To prevent tree-split divergence, force live volume to 0.0 for forex.
+    if is_forex:
+        for c in candles:
+            c['volume'] = 0.0
+        if mtf_candles:
+            for c in mtf_candles:
+                c['volume'] = 0.0
 
     # Forex-only policy: block crypto symbols
     if not is_forex_symbol(symbol):

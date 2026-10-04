@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
@@ -19,7 +19,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
     private readonly string _savePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "meta_weights_v2.json");
     private const double InitialLearningRate = 0.10;
     private const double LrDecay             = 0.002;
-    private const double WeightDecay         = 0.999;
+    private const double WeightDecay         = 0.001;
 
     public OnlineMetaLearner()
     {
@@ -34,7 +34,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         //   ML (LightGBM): 58.6% win  > weight 1.35  (best module)
         //   TA (Skender):  53.4% win  > weight 1.10  (above average)
         //   SMC:           51.4% win  > weight 0.90  (slightly below neutral)
-        //   OF (OrderFlow):35.8% win  > weight 0.20  (actively harmful � near-zero)
+        //   OF (OrderFlow):35.8% win  > weight 0.20  (actively harmful — near-zero)
         // Order: [Bias, TA, OF, SMC, ML]
         return _weights.GetOrAdd(key, _ => new double[] { 0.0, 1.10, 0.20, 0.90, 1.35 });
     }
@@ -211,5 +211,6 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         });
     }
 }
+
 
 

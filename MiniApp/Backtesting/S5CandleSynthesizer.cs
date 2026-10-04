@@ -12,7 +12,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
     public static class S5CandleSynthesizer
     {
         private const int SubCandlesPerMinute = 12; // 60s / 5s = 12
-        private static readonly Random _rng = new(42); // seed для воспроизводимости
+        private static Random _rng => Random.Shared;
 
         public static MiniAppController.OhlcCandle[] SynthesizeFromM1(
             MiniAppController.OhlcCandle[] m1Candles)

@@ -3,7 +3,7 @@ from model import ForexPredictor
 
 def retrain():
     pairs = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
-    intervals = ["1m"]
+    intervals = ["s5", "s10", "s15", "s30", "1m"]
     regimes = ["ALL", "FLAT", "TREND", "CHAOS"]
     
     for pair in pairs:
