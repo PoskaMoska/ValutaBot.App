@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -223,7 +223,8 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                 {
                     string dbStatus = "? Error";
                     try {
-                        using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnectionAsync();
+                        using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                        await conn.OpenAsync();
                         using var cmd = new Npgsql.NpgsqlCommand("SELECT 1", conn);
                         await cmd.ExecuteScalarAsync();
                         dbStatus = "? OK";
@@ -235,14 +236,14 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                         if (client != null) {
                             client.Timeout = TimeSpan.FromSeconds(3);
                             var pyPort = Environment.GetEnvironmentVariable("PYTHON_PORT") ?? "8000";
-                            var mlResp = await client.GetAsync("http://127.0.0.1:$pyPort/health");
+                            var mlResp = await client.GetAsync($"http://127.0.0.1:{pyPort}/health");
                             if (mlResp.IsSuccessStatusCode) mlStatus = "? OK";
                         }
                     } catch { }
 
                     string tiingoStatus = Environment.GetEnvironmentVariable("TIINGO_API_KEY") != null ? "? Connected" : "?? Missing Key";
 
-                    string msg = "?? <b>ValutaBot Deploy Completed!</b>\n\n?? <b>System Diagnostics:</b>\n- C# Core: ? OK\n- PostgreSQL: $dbStatus\n- Python ML: $mlStatus\n- WS Provider: $tiingoStatus\n\n<i>Bot is fully online and monitoring the market.</i>";
+                    string msg = $"? <b>ValutaBot Deploy Completed!</b>\n\n? <b>System Diagnostics:</b>\n- C# Core: ? OK\n- PostgreSQL: {dbStatus}\n- Python ML: {mlStatus}\n- WS Provider: {tiingoStatus}\n\n<i>Bot is fully online and monitoring the market.</i>";
                     await ValutaBot.MiniApp.TelegramBotService.SendMessageToAdmins(msg);
                 }
                 catch (Exception ex)
@@ -280,6 +281,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         }
     }
 }
+
 
 
 
