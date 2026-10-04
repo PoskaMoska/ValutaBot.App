@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
@@ -31,10 +31,10 @@ public class OnlineMetaLearner : IOnlineMetaLearner
     private double[] GetOrCreateWeights(string key)
     {
         // Empirical priors from 6 months of signal_votes data (2,500+ real trades):
-        //   ML (LightGBM): 58.6% win  → weight 1.35  (best module)
-        //   TA (Skender):  53.4% win  → weight 1.10  (above average)
-        //   SMC:           51.4% win  → weight 0.90  (slightly below neutral)
-        //   OF (OrderFlow):35.8% win  → weight 0.20  (actively harmful — near-zero)
+        //   ML (LightGBM): 58.6% win  > weight 1.35  (best module)
+        //   TA (Skender):  53.4% win  > weight 1.10  (above average)
+        //   SMC:           51.4% win  > weight 0.90  (slightly below neutral)
+        //   OF (OrderFlow):35.8% win  > weight 0.20  (actively harmful � near-zero)
         // Order: [Bias, TA, OF, SMC, ML]
         return _weights.GetOrAdd(key, _ => new double[] { 0.0, 1.10, 0.20, 0.90, 1.35 });
     }
@@ -135,23 +135,23 @@ public class OnlineMetaLearner : IOnlineMetaLearner
             if (!wasWin)
             {
                 lr *= penaltyMultiplier;
-                for (int i = 1; i < w.Length; i++) w[i] *= lossDecay;
-            }
-            else
-            {
-                for (int i = 1; i < w.Length; i++) w[i] = 1.0 - ((1.0 - w[i]) * WeightDecay);
             }
 
             // Stochastic Gradient Descent step using Log-Odds gradients
+            // This is the core fix: error * log_odds correctly rewards/punishes individual modules!
             w[0] += lr * error;
             w[1] += lr * error * lo_ta;
             w[2] += lr * error * lo_of;
             w[3] += lr * error * lo_smc;
             w[4] += lr * error * lo_ml;
 
-            // Cap L1 Norm
+            // Soft L2 Regularization (pulls weights very gently towards 1.0 to prevent drifting)
+            for (int i = 1; i < w.Length; i++) 
+            {
+                w[i] += (1.0 - w[i]) * WeightDecay;
+            }
+
             // ADAPTIVE FIX: Never allow weights to become negative.
-            // If a weight is negative, the MetaLearner will output the exact OPPOSITE of the module's signal.
             // If a module is performing poorly, its weight should drop to near 0, but not invert.
             for (int i = 1; i < w.Length; i++)
             {
@@ -211,3 +211,4 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         });
     }
 }
+

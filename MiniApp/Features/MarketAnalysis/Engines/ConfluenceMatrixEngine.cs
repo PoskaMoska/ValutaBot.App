@@ -367,14 +367,8 @@ public class ConfluenceMatrixEngine(
             double wSmc = autoCalib.GetCalibratedRegimeWeight("SMC",          asset, timeframe, regime);
             double wMl  = autoCalib.GetCalibratedRegimeWeight("LIGHTGBM",     asset, timeframe, regime);
 
-            taScore  *= wTa;
-            ofScore  *= wOf;
-            smcScore *= wSmc;
-            mlScore  *= wMl;
-
             BotLogger.Info($"[AutoCalib] {asset}/{timeframe} Regime={regime} | wTA={wTa:F2} wOF={wOf:F2} wSMC={wSmc:F2} wML={wMl:F2}");
         }
-        // ─────────────────────────────────────────────────────────────────────────
 
         bool tfConflict = mtfResult.DominantDirection != "NEUTRAL" && 
                          ((taScore > 0 && mtfResult.DominantDirection == "PUT") || 
@@ -383,11 +377,12 @@ public class ConfluenceMatrixEngine(
         double metaProb = 0.5;
         if (TradeOutcomeTracker.MetaLearner != null)
         {
-            // Normalize inputs before passing to MetaLearner to balance their impact
+            // FEED RAW SCORES TO METALEARNER (Double-Dipping Fix)
+            // Unscaled scores so SGD learner can attribute error to the original signal.
             double normTa = taScore; // Already [-1.0, 1.0]
-            double normOf = Math.Clamp(ofScore / 0.5, -1.0, 1.0); // was [-0.5, 0.5], scale to [-1, 1]
-            double normSmc = Math.Clamp(smcScore, -1.0, 1.0); // was up to [-1.0, 1.0] usually
-            double normMl = mlScore; // Already smoothly [-1.0, 1.0]
+            double normOf = Math.Clamp(ofScore / 0.5, -1.0, 1.0); // scale to [-1, 1]
+            double normSmc = Math.Clamp(smcScore, -1.0, 1.0); // up to [-1.0, 1.0]
+            double normMl = mlScore; // smoothly [-1.0, 1.0]
             
             metaProb = TradeOutcomeTracker.MetaLearner.Predict(
                 asset, timeframe, normTa, normOf, normSmc, normMl, tfConflict);
@@ -395,12 +390,16 @@ public class ConfluenceMatrixEngine(
         else
         {
             // Fallback when MetaLearner is offline.
-            // OF removed (35.8% anti-signal). ML gets highest weight (AUC 78%, empirical 58.6%).
-            metaProb = Math.Clamp(0.5 + (mlScore * 0.35) + (taScore * 0.20) + (smcScore * 0.15), 0.0, 1.0);
-        }
+            // Here we apply AutoCalib weights manually.
+            double scaledTa = taScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, MarketRegime.Unknown) : 1.0);
+            double scaledOf = ofScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("OrderFlow", asset, timeframe, MarketRegime.Unknown) : 1.0);
+            double scaledSmc = smcScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("SMC", asset, timeframe, MarketRegime.Unknown) : 1.0);
+            double scaledMl = mlScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("LIGHTGBM", asset, timeframe, MarketRegime.Unknown) : 1.0);
 
-        // Пользовательское требование: Бот должен всегда давать сигнал (без NEUTRAL зоны)
-        string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
+            metaProb = Math.Clamp(0.5 + (scaledMl * 0.35) + (scaledTa * 0.20) + (scaledSmc * 0.15), 0.0, 1.0);
+        }
+        
+        // string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
         
         // Определение маржи уверенности (от 0.0 до 0.5)
         double margin = Math.Abs(metaProb - 0.5);
@@ -521,6 +520,7 @@ public class ConfluenceMatrixEngine(
     }
 
 }
+
 
 
 
