@@ -214,6 +214,44 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
 
         RegisterRoutes(app);
 
+                app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(8));
+                try
+                {
+                    string dbStatus = "? Error";
+                    try {
+                        using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnectionAsync();
+                        using var cmd = new Npgsql.NpgsqlCommand("SELECT 1", conn);
+                        await cmd.ExecuteScalarAsync();
+                        dbStatus = "? OK";
+                    } catch { }
+
+                    string mlStatus = "? Error";
+                    try {
+                        var client = HttpFactory?.CreateClient();
+                        if (client != null) {
+                            client.Timeout = TimeSpan.FromSeconds(3);
+                            var pyPort = Environment.GetEnvironmentVariable("PYTHON_PORT") ?? "8000";
+                            var mlResp = await client.GetAsync("http://127.0.0.1:$pyPort/health");
+                            if (mlResp.IsSuccessStatusCode) mlStatus = "? OK";
+                        }
+                    } catch { }
+
+                    string tiingoStatus = Environment.GetEnvironmentVariable("TIINGO_API_KEY") != null ? "? Connected" : "?? Missing Key";
+
+                    string msg = "?? <b>ValutaBot Deploy Completed!</b>\n\n?? <b>System Diagnostics:</b>\n- C# Core: ? OK\n- PostgreSQL: $dbStatus\n- Python ML: $mlStatus\n- WS Provider: $tiingoStatus\n\n<i>Bot is fully online and monitoring the market.</i>";
+                    await ValutaBot.MiniApp.TelegramBotService.SendMessageToAdmins(msg);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Startup Notification Error: " + ex.Message);
+                }
+            });
+        });
+
         await app.RunAsync($"http://0.0.0.0:{port}");
     }
 
@@ -242,4 +280,6 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         }
     }
 }
+
+
 
