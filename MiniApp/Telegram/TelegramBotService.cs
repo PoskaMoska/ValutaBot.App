@@ -35,12 +35,26 @@ public partial class TelegramBotService : BackgroundService
         string? token = TelegramNotifier.GetToken();
         if (string.IsNullOrEmpty(token)) return;
 
+        var notifiedIds = new System.Collections.Generic.HashSet<long>();
+
+        try
+        {
+            var dbAdmins = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.GetAdminChatIdsAsync();
+            foreach (var adminId in dbAdmins)
+            {
+                await SendMessage(token, adminId, text);
+                notifiedIds.Add(adminId);
+            }
+        }
+        catch { }
+
         string envAdmin = Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? Environment.GetEnvironmentVariable("ADMIN_IDS") ?? "";
         foreach (var part in envAdmin.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
         {
-            if (long.TryParse(part, out long adminId))
+            if (long.TryParse(part, out long adminId) && !notifiedIds.Contains(adminId))
             {
                 await SendMessage(token, adminId, text);
+                notifiedIds.Add(adminId);
             }
         }
     }

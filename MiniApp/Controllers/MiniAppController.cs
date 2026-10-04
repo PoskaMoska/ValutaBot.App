@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -64,7 +64,7 @@ public static partial class MiniAppController
         builder.Services.AddSingleton<IMathEngine>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IMarketAnalyzer>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IRiskGatekeeper>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
-        // AutoCalibrationEngine — Regime-Aware Signal Weight Engine (minute+ TFs only)
+        // AutoCalibrationEngine � Regime-Aware Signal Weight Engine (minute+ TFs only)
         builder.Services.AddSingleton<AutoCalibrationEngine>();
         builder.Services.AddSingleton<IAutoCalibrationEngine>(sp => sp.GetRequiredService<AutoCalibrationEngine>());
         
@@ -281,6 +281,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         }
     }
 }
+
 
 
 
