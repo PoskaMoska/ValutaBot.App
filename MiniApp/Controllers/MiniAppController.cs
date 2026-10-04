@@ -217,7 +217,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         {
             _ = Task.Run(async () =>
             {
-                await Task.Delay(TimeSpan.FromSeconds(8));
+                await Task.Delay(TimeSpan.FromSeconds(15)); // Give Python ML time to load models
                 try
                 {
                     string dbStatus = "❌ Ошибка";
@@ -251,6 +251,8 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                 }
             });
         });
+
+
 
 
         await app.RunAsync($"http://0.0.0.0:{port}");
