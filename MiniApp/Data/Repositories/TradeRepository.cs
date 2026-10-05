@@ -48,6 +48,22 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public string Session    { get; set; } = "UNKNOWN"; // TOKYO | LONDON | NY | OVERLAP | QUIET
         public int    DayOfWeek  { get; set; }               // 1=Mon … 7=Sun
         public int    HourUtc    { get; set; }               // 0-23 UTC
+
+        // === Phase 1: Complete Decision Snapshot ===
+        public string TaDirection  { get; set; } = "NEUTRAL";
+        public string MlDirection  { get; set; } = "NEUTRAL";
+        public string SmcDirection { get; set; } = "NEUTRAL";
+        public string OfDirection  { get; set; } = "NEUTRAL";
+        public int    ConflictCount { get; set; }
+        public string ConfidenceBucket { get; set; } = "50-60";
+        public bool   WasCloseCall { get; set; }
+        public int    ConsecutiveLossesBefore { get; set; }
+        public int    SecondsSinceLastTrade { get; set; } = -1;
+        public string ReasoningText { get; set; } = "";
+        public string MlModelVersion { get; set; } = "";
+        public double MlModelAccuracy { get; set; }
+        public double MaxFavorableBps { get; set; }
+        public double MaxAdverseBps { get; set; }
     }
 
     public class EvolutionDumpDto
@@ -150,11 +166,17 @@ FROM outcome_data;");
                     (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon,
                      market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news,
-                     session, day_of_week, hour_utc)
+                     session, day_of_week, hour_utc,
+                     ta_direction, ml_direction, smc_direction, of_direction, conflict_count,
+                     confidence_bucket, was_close_call, consecutive_losses_before, seconds_since_last_trade,
+                     reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps)
                     VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
                             @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
-                            @Session, @DayOfWeek, @HourUtc)
+                            @Session, @DayOfWeek, @HourUtc,
+                            @TaDirection, @MlDirection, @SmcDirection, @OfDirection, @ConflictCount,
+                            @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
+                            @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
                         timeframe = EXCLUDED.timeframe,
@@ -187,7 +209,21 @@ FROM outcome_data;");
                         minutes_to_news = EXCLUDED.minutes_to_news,
                         session = EXCLUDED.session,
                         day_of_week = EXCLUDED.day_of_week,
-                        hour_utc = EXCLUDED.hour_utc
+                        hour_utc = EXCLUDED.hour_utc,
+                        ta_direction = EXCLUDED.ta_direction,
+                        ml_direction = EXCLUDED.ml_direction,
+                        smc_direction = EXCLUDED.smc_direction,
+                        of_direction = EXCLUDED.of_direction,
+                        conflict_count = EXCLUDED.conflict_count,
+                        confidence_bucket = EXCLUDED.confidence_bucket,
+                        was_close_call = EXCLUDED.was_close_call,
+                        consecutive_losses_before = EXCLUDED.consecutive_losses_before,
+                        seconds_since_last_trade = EXCLUDED.seconds_since_last_trade,
+                        reasoning_text = EXCLUDED.reasoning_text,
+                        ml_model_version = EXCLUDED.ml_model_version,
+                        ml_model_accuracy = EXCLUDED.ml_model_accuracy,
+                        max_favorable_bps = EXCLUDED.max_favorable_bps,
+                        max_adverse_bps = EXCLUDED.max_adverse_bps
                 ", new
                 {
                     outcome.Id,
@@ -222,7 +258,21 @@ FROM outcome_data;");
                     outcome.MinutesToNews,
                     outcome.Session,
                     outcome.DayOfWeek,
-                    outcome.HourUtc
+                    outcome.HourUtc,
+                    outcome.TaDirection,
+                    outcome.MlDirection,
+                    outcome.SmcDirection,
+                    outcome.OfDirection,
+                    outcome.ConflictCount,
+                    outcome.ConfidenceBucket,
+                    outcome.WasCloseCall,
+                    outcome.ConsecutiveLossesBefore,
+                    outcome.SecondsSinceLastTrade,
+                    outcome.ReasoningText,
+                    outcome.MlModelVersion,
+                    outcome.MlModelAccuracy,
+                    outcome.MaxFavorableBps,
+                    outcome.MaxAdverseBps
                 });
             }
             catch (Exception ex)
@@ -286,8 +336,8 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             using var conn = DbConnectionFactory.GetConnection();
             await conn.ExecuteAsync(@"
-                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, features_json)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @FeaturesJson)
+                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json)
+                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson)
                 ON CONFLICT (id) DO NOTHING", 
                 new {
                     record.Id,
@@ -319,6 +369,9 @@ FROM outcome_data;");
                     record.RsiAtSignal,
                     record.HigherTfAligned,
                     record.MinutesToNews,
+                    record.ReasoningText,
+                    record.MlModelVersion,
+                    record.MlModelAccuracy,
                     record.FeaturesJson
                 });
         }
@@ -335,7 +388,8 @@ FROM outcome_data;");
                        probability as ""Probability"", features_json as ""FeaturesJson"", ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"", ml_prob as ""MlProb"", ml_score as ""MlScore"",
                        smc_bos_dir as ""SmcBosDir"", smc_has_ob as ""SmcHasOb"", smc_has_fvg as ""SmcHasFvg"", of_delta_ratio as ""OfDeltaRatio"", of_state as ""OfState"", dynamic_horizon as ""DynamicHorizon"",
                        market_regime as ""MarketRegime"", velocity_regime as ""VelocityRegime"", atr_at_signal as ""AtrAtSignal"", adx_at_signal as ""AdxAtSignal"",
-                       rsi_at_signal as ""RsiAtSignal"", higher_tf_aligned as ""HigherTfAligned"", minutes_to_news as ""MinutesToNews""
+                       rsi_at_signal as ""RsiAtSignal"", higher_tf_aligned as ""HigherTfAligned"", minutes_to_news as ""MinutesToNews"",
+                       reasoning_text as ""ReasoningText"", ml_model_version as ""MlModelVersion"", ml_model_accuracy as ""MlModelAccuracy""
                 FROM pending_trades 
                 WHERE verify_at <= @UpToStr", 
                 new { UpToStr = upTo.ToString("o") });
@@ -372,7 +426,10 @@ FROM outcome_data;");
                 AdxAtSignal = r.AdxAtSignal != null ? Convert.ToDouble(r.AdxAtSignal) : 0.0,
                 RsiAtSignal = r.RsiAtSignal != null ? Convert.ToDouble(r.RsiAtSignal) : 50.0,
                 HigherTfAligned = r.HigherTfAligned != null ? Convert.ToBoolean(r.HigherTfAligned) : false,
-                MinutesToNews = r.MinutesToNews != null ? Convert.ToInt32(r.MinutesToNews) : -1
+                MinutesToNews = r.MinutesToNews != null ? Convert.ToInt32(r.MinutesToNews) : -1,
+                ReasoningText = r.ReasoningText ?? "",
+                MlModelVersion = r.MlModelVersion ?? "",
+                MlModelAccuracy = r.MlModelAccuracy != null ? Convert.ToDouble(r.MlModelAccuracy) : 0.0
             }).Where(r => r.CreatedAt != DateTime.MinValue).ToList();
         }
 

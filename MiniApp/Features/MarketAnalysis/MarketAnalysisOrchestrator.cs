@@ -262,7 +262,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
                 mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",
-                minutesToNews ?? -1);
+                minutesToNews ?? -1,
+                consensus.CombinedReasoningText ?? "",
+                mlPrediction?.ModelVersion ?? "",
+                mlPrediction?.Accuracy ?? 0.0);
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
@@ -282,7 +285,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
                 mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",
-                minutesToNews ?? -1);
+                minutesToNews ?? -1,
+                consensus.CombinedReasoningText ?? "",
+                mlPrediction?.ModelVersion ?? "",
+                mlPrediction?.Accuracy ?? 0.0);
             dbSw.Stop();
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}) -> {dbSw.ElapsedMilliseconds}ms");
         }

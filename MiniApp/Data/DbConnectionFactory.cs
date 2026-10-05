@@ -131,6 +131,25 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN session TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN day_of_week INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN hour_utc INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
+                    -- Phase 1: Complete Decision Snapshot
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ta_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN conflict_count INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN confidence_bucket TEXT NOT NULL DEFAULT '50-60'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN was_close_call BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN consecutive_losses_before INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN seconds_since_last_trade INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN reasoning_text TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_model_version TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_model_accuracy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN max_favorable_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN max_adverse_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    -- pending_trades: reasoning + ml metadata for pipeline
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN reasoning_text TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN ml_model_version TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN ml_model_accuracy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN dynamic_horizon INT NOT NULL DEFAULT 3; EXCEPTION WHEN duplicate_column THEN END;
                     
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;

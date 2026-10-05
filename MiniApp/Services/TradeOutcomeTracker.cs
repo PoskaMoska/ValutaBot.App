@@ -14,6 +14,20 @@ public static class TradeOutcomeTracker
     private static readonly SemaphoreSlim _initSemaphore = new(1, 1);
     private static readonly SemaphoreSlim _csvSemaphore = new(1, 1); // B5-FIX: Concurrent CSV write lock
 private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _consecutiveLosses = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastTradeTime = new();
+
+    private static int ComputeSecondsSinceLastTrade(string asset, string timeframe, DateTime createdAt)
+    {
+        string key = $"{asset}_{timeframe}";
+        if (_lastTradeTime.TryGetValue(key, out DateTime lastTime))
+        {
+            int seconds = (int)(createdAt - lastTime).TotalSeconds;
+            _lastTradeTime[key] = createdAt;
+            return Math.Max(0, seconds);
+        }
+        _lastTradeTime[key] = createdAt;
+        return -1; // First trade for this pair/tf
+    }
 
     /// <summary>
     /// Maps a UTC signal time to a forex trading session label.
@@ -118,6 +132,19 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 Session = ComputeSession(record.CreatedAt),
                 DayOfWeek = (int)record.CreatedAt.DayOfWeek == 0 ? 7 : (int)record.CreatedAt.DayOfWeek,
                 HourUtc = record.CreatedAt.Hour,
+                // Phase 1: Decision Snapshot
+                TaDirection = record.SourceDirections.GetValueOrDefault("TechAnalysis", "NEUTRAL"),
+                MlDirection = record.SourceDirections.GetValueOrDefault("LIGHTGBM", "NEUTRAL"),
+                SmcDirection = record.SourceDirections.GetValueOrDefault("SMC", "NEUTRAL"),
+                OfDirection = record.SourceDirections.GetValueOrDefault("OrderFlow", "NEUTRAL"),
+                ConflictCount = record.SourceDirections.Count(kv => kv.Value != "NEUTRAL" && kv.Value != record.Direction && !record.Direction.StartsWith("SHADOW")),
+                ConfidenceBucket = $"{record.Probability / 10 * 10}-{record.Probability / 10 * 10 + 10}",
+                WasCloseCall = Math.Abs(record.PnlBps) < 2.0,
+                ConsecutiveLossesBefore = GetConsecutiveLosses(record.Asset, record.Timeframe),
+                SecondsSinceLastTrade = ComputeSecondsSinceLastTrade(record.Asset, record.Timeframe, record.CreatedAt),
+                ReasoningText = record.ReasoningText.Length > 2000 ? record.ReasoningText[..2000] : record.ReasoningText,
+                MlModelVersion = record.MlModelVersion,
+                MlModelAccuracy = record.MlModelAccuracy,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };

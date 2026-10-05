@@ -51,7 +51,8 @@ public static class SignalTracker
         double ofDeltaRatio = 1.0, string ofState = "NEUTRAL",
         string marketRegime = "UNKNOWN", string velocityRegime = "UNKNOWN",
         double atrAtSignal = 0.0, double adxAtSignal = 0.0, double rsiAtSignal = 50.0,
-        bool higherTfAligned = false, int minutesToNews = -1)
+        bool higherTfAligned = false, int minutesToNews = -1,
+        string reasoningText = "", string mlModelVersion = "", double mlModelAccuracy = 0.0)
     {
         if (MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
         string sym = asset.ToUpper();
@@ -108,7 +109,10 @@ public static class SignalTracker
             AdxAtSignal = adxAtSignal,
             RsiAtSignal = rsiAtSignal,
             HigherTfAligned = higherTfAligned,
-            MinutesToNews = minutesToNews
+            MinutesToNews = minutesToNews,
+            ReasoningText = reasoningText,
+            MlModelVersion = mlModelVersion,
+            MlModelAccuracy = mlModelAccuracy
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
@@ -252,6 +256,11 @@ public static class SignalTracker
         public double RsiAtSignal     { get; set; } = 50.0;
         public bool   HigherTfAligned { get; set; }
         public int    MinutesToNews   { get; set; } = -1;
+
+        // Decision reasoning + ML model metadata
+        public string ReasoningText   { get; set; } = "";
+        public string MlModelVersion  { get; set; } = "";
+        public double MlModelAccuracy { get; set; }
     }
 
     public class AccuracyStats
