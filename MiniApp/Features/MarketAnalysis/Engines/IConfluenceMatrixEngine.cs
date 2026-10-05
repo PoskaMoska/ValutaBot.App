@@ -44,7 +44,6 @@ public interface IConfluenceMatrixEngine
         double conflictPenalty,
         TaSignal taSignal,
         SmcSignal smcSignal,
-        OrderflowSignal ofSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
         ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0);

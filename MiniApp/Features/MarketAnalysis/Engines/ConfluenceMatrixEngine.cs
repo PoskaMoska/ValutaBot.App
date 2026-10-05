@@ -307,7 +307,6 @@ public class ConfluenceMatrixEngine(
         double conflictPenalty,
         TaSignal taSignal,
         SmcSignal smcSignal,
-        OrderflowSignal ofSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
         ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0)
@@ -380,19 +379,17 @@ public class ConfluenceMatrixEngine(
             // FEED RAW SCORES TO METALEARNER (Double-Dipping Fix)
             // Unscaled scores so SGD learner can attribute error to the original signal.
             double normTa = taScore; // Already [-1.0, 1.0]
-            double normOf = Math.Clamp(ofScore / 0.5, -1.0, 1.0); // scale to [-1, 1]
             double normSmc = Math.Clamp(smcScore, -1.0, 1.0); // up to [-1.0, 1.0]
             double normMl = mlScore; // smoothly [-1.0, 1.0]
             
             metaProb = TradeOutcomeTracker.MetaLearner.Predict(
-                asset, timeframe, normTa, normOf, normSmc, normMl, tfConflict);
+                asset, timeframe, normTa, 0.0, normSmc, normMl, tfConflict);
         }
         else
         {
             // Fallback when MetaLearner is offline.
             // Here we apply AutoCalib weights manually.
             double scaledTa = taScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
-            double scaledOf = ofScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("OrderFlow", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
             double scaledSmc = smcScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("SMC", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
             double scaledMl = mlScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("LIGHTGBM", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
 

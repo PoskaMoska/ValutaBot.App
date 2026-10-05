@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using ValutaBot.MiniApp;
@@ -63,17 +63,14 @@ namespace ValutaBot.App.MiniApp.Backtesting
                     if (smcResult.BosDirection == "BULLISH" || smcResult.SweepDirection == "BULLISH_SWEEP") smcScore += 1;
                     else if (smcResult.BosDirection == "BEARISH" || smcResult.SweepDirection == "BEARISH_SWEEP") smcScore -= 1;
 
-                    var ofResult = OrderFlowEngine.AnalyzeOrderFlow(asset, "1m", slice, currentPrice);
+                    // OF REMOVED — always 0
                     double ofScore = 0;
-                    var ofState = ofResult.OrderFlowState;
-                    if (ofState != null && ofState.Contains("BULLISH")) ofScore += 1;
-                    else if (ofState != null && ofState.Contains("BEARISH")) ofScore -= 1;
                     
                     double mlScore = 0;
                     // (ML Python Service call is bypassed during cold backtest generation 
-                    // to prevent 1.5 million slow HTTP requests. We only need TA/SMC/OF features)
+                    // to prevent 1.5 million slow HTTP requests. We only need TA/SMC features)
                     
-                    double ensemble = (taScore * 0.5) + (smcScore * 1.5) + (ofScore * 0.3) + (mlScore * 1.0);
+                    double ensemble = (taScore * 0.5) + (smcScore * 1.5) + (mlScore * 1.0);
 
                     if (Math.Abs(ensemble) > 1.2)
                     {
@@ -95,18 +92,17 @@ namespace ValutaBot.App.MiniApp.Backtesting
                             PnlBps = pnlBps,
                             WasWin = isWin,
                             TaScore = taScore,
-                            OfScore = ofScore,
+                            OfScore = 0.0,
                             SmcScore = smcScore,
                             MlScore = mlScore,
-                            MlProb = 0.5, // ML prediction bypassed
+                            MlProb = 0.5,
                             CreatedAt = candles[i].Timestamp.ToString("O"),
                             VerifiedAt = candles[i + dynamicHorizon].Timestamp.ToString("O"),
-                            // === Rich Features for LightGBM ===
                             SmcBosDir = smcResult.BosDirection ?? "NONE",
                             SmcHasOb  = smcResult.HasOrderBlock,
                             SmcHasFvg = smcResult.HasFvg,
-                            OfDeltaRatio = ofResult.DeltaRatio,
-                            OfState   = ofResult.OrderFlowState ?? "NEUTRAL",
+                            OfDeltaRatio = 1.0,
+                            OfState   = "NEUTRAL",
                             DynamicHorizon = dynamicHorizon
                         };
 

@@ -59,52 +59,10 @@ internal sealed class IndicatorCache
 
     private readonly ConcurrentDictionary<(string asset, string tf, string indicatorKey), CacheState> _states = new();
 
-    private static readonly ConcurrentDictionary<string, Indicators.StatefulOrderFlow> _orderFlowCache = new();
-
-    // FIX C-3: LRU eviction — evict the least-recently-used 25% of entries.
-    // Previously used Take(toRemove) on unordered ConcurrentDictionary keys,
-    // which was effectively random and could delete actively-trading pairs.
-    private static void PruneOrderFlowCache()
-    {
-        var ordered = _orderFlowCache
-            .OrderBy(kv => _orderFlowLastTicks.GetValueOrDefault($"{kv.Key}", 0))
-            .Take(Math.Max(1, _orderFlowCache.Count / 4))
-            .Select(kv => kv.Key)
-            .ToList();
-        foreach (var k in ordered)
-        {
-            _orderFlowCache.TryRemove(k, out _);
-            // FIX M-1: Also remove from _orderFlowLastTicks to prevent stale tick lookup
-            _orderFlowLastTicks.TryRemove(k, out _);
-        }
-    }
-
-    // Maintain last tick for OrderFlow cache validation
-    private static readonly ConcurrentDictionary<string, long> _orderFlowLastTicks = new();
-
-    // FIX C-03: three non-atomic ConcurrentDictionary operations had no single lock →
-    // a concurrent request could see the reset state before GetOrAdd reinserts the new object.
-    private static readonly object _orderFlowLock = new();
-
-    public static Indicators.StatefulOrderFlow GetOrderFlow(string asset, string timeframe, ReadOnlySpan<MiniAppController.OhlcCandle> candles)
-    {
-        if (_orderFlowCache.Count > 1000) PruneOrderFlowCache();
-        string key = $"{asset}_{timeframe}";
-
-        lock (_orderFlowLock)
-        {
-            long lastTick = _orderFlowLastTicks.GetValueOrDefault(key, 0);
-            int unseen    = CountUnseen(candles, lastTick);
-
-            if (unseen > 50 || IsTimestampRewind(candles, lastTick))
-                _orderFlowCache[key] = new Indicators.StatefulOrderFlow();
-
-            if (candles.Length > 0)
-                _orderFlowLastTicks[key] = candles[^1].Timestamp.Ticks;
-
-            return _orderFlowCache.GetOrAdd(key, _ => new Indicators.StatefulOrderFlow());
-        }
-    }
+    // ORDER FLOW REMOVED: StatefulOrderFlow cache deleted.
+    // OF gave 35.8% win-rate (anti-signal) on live forex data.
+    // Forex has no centralized exchange - tick count ≠ real volume.
+    // ML (LightGBM) implicitly captures order flow through price-action features.
 
     // ── RSI ──────────────────────────────────────────────────────────────────
 

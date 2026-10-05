@@ -330,8 +330,7 @@ public static class MLPythonService
         MiniAppController.OhlcCandle[] candles,
         bool isForex = false,
         MiniAppController.OhlcCandle[]? mtfCandles = null,
-        ValutaBot.MiniApp.SmcEngine.SmcAnalysisResult? smcResult = null,
-        ValutaBot.MiniApp.OrderFlowEngine.OrderFlowResult? ofResult = null)
+        ValutaBot.MiniApp.SmcEngine.SmcAnalysisResult? smcResult = null)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl))
             return null;
@@ -365,14 +364,11 @@ public static class MLPythonService
             string smcBosDir = smcResult?.BosDirection ?? "NONE";
             bool smcHasOb = smcResult?.HasOrderBlock ?? false;
             bool smcHasFvg = smcResult?.HasFvg ?? false;
-            double ofDeltaRatio = ofResult?.DeltaRatio ?? 1.0;
-            string ofState = ofResult?.OrderFlowState ?? "NEUTRAL";
-
             object payload = mappedMtf != null 
                 ? new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex, mtf_candles = mappedMtf,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = ofDeltaRatio, of_state = ofState }
+                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL" }
                 : new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = ofDeltaRatio, of_state = ofState };
+                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL" };
 
             byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(payload);
             using var content = new ByteArrayContent(jsonBytes);
@@ -405,7 +401,7 @@ public static class MLPythonService
             {
                 string smcBos = smcResult?.BosDirection ?? "NONE";
                 string smcOb = (smcResult?.OrderBlockType != null) ? "OB_PRESENT" : "NO_OB";
-                double ofRat = ofResult?.ScoreContribution ?? 0.0;
+                double ofRat = 0.0;
                 
                 BotLogger.Info($"[ML Insights] {binanceSymbol}/{interval} | СЦЕНАРИЙ: Слом={smcBos}, Блок={smcOb}, ОФ={ofRat:F1} | ВЕРДИКТ: {result.Direction} (Уверенность: {result.Confidence*100:F1}%) | RawConf: {result.RawConfidence:F4} [v:{result.ModelVersion}]");
                 return new MLPythonPrediction(

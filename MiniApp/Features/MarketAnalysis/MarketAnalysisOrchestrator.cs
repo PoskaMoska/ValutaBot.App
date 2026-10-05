@@ -135,7 +135,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         // 6. Engines (Parallel)
         var engSw = Stopwatch.StartNew();
         var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
-        var ofResult = new ValutaBot.MiniApp.OrderFlowEngine.OrderFlowResult { ScoreContribution = 0, Description = "REMOVED", DeltaRatio = 1.0, OrderFlowState = "NEUTRAL" };
         
         // TA Scoring
         var taSw = Stopwatch.StartNew();
@@ -152,7 +151,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
         // ML
         var mlSw = Stopwatch.StartNew();
-        var mlPrediction = _settings.EnableMachineLearning ? await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult, ofResult) : null;
+        var mlPrediction = _settings.EnableMachineLearning ? await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult) : null;
         string lgbmDir = "NEUTRAL";
         double lgbmConf = 0.5;
         if (mlPrediction != null) {
@@ -192,11 +191,10 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         
         var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.hmaVal, taResult.volStrengthVal, mainAtr, mainAdx);
         var smcSignal = new SmcSignal(smcResult.BosDirection ?? "", smcResult.SweepDirection ?? "", smcResult.OrderBlockType ?? "", smcResult.FvgType ?? "", "");
-        var ofSignal = new OrderflowSignal(ofResult.ScoreContribution, ofResult.Description);
         var mlSignal = new MlSignal(lgbmDir, lgbmConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline", mlPrediction?.HorizonCandles, mlPrediction?.RawConfidence);
         var stateSignal = new StateSignal(state.VelocityRegime, state.VelocityBpsPerSec, state.MomentumContribution);
 
-        var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
+        var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
         
         // --- NEWS CALENDAR INTEGRATION ---
         int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
@@ -256,8 +254,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
-            _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
-                smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", ofResult.DeltaRatio, ofResult.OrderFlowState,
+            _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
+                smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 mlPrediction?.ModelVersion?.Split('/').LastOrDefault() ?? "UNKNOWN",
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
@@ -279,8 +277,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
-            _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
-                smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", ofResult.DeltaRatio, ofResult.OrderFlowState,
+            _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
+                smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 mlPrediction?.ModelVersion?.Split('/').LastOrDefault() ?? "UNKNOWN",
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
@@ -309,7 +307,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 };
                 string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
-                _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.OfScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson);
+                _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson);
             }
             traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 53% -> {dbSw.ElapsedMilliseconds}ms");
         }
@@ -379,8 +377,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             adaptiveReasoning = consensus.CombinedReasoningText,
             taDirection = consensus.TaScore > 0.02 ? "BUY" : consensus.TaScore < -0.02 ? "PUT" : "NEUTRAL",
             taConfidence = (int)Math.Clamp(Math.Abs(consensus.TaScore * 100), 0, 100),
-            ofDirection = ofSignal.ScoreContribution > 0.02 ? "BUY" : ofSignal.ScoreContribution < -0.02 ? "PUT" : "NEUTRAL",
-            ofConfidence = (int)Math.Clamp(Math.Abs(ofSignal.ScoreContribution * 100), 0, 100),
+            ofDirection = "NEUTRAL",
+            ofConfidence = 0,
             smcDirection = 
                 (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
                 (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 

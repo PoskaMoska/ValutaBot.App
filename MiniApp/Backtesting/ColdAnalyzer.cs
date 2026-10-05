@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using ValutaBot.MiniApp;
@@ -80,14 +80,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                     if (isBuy == actualUp) smcSweepWins++; else smcSweepLosses++;
                 }
 
-                // 3. Order Flow
-                var ofResult = OrderFlowEngine.AnalyzeOrderFlow("EUR/USD OTC", "1m", slice, currentPrice);
-                var ofState = ofResult.OrderFlowState;
-                if (ofState != null && (ofState.Contains("BULLISH") || ofState.Contains("BEARISH")))
-                {
-                    bool isBuy = ofState.Contains("BULLISH");
-                    if (isBuy == actualUp) ofWins++; else ofLosses++;
-                }
+                // 3. Order Flow REMOVED — 35.8% win-rate anti-signal on live forex
             }
 
             Console.WriteLine($"\nАнализ завершен за {sw.ElapsedMilliseconds}мс.");

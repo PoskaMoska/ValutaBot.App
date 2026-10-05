@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -82,9 +82,6 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 // ── SMC Engine ───────────────────────────────────────────────
                 var smcState = taEngine.GetSmcState(Asset, timeframe, closedOhlcSpan, currentPrice);
 
-                // ── OrderFlow Engine ─────────────────────────────────────────
-                var ofResult = OrderFlowEngine.AnalyzeOrderFlow(Asset, timeframe, closedOhlcSpan, currentPrice);
-
                 // ── ContinuousState Engine ───────────────────────────────────
                 var stateResult = ContinuousStateEngine.EvaluateContinuousState(
                     closedPrices, Asset, timeframe);
@@ -109,7 +106,6 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 string regimeName = regime.ToString();
 
                 double wTA   = 1.0;
-                double wOF   = 1.0;
                 double wLGBM = 1.0;
                 double wSMC  = 1.0;
                 double wSkender = 1.0;
@@ -120,10 +116,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 // 1. Math TA (score is typically -1.0 to 1.0)
                 ensembleScore += (taScore * wTA);
                 
-                // 2. OrderFlow
-                if (ofResult.ScoreContribution > 0.4) {
-                    ensembleScore += ofResult.OrderFlowState.Contains("BULLISH") ? (0.5 * wOF) : (-0.5 * wOF);
-                }
+                // 2. OrderFlow REMOVED — 35.8% win-rate anti-signal on live forex
 
                 // 3. ML LightGBM
                 if (mlDir == "BUY") ensembleScore += (0.8 * wLGBM);
@@ -177,7 +170,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                         Regime:            regimeName,
                         WeightTA:          wTA,
                         WeightSMC:         wSMC,
-                        WeightOF:          wOF,
+                        WeightOF:          0.0,
                         WeightLGBM:        wLGBM,
                         WeightSkender:     wSkender,
                         MlDirection:       mlDir,
