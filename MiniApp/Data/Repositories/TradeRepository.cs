@@ -706,5 +706,25 @@ FROM outcome_data;");
             }
             return result;
         }
+
+        /// <summary>
+        /// Returns the total number of verified (fully labeled) rows in trade_outcomes.
+        /// Used by CircuitBreakerService to autonomously decide whether the system
+        /// is still in dataset-collection mode (CB bypassed) or live-trading mode (CB active).
+        /// </summary>
+        public static async Task<int> GetVerifiedOutcomesCountAsync()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
+                using var conn = DbConnectionFactory.GetConnection();
+                return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes;");
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] GetVerifiedOutcomesCountAsync failed: {ex.Message}");
+                return 0;
+            }
+        }
     }
 }

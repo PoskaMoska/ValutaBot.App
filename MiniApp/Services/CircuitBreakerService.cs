@@ -22,6 +22,17 @@ namespace ValutaBot.MiniApp.Services
 
     public sealed class CircuitBreakerService : ICircuitBreakerService
     {
+        // ── Autonomous Dataset Collection Mode ────────────────────────────────────────
+        // The bot automatically bypasses the Circuit Breaker until it has accumulated
+        // enough labeled rows to be worth protecting. Once this threshold is crossed,
+        // CB activates permanently as a live-trading guard.
+        // No config flags, no Railway variables — fully autonomous.
+        private const int DatasetReadinessThreshold = 15_000;
+
+        private int  _cachedOutcomeCount     = -1;   // -1 = not yet loaded
+        private DateTime _outcomeCacheExpiry = DateTime.MinValue;
+        private readonly SemaphoreSlim _outcomeCacheLock = new(1, 1);
+
         private readonly TradingBotSettings _settings;
         private readonly Func<NpgsqlConnection> _getConnection;
         private readonly object _lock = new();
@@ -75,9 +86,26 @@ namespace ValutaBot.MiniApp.Services
 
         public bool IsHalted()
         {
+            // ── Autonomous bypass: if we haven't yet reached the dataset readiness
+            // threshold, Circuit Breaker is completely inactive. No config needed.
+            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < DatasetReadinessThreshold)
+            {
+                // Kick an async refresh so the count stays up-to-date (fire-and-forget)
+                if (DateTime.UtcNow > _outcomeCacheExpiry)
+                    _ = Task.Run(RefreshOutcomeCountCacheAsync);
+                return false;
+            }
+
+            // Outcome count not yet loaded (startup) → trigger async load and allow scanning
+            if (_cachedOutcomeCount < 0)
+            {
+                _ = Task.Run(RefreshOutcomeCountCacheAsync);
+                return false;
+            }
+
             lock (_lock)
             {
-                // Refresh from DB if cache is stale
+                // Refresh CB halt state from DB if cache is stale
                 var cacheStale = (DateTime.UtcNow - _cacheLoadedAt).TotalSeconds > _settings.CircuitBreakerDbCacheTtlSeconds;
                 if (cacheStale)
                 {
@@ -87,7 +115,7 @@ namespace ValutaBot.MiniApp.Services
                 if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
                     return true;
 
-                // Halt expired -> clear state and delete DB row
+                // Halt expired → clear state and delete DB row
                 if (_haltedUntil.HasValue && DateTime.UtcNow >= _haltedUntil.Value)
                 {
                     _haltedUntil = null;
@@ -101,6 +129,10 @@ namespace ValutaBot.MiniApp.Services
 
         public string? GetHaltedReason()
         {
+            // During dataset collection show informative progress instead of null
+            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < DatasetReadinessThreshold)
+                return null; // scanner treats null as "not halted" — correct behaviour
+
             lock (_lock)
             {
                 if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
@@ -114,6 +146,14 @@ namespace ValutaBot.MiniApp.Services
 
         public async Task CheckStateAsync(CancellationToken ct = default)
         {
+            // ── Autonomous bypass: don't activate CB while still building the dataset ──
+            await RefreshOutcomeCountCacheAsync();
+            if (_cachedOutcomeCount < DatasetReadinessThreshold)
+            {
+                BotLogger.Info($"[CircuitBreaker] Dataset collection mode — {_cachedOutcomeCount}/{DatasetReadinessThreshold} rows. CB inactive.");
+                return;
+            }
+
             // If already halted, skip the DB outcome query entirely
             if (IsHalted()) return;
 
@@ -196,6 +236,29 @@ namespace ValutaBot.MiniApp.Services
                     _haltedUntil = newHaltUntil;
                     _haltReason = reason;
                     _cacheLoadedAt = DateTime.UtcNow;
+                }
+            }
+        }
+
+        private async Task RefreshOutcomeCountCacheAsync()
+        {
+            if (await _outcomeCacheLock.WaitAsync(0))
+            {
+                try
+                {
+                    if (DateTime.UtcNow > _outcomeCacheExpiry)
+                    {
+                        _cachedOutcomeCount = await TradeRepository.GetVerifiedOutcomesCountAsync();
+                        _outcomeCacheExpiry = DateTime.UtcNow.AddMinutes(5); // cache for 5 minutes
+                    }
+                }
+                catch (Exception ex)
+                {
+                    BotLogger.Warn($"[CircuitBreaker] Failed to refresh outcome count: {ex.Message}");
+                }
+                finally
+                {
+                    _outcomeCacheLock.Release();
                 }
             }
         }
