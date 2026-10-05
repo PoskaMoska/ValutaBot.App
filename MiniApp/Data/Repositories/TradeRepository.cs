@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -166,6 +166,7 @@ FROM outcome_data;");
                     outcome.Asset,
                     outcome.Timeframe,
                     outcome.Direction,
+                    outcome.Probability,
                     outcome.EntryPrice,
                     outcome.ExitPrice,
                     outcome.PnlBps,
