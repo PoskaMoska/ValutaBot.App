@@ -213,36 +213,44 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
 
         RegisterRoutes(app);
-        app.Lifetime.ApplicationStarted.Register(() =>
+                app.Lifetime.ApplicationStarted.Register(() =>
         {
             _ = Task.Run(async () =>
             {
-                await Task.Delay(TimeSpan.FromSeconds(15)); // Give Python ML time to load models
                 try
                 {
-                    string dbStatus = "❌ Ошибка";
+                    string dbStatus = "\u274C Ошибка";
                     try {
                         using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                         await conn.OpenAsync();
                         using var cmd = new Npgsql.NpgsqlCommand("SELECT 1", conn);
                         await cmd.ExecuteScalarAsync();
-                        dbStatus = "⨅ Подключено";
+                        dbStatus = "\u2705 Подключено";
                     } catch { }
 
-                    string mlStatus = "❌ Ошибка";
-                    try {
-                        var client = HttpFactory?.CreateClient();
-                        if (client != null) {
-                            client.Timeout = TimeSpan.FromSeconds(3);
-                            var pyPort = Environment.GetEnvironmentVariable("PYTHON_PORT") ?? "8000";
-                            var mlResp = await client.GetAsync($"http://127.0.0.1:{pyPort}/health");
-                            if (mlResp.IsSuccessStatusCode) mlStatus = "⨅ В сети";
+                    string mlStatus = "\u274C Ошибка (Таймаут)";
+                    var client = HttpFactory?.CreateClient();
+                    if (client != null) {
+                        client.Timeout = TimeSpan.FromSeconds(3);
+                        var pyPort = Environment.GetEnvironmentVariable("PYTHON_PORT") ?? "8000";
+                        string url = "http://127.0.0.1:" + pyPort + "/health";
+                        
+                        for (int i = 0; i < 20; i++)
+                        {
+                            try {
+                                var mlResp = await client.GetAsync(url);
+                                if (mlResp.IsSuccessStatusCode) {
+                                    mlStatus = "\u2705 В сети";
+                                    break;
+                                }
+                            } catch { }
+                            await Task.Delay(TimeSpan.FromSeconds(3));
                         }
-                    } catch { }
+                    }
 
-                    string tiingoStatus = Environment.GetEnvironmentVariable("TIINGO_API_KEY") != null ? "⨅ Подключено" : "⚠️ Нет ключа";
+                    string tiingoStatus = Environment.GetEnvironmentVariable("TIINGO_API_KEY") != null ? "\u2705 Подключено" : "\u26A0\uFE0F Нет ключа";
 
-                    string msg = $"🚀 <b>ValutaBot Успешно Запущен!</b>\n\n♬️ <b>Системная диагностика:</b>\n- C# Core: ⨅ ОК\n- PostgreSQL: {dbStatus}\n- Python ML: {mlStatus}\n- WebSocket: {tiingoStatus}\n\n<i>Бот полностью в сети и мониторит рынок.</i>";
+                    string msg = "\U0001F680 <b>ValutaBot Успешно Запущен!</b>\n\n\u2699\uFE0F <b>Системная диагностика:</b>\n- C# Core: \u2705 ОК\n- PostgreSQL: " + dbStatus + "\n- Python ML: " + mlStatus + "\n- WebSocket: " + tiingoStatus + "\n\n<i>Бот полностью в сети и мониторит рынок.</i>";
                     await ValutaBot.MiniApp.TelegramBotService.SendMessageToAdmins(msg);
                 }
                 catch (Exception ex)
@@ -251,9 +259,6 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                 }
             });
         });
-
-
-
 
         await app.RunAsync($"http://0.0.0.0:{port}");
     }
