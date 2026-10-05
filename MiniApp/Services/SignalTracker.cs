@@ -48,7 +48,10 @@ public static class SignalTracker
         double smcScore = 0.0,
         double mlProb = 0.0, double mlScore = 0.0, string featuresJson = "",
         string smcBosDir = "NONE", bool smcHasOb = false, bool smcHasFvg = false,
-        double ofDeltaRatio = 1.0, string ofState = "NEUTRAL")
+        double ofDeltaRatio = 1.0, string ofState = "NEUTRAL",
+        string marketRegime = "UNKNOWN", string velocityRegime = "UNKNOWN",
+        double atrAtSignal = 0.0, double adxAtSignal = 0.0, double rsiAtSignal = 50.0,
+        bool higherTfAligned = false, int minutesToNews = -1)
     {
         if (MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
         string sym = asset.ToUpper();
@@ -98,7 +101,14 @@ public static class SignalTracker
             SmcHasFvg = smcHasFvg,
             OfDeltaRatio = ofDeltaRatio,
             OfState = ofState,
-            DynamicHorizon = expiryCandles
+            DynamicHorizon = expiryCandles,
+            MarketRegime = marketRegime,
+            VelocityRegime = velocityRegime,
+            AtrAtSignal = atrAtSignal,
+            AdxAtSignal = adxAtSignal,
+            RsiAtSignal = rsiAtSignal,
+            HigherTfAligned = higherTfAligned,
+            MinutesToNews = minutesToNews
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
@@ -233,6 +243,15 @@ public static class SignalTracker
         public double OfDeltaRatio { get; set; }
         public string OfState { get; set; } = "NEUTRAL";
         public int DynamicHorizon { get; set; } = 3;
+
+        // Market context — captured at signal time, flows through pending_trades to trade_outcomes
+        public string MarketRegime    { get; set; } = "UNKNOWN";
+        public string VelocityRegime  { get; set; } = "UNKNOWN";
+        public double AtrAtSignal     { get; set; }
+        public double AdxAtSignal     { get; set; }
+        public double RsiAtSignal     { get; set; } = 50.0;
+        public bool   HigherTfAligned { get; set; }
+        public int    MinutesToNews   { get; set; } = -1;
     }
 
     public class AccuracyStats

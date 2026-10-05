@@ -15,6 +15,24 @@ public static class TradeOutcomeTracker
     private static readonly SemaphoreSlim _csvSemaphore = new(1, 1); // B5-FIX: Concurrent CSV write lock
 private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _consecutiveLosses = new();
 
+    /// <summary>
+    /// Maps a UTC signal time to a forex trading session label.
+    /// OVERLAP (London+NY) is the highest-volume window and most predictable for subminute TFs.
+    /// </summary>
+    private static string ComputeSession(DateTime utc)
+    {
+        int h = utc.Hour;
+        // OVERLAP = London/NY crossover 13:00–16:00 UTC (highest volume, tightest spreads)
+        if (h >= 13 && h < 16) return "OVERLAP";
+        // LONDON = 08:00–17:00 UTC
+        if (h >= 8 && h < 17) return "LONDON";
+        // NY = 13:00–21:00 UTC (already covers NY-only from 16–21)
+        if (h >= 16 && h < 21) return "NY";
+        // TOKYO = 00:00–09:00 UTC
+        if (h >= 0 && h < 9) return "TOKYO";
+        return "QUIET";
+    }
+
     public static int GetConsecutiveLosses(string asset, string timeframe)
     {
         string key = $"{asset}_{timeframe}";
@@ -90,6 +108,16 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 OfDeltaRatio = record.OfDeltaRatio,
                 OfState = record.OfState,
                 DynamicHorizon = record.DynamicHorizon,
+                MarketRegime = record.MarketRegime,
+                VelocityRegime = record.VelocityRegime,
+                AtrAtSignal = record.AtrAtSignal,
+                AdxAtSignal = record.AdxAtSignal,
+                RsiAtSignal = record.RsiAtSignal,
+                HigherTfAligned = record.HigherTfAligned,
+                MinutesToNews = record.MinutesToNews,
+                Session = ComputeSession(record.CreatedAt),
+                DayOfWeek = (int)record.CreatedAt.DayOfWeek == 0 ? 7 : (int)record.CreatedAt.DayOfWeek,
+                HourUtc = record.CreatedAt.Hour,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };

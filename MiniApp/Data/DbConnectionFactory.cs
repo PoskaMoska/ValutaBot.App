@@ -120,6 +120,17 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_has_fvg BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_delta_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_state TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
+                    -- Rich market context columns for analytics and ML feature engineering
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN market_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN velocity_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN atr_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN adx_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN minutes_to_news INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN session TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN day_of_week INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN hour_utc INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN dynamic_horizon INT NOT NULL DEFAULT 3; EXCEPTION WHEN duplicate_column THEN END;
                     
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
@@ -133,6 +144,14 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE pending_trades ADD COLUMN of_delta_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN of_state TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN dynamic_horizon INTEGER NOT NULL DEFAULT 3; EXCEPTION WHEN duplicate_column THEN END;
+                    -- Rich market context (pending_trades → trade_outcomes pipeline)
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN market_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN velocity_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN atr_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN adx_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN minutes_to_news INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
                 END $$;
 
                 CREATE TABLE IF NOT EXISTS signal_votes (
