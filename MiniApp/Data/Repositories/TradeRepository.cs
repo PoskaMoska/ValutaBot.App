@@ -248,8 +248,8 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             using var conn = DbConnectionFactory.GetConnection();
             await conn.ExecuteAsync(@"
-                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, features_json)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson)
+                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, features_json)
+                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @FeaturesJson)
                 ON CONFLICT (id) DO NOTHING", 
                 new {
                     record.Id,
@@ -268,6 +268,12 @@ FROM outcome_data;");
                     record.SmcScore,
                     record.MlProb,
                     record.MlScore,
+                    record.SmcBosDir,
+                    record.SmcHasOb,
+                    record.SmcHasFvg,
+                    record.OfDeltaRatio,
+                    record.OfState,
+                    record.DynamicHorizon,
                     record.FeaturesJson
                 });
         }
@@ -305,7 +311,13 @@ FROM outcome_data;");
                 OfScore = r.OfScore != null ? Convert.ToDouble(r.OfScore) : 0.0,
                 SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,
                 MlProb = r.MlProb != null ? Convert.ToDouble(r.MlProb) : 0.0,
-                MlScore = r.MlScore != null ? Convert.ToDouble(r.MlScore) : 0.0
+                MlScore = r.MlScore != null ? Convert.ToDouble(r.MlScore) : 0.0,
+                SmcBosDir = r.SmcBosDir ?? "NONE",
+                SmcHasOb = r.SmcHasOb != null ? Convert.ToBoolean(r.SmcHasOb) : false,
+                SmcHasFvg = r.SmcHasFvg != null ? Convert.ToBoolean(r.SmcHasFvg) : false,
+                OfDeltaRatio = r.OfDeltaRatio != null ? Convert.ToDouble(r.OfDeltaRatio) : 1.0,
+                OfState = r.OfState ?? "NEUTRAL",
+                DynamicHorizon = r.DynamicHorizon != null ? Convert.ToInt32(r.DynamicHorizon) : 3
             }).Where(r => r.CreatedAt != DateTime.MinValue).ToList();
         }
 

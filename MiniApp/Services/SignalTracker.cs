@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -15,7 +15,7 @@ public static class SignalTracker
 {
     // Cooldown map using MemoryCache to automatically handle expiry without O(N) sweeping
     private static readonly Microsoft.Extensions.Caching.Memory.MemoryCache _cooldownCache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
-    // FIX #6: internal ����� PendingTradeVerificationService ��� ������ ���� ��� ������������ ����
+    // FIX #6: internal ????? PendingTradeVerificationService ??? ?????? ???? ??? ???????????? ????
     internal static readonly ConcurrentDictionary<string, double> _livePrices = new();
 
     public static void UpdateLivePrice(string asset, double price)
@@ -28,10 +28,10 @@ public static class SignalTracker
     private static readonly SemaphoreSlim _signalVotesCacheLock = new(1, 1);
     // Legacy background verification timer removed.
 
-    // в”Ђв”Ђ Public Write API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // ── Public Write API ───────────────────────────────────────────────────
 
     /// <summary>
-    /// Record a new prediction. Will be verified automatically after expiryCandles Г— timeframeSecs seconds.
+    /// Record a new prediction. Will be verified automatically after expiryCandles × timeframeSecs seconds.
     /// </summary>
     public static async Task RecordPredictionAsync(
         string direction,
@@ -46,7 +46,9 @@ public static class SignalTracker
         double taScore = 0.0,
         double ofScore = 0.0,
         double smcScore = 0.0,
-        double mlProb = 0.0, double mlScore = 0.0, string featuresJson = "")
+        double mlProb = 0.0, double mlScore = 0.0, string featuresJson = "",
+        string smcBosDir = "NONE", bool smcHasOb = false, bool smcHasFvg = false,
+        double ofDeltaRatio = 1.0, string ofState = "NEUTRAL")
     {
         if (MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
         string sym = asset.ToUpper();
@@ -68,8 +70,8 @@ public static class SignalTracker
             return;
         }
 
-        // FIX PRIORITY-6: Cooldown �������� �� 10 ������
-        // MemoryCache ������������� ������ ���� ����� 10 ������ ��� ������� O(N) ������� �������� ������.
+        // FIX PRIORITY-6: Cooldown ???????? ?? 10 ??????
+        // MemoryCache ????????????? ?????? ???? ????? 10 ?????? ??? ??????? O(N) ??????? ???????? ??????.
         int cooldownCandles = Math.Max(expiryCandles, 3); _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(cooldownCandles * timeframeSecs));
 
         var record = new PredictionRecord
@@ -90,7 +92,13 @@ public static class SignalTracker
             SmcScore = smcScore,
             MlProb = mlProb,
             MlScore = mlScore,
-            FeaturesJson = featuresJson
+            FeaturesJson = featuresJson,
+            SmcBosDir = smcBosDir,
+            SmcHasOb = smcHasOb,
+            SmcHasFvg = smcHasFvg,
+            OfDeltaRatio = ofDeltaRatio,
+            OfState = ofState,
+            DynamicHorizon = expiryCandles
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
@@ -98,7 +106,7 @@ public static class SignalTracker
         // Local Task.Run verification removed. PendingTradeVerificationService handles all verifications.
 
         Console.WriteLine($"[Tracker] Recorded {direction} {asset}/{timeframe} @ {price:F5} " +
-                          $"� target verify at {verifyAt:HH:mm:ss}");
+                          $"? target verify at {verifyAt:HH:mm:ss}");
     }
 
     // ---------------- Public Read API --------------------------------------------------------
@@ -149,13 +157,13 @@ public static class SignalTracker
 
     public static async Task<double> GetSignalWeightAsync(string signalName, double baseWeight = 1.0)
     {
-        // L1-FIX: РСЃРїРѕР»СЊР·СѓРµРј РєСЌС€ 30 СЃРµРє вЂ” СѓР±РёСЂР°РµРј SELECT РЅР° РєР°Р¶РґС‹Р№ С‚РёРє
+        // L1-FIX: Используем кэш 30 сек — убираем SELECT на каждый тик
         if (_signalVotesCache == null || DateTime.UtcNow > _signalVotesCacheExpiry)
         {
             await _signalVotesCacheLock.WaitAsync();
             try
             {
-                // Double-check РїРѕСЃР»Рµ РїРѕР»СѓС‡РµРЅРёСЏ Р±Р»РѕРєРёСЂРѕРІРєРё
+                // Double-check после получения блокировки
                 if (_signalVotesCache == null || DateTime.UtcNow > _signalVotesCacheExpiry)
                 {
                     _signalVotesCache = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetAllSignalVotesAsync();
@@ -170,7 +178,7 @@ public static class SignalTracker
         return CalculateSignalWeight(_signalVotesCache, signalName, baseWeight);
     }
 
-    // в”Ђв”Ђ Background Verification в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // ── Background Verification ────────────────────────────────────────────
 
     // Validation logic (VerifyPendingAsync and FetchExitPriceAsync) was fully surgically excised (Ace of Swords).
     // The legacy timer caused race conditions with the new memory-driven validator,
@@ -194,7 +202,7 @@ public static class SignalTracker
             var s => s
         };
 
-    // в”Ђв”Ђ Data Types в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    // ── Data Types ─────────────────────────────────────────────────────────
 
     public class PredictionRecord
     {
@@ -219,6 +227,12 @@ public static class SignalTracker
         public double MlProb { get; set; }
         public double MlScore { get; set; }
         public string FeaturesJson { get; set; } = "";
+        public string SmcBosDir { get; set; } = "NONE";
+        public bool SmcHasOb { get; set; }
+        public bool SmcHasFvg { get; set; }
+        public double OfDeltaRatio { get; set; }
+        public string OfState { get; set; } = "NEUTRAL";
+        public int DynamicHorizon { get; set; } = 3;
     }
 
     public class AccuracyStats

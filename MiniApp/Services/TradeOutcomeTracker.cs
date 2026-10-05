@@ -84,6 +84,12 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 MlProb = record.MlProb,
                 MlScore = record.MlScore,
                 FeaturesJson = record.FeaturesJson,
+                SmcBosDir = record.SmcBosDir,
+                SmcHasOb = record.SmcHasOb,
+                SmcHasFvg = record.SmcHasFvg,
+                OfDeltaRatio = record.OfDeltaRatio,
+                OfState = record.OfState,
+                DynamicHorizon = record.DynamicHorizon,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };
@@ -140,11 +146,18 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             // Trades smaller than this are statistical noise (Brownian motion). 
             // We record them for the user's DB and consecutive losses, but hide them from ML to prevent weight poisoning.
             double pctDiff = record.EntryPrice > 1e-8 ? Math.Abs(exitPriceVal - record.EntryPrice) / record.EntryPrice * 100.0 : 0;
-            bool isTrainingDoji = pctDiff < 0.025;
+            double dojiThreshold = record.Timeframe switch
+            {
+                "s5" => 0.005,
+                "s10" => 0.010,
+                "s15" => 0.015,
+                _ => 0.025
+            };
+            bool isTrainingDoji = pctDiff < dojiThreshold;
 
             if (isTrainingDoji)
             {
-                BotLogger.Warn($"[TradeOutcomeTracker] Training Doji (Noise) for {record.Asset} (pctDiff={pctDiff:F4}% < 0.025%). Skipping ML/WF feedback to prevent weight poisoning.");
+                BotLogger.Warn($"[TradeOutcomeTracker] Training Doji (Noise) for {record.Asset} (pctDiff={pctDiff:F4}% < {dojiThreshold:F3}%). Skipping ML/WF feedback to prevent weight poisoning.");
                 return;
             }
 
