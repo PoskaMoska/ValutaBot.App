@@ -17,6 +17,13 @@ public class TradingBotSettings
     public int CircuitBreakerWindowSize { get; set; } = 10;                 // WINDOW_SIZE
     public int CircuitBreakerMaxConsecutiveLosses { get; set; } = 3;        // MAX_CONSECUTIVE_LOSSES
     public double CircuitBreakerMinWinRate { get; set; } = 0.40;            // MIN_WIN_RATE
-    public int CircuitBreakerCooldownMinutes { get; set; } = 120;           // COOLDOWN_MINUTES (2 hours)
+    public int CircuitBreakerCooldownMinutes { get; set; } = 15;            // COOLDOWN_MINUTES (15 min, dataset mode)
     public int CircuitBreakerDbCacheTtlSeconds { get; set; } = 30;          // DB_CACHE_TTL_SECONDS
+
+    /// <summary>
+    /// When true, the AutoTradingScanner completely bypasses the Circuit Breaker
+    /// so dataset accumulation never stops due to consecutive losses.
+    /// Set to false only when switching to live real-money trading.
+    /// </summary>
+    public bool DatasetCollectionMode { get; set; } = true;
 }

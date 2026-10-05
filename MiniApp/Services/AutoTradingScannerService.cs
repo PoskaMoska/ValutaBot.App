@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using ValutaBot.MiniApp.Features.MarketAnalysis;
 using ValutaBot.App.MiniApp.Data.Repositories;
 
@@ -21,6 +22,7 @@ public class AutoTradingScannerService : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AutoTradingScannerService> _logger;
     private readonly ICircuitBreakerService _circuitBreaker;
+    private readonly TradingBotSettings _settings;
     private static readonly string[] _targetPairs = { "EURUSD", "GBPUSD", "USDJPY", "AUDUSD" };
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
@@ -41,11 +43,12 @@ public class AutoTradingScannerService : BackgroundService
         };
 
 
-    public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger, ICircuitBreakerService circuitBreaker)
+    public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger, ICircuitBreakerService circuitBreaker, IOptions<TradingBotSettings> settings)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
         _circuitBreaker = circuitBreaker;
+        _settings = settings.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -77,7 +80,11 @@ public class AutoTradingScannerService : BackgroundService
                 continue;
             }
 
-            if (_circuitBreaker.IsHalted())
+            if (_settings.DatasetCollectionMode)
+            {
+                _logger.LogDebug("[AutoScanner] DatasetCollectionMode=true — Circuit Breaker bypassed for continuous data collection.");
+            }
+            else if (_circuitBreaker.IsHalted())
             {
                 _logger.LogWarning($"[AutoScanner] Circuit Breaker Active: {_circuitBreaker.GetHaltedReason()}. Pausing scan...");
                 await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
@@ -140,7 +147,11 @@ public class AutoTradingScannerService : BackgroundService
                 continue;
             }
 
-            if (_circuitBreaker.IsHalted())
+            if (_settings.DatasetCollectionMode)
+            {
+                _logger.LogDebug("[AutoScanner] DatasetCollectionMode=true — Circuit Breaker bypassed for continuous data collection.");
+            }
+            else if (_circuitBreaker.IsHalted())
             {
                 _logger.LogWarning($"[AutoScanner] Circuit Breaker Active: {_circuitBreaker.GetHaltedReason()}. Pausing scan...");
                 await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
