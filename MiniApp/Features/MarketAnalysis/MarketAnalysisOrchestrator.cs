@@ -237,6 +237,43 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             ["LIGHTGBM"]     = lgbmDir,
         };
 
+        // Phase 3 Context calculations
+        double priceEntropy = 0.0;
+        int trendMaturity = 0;
+        double pricePositionPct = 0.5;
+        bool bbSqueeze = false;
+        
+        if (candles.Length >= 20)
+        {
+            var last20 = candles.Skip(candles.Length - 20).ToList();
+            double maxHigh = last20.Max(c => c.High);
+            double minLow = last20.Min(c => c.Low);
+            if (maxHigh > minLow) {
+                pricePositionPct = (currentLivePrice - minLow) / (maxHigh - minLow);
+            }
+            
+            double sma20 = last20.Average(c => c.Close);
+            double stdev20 = Math.Sqrt(last20.Average(c => Math.Pow(c.Close - sma20, 2)));
+            bbSqueeze = (stdev20 * 4) / sma20 < 0.0005; // 5 bps bandwidth
+            
+            int streak = 0;
+            bool? upTrend = null;
+            for (int i = candles.Length - 1; i >= 1; i--) {
+                bool isUp = candles[i].Close > candles[i-1].Close;
+                bool isDown = candles[i].Close < candles[i-1].Close;
+                if (upTrend == null) {
+                    if (isUp) upTrend = true;
+                    else if (isDown) upTrend = false;
+                    else break;
+                }
+                if (upTrend == true && isUp) streak++;
+                else if (upTrend == false && isDown) streak++;
+                else break;
+            }
+            trendMaturity = streak;
+            priceEntropy = mainAtr > 0 ? (stdev20 / mainAtr) : 0.0;
+        }
+
         // RECORD (Fire and forget) ONLY IF CONFIDENCE IS HIGH ENOUGH
         int targetHorizon = timeout.TimeoutCandles;
         if (isRiskBlocked)
@@ -254,6 +291,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
+            string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taSignal);
+
+            string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
+
+            string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(smcSignal);
+
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 mlPrediction?.ModelVersion?.Split('/').LastOrDefault() ?? "UNKNOWN",
@@ -263,7 +306,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 minutesToNews ?? -1,
                 consensus.CombinedReasoningText ?? "",
                 mlPrediction?.ModelVersion ?? "",
-                mlPrediction?.Accuracy ?? 0.0);
+                mlPrediction?.Accuracy ?? 0.0,
+                priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
@@ -277,6 +321,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             };
             string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
+            string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taSignal);
+
+            string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
+
+            string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(smcSignal);
+
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 mlPrediction?.ModelVersion?.Split('/').LastOrDefault() ?? "UNKNOWN",
@@ -286,7 +336,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 minutesToNews ?? -1,
                 consensus.CombinedReasoningText ?? "",
                 mlPrediction?.ModelVersion ?? "",
-                mlPrediction?.Accuracy ?? 0.0);
+                mlPrediction?.Accuracy ?? 0.0,
+                priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             dbSw.Stop();
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}) -> {dbSw.ElapsedMilliseconds}ms");
         }
@@ -307,7 +358,14 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 };
                 string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
-                _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson);
+                string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taSignal);
+
+                string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
+
+                string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(smcSignal);
+
+                _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
+                    "NONE", false, false, 1.0, "NEUTRAL", "UNKNOWN", state.VelocityRegime ?? "UNKNOWN", mainAtr, mainAdx, taResult.rsiVal, false, minutesToNews ?? -1, "", "", 0.0, priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             }
             traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 53% -> {dbSw.ElapsedMilliseconds}ms");
         }

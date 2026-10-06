@@ -1,4 +1,4 @@
-﻿using ValutaBot.App.MiniApp.Data.Repositories;
+using ValutaBot.App.MiniApp.Data.Repositories;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -109,7 +109,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 EntryPrice = record.EntryPrice,
                 ExitPrice = record.ExitPrice ?? record.EntryPrice,
                 PnlBps = record.PnlBps,
-                WasWin = record.WasCorrect ?? false,
+                WasWin = record.WasCorrect,
                 TaScore = record.TaScore,
                 OfScore = record.OfScore,
                 SmcScore = record.SmcScore,
@@ -159,19 +159,20 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             // 🔥 DRIFT DETECTION 🔥
             _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
 
-            bool wasCorrect = record.WasCorrect ?? false;
-
-            double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
-            
             bool isExactDoji = Math.Abs(record.PnlBps) < 1e-4; // Exact tie / Refund
-
+            string lossKey = $"{record.Asset}_{record.Timeframe}";
+            
             if (isExactDoji)
             {
+                // A tie breaks the loss streak!
+                _consecutiveLosses[lossKey] = 0;
                 BotLogger.Warn($"[TradeOutcomeTracker] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
                 return;
             }
 
-            string lossKey = $"{record.Asset}_{record.Timeframe}";
+            bool wasCorrect = record.WasCorrect ?? false;
+            double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
+            
             if (wasCorrect)
             {
                 _consecutiveLosses[lossKey] = 0;

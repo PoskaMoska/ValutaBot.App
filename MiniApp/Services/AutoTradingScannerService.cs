@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -69,68 +71,72 @@ public class AutoTradingScannerService : BackgroundService
 
     private async Task RunSubminuteScannerAsync(CancellationToken stoppingToken)
     {
-        int currentPairIndex = 0;
-        int currentTfIndex = 0;
+        var channel = Channel.CreateUnbounded<(string pair, string tf)>();
 
-        while (!stoppingToken.IsCancellationRequested)
+        RealtimeTickCollector.OnCandleClosed += (pair, tf) =>
         {
-            if (IsWeekendPause())
+            if (_targetPairs.Contains(pair, StringComparer.OrdinalIgnoreCase) && _subminuteTfs.Contains(tf, StringComparer.OrdinalIgnoreCase))
             {
-                await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
-                continue;
+                channel.Writer.TryWrite((pair, tf));
             }
+        };
 
-            if (_settings.DatasetCollectionMode)
+        var workers = new List<Task>();
+        for (int i = 0; i < 4; i++) // 4 concurrent workers
+        {
+            workers.Add(Task.Run(async () =>
             {
-                _logger.LogDebug("[AutoScanner] DatasetCollectionMode=true — Circuit Breaker bypassed for continuous data collection.");
-            }
-            else if (_circuitBreaker.IsHalted())
-            {
-                _logger.LogWarning($"[AutoScanner] Circuit Breaker Active: {_circuitBreaker.GetHaltedReason()}. Pausing scan...");
-                await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
-                continue;
-            }
-
-            try
-            {
-                using var scope = _serviceProvider.CreateScope();
-                var orchestrator = scope.ServiceProvider.GetRequiredService<IMarketAnalysisOrchestrator>();
-                var userSettings = await UserRepository.GetSettingsAsync(0);
-
-                string pair = _targetPairs[currentPairIndex];
-                string tf = _subminuteTfs[currentTfIndex];
-                int minCandles = _minCandlesPerTf.TryGetValue(tf, out int mc) ? mc : 80;
-
-                var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
-                
-                // Only scan if we have enough fresh WebSocket data
-                if (recentCandles.Length >= minCandles)
+                await foreach (var item in channel.Reader.ReadAllAsync(stoppingToken))
                 {
-                    var lastCandleTime = recentCandles[^1].Timestamp;
-                    if ((DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30)
-                    {
-                        _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles)...");
-                        await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
-                    }
-                    else
-                    {
-                        _logger.LogWarning($"[AutoScanner-Fast] Stale candles for {pair}/{tf}: last={lastCandleTime:HH:mm:ss}. Skipping.");
-                    }
+                    if (stoppingToken.IsCancellationRequested) break;
+                    await ProcessSubminuteScanAsync(item.pair, item.tf, stoppingToken);
+                }
+            }, stoppingToken));
+        }
+
+        await Task.WhenAll(workers);
+    }
+
+    private async Task ProcessSubminuteScanAsync(string pair, string tf, CancellationToken stoppingToken)
+    {
+        if (IsWeekendPause()) return;
+
+        if (_settings.DatasetCollectionMode)
+        {
+            // Allowed
+        }
+        else if (_circuitBreaker.IsHalted())
+        {
+            _logger.LogWarning($"[AutoScanner] Circuit Breaker Active. Pausing scan...");
+            return;
+        }
+
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var orchestrator = scope.ServiceProvider.GetRequiredService<IMarketAnalysisOrchestrator>();
+            var userSettings = await UserRepository.GetSettingsAsync(0);
+
+            int minCandles = _minCandlesPerTf.TryGetValue(tf, out int mc) ? mc : 80;
+            var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
+            
+            if (recentCandles.Length >= minCandles)
+            {
+                var lastCandleTime = recentCandles[^1].Timestamp;
+                if ((DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30)
+                {
+                    _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles)...");
+                    await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
                 }
                 else
                 {
-                    _logger.LogDebug($"[AutoScanner-Fast] Not enough candles for {pair}/{tf}: {recentCandles.Length}/{minCandles}. Waiting...");
+                    _logger.LogWarning($"[AutoScanner-Fast] Stale candles for {pair}/{tf}: last={lastCandleTime:HH:mm:ss}. Skipping.");
                 }
-
-                MoveToNextCycle(ref currentTfIndex, ref currentPairIndex, _subminuteTfs.Length);
             }
-            catch (Exception ex)
-            {
-                if (ex.Message.Contains("Рынок в состоянии застоя")) _logger.LogWarning($"[AutoScanner-Fast] Blocked: {ex.Message}"); else _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
-            }
-
-            // Fast loop: 10 seconds between checks (safe because it relies on local RAM/DB)
-            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            if (ex.Message.Contains("���������")) _logger.LogWarning($"[AutoScanner-Fast] Blocked: {ex.Message}"); else _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
         }
     }
 

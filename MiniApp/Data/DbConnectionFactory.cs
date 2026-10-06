@@ -89,7 +89,7 @@ namespace ValutaBot.App.MiniApp.Data
                     entry_price DOUBLE PRECISION NOT NULL,
                     exit_price DOUBLE PRECISION NOT NULL,
                     pnl_bps DOUBLE PRECISION NOT NULL,
-                    was_win BOOLEAN NOT NULL,
+                    was_win BOOLEAN,
                     created_at TEXT NOT NULL,
                     verified_at TEXT NOT NULL
                 );
@@ -150,6 +150,17 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE pending_trades ADD COLUMN reasoning_text TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ml_model_version TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ml_model_accuracy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    
+                    -- Phase 3: Entropy and Market Phase context
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN price_entropy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN trend_maturity INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN price_position_pct DOUBLE PRECISION NOT NULL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN bb_squeeze BOOLEAN NOT NULL DEFAULT false; EXCEPTION WHEN duplicate_column THEN END;
+                    
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN price_entropy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN trend_maturity INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN price_position_pct DOUBLE PRECISION NOT NULL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE pending_trades ADD COLUMN bb_squeeze BOOLEAN NOT NULL DEFAULT false; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE trade_outcomes ADD COLUMN dynamic_horizon INT NOT NULL DEFAULT 3; EXCEPTION WHEN duplicate_column THEN END;
                     
                     BEGIN ALTER TABLE pending_trades ADD COLUMN ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
@@ -240,9 +251,7 @@ namespace ValutaBot.App.MiniApp.Data
 
             BotLogger.Info("[PostgreSQL DB] Database tables initialized successfully.");
 
-            // Wire AutoCalibrationEngine into TradeOutcomeTracker before initializing
-            // so that RestoreState() calls during Init correctly land in the engine.
-            TradeOutcomeTracker.AutoCalib = new AutoCalibrationEngine();
+            // AutoCalibrationEngine is now wired via DI in MiniAppController
 
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();

@@ -67,6 +67,14 @@ public static class TiingoWebSocketStream
         }
     }
 
+    private static bool IsWeekendPause()
+    {
+        var dayOfWeek = DateTime.UtcNow.DayOfWeek;
+        return dayOfWeek == DayOfWeek.Saturday ||
+               (dayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
+               (dayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
+    }
+
     private static async Task WatchdogLoopAsync(CancellationToken token)
     {
         try
@@ -75,7 +83,11 @@ public static class TiingoWebSocketStream
             {
                 await Task.Delay(15000, token); // Check every 15s
 
-                bool isDead = (DateTime.UtcNow - _lastMessageTime).TotalSeconds > 60;
+                if (IsWeekendPause()) {
+                      _lastMessageTime = DateTime.UtcNow;
+                      continue;
+                  }
+                  bool isDead = (DateTime.UtcNow - _lastMessageTime).TotalSeconds > 60;
                 if (isDead && _webSocket?.State == WebSocketState.Open)
                 {
                     BotLogger.Warn("[Tiingo WS] Watchdog detected silent drop (no ticks for >60s). Dropping connection to force reconnect...");
@@ -107,6 +119,11 @@ public static class TiingoWebSocketStream
         {
             while (!token.IsCancellationRequested)
             {
+                if (IsWeekendPause())
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(5), token);
+                    continue;
+                }
                 bool wasConnected = false;
                 using var connCts = CancellationTokenSource.CreateLinkedTokenSource(token);
                 _connectionCts = connCts;
@@ -197,12 +214,18 @@ public static class TiingoWebSocketStream
                     if (dataArr.GetArrayLength() >= 6)
                     {
                         string ticker = dataArr[1].GetString()?.ToUpper() ?? "";
+                        string dateStr = dataArr[2].GetString() ?? "";
                         double midPrice = dataArr[5].GetDouble();
 
                         if (midPrice > 0)
                         {
                             _livePrices[ticker] = midPrice;
-                            _ = RealtimeTickCollector.OnPriceUpdateAsync(ticker, midPrice);
+                            long tickTimeUtc = DateTime.UtcNow.Ticks;
+                            if (DateTime.TryParse(dateStr, null, System.Globalization.DateTimeStyles.AdjustToUniversal, out var dt))
+                            {
+                                tickTimeUtc = dt.Ticks;
+                            }
+                            _ = RealtimeTickCollector.OnPriceUpdateAsync(ticker, midPrice, tickTimeUtc);
                         }
                     }
                 }

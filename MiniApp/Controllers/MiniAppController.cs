@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -193,6 +193,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         var cbService = app.Services.GetRequiredService<ValutaBot.MiniApp.Services.ICircuitBreakerService>();
         await cbService.InitializeAsync();
         ValutaBot.MiniApp.TradeOutcomeTracker.CircuitBreaker = cbService;
+        ValutaBot.MiniApp.TradeOutcomeTracker.AutoCalib = app.Services.GetRequiredService<ValutaBot.MiniApp.IAutoCalibrationEngine>();
 
         LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
         app.UseStaticFiles();

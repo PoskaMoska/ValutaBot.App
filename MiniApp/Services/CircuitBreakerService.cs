@@ -169,8 +169,8 @@ namespace ValutaBot.MiniApp.Services
                 int consecutiveLosses = 0;
                 foreach (var win in recentOutcomes)
                 {
-                    if (!win) consecutiveLosses++;
-                    else break;
+                    if (win == false) consecutiveLosses++;
+                    else break; // Win or Tie resets the streak
                 }
                 if (consecutiveLosses >= _settings.CircuitBreakerMaxConsecutiveLosses)
                 {
@@ -178,15 +178,16 @@ namespace ValutaBot.MiniApp.Services
                     reason = $"{consecutiveLosses} consecutive losses";
                 }
 
-                // Check 2: Win rate over the window (min 5 trades to evaluate)
-                if (!shouldHalt && recentOutcomes.Count >= 5)
+                // Check 2: Win rate over the window (min 5 trades to evaluate, exclude ties)
+                var resolvedTrades = recentOutcomes.Where(w => w.HasValue).Select(w => w!.Value).ToList();
+                if (!shouldHalt && resolvedTrades.Count >= 5)
                 {
-                    int wins = recentOutcomes.Count(w => w);
-                    double winRate = (double)wins / recentOutcomes.Count;
+                    int wins = resolvedTrades.Count(w => w);
+                    double winRate = (double)wins / resolvedTrades.Count;
                     if (winRate < _settings.CircuitBreakerMinWinRate)
                     {
                         shouldHalt = true;
-                        reason = $"Win rate dropped to {winRate:P0} (last {recentOutcomes.Count} trades)";
+                        reason = $"Win rate dropped to {winRate:P0} (last {resolvedTrades.Count} resolved trades)";
                     }
                 }
 

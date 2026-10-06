@@ -16,7 +16,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public double EntryPrice { get; set; }
         public double ExitPrice { get; set; }
         public double PnlBps { get; set; }
-        public bool WasWin { get; set; }
+        public bool? WasWin { get; set; }
         public int Probability { get; set; }
         public double TaScore { get; set; }
         public double OfScore { get; set; }
@@ -64,6 +64,12 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public double MlModelAccuracy { get; set; }
         public double MaxFavorableBps { get; set; }
         public double MaxAdverseBps { get; set; }
+        
+        // === Phase 3: Entropy and Context ===
+        public double PriceEntropy { get; set; }
+        public int    TrendMaturity { get; set; }
+        public double PricePositionPct { get; set; }
+        public bool   BbSqueeze { get; set; }
     }
 
     public class EvolutionDumpDto
@@ -169,14 +175,16 @@ FROM outcome_data;");
                      session, day_of_week, hour_utc,
                      ta_direction, ml_direction, smc_direction, of_direction, conflict_count,
                      confidence_bucket, was_close_call, consecutive_losses_before, seconds_since_last_trade,
-                     reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps)
+                     reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps,
+                     price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
                     VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
                             @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
                             @Session, @DayOfWeek, @HourUtc,
                             @TaDirection, @MlDirection, @SmcDirection, @OfDirection, @ConflictCount,
                             @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
-                            @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps)
+                            @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
+                            @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, @TaTelemetry::jsonb, @MlTelemetry::jsonb, @SmcTelemetry::jsonb)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
                         timeframe = EXCLUDED.timeframe,
@@ -223,7 +231,11 @@ FROM outcome_data;");
                         ml_model_version = EXCLUDED.ml_model_version,
                         ml_model_accuracy = EXCLUDED.ml_model_accuracy,
                         max_favorable_bps = EXCLUDED.max_favorable_bps,
-                        max_adverse_bps = EXCLUDED.max_adverse_bps
+                        max_adverse_bps = EXCLUDED.max_adverse_bps,
+                        price_entropy = EXCLUDED.price_entropy,
+                        trend_maturity = EXCLUDED.trend_maturity,
+                        price_position_pct = EXCLUDED.price_position_pct,
+                        bb_squeeze = EXCLUDED.bb_squeeze
                 ", new
                 {
                     outcome.Id,
@@ -272,7 +284,11 @@ FROM outcome_data;");
                     outcome.MlModelVersion,
                     outcome.MlModelAccuracy,
                     outcome.MaxFavorableBps,
-                    outcome.MaxAdverseBps
+                    outcome.MaxAdverseBps,
+                    outcome.PriceEntropy,
+                    outcome.TrendMaturity,
+                    outcome.PricePositionPct,
+                    outcome.BbSqueeze
                 });
             }
             catch (Exception ex)
@@ -336,8 +352,8 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             using var conn = DbConnectionFactory.GetConnection();
             await conn.ExecuteAsync(@"
-                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson)
+                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
+                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, @TaTelemetry::jsonb, @MlTelemetry::jsonb, @SmcTelemetry::jsonb)
                 ON CONFLICT (id) DO NOTHING", 
                 new {
                     record.Id,
@@ -372,7 +388,14 @@ FROM outcome_data;");
                     record.ReasoningText,
                     record.MlModelVersion,
                     record.MlModelAccuracy,
-                    record.FeaturesJson
+                    record.FeaturesJson,
+                    record.PriceEntropy,
+                    record.TrendMaturity,
+                    record.PricePositionPct,
+                    record.BbSqueeze,
+                    record.TaTelemetry,
+                    record.MlTelemetry,
+                    record.SmcTelemetry
                 });
         }
 
@@ -604,11 +627,11 @@ FROM outcome_data;");
                 BotLogger.Warn($"[TradeRepository] EnsureCalibrationTable notice: {ex.Message}");
             }
         }
-        public static async Task<System.Collections.Generic.List<bool>> GetRecentOutcomesAsync(int limit = 10)
+        public static async Task<System.Collections.Generic.List<bool?>> GetRecentOutcomesAsync(int limit = 10)
         {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool>();
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool?>();
             using var conn = DbConnectionFactory.GetConnection();
-            var rows = await conn.QueryAsync<bool>(@"
+            var rows = await conn.QueryAsync<bool?>(@"
                 SELECT was_win 
                 FROM trade_outcomes 
                 WHERE verified_at IS NOT NULL 

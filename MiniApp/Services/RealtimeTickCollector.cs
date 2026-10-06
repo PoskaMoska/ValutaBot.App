@@ -13,6 +13,7 @@ namespace ValutaBot.MiniApp
 {
     public static class RealtimeTickCollector
     {
+        public static event Action<string, string>? OnCandleClosed;
         private class CandleAccumulator
         {
             public double? Open { get; set; }
@@ -21,6 +22,7 @@ namespace ValutaBot.MiniApp
             public double Close { get; set; }
             public int TickCount { get; set; }
             public DateTime OpenTime { get; set; }
+            public MiniAppController.OhlcCandle? LastClosed { get; set; }
             
             public void AddTick(double price)
             {
@@ -33,6 +35,7 @@ namespace ValutaBot.MiniApp
             
             public void Reset(DateTime openTime)
             {
+                if (Open.HasValue) LastClosed = new MiniAppController.OhlcCandle(Open.Value, High, Low, Close, TickCount, OpenTime);
                 Open = null;
                 High = double.MinValue;
                 Low = double.MaxValue;
@@ -194,13 +197,9 @@ namespace ValutaBot.MiniApp
                     liveAcc = acc;
                 }
 
+                MiniAppController.OhlcCandle? missedClosed = null;
                 if (liveAcc != null)
                 {
-                    // D1-4 FIX: Convert both sides to DateTime (UTC ticks) before comparing.
-                    // Old code: Convert.ToString(r.OpenTime) == liveOpenTimeStr
-                    //   → Culture-dependent: on Railway Linux (non en-US) the DB DateTime
-                    //     formats differently than "o" (ISO-8601), so RemoveAll never matched
-                    //     → liveAcc candle AND the same DB candle both appeared → duplicate last candle.
                     DateTime liveOpenTime = liveAcc.OpenTime.ToUniversalTime();
                     records.RemoveAll(r =>
                     {
@@ -209,14 +208,28 @@ namespace ValutaBot.MiniApp
                             : Convert.ToDateTime(r.OpenTime).ToUniversalTime();
                         return dbTime.Ticks == liveOpenTime.Ticks;
                     });
+
+                    if (liveAcc.LastClosed != null)
+                    {
+                        long lastClosedTicks = liveAcc.LastClosed.Timestamp.ToUniversalTime().Ticks;
+                        bool found = false;
+                        foreach (var r in records)
+                        {
+                            DateTime dbTime = r.OpenTime is string s
+                                ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal)
+                                : Convert.ToDateTime(r.OpenTime).ToUniversalTime();
+                            if (dbTime.Ticks == lastClosedTicks) { found = true; break; }
+                        }
+                        if (!found) missedClosed = liveAcc.LastClosed;
+                    }
                 }
 
-                int totalCount = records.Count + (liveAcc != null ? 1 : 0);
+                int totalCount = records.Count + (liveAcc != null ? 1 : 0) + (missedClosed != null ? 1 : 0);
                 int resultSize = Math.Min(limit, totalCount);
                 var result = new MiniAppController.OhlcCandle[resultSize];
                 
                 int resultIdx = 0;
-                int dbRecordsToTake = Math.Min(records.Count, resultSize - (liveAcc != null ? 1 : 0));
+                int dbRecordsToTake = Math.Min(records.Count, resultSize - (liveAcc != null ? 1 : 0) - (missedClosed != null ? 1 : 0));
                 
                 for (int i = dbRecordsToTake - 1; i >= 0; i--)
                 {
@@ -234,6 +247,10 @@ namespace ValutaBot.MiniApp
                         parsedTime);
                 }
 
+                if (missedClosed != null && resultIdx < resultSize)
+                {
+                    result[resultIdx++] = missedClosed;
+                }
                 if (liveAcc != null && resultIdx < resultSize)
                 {
                     lock (liveAcc)
@@ -260,10 +277,10 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        public static Task OnPriceUpdateAsync(string asset, double price)
+        public static Task OnPriceUpdateAsync(string asset, double price, long tickTimeUtc)
         {
             string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
-            long nowTicks = DateTime.UtcNow.Ticks;
+            long nowTicks = tickTimeUtc;
 
             QueueTick(cleanAsset, "s5", price, nowTicks, TimeSpan.FromSeconds(5).Ticks);
             QueueTick(cleanAsset, "s10", price, nowTicks, TimeSpan.FromSeconds(10).Ticks);
@@ -306,7 +323,10 @@ namespace ValutaBot.MiniApp
             lock (acc)
             {
                 if (acc.OpenTime != openTime && acc.OpenTime != default)
+                {
                     acc.Reset(openTime);
+                    OnCandleClosed?.Invoke(asset, dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1");
+                }
                 else if (acc.OpenTime == default)
                     acc.OpenTime = openTime;
 

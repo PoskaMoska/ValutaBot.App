@@ -51,7 +51,8 @@ public static class SignalTracker
         string marketRegime = "UNKNOWN", string velocityRegime = "UNKNOWN",
         double atrAtSignal = 0.0, double adxAtSignal = 0.0, double rsiAtSignal = 50.0,
         bool higherTfAligned = false, int minutesToNews = -1,
-        string reasoningText = "", string mlModelVersion = "", double mlModelAccuracy = 0.0)
+        string reasoningText = "", string mlModelVersion = "", double mlModelAccuracy = 0.0,
+        double priceEntropy = 0.0, int trendMaturity = 0, double pricePositionPct = 0.5, bool bbSqueeze = false, string? taTelemetry = null, string? mlTelemetry = null, string? smcTelemetry = null)
     {
         if (MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
         string sym = asset.ToUpper();
@@ -110,7 +111,14 @@ public static class SignalTracker
             MinutesToNews = minutesToNews,
             ReasoningText = reasoningText,
             MlModelVersion = mlModelVersion,
-            MlModelAccuracy = mlModelAccuracy
+            MlModelAccuracy = mlModelAccuracy,
+            PriceEntropy = priceEntropy,
+            TrendMaturity = trendMaturity,
+            PricePositionPct = pricePositionPct,
+            BbSqueeze = bbSqueeze,
+            TaTelemetry = taTelemetry,
+            MlTelemetry = mlTelemetry,
+            SmcTelemetry = smcTelemetry
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
@@ -259,6 +267,17 @@ public static class SignalTracker
         public string ReasoningText   { get; set; } = "";
         public string MlModelVersion  { get; set; } = "";
         public double MlModelAccuracy { get; set; }
+        
+        // Phase 3 context
+        public double PriceEntropy { get; set; }
+        public int    TrendMaturity { get; set; }
+        public double PricePositionPct { get; set; }
+        public bool   BbSqueeze { get; set; }
+
+        public string? TaTelemetry { get; set; }
+        public string? MlTelemetry { get; set; }
+        public string? SmcTelemetry { get; set; }
+
     }
 
     public class AccuracyStats

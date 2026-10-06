@@ -126,16 +126,22 @@ public class PendingTradeVerificationService : BackgroundService
             return;
         }
 
-        bool isCorrect = (record.Direction.EndsWith("BUY") && exitPrice.Value > record.EntryPrice)
-                      || (record.Direction.EndsWith("PUT") && exitPrice.Value < record.EntryPrice);
-
+        bool isExactDoji = Math.Abs(priceDiff) < 1e-8; // entry == exit
+        
         record.ExitPrice = exitPrice.Value;
         record.PnlBps = Math.Round(priceDiff * 10000, 2);
-        record.WasCorrect = isCorrect;
+        
+        if (isExactDoji) {
+            record.WasCorrect = null; // TIE
+        } else {
+            record.WasCorrect = (record.Direction.EndsWith("BUY") && exitPrice.Value > record.EntryPrice)
+                             || (record.Direction.EndsWith("PUT") && exitPrice.Value < record.EntryPrice);
+        }
 
         await TradeOutcomeTracker.OnTradeVerifiedAsync(record);
         await TradeRepository.DeletePendingTradeAsync(record.Id);
 
-        BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {(isCorrect ? "WIN" : "LOSS")} @ {exitPrice.Value} (Target: {record.VerifyAt:HH:mm:ss})");
+        string resultStr = record.WasCorrect.HasValue ? (record.WasCorrect.Value ? "WIN" : "LOSS") : "TIE";
+        BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {resultStr} @ {exitPrice.Value} (Target: {record.VerifyAt:HH:mm:ss})");
     }
 }
