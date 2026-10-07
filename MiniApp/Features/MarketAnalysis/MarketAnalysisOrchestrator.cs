@@ -50,6 +50,21 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         _logger = logger;
     }
 
+    /// <summary>
+    /// Extracts the ML regime token (TREND/FLAT/CHAOS/ALL) from a model version such as
+    /// "lgbm-v1-USDJPY_s10_TREND-1790964297". Returns "UNKNOWN" if it cannot be parsed.
+    /// </summary>
+    private static string ExtractMlRegime(string? modelVersion)
+    {
+        if (string.IsNullOrWhiteSpace(modelVersion)) return "UNKNOWN";
+        string last = modelVersion.Split('/').Last();
+        foreach (var part in last.Split('-', '_'))
+        {
+            if (part is "TREND" or "FLAT" or "CHAOS" or "ALL") return part;
+        }
+        return "UNKNOWN";
+    }
+
     private double GetSafeLimit(double value)
     {
         if (double.IsNaN(value) || double.IsInfinity(value)) return 0;
@@ -299,7 +314,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                mlPrediction?.ModelVersion?.Split('/').LastOrDefault() ?? "UNKNOWN",
+                ExtractMlRegime(mlPrediction?.ModelVersion),
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
                 mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",
@@ -329,7 +344,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                mlPrediction?.ModelVersion?.Split('/').LastOrDefault() ?? "UNKNOWN",
+                ExtractMlRegime(mlPrediction?.ModelVersion),
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
                 mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",

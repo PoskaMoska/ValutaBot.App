@@ -70,6 +70,11 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public int    TrendMaturity { get; set; }
         public double PricePositionPct { get; set; }
         public bool   BbSqueeze { get; set; }
+
+        // === Raw per-source telemetry (stored as jsonb) ===
+        public string? TaTelemetry  { get; set; }
+        public string? MlTelemetry  { get; set; }
+        public string? SmcTelemetry { get; set; }
     }
 
     public class EvolutionDumpDto
@@ -235,7 +240,10 @@ FROM outcome_data;");
                         price_entropy = EXCLUDED.price_entropy,
                         trend_maturity = EXCLUDED.trend_maturity,
                         price_position_pct = EXCLUDED.price_position_pct,
-                        bb_squeeze = EXCLUDED.bb_squeeze
+                        bb_squeeze = EXCLUDED.bb_squeeze,
+                        ta_telemetry = EXCLUDED.ta_telemetry,
+                        ml_telemetry = EXCLUDED.ml_telemetry,
+                        smc_telemetry = EXCLUDED.smc_telemetry
                 ", new
                 {
                     outcome.Id,
@@ -288,7 +296,10 @@ FROM outcome_data;");
                     outcome.PriceEntropy,
                     outcome.TrendMaturity,
                     outcome.PricePositionPct,
-                    outcome.BbSqueeze
+                    outcome.BbSqueeze,
+                    outcome.TaTelemetry,
+                    outcome.MlTelemetry,
+                    outcome.SmcTelemetry
                 });
             }
             catch (Exception ex)
@@ -412,7 +423,9 @@ FROM outcome_data;");
                        smc_bos_dir as ""SmcBosDir"", smc_has_ob as ""SmcHasOb"", smc_has_fvg as ""SmcHasFvg"", of_delta_ratio as ""OfDeltaRatio"", of_state as ""OfState"", dynamic_horizon as ""DynamicHorizon"",
                        market_regime as ""MarketRegime"", velocity_regime as ""VelocityRegime"", atr_at_signal as ""AtrAtSignal"", adx_at_signal as ""AdxAtSignal"",
                        rsi_at_signal as ""RsiAtSignal"", higher_tf_aligned as ""HigherTfAligned"", minutes_to_news as ""MinutesToNews"",
-                       reasoning_text as ""ReasoningText"", ml_model_version as ""MlModelVersion"", ml_model_accuracy as ""MlModelAccuracy""
+                       reasoning_text as ""ReasoningText"", ml_model_version as ""MlModelVersion"", ml_model_accuracy as ""MlModelAccuracy"",
+                       price_entropy as ""PriceEntropy"", trend_maturity as ""TrendMaturity"", price_position_pct as ""PricePositionPct"", bb_squeeze as ""BbSqueeze"",
+                       ta_telemetry::text as ""TaTelemetry"", ml_telemetry::text as ""MlTelemetry"", smc_telemetry::text as ""SmcTelemetry""
                 FROM pending_trades 
                 WHERE verify_at <= @UpToStr", 
                 new { UpToStr = upTo.ToString("o") });
@@ -452,7 +465,14 @@ FROM outcome_data;");
                 MinutesToNews = r.MinutesToNews != null ? Convert.ToInt32(r.MinutesToNews) : -1,
                 ReasoningText = r.ReasoningText ?? "",
                 MlModelVersion = r.MlModelVersion ?? "",
-                MlModelAccuracy = r.MlModelAccuracy != null ? Convert.ToDouble(r.MlModelAccuracy) : 0.0
+                MlModelAccuracy = r.MlModelAccuracy != null ? Convert.ToDouble(r.MlModelAccuracy) : 0.0,
+                PriceEntropy = r.PriceEntropy != null ? Convert.ToDouble(r.PriceEntropy) : 0.0,
+                TrendMaturity = r.TrendMaturity != null ? Convert.ToInt32(r.TrendMaturity) : 0,
+                PricePositionPct = r.PricePositionPct != null ? Convert.ToDouble(r.PricePositionPct) : 0.5,
+                BbSqueeze = r.BbSqueeze != null ? Convert.ToBoolean(r.BbSqueeze) : false,
+                TaTelemetry = (string?)r.TaTelemetry,
+                MlTelemetry = (string?)r.MlTelemetry,
+                SmcTelemetry = (string?)r.SmcTelemetry
             }).Where(r => r.CreatedAt != DateTime.MinValue).ToList();
         }
 

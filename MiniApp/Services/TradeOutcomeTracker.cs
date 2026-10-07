@@ -145,6 +145,13 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 ReasoningText = record.ReasoningText.Length > 2000 ? record.ReasoningText[..2000] : record.ReasoningText,
                 MlModelVersion = record.MlModelVersion,
                 MlModelAccuracy = record.MlModelAccuracy,
+                PriceEntropy = record.PriceEntropy,
+                TrendMaturity = record.TrendMaturity,
+                PricePositionPct = record.PricePositionPct,
+                BbSqueeze = record.BbSqueeze,
+                TaTelemetry = record.TaTelemetry,
+                MlTelemetry = record.MlTelemetry,
+                SmcTelemetry = record.SmcTelemetry,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };
