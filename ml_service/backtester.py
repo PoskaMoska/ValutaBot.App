@@ -111,27 +111,17 @@ def to_twelvedata_symbol(symbol):
 
 
 def interpolate_subminute(m1_candles, interval):
-    sec = int(interval[1:]) if (interval.startswith("s") and len(interval) > 1) else 60
-    if sec >= 60:
-        return m1_candles
-    sub_per_min = 60 // sec
-    interpolated = []
-    for m in m1_candles:
-        sp = m["open"]
-        ep = m["close"]
-        pr = ep - sp
-        hl = m["high"]
-        ll = m["low"]
-        vs = (hl - ll) / sub_per_min
-        for i in range(sub_per_min):
-            o = sp + pr * (i / sub_per_min)
-            c = sp + pr * ((i + 1) / sub_per_min)
-            mw = vs * 0.25 * math.sin(i * math.pi / 2.0)
-            h = min(max(o, c) + abs(mw), hl)
-            l = max(min(o, c) - abs(mw), ll)
-            interpolated.append({"open": o, "high": h, "low": l, "close": c,
-                                  "volume": m["volume"] / sub_per_min})
-    return interpolated
+    """
+    Interpolation of 1m candles into 5s/10s/15s mathematically leaks the 1m close price 
+    into the subminute features, causing 0.90+ AUC in backtests but ~48% live.
+    This was the root cause of the Lookahead Bias in ML training.
+    Real training uses ValutaTicks.db or PostgreSQL, which are NOT interpolated.
+    """
+    print(f"\n[FATAL] interpolate_subminute is DISABLED to prevent TARGET LEAKAGE.")
+    print(f"        Interpolating 1m to {interval} mathematically leaks the future 1m close into early features.")
+    print(f"        This caused the fake 0.90 AUC. Run training using data_loader.py DB queries instead.")
+    import sys
+    sys.exit(1)
 
 
 def fetch_binance(symbol, interval, limit):

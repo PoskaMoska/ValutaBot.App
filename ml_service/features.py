@@ -317,58 +317,14 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
     # Это 80% пользы от Deep Learning при 5% сложности.
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    RAW_WINDOW = 60  # последние 60 свечей — оптимум для DL Price Action
+    # Removed RAW_WINDOW to prevent LightGBM dimensionality curse and overfitting.
 
-    # --- 1. Нормализованные цены закрытия (паттерн движения) ---
-    # Делим каждое окно на его среднее — модель видит форму, а не абсолютный уровень.
-    # window_mean вычисляется по текущим 60 свечам (без заглядывания в будущее).
-    close_series = pd.Series(c)
-    window_mean = close_series.rolling(RAW_WINDOW, min_periods=1).mean()
-    for lag in range(1, RAW_WINDOW + 1):
-        shifted = close_series.shift(lag - 1)
-        feats[f'raw_close_{lag}'] = (shifted / (window_mean + 1e-10) - 1.0).fillna(0.0).values
-
-
-    # --- 2. Направление тела свечи (candle body sequence) ---
-    # (close-open)/range — от -1 (полная медвежья) до +1 (полная бычья)
-    body_dir = (c - o) / ((h - lo) + 1e-10)
-    body_dir_series = pd.Series(body_dir)
-    for lag in range(1, RAW_WINDOW + 1):
-        feats[f'raw_body_{lag}'] = body_dir_series.shift(lag - 1).fillna(0.0).values
-
-    # --- 3. Лог-доходности (скорость и ускорение движения) ---
-    log_ret = np.zeros(len(c))
-    log_ret[1:] = np.log((c[1:] + 1e-10) / (c[:-1] + 1e-10))
-    log_ret_series = pd.Series(log_ret)
-    for lag in range(1, RAW_WINDOW + 1):
-        feats[f'raw_logret_{lag}'] = log_ret_series.shift(lag - 1).fillna(0.0).values
-
-    # --- 4. Normalized High/Low shadows (wick pressure) ---
-    # Видит давление покупателей/продавцов через форму свечи
-    upper_shadow = (h - np.maximum(o, c)) / ((h - lo) + 1e-10)
-    lower_shadow = (np.minimum(o, c) - lo) / ((h - lo) + 1e-10)
-    for lag in range(1, RAW_WINDOW + 1):  # Увеличено до всего окна
-        feats[f'raw_wick_up_{lag}']  = pd.Series(upper_shadow).shift(lag - 1).fillna(0.0).values
-        feats[f'raw_wick_dn_{lag}']  = pd.Series(lower_shadow).shift(lag - 1).fillna(0.0).values
-
-    # --- 5. Normalized Volume (raw_volume) ---
-    # Делим на скользящее среднее объема за окно
-    vol_series = pd.Series(v)
-    vol_window_mean = vol_series.rolling(RAW_WINDOW, min_periods=1).mean()
-    for lag in range(1, RAW_WINDOW + 1):
-        shifted_vol = vol_series.shift(lag - 1)
-        feats[f'raw_vol_{lag}'] = (shifted_vol / (vol_window_mean + 1e-10)).fillna(0.0).values
-
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    result = pd.DataFrame(feats, index=df.index)
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Rich pre-computed features (from trade_outcomes via _fetch_rl_feedback)
     # These are passed in as extra columns on the candle dicts when training.
     # At inference time (live prediction), they are absent -> filled with 0.
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    result = pd.DataFrame(feats)
+
     # smc_bos_dir: encoded as  1.0=BULLISH_BOS, -1.0=BEARISH_BOS, 0.0=NONE
     if 'smc_bos_dir' in df.columns:
         bos_map = {'BULLISH_BOS': 1.0, 'BULLISH': 1.0, 'BEARISH_BOS': -1.0, 'BEARISH': -1.0, 'NONE': 0.0}

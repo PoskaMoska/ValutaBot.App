@@ -67,9 +67,15 @@ public class PendingTradeVerificationService : BackgroundService
             await conn.OpenAsync();
             
             // First try to find a subminute candle (s5, s10, etc.) for high precision
-            // subminute_candles uses column: close_price
+            // To avoid horizon skew, we must get the exact price at VerifyAt.
+            // If the candle's open_time == VerifyAt, the exact price is its open_price.
+            // If the returned candle is the preceding one, the exact price is its close_price.
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
-                SELECT close_price
+                SELECT 
+                    CASE 
+                        WHEN open_time = @VerifyAt THEN open_price 
+                        ELSE close_price 
+                    END
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
                   AND open_time <= @VerifyAt
@@ -81,11 +87,14 @@ public class PendingTradeVerificationService : BackgroundService
             });
 
             // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m)
-            // BUGFIX: historical_candles column is 'close', NOT 'close_price'
             if (!exitPrice.HasValue || exitPrice.Value <= 0)
             {
                 exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
-                    SELECT ""close""
+                    SELECT 
+                        CASE 
+                            WHEN open_time = @VerifyAt THEN ""open"" 
+                            ELSE ""close"" 
+                        END
                     FROM historical_candles
                     WHERE asset = @Asset
                       AND open_time <= @VerifyAt
