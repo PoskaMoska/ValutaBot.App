@@ -86,6 +86,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_train_all())
     # asyncio.create_task(_auto_crawler_loop()) # DISABLING: TwelveData uses too many credits; Tiingo WS fills DB now
     asyncio.create_task(_weekly_global_retrain_loop())
+    asyncio.create_task(_daily_diagnostics_loop())
     yield
     if _process_pool is not None:
         _process_pool.shutdown(wait=False)
@@ -159,6 +160,30 @@ _BOT_BASE_URL = os.getenv("BOT_BASE_URL", "")   # e.g. https://valutatbot.railwa
 # Retrain ALL timeframes weekly, including subminute
 _WEEKLY_INTERVALS = _DEFAULT_INTERVALS
 
+
+async def _daily_diagnostics_loop():
+    """Runs Self-Healing Diagnostics daily at 23:30 UTC."""
+    import datetime
+    from diagnostics import run_diagnostics
+    
+    await asyncio.sleep(120) # wait 2 mins after startup
+    
+    while True:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        # Trigger window: Every day at 23:30 UTC
+        if now_utc.hour == 23 and now_utc.minute >= 30 and now_utc.minute <= 45:
+            try:
+                log.info("[SelfHealing] Running daily diagnostics...")
+                run_diagnostics()
+            except Exception as e:
+                log.error(f"[SelfHealing] Diagnostics failed: {e}")
+            
+            # Sleep for 2 hours to avoid re-triggering in the same window
+            await asyncio.sleep(7200)
+            
+        # Check every 10 minutes
+        await asyncio.sleep(600)
 
 async def _weekly_global_retrain_loop():
     """
