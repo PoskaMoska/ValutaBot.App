@@ -336,9 +336,9 @@ class ForexPredictor:
         self.interval = interval.lower()
         self.regime = regime.upper()
         if self.regime == "ALL":
-            self._key = f"{self.symbol}_{self.interval}"
+            self._key = f"{self.symbol}_{self.interval}_v2"
         else:
-            self._key = f"{self.symbol}_{self.interval}_{self.regime}"
+            self._key = f"{self.symbol}_{self.interval}_{self.regime}_v2"
         # Tier 1: Global Strategist
         self._model: Optional[lgb.LGBMClassifier] = None
         self._meta: Optional[ModelMeta] = None
@@ -1481,9 +1481,9 @@ class VariancePredictor:
         self.interval = interval.lower()
         self.regime = regime.upper()
         if self.regime == "ALL":
-            self._key = f"{self.symbol}_{self.interval}"
+            self._key = f"{self.symbol}_{self.interval}_v2"
         else:
-            self._key = f"{self.symbol}_{self.interval}_{self.regime}"
+            self._key = f"{self.symbol}_{self.interval}_{self.regime}_v2"
         self._model: Optional["lgb.LGBMRegressor"] = None
         self._lock = threading.Lock()
         VARIANCE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
