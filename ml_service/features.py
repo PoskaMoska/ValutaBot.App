@@ -76,28 +76,7 @@ def _approximate_entropy(close: np.ndarray, window: int = 20, m: int = 2, r_fact
     result = (result.clip(0.0, 2.0) / 2.0).fillna(0.5)
     return result.values
 
-def _order_flow_features(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, v: np.ndarray, vol_ma: np.ndarray) -> tuple:
-    candle_range = (h - lo) + 1e-10
-    buy_ratio = (c - lo) / candle_range
-    sell_ratio = (h - c) / candle_range
-    
-    buy_vol = v * buy_ratio
-    sell_vol = v * sell_ratio
-    
-    delta_ratio = buy_vol / (sell_vol + 1e-10)
-    
-    # Block trade anomaly: 1 if volume > 1.7x MA, else 0
-    block_trade = (v > (vol_ma * 1.7)).astype(float)
-    
-    return buy_vol, sell_vol, delta_ratio, block_trade
 
-def _fvg_features(h: np.ndarray, lo: np.ndarray) -> tuple:
-    """Fair Value Gaps: Returns arrays for Bullish and Bearish FVG sizes via NumPy vectorization."""
-    fvg_bullish = np.zeros(len(h))
-    fvg_bearish = np.zeros(len(h))
-    
-    if len(h) < 3:
-        return fvg_bullish, fvg_bearish
         
     bullish_mask = lo[2:] > h[:-2]
     fvg_bullish[2:][bullish_mask] = lo[2:][bullish_mask] - h[:-2][bullish_mask]
@@ -218,20 +197,9 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
     feats['vol_ratio']     = v / (vol_ma + 1e-10)
     feats['vol_ma']        = vol_ma / (rolling_vol_mean + 1e-10)
     
-    buy_vol, sell_vol, delta_ratio, block_trade = _order_flow_features(o, h, lo, c, v, vol_ma)
-    feats['of_buy_vol_norm'] = buy_vol / (vol_ma + 1e-10)
-    feats['of_sell_vol_norm'] = sell_vol / (vol_ma + 1e-10)
-    feats['of_delta_ratio'] = np.clip(delta_ratio, 0.0, 5.0)
-    feats['of_block_trade'] = block_trade
-    
-    rolling_buy = pd.Series(buy_vol).rolling(5).sum().values
-    rolling_sell = pd.Series(sell_vol).rolling(5).sum().values
-    feats['of_rolling_delta_5'] = np.clip(rolling_buy / (rolling_sell + 1e-10), 0.0, 5.0)
-    
-    # Fair Value Gaps
-    fvg_bull, fvg_bear = _fvg_features(h, lo)
-    feats['smc_fvg_bullish'] = fvg_bull / (c + 1e-10)
-    feats['smc_fvg_bearish'] = fvg_bear / (c + 1e-10)
+    # Added Hurst and Entropy for Regime Awareness
+    feats['hurst_exponent'] = _hurst_exponent(c, window=60)
+    feats['shannon_entropy'] = _shannon_entropy(c, window=20, bins=10)
 
     # ━━━ Channel Position ━━━
     high20 = pd.Series(h).rolling(20).max().values

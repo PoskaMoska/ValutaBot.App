@@ -158,6 +158,11 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                 if (w[i] > 4.0) w[i] = 4.0;
                 if (w[i] < 0.05) w[i] = 0.05;
             }
+            
+            // BIAS CLAMP: Prevent the model from accumulating infinite negative bias
+            // and inverting signals. Max offset is +/- 1.5 logits.
+            if (w[0] > 1.5) w[0] = 1.5;
+            if (w[0] < -1.5) w[0] = -1.5;
         }
 
         _updateCounts.AddOrUpdate(key, 1, (_, v) => v + 1);
