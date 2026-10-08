@@ -302,12 +302,26 @@ def build_features(candles: List[Dict], mtf_candles: List[Dict] = None) -> pd.Da
         feats['mtf_trend'] = np.zeros(len(c))
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # PRIORITY 3: Raw Price Action Windows (Price Action без индикаторов)
-    # LightGBM видит сырые паттерны свечей напрямую — как трейдер смотрит на график.
-    # Это 80% пользы от Deep Learning при 5% сложности.
+    # DUAL-SCALE PRICE ACTION ARCHITECTURE (Global Context + Local Micro-Lens)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 1. Macro Global Map (Channel position and trend slope over 80 candles)
+    high80 = pd.Series(h).rolling(80, min_periods=20).max().values
+    low80  = pd.Series(lo).rolling(80, min_periods=20).min().values
+    range80 = high80 - low80 + 1e-10
+    feats['macro_channel_pos_80'] = np.clip((c - low80) / range80, 0.0, 1.0)
+    feats['dist_high_80_atr'] = (high80 - c) / (atr + 1e-10)
+    feats['dist_low_80_atr']  = (c - low80) / (atr + 1e-10)
+    feats['macro_slope_80']   = _linreg_slope(c, 80)
 
-    # Removed RAW_WINDOW to prevent LightGBM dimensionality curse and overfitting.
+    # 2. Local Micro-Lens Price Action (Relative deviations of last 5 candles in ATR units)
+    for lag in range(1, 6):
+        c_lag = pd.Series(c).shift(lag).fillna(c[0]).values
+        h_lag = pd.Series(h).shift(lag).fillna(h[0]).values
+        l_lag = pd.Series(lo).shift(lag).fillna(lo[0]).values
+        
+        feats[f'pa_close_dev_{lag}'] = (c_lag - c) / (atr + 1e-10)
+        feats[f'pa_high_dev_{lag}']  = (h_lag - c) / (atr + 1e-10)
+        feats[f'pa_low_dev_{lag}']   = (l_lag - c) / (atr + 1e-10)
 
     # Rich pre-computed features (from trade_outcomes via _fetch_rl_feedback)
     # These are passed in as extra columns on the candle dicts when training.

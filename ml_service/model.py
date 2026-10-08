@@ -470,13 +470,15 @@ class ForexPredictor:
             except Exception as shap_ex:
                 log.debug(f"[SHAP] Explanation failed for {self._key}: {shap_ex}")
 
-            if prob >= MIN_CONFIDENCE:
-                return "BUY", prob, version, TARGET_HORIZON_CANDLES, prob, top_features
-            elif prob <= (1.0 - MIN_CONFIDENCE):
-                return "PUT", 1.0 - prob, version, TARGET_HORIZON_CANDLES, prob, top_features
+            # Always deliver clear directional signal (BUY or PUT) with calibrated confidence
+            if prob >= 0.50:
+                direction = "BUY"
+                confidence = prob
             else:
-                confidence = abs(prob - 0.5) * 2
-                return "NEUTRAL", 0.5 + confidence * 0.15, version, TARGET_HORIZON_CANDLES, prob, top_features
+                direction = "PUT"
+                confidence = 1.0 - prob
+
+            return direction, confidence, version, TARGET_HORIZON_CANDLES, prob, top_features
 
         except Exception as e:
             log.error(f"[Predict] {self._key}: {e}")
