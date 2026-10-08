@@ -703,24 +703,14 @@ async def predict(request: Request):
     except Exception as e:
         log.error(f"[Predict] Failed to calc regime, fallback to ALL: {e}")
 
-    predictor = _get_predictor(symbol, interval, regime)
+    # Primary predictor: The clean, high-capacity Dual-Scale master model (ALL)
+    predictor = _get_predictor(symbol, interval, "ALL")
 
-    # Robust bidirectional fallback cascade:
-    # 1. If regime-specific model (FLAT/TREND/CHAOS) is missing, seamlessly fallback to ALL
+    # Fallback to regime-specific if ALL is not found
     if predictor._model is None and regime != "ALL":
-        all_pred = _get_predictor(symbol, interval, "ALL")
-        if all_pred._model is not None:
-            predictor = all_pred
-            regime = "ALL"
-
-    # 2. If ALL model is missing, try any available regime model
-    if predictor._model is None and regime == "ALL":
-        for fallback in ["FLAT", "TREND", "CHAOS"]:
-            fb_pred = _get_predictor(symbol, interval, fallback)
-            if fb_pred._model is not None:
-                predictor = fb_pred
-                regime = fallback
-                break
+        fb_pred = _get_predictor(symbol, interval, regime)
+        if fb_pred._model is not None:
+            predictor = fb_pred
 
     # Auto-train in background if model is missing.
     if predictor._model is None and not predictor.is_training:
@@ -886,8 +876,8 @@ def feedback(req: TrainFeedback, background_tasks: BackgroundTasks):
                 else:
                     regime = "ALL"
             except Exception:
-                regime = "ALL"
-            predictor = _get_predictor(req.asset, norm_interval, regime)
+                pass
+            predictor = _get_predictor(req.asset, norm_interval, "ALL")
             higher_tf = predictor._get_higher_tf()
             mtf_candles = _fetch_candles_at_entry(req.asset, higher_tf, req.timestamp, limit=100)
 
