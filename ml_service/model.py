@@ -1237,8 +1237,6 @@ class ForexPredictor:
                 log.info(f"[ShadowChallenger] {self._key}: challenger trained (not deployed): {report}")
                 return report
 
-            self._save(final_model, meta, embedder=fitted_embedder)
-
             # FIX H-3: Quality Gate — do not deploy new model if it's significantly worse
             # than the current one. This prevents weekly retraining from replacing a
             # good 58%-accuracy model with a bad 49% model on noisy/thin data.
@@ -1268,6 +1266,9 @@ class ForexPredictor:
                     "auc": round(avg_auc, 4), "version": version,
                     "deployed": False, "reason": "quality_gate_blocked"
                 }
+
+            # Only persist to disk and memory if quality gate passes!
+            self._save(final_model, meta, embedder=fitted_embedder)
 
             with self._lock:
                 self._model = final_model

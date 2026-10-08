@@ -24,10 +24,8 @@ namespace ValutaBot.MiniApp.Services
     {
         // ── Autonomous Dataset Collection Mode ────────────────────────────────────────
         // The bot automatically bypasses the Circuit Breaker until it has accumulated
-        // enough labeled rows to be worth protecting. Once this threshold is crossed,
-        // CB activates permanently as a live-trading guard.
-        // No config flags, no Railway variables — fully autonomous.
-        private const int DatasetReadinessThreshold = 15_000;
+        // enough labeled rows to be worth protecting (_settings.DatasetReadinessThreshold, default 1,000).
+        // Once this threshold is crossed, CB activates permanently as a live-trading guard.
 
         private int  _cachedOutcomeCount     = -1;   // -1 = not yet loaded
         private DateTime _outcomeCacheExpiry = DateTime.MinValue;
@@ -88,7 +86,7 @@ namespace ValutaBot.MiniApp.Services
         {
             // ── Autonomous bypass: if we haven't yet reached the dataset readiness
             // threshold, Circuit Breaker is completely inactive. No config needed.
-            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < DatasetReadinessThreshold)
+            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < _settings.DatasetReadinessThreshold)
             {
                 // Kick an async refresh so the count stays up-to-date (fire-and-forget)
                 if (DateTime.UtcNow > _outcomeCacheExpiry)
@@ -130,7 +128,7 @@ namespace ValutaBot.MiniApp.Services
         public string? GetHaltedReason()
         {
             // During dataset collection show informative progress instead of null
-            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < DatasetReadinessThreshold)
+            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < _settings.DatasetReadinessThreshold)
                 return null; // scanner treats null as "not halted" — correct behaviour
 
             lock (_lock)
@@ -148,9 +146,9 @@ namespace ValutaBot.MiniApp.Services
         {
             // ── Autonomous bypass: don't activate CB while still building the dataset ──
             await RefreshOutcomeCountCacheAsync();
-            if (_cachedOutcomeCount < DatasetReadinessThreshold)
+            if (_cachedOutcomeCount < _settings.DatasetReadinessThreshold)
             {
-                BotLogger.Info($"[CircuitBreaker] Dataset collection mode — {_cachedOutcomeCount}/{DatasetReadinessThreshold} rows. CB inactive.");
+                BotLogger.Info($"[CircuitBreaker] Dataset collection mode — {_cachedOutcomeCount}/{_settings.DatasetReadinessThreshold} rows. CB inactive.");
                 return;
             }
 

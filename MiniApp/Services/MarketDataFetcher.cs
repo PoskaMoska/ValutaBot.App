@@ -128,7 +128,9 @@ public class MarketDataFetcher
             if (liveCandles.Length >= limit || liveCandles.Length >= 25)
             {
                 var liveCandlesLastTime = liveCandles[^1].Timestamp;
-                if ((DateTime.UtcNow - liveCandlesLastTime).TotalMinutes <= 5)
+                int intervalSecs = Math.Max(5, TimeframeSeconds(rawInterval));
+                int maxAllowedLagSecs = Math.Max(25, intervalSecs * 3);
+                if ((DateTime.UtcNow - liveCandlesLastTime).TotalSeconds <= maxAllowedLagSecs)
                 {
                     BotLogger.Info($"[MarketDataFetcher] Using {liveCandles.Length} live {rawInterval} candles for {cleanKey}.");
                     RecordSuccess();
@@ -136,7 +138,7 @@ public class MarketDataFetcher
                 }
                 else
                 {
-                    BotLogger.Warn($"[MarketDataFetcher] Live candles for {cleanKey} are STALE (last: {liveCandlesLastTime:O}). Proceeding to backfill.");
+                    BotLogger.Warn($"[MarketDataFetcher] Live candles for {cleanKey} are STALE (last: {liveCandlesLastTime:O}, age: {(DateTime.UtcNow - liveCandlesLastTime).TotalSeconds:F0}s > {maxAllowedLagSecs}s). Proceeding to backfill.");
                     liveCandles = Array.Empty<MiniAppController.OhlcCandle>();
                 }
             }

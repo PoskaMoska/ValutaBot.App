@@ -35,10 +35,16 @@ public static class TiingoWebSocketStream
 
     // Live price store: last tick per symbol
     private static readonly ConcurrentDictionary<string, double> _livePrices = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, double> _liveSpreadsBps = new(StringComparer.OrdinalIgnoreCase);
 
     public static bool TryGetLivePrice(string symbol, out double price)
     {
         return _livePrices.TryGetValue(AssetSanitizer.Sanitize(symbol), out price);
+    }
+
+    public static bool TryGetSpreadBps(string symbol, out double spreadBps)
+    {
+        return _liveSpreadsBps.TryGetValue(AssetSanitizer.Sanitize(symbol), out spreadBps);
     }
 
     public static bool IsConnected => _webSocket?.State == System.Net.WebSockets.WebSocketState.Open;
@@ -185,6 +191,7 @@ public static class TiingoWebSocketStream
     private static async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken connectionToken)
     {
         var buffer = new byte[8192];
+        using var ms = new System.IO.MemoryStream();
 
         try
         {
@@ -202,7 +209,25 @@ public static class TiingoWebSocketStream
                 }
 
                 _lastMessageTime = DateTime.UtcNow;
-                string message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                string message;
+
+                if (result.EndOfMessage)
+                {
+                    message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                }
+                else
+                {
+                    ms.SetLength(0);
+                    ms.Write(buffer, 0, result.Count);
+                    while (!result.EndOfMessage)
+                    {
+                        result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ctsTimeout.Token);
+                        if (result.MessageType == WebSocketMessageType.Close) break;
+                        ms.Write(buffer, 0, result.Count);
+                    }
+                    if (result.MessageType == WebSocketMessageType.Close) break;
+                    message = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                }
 
                 // Fast path parsing
                 if (!message.Contains("\"messageType\":\"A\"")) continue;
@@ -227,6 +252,18 @@ public static class TiingoWebSocketStream
                             {
                                 tickTimeUtc = dt.Ticks;
                             }
+
+                            if (dataArr.GetArrayLength() >= 8)
+                            {
+                                double bid = dataArr[4].GetDouble();
+                                double ask = dataArr[7].GetDouble();
+                                if (ask >= bid && bid > 0)
+                                {
+                                    _liveSpreadsBps[ticker] = Math.Round((ask - bid) / midPrice * 10000, 2);
+                                }
+                            }
+
+                            ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice(ticker, midPrice, new DateTime(tickTimeUtc, DateTimeKind.Utc));
                             _ = RealtimeTickCollector.OnPriceUpdateAsync(ticker, midPrice, tickTimeUtc);
                         }
                     }

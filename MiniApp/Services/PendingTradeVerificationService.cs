@@ -70,6 +70,8 @@ public class PendingTradeVerificationService : BackgroundService
             // To avoid horizon skew, we must get the exact price at VerifyAt.
             // If the candle's open_time == VerifyAt, the exact price is its open_price.
             // If the returned candle is the preceding one, the exact price is its close_price.
+            // Require open_time >= VerifyAt - 20s to prevent matching stale candles from hours ago during feed outages.
+            DateTime minAllowedSub = record.VerifyAt.AddSeconds(-20);
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                 SELECT 
                     CASE 
@@ -79,16 +81,19 @@ public class PendingTradeVerificationService : BackgroundService
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
                   AND open_time <= @VerifyAt
+                  AND open_time >= @MinAllowedTime
                 ORDER BY open_time DESC LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
-                VerifyAt = record.VerifyAt.ToString("O")
+                VerifyAt = record.VerifyAt.ToString("O"),
+                MinAllowedTime = minAllowedSub.ToString("O")
             });
 
             // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m)
             if (!exitPrice.HasValue || exitPrice.Value <= 0)
             {
+                DateTime minAllowedHist = record.VerifyAt.AddSeconds(-120);
                 exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                     SELECT 
                         CASE 
@@ -98,11 +103,55 @@ public class PendingTradeVerificationService : BackgroundService
                     FROM historical_candles
                     WHERE asset = @Asset
                       AND open_time <= @VerifyAt
+                      AND open_time >= @MinAllowedTime
                     ORDER BY open_time DESC LIMIT 1
                 ", new { 
                     Asset = cleanAsset, 
-                    VerifyAt = record.VerifyAt.ToString("O")
+                    VerifyAt = record.VerifyAt.ToString("O"),
+                    MinAllowedTime = minAllowedHist.ToString("O")
                 });
+            }
+
+            // Calculate excursion (MFE / MAE) during trade lifetime [CreatedAt, VerifyAt]
+            if (exitPrice.HasValue && exitPrice.Value > 0)
+            {
+                try
+                {
+                    var exc = await conn.QueryFirstOrDefaultAsync<dynamic>(@"
+                        SELECT MAX(high_price) as max_high, MIN(low_price) as min_low
+                        FROM subminute_candles
+                        WHERE asset = @Asset
+                          AND open_time >= @CreatedAt
+                          AND open_time <= @VerifyAt
+                    ", new { 
+                        Asset = cleanAsset, 
+                        CreatedAt = record.CreatedAt.ToString("O"), 
+                        VerifyAt = record.VerifyAt.ToString("O") 
+                    });
+
+                    double maxH = (exc != null && exc.max_high != null) ? Convert.ToDouble(exc.max_high) : exitPrice.Value;
+                    double minL = (exc != null && exc.min_low != null) ? Convert.ToDouble(exc.min_low) : exitPrice.Value;
+
+                    if (maxH < exitPrice.Value) maxH = exitPrice.Value;
+                    if (minL > exitPrice.Value) minL = exitPrice.Value;
+                    if (maxH < record.EntryPrice) maxH = record.EntryPrice;
+                    if (minL > record.EntryPrice) minL = record.EntryPrice;
+
+                    if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY"))
+                    {
+                        record.MaxFavorableBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000, 2);
+                        record.MaxAdverseBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000, 2);
+                    }
+                    else if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("PUT"))
+                    {
+                        record.MaxFavorableBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000, 2);
+                        record.MaxAdverseBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000, 2);
+                    }
+                }
+                catch (Exception exMfe)
+                {
+                    BotLogger.Warn($"[PendingVerifier] MFE/MAE calculation warning: {exMfe.Message}");
+                }
             }
         }
         catch (Exception ex)

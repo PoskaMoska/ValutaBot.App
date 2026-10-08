@@ -126,18 +126,45 @@ public static class SignalTracker
                           $"? target verify at {verifyAt:HH:mm:ss}");
     }
 
-    // ---------------- Public Read API --------------------------------------------------------
+    // ---------------- In-Memory TTL Cache for High-Frequency Read API ------------------------
+    private static AccuracyStats? _cachedOverallStats;
+    private static DateTime _overallStatsExpiry = DateTime.MinValue;
+    private static readonly SemaphoreSlim _overallStatsLock = new(1, 1);
+    private static readonly ConcurrentDictionary<string, (AccuracyStats stats, DateTime expiry)> _cachedAssetStats = new();
 
     public static async Task<AccuracyStats> GetOverallStatsAsync()
     {
-        var (total, verified, correct) = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetOverallStatsAsync();
-        return new AccuracyStats("ALL", total, verified, correct);
+        if (_cachedOverallStats != null && DateTime.UtcNow < _overallStatsExpiry)
+            return _cachedOverallStats;
+
+        await _overallStatsLock.WaitAsync();
+        try
+        {
+            if (_cachedOverallStats != null && DateTime.UtcNow < _overallStatsExpiry)
+                return _cachedOverallStats;
+
+            var (total, verified, correct) = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetOverallStatsAsync();
+            var stats = new AccuracyStats("ALL", total, verified, correct);
+            _cachedOverallStats = stats;
+            _overallStatsExpiry = DateTime.UtcNow.AddSeconds(60);
+            return stats;
+        }
+        finally
+        {
+            _overallStatsLock.Release();
+        }
     }
 
     public static async Task<AccuracyStats> GetStatsAsync(string asset, string timeframe)
     {
+        string key = $"{asset.ToUpper()}_{timeframe.ToLower()}";
+        if (_cachedAssetStats.TryGetValue(key, out var entry) && DateTime.UtcNow < entry.expiry)
+            return entry.stats;
+
         var (total, verified, correct) = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetStatsAsync(asset, timeframe);
-        return new AccuracyStats($"{asset}_{timeframe}", total, verified, correct);
+        var stats = new AccuracyStats($"{asset}_{timeframe}", total, verified, correct);
+        _cachedAssetStats[key] = (stats, DateTime.UtcNow.AddSeconds(60));
+        return stats;
     }
 
     public static async Task<AccuracyStats[]> GetAllStatsAsync()
@@ -271,10 +298,13 @@ public static class SignalTracker
         public double PricePositionPct { get; set; }
         public bool   BbSqueeze { get; set; }
 
+        // Excursion metrics during trade lifetime
+        public double MaxFavorableBps { get; set; } = 0.0;
+        public double MaxAdverseBps   { get; set; } = 0.0;
+
         public string? TaTelemetry { get; set; }
         public string? MlTelemetry { get; set; }
         public string? SmcTelemetry { get; set; }
-
     }
 
     public class AccuracyStats

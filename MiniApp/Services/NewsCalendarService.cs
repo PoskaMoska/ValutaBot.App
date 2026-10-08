@@ -105,19 +105,36 @@ namespace ValutaBot.MiniApp.Services
 
         public NewsEvent? GetNextHighImpactNews(string asset)
         {
-            // Asset is e.g. "EUR/USD" or "EUR/USD OTC"
-            var parts = asset.Replace(" OTC", "").Split('/');
-            if (parts.Length != 2) return null;
+            if (string.IsNullOrWhiteSpace(asset)) return null;
 
-            var c1 = parts[0];
-            var c2 = parts[1];
+            string clean = asset.ToUpper().Replace(" OTC", "").Replace("_OTC", "").Replace("/", "").Replace("-", "").Trim();
+            string c1 = "";
+            string c2 = "";
+
+            if (clean.Length >= 6)
+            {
+                c1 = clean.Substring(0, 3);
+                c2 = clean.Substring(3, 3);
+            }
+            else
+            {
+                var parts = asset.Replace(" OTC", "").Split('/');
+                if (parts.Length == 2)
+                {
+                    c1 = parts[0].Trim().ToUpper();
+                    c2 = parts[1].Trim().ToUpper();
+                }
+            }
+
+            if (string.IsNullOrEmpty(c1) || string.IsNullOrEmpty(c2)) return null;
 
             _lock.Wait();
             try
             {
                 var now = DateTime.UtcNow;
                 return _events.FirstOrDefault(e => 
-                    (e.Country == c1 || e.Country == c2) && 
+                    (string.Equals(e.Country, c1, StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(e.Country, c2, StringComparison.OrdinalIgnoreCase)) && 
                     e.UtcTime >= now);
             }
             finally

@@ -183,8 +183,9 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                 w[i] = Math.Clamp(w[i], 0.35, 3.5);
             }
 
-            // Bias clamp
-            w[0] = Math.Clamp(w[0], -1.0, 1.0);
+            // Bias shrinkage towards 0.0 to strictly prevent phantom directional lock-in
+            w[0] += (0.0 - w[0]) * 0.02;
+            w[0] = Math.Clamp(w[0], -0.15, 0.15);
         }
 
         newCount = _updateCounts.AddOrUpdate(key, 1, (_, v) => v + 1);
@@ -209,6 +210,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                 {
                     if (item.weights != null && item.weights.Length == 5)
                     {
+                        item.weights[0] = Math.Clamp(item.weights[0], -0.15, 0.15);
                         _weights[item.key] = item.weights;
                         _updateCounts[item.key] = item.updateCount;
                     }
@@ -239,6 +241,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                     foreach (var kvp in dict) 
                     { 
                         var w = kvp.Value; 
+                        w[0] = Math.Clamp(w[0], -0.15, 0.15);
                         for (int i = 1; i < w.Length; i++) 
                         { 
                             if (w[i] < 0.10) w[i] = 0.10; 

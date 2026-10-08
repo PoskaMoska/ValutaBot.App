@@ -31,6 +31,8 @@ node_modules/
 # Data
 *.csv
 *.xlsx
+*.npz
+*.pt
 
 # Secrets - never commit real keys (use env vars / Railway dashboard)
 .env

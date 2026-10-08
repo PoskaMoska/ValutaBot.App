@@ -14,6 +14,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastSampleTimeByAssetTf = new();
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     
     private readonly MarketDataFetcher _fetcher;
@@ -309,11 +310,46 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             SmcScore = consensus.SmcScore
         });
 
+        string effectiveMarketRegime = !string.IsNullOrEmpty(taDetail.Regime) && taDetail.Regime != "UNKNOWN"
+            ? taDetail.Regime
+            : (state.VelocityRegime ?? ExtractMlRegime(mlPrediction?.ModelVersion));
+
+        var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
+        var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
+        TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out double liveSpreadBps);
+
         var mlFeatures = new {
             Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
             MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
             Smc = smcResult,
             Ta = taDetail,
+            MacroContext = new {
+                MinutesToNews = minutesToNews ?? -1,
+                MarketRegime = effectiveMarketRegime,
+                VelocityRegime = state.VelocityRegime ?? "UNKNOWN",
+                Atr = mainAtr,
+                Adx = mainAdx,
+                PriceEntropy = priceEntropy,
+                TrendMaturity = trendMaturity,
+                PricePositionPct = pricePositionPct,
+                BbSqueeze = bbSqueeze,
+                HourUtc = DateTime.UtcNow.Hour,
+                DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
+                Session = TradeOutcomeTracker.ComputeSession(DateTime.UtcNow),
+                // V3 SOTA Deep Learning Anchors
+                DayRangePositionPct = dayAnchors.DayRangePositionPct,
+                DistToDayHighBps = dayAnchors.DistToDayHighBps,
+                DistToDayLowBps = dayAnchors.DistToDayLowBps,
+                AsianHigh = dayAnchors.AsianHigh,
+                AsianLow = dayAnchors.AsianLow,
+                DistToAsianHighBps = dayAnchors.DistToAsianHighBps,
+                DistToAsianLowBps = dayAnchors.DistToAsianLowBps,
+                DxyMomentum1mBps = dxyMetrics.DxyMomentum1mBps,
+                DxyMomentum5mBps = dxyMetrics.DxyMomentum5mBps,
+                BasketSyncScore = dxyMetrics.BasketSyncScore,
+                SpreadBps = liveSpreadBps,
+                TickCountLastCandle = closedCandles.Length > 0 ? closedCandles[^1].Volume : 0
+            },
             MetaLearner = new {
                 Weights = metaWeights,
                 Prob = consensus.MlProb,
@@ -323,11 +359,17 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         };
         string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
-        if (consensus.Probability >= 57)
+        // Risk & Market Invariant: S5 has an empirically proven negative expectancy (41.01% WR) due to broker spread & execution jitter.
+        // Route S5 signals to SHADOW trades to preserve data collection while protecting live execution.
+        bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
+        string sampleKey = $"{cleanAsset}_{timeframe}";
+
+        if (consensus.Probability >= 57 && !isS5)
         {
+            _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                ExtractMlRegime(mlPrediction?.ModelVersion),
+                effectiveMarketRegime,
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
                 mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",
@@ -339,11 +381,12 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
-        else if (consensus.Probability >= 45 && consensus.Probability < 57)
+        else if (consensus.Probability >= 45 || isS5)
         {
+            _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                ExtractMlRegime(mlPrediction?.ModelVersion),
+                effectiveMarketRegime,
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
                 mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",
@@ -353,19 +396,27 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 mlPrediction?.Accuracy ?? 0.0,
                 priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             dbSw.Stop();
-            traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}) -> {dbSw.ElapsedMilliseconds}ms");
+            traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{(isS5 ? ", S5 noise guard" : "")}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else
         {
             dbSw.Stop();
             
-            // --- TRUE NEGATIVE NOISE COLLECTION (For 3-system Transformer architecture) ---
-            if (System.Random.Shared.NextDouble() < 0.005)
+            // --- V3 SYSTEMATIC NEGATIVE SAMPLING (Prevents Selection Bias for Deep Learning / Transformers) ---
+            bool isPeriodicSampleDue = !_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastTime) 
+                                       || (DateTime.UtcNow - lastTime).TotalMinutes >= 3.0;
+
+            if (isPeriodicSampleDue || System.Random.Shared.NextDouble() < 0.005)
             {
+                _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
                 _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
-                    "NONE", false, false, 1.0, "NEUTRAL", "UNKNOWN", state.VelocityRegime ?? "UNKNOWN", mainAtr, mainAdx, taResult.rsiVal, false, minutesToNews ?? -1, "", "", 0.0, priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
+                    "NONE", false, false, 1.0, "NEUTRAL", effectiveMarketRegime, state.VelocityRegime ?? "UNKNOWN", mainAtr, mainAdx, taResult.rsiVal, false, minutesToNews ?? -1, "", "", 0.0, priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
+                traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения нейтральному рынку ({consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");
             }
-            traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 53% -> {dbSw.ElapsedMilliseconds}ms");
+            else
+            {
+                traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 53% -> {dbSw.ElapsedMilliseconds}ms");
+            }
         }
 
         sw.Stop();

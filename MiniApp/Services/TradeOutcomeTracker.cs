@@ -33,7 +33,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
     /// Maps a UTC signal time to a forex trading session label.
     /// OVERLAP (London+NY) is the highest-volume window and most predictable for subminute TFs.
     /// </summary>
-    private static string ComputeSession(DateTime utc)
+    public static string ComputeSession(DateTime utc)
     {
         int h = utc.Hour;
         // OVERLAP = London/NY crossover 13:00–16:00 UTC (highest volume, tightest spreads)
@@ -150,6 +150,8 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 ReasoningText = record.ReasoningText.Length > 2000 ? record.ReasoningText[..2000] : record.ReasoningText,
                 MlModelVersion = record.MlModelVersion,
                 MlModelAccuracy = record.MlModelAccuracy,
+                MaxFavorableBps = record.MaxFavorableBps,
+                MaxAdverseBps = record.MaxAdverseBps,
                 PriceEntropy = record.PriceEntropy,
                 TrendMaturity = record.TrendMaturity,
                 PricePositionPct = record.PricePositionPct,
