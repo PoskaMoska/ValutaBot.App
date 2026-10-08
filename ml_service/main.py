@@ -78,9 +78,89 @@ async def _train_all():
                 
                 await asyncio.sleep(delay)
 
+def prune_models_disk() -> dict:
+    """
+    Cleans up redundant and obsolete files from MODEL_DIR to prevent volume disk exhaustion:
+    1. Removes orphaned SQLite DBs (e.g. ValutaTicks.db)
+    2. Removes duplicate _v2.pkl models when primary .pkl exists
+    3. Removes obsolete _variance.pkl files when _v2_variance.pkl exists
+    4. Removes temporary .tmp files left over from interrupted saves
+    """
+    from model import MODEL_DIR
+    deleted_files = []
+    freed_bytes = 0
+
+    if not MODEL_DIR.exists():
+        return {"status": "ok", "deleted_count": 0, "freed_mb": 0.0}
+
+    # 1. Remove orphaned database files (e.g. ValutaTicks.db)
+    for db_file in list(MODEL_DIR.glob("**/*.db")):
+        try:
+            sz = db_file.stat().st_size
+            db_file.unlink()
+            deleted_files.append(db_file.name)
+            freed_bytes += sz
+            log.info(f"[DiskPrune] Removed orphaned database {db_file.name} ({sz / 1024 / 1024:.2f} MB)")
+        except Exception as e:
+            log.warning(f"[DiskPrune] Failed to remove {db_file}: {e}")
+
+    # 2. Remove stale .tmp files
+    for tmp_file in list(MODEL_DIR.glob("**/*.tmp")):
+        try:
+            sz = tmp_file.stat().st_size
+            tmp_file.unlink()
+            deleted_files.append(tmp_file.name)
+            freed_bytes += sz
+            log.info(f"[DiskPrune] Removed stale temp file {tmp_file.name} ({sz / 1024 / 1024:.2f} MB)")
+        except Exception as e:
+            log.warning(f"[DiskPrune] Failed to remove {tmp_file}: {e}")
+
+    # 3. Remove duplicate _v2.pkl files where base .pkl exists
+    for v2_file in list(MODEL_DIR.glob("**/*_v2.pkl")):
+        base_name = v2_file.name.replace("_v2.pkl", ".pkl")
+        base_file = v2_file.parent / base_name
+        if base_file.exists():
+            try:
+                sz = v2_file.stat().st_size
+                v2_file.unlink()
+                deleted_files.append(v2_file.name)
+                freed_bytes += sz
+                log.info(f"[DiskPrune] Removed duplicate model {v2_file.name} ({sz / 1024 / 1024:.2f} MB)")
+            except Exception as e:
+                log.warning(f"[DiskPrune] Failed to remove {v2_file}: {e}")
+
+    # 4. Remove duplicate non-v2 variance files where _v2_variance.pkl exists
+    for v2_var in list(MODEL_DIR.glob("**/*_v2_variance.pkl")):
+        old_name = v2_var.name.replace("_v2_variance.pkl", "_variance.pkl")
+        old_file = v2_var.parent / old_name
+        if old_file.exists():
+            try:
+                sz = old_file.stat().st_size
+                old_file.unlink()
+                deleted_files.append(old_file.name)
+                freed_bytes += sz
+                log.info(f"[DiskPrune] Removed obsolete variance model {old_file.name} ({sz / 1024 / 1024:.2f} MB)")
+            except Exception as e:
+                log.warning(f"[DiskPrune] Failed to remove {old_file}: {e}")
+
+    freed_mb = round(freed_bytes / (1024 * 1024), 2)
+    log.info(f"[DiskPrune] Finished. Removed {len(deleted_files)} files, freed {freed_mb} MB.")
+    return {
+        "status": "ok",
+        "deleted_count": len(deleted_files),
+        "freed_mb": freed_mb,
+        "sample_deleted": deleted_files[:20]
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _process_pool
+    # Automatically prune persistent volume on startup to avoid disk exhaustion
+    try:
+        prune_models_disk()
+    except Exception as e:
+        log.warning(f"[Startup] Disk prune error: {e}")
     _process_pool = ProcessPoolExecutor(max_workers=2)
     log.info("[Startup] Launching background pre-training for all timeframes...")
     asyncio.create_task(_train_all())
@@ -571,6 +651,12 @@ def debug_ls():
     except Exception as e:
         return {"error": str(e), "model_dir": str(MODEL_DIR)}
     return {"model_dir": str(MODEL_DIR), "count": len(result), "files": result}
+
+
+@app.post("/debug/prune_disk")
+def debug_prune_disk():
+    """Removes orphaned DBs, duplicate _v2 models, and temp files to free persistent volume disk space."""
+    return prune_models_disk()
 
 
 @app.post("/upload_model")

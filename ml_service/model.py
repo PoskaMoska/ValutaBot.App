@@ -1368,6 +1368,14 @@ class ForexPredictor:
         joblib.dump({"model": model, "meta": meta,
                      "embedder": embedder if embedder is not None else self._embedder}, tmp)
         os.replace(tmp, p)
+        # Clean up legacy _v2 file if present to save volume disk
+        if "_v2" not in self._key:
+            v2_p = p.parent / f"{self._key}_v2.pkl"
+            if v2_p.exists():
+                try:
+                    v2_p.unlink()
+                except Exception:
+                    pass
 
     def _try_load(self):
         # Load LightGBM (Tier 1)
