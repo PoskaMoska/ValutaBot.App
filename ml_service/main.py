@@ -705,6 +705,15 @@ async def predict(request: Request):
 
     predictor = _get_predictor(symbol, interval, regime)
 
+    # Robust bidirectional fallback cascade:
+    # 1. If regime-specific model (FLAT/TREND/CHAOS) is missing, seamlessly fallback to ALL
+    if predictor._model is None and regime != "ALL":
+        all_pred = _get_predictor(symbol, interval, "ALL")
+        if all_pred._model is not None:
+            predictor = all_pred
+            regime = "ALL"
+
+    # 2. If ALL model is missing, try any available regime model
     if predictor._model is None and regime == "ALL":
         for fallback in ["FLAT", "TREND", "CHAOS"]:
             fb_pred = _get_predictor(symbol, interval, fallback)
