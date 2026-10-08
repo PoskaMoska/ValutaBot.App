@@ -406,7 +406,7 @@ public class ConfluenceMatrixEngine(
             double scaledSmc = smcScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("SMC", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
             double scaledMl = mlScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("LIGHTGBM", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
 
-            metaProb = Math.Clamp(0.5 + (scaledMl * 0.35) + (scaledTa * 0.20) + (scaledSmc * 0.15), 0.0, 1.0);
+            metaProb = Math.Clamp(0.5 + (scaledMl * 0.60) + (scaledTa * 0.40) + (scaledSmc * 0.0), 0.0, 1.0);
         }
         
         string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
