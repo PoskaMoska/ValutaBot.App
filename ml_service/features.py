@@ -78,13 +78,35 @@ def _approximate_entropy(close: np.ndarray, window: int = 20, m: int = 2, r_fact
 
 
         
-    bullish_mask = lo[2:] > h[:-2]
-    fvg_bullish[2:][bullish_mask] = lo[2:][bullish_mask] - h[:-2][bullish_mask]
+def _hurst_exponent(price: np.ndarray, window: int = 60) -> np.ndarray:
+    """Calculates a rolling approximation of the Hurst Exponent to measure trendiness."""
+    hurst = np.full(len(price), 0.5)
+    if len(price) <= window:
+        return hurst
     
-    bearish_mask = h[2:] < lo[:-2]
-    fvg_bearish[2:][bearish_mask] = lo[:-2][bearish_mask] - h[2:][bearish_mask]
-            
-    return fvg_bullish, fvg_bearish
+    windows = np.lib.stride_tricks.sliding_window_view(price[:-1], window)
+    chunk_range = windows.max(axis=-1) - windows.min(axis=-1)
+    chunk_std = windows.std(axis=-1) + 1e-10
+    rs = chunk_range / chunk_std
+    hurst[window:] = np.log(rs + 1e-10) / np.log(window)
+    return hurst
+
+def _shannon_entropy(price: np.ndarray, window: int = 20, bins: int = 10) -> np.ndarray:
+    """Calculates rolling Shannon entropy to measure chaos."""
+    entropy = np.zeros(len(price))
+    if len(price) <= window:
+        return entropy
+    
+    for i in range(window, len(price)):
+        chunk = price[i-window:i]
+        rng = np.max(chunk) - np.min(chunk)
+        if rng < 1e-10:
+            continue
+        hist, _ = np.histogram(chunk, bins=bins, density=True)
+        p = hist[hist > 0] * rng / bins
+        p = p / (np.sum(p) + 1e-10)
+        entropy[i] = -np.sum(p * np.log2(p + 1e-12))
+    return entropy
 
 def _parse_timestamps_vectorized(ts_series: pd.Series) -> pd.Series:
     """

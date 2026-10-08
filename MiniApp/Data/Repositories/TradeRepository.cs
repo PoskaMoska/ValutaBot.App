@@ -667,7 +667,7 @@ FROM outcome_data;");
             var rows = await conn.QueryAsync<bool>(@"
                 SELECT was_win 
                 FROM trade_outcomes 
-                WHERE asset = @Asset AND timeframe = @Timeframe AND verified_at IS NOT NULL 
+                WHERE asset = @Asset AND timeframe = @Timeframe AND was_win IS NOT NULL 
                 ORDER BY verified_at DESC 
                 LIMIT @Limit
             ", new { Asset = asset, Timeframe = timeframe, Limit = limit });
