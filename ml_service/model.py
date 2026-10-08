@@ -1369,6 +1369,10 @@ class ForexPredictor:
     def _try_load(self):
         # Load LightGBM (Tier 1)
         p = self._model_path()
+        if not p.exists():
+            p_alt = MODEL_DIR / f"{self._key.replace('_v2', '')}.pkl" if "_v2" in self._key else MODEL_DIR / f"{self._key}_v2.pkl"
+            if p_alt.exists():
+                p = p_alt
         if p.exists():
             try:
                 data = joblib.load(p)

@@ -11,8 +11,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-# Trained ML model files — stored on Railway Volume, not in git
+# Trained ML model files — track production _v2.pkl models
 *.pkl
+!ml_service/data/models/*_v2.pkl
 retrain_v3.log
 .venv/
 venv/

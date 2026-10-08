@@ -599,6 +599,12 @@ async def upload_model(
 
         # Reload into memory
         predictor = _get_predictor(symbol.upper(), interval, regime)
+        dest_v2 = predictor._model_path()
+        if dest_v2 != dest:
+            try:
+                dest_v2.write_bytes(content)
+            except Exception:
+                pass
         predictor._try_load()
 
         log.info(f"[UploadModel] Saved and reloaded {key}.pkl ({len(content)//1024} KB)")
@@ -606,7 +612,7 @@ async def upload_model(
             "status": "ok",
             "key": key,
             "size_kb": round(len(content) / 1024, 1),
-            "path": str(dest),
+            "path": str(dest_v2 if dest_v2.exists() else dest),
             "auc": predictor._meta.auc if predictor._meta else None
         }
     except Exception as e:
@@ -651,15 +657,14 @@ async def predict(request: Request):
     candles[-1]['of_state'] = of_state
     candles[-1]['dynamic_horizon'] = 3  # default since we don't know it live yet
 
-    # Fix Volume Train-Inference Skew:
-    # Historical REST candles for forex have volume=0, but live WS candles have volume=tick_count.
-    # To prevent tree-split divergence, force live volume to 0.0 for forex.
-    if is_forex:
-        for c in candles:
-            c['volume'] = 0.0
-        if mtf_candles:
-            for c in mtf_candles:
-                c['volume'] = 0.0
+    # Ensure volume is valid and non-zero so micro_efficiency_ratio and volume ratios do not diverge
+    for c in candles:
+        v_val = float(c.get('volume', 1.0))
+        c['volume'] = max(1.0, v_val)
+    if mtf_candles:
+        for c in mtf_candles:
+            v_val = float(c.get('volume', 1.0))
+            c['volume'] = max(1.0, v_val)
 
     # Forex-only policy: block crypto symbols
     if not is_forex_symbol(symbol):
