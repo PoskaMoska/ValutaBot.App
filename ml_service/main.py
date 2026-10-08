@@ -115,19 +115,19 @@ def prune_models_disk() -> dict:
         except Exception as e:
             log.warning(f"[DiskPrune] Failed to remove {tmp_file}: {e}")
 
-    # 3. Remove duplicate _v2.pkl files where base .pkl exists
+    # 3. Remove legacy V1 models (.pkl) where active V2 model (_v2.pkl) exists
     for v2_file in list(MODEL_DIR.glob("**/*_v2.pkl")):
-        base_name = v2_file.name.replace("_v2.pkl", ".pkl")
-        base_file = v2_file.parent / base_name
-        if base_file.exists():
+        legacy_name = v2_file.name.replace("_v2.pkl", ".pkl")
+        legacy_file = v2_file.parent / legacy_name
+        if legacy_file.exists():
             try:
-                sz = v2_file.stat().st_size
-                v2_file.unlink()
-                deleted_files.append(v2_file.name)
+                sz = legacy_file.stat().st_size
+                legacy_file.unlink()
+                deleted_files.append(legacy_file.name)
                 freed_bytes += sz
-                log.info(f"[DiskPrune] Removed duplicate model {v2_file.name} ({sz / 1024 / 1024:.2f} MB)")
+                log.info(f"[DiskPrune] Removed legacy V1 model {legacy_file.name} ({sz / 1024 / 1024:.2f} MB)")
             except Exception as e:
-                log.warning(f"[DiskPrune] Failed to remove {v2_file}: {e}")
+                log.warning(f"[DiskPrune] Failed to remove {legacy_file}: {e}")
 
     # 4. Remove duplicate non-v2 variance files where _v2_variance.pkl exists
     for v2_var in list(MODEL_DIR.glob("**/*_v2_variance.pkl")):
