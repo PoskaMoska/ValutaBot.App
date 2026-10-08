@@ -296,7 +296,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
              consensus = consensus with { Probability = 0, FinalDirection = "NEUTRAL" }; // Force into HOLD block
         }
         
-        if (consensus.Probability >= 53)
+        if (consensus.Probability >= 57)
         {
             var mlFeatures = new {
                 Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
@@ -326,7 +326,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
-        else if (consensus.Probability >= 45 && consensus.Probability < 53)
+        else if (consensus.Probability >= 45 && consensus.Probability < 57)
         {
             var mlFeatures = new {
                 Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
