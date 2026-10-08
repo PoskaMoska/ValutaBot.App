@@ -41,6 +41,8 @@ public static class TiingoWebSocketStream
         return _livePrices.TryGetValue(AssetSanitizer.Sanitize(symbol), out price);
     }
 
+    public static bool IsConnected => _webSocket?.State == System.Net.WebSockets.WebSocketState.Open;
+
     public static void StartStream(string[] symbols)
     {
         // Single-loop guard: a second StartStream call must not create a second connection.

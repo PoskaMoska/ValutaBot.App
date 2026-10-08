@@ -32,15 +32,16 @@ public class SelfDiagnosticService : BackgroundService
         _serviceProvider = serviceProvider;
         _configuration = configuration;
 
+        // Clean slate on startup: do not inherit stale crash state from previous deployment
         try 
         {
             if (System.IO.File.Exists(_mlStateFilePath))
             {
-                var txt = System.IO.File.ReadAllText(_mlStateFilePath).Trim();
-                if (txt == "false") _mlWasHealthy = false;
+                System.IO.File.Delete(_mlStateFilePath);
             }
         }
         catch { }
+        _mlWasHealthy = true;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

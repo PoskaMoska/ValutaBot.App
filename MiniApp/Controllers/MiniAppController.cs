@@ -232,24 +232,37 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                     string mlStatus = "\u274C Ошибка (Таймаут)";
                     var client = HttpFactory?.CreateClient();
                     if (client != null) {
-                        client.Timeout = TimeSpan.FromSeconds(3);
-                        var pyPort = Environment.GetEnvironmentVariable("PYTHON_PORT") ?? "8000";
-                        string url = "http://127.0.0.1:" + pyPort + "/health";
+                        client.Timeout = TimeSpan.FromSeconds(2);
+                        var mlBaseUrl = builder.Configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
+                        string url = $"{mlBaseUrl.TrimEnd('/')}/health";
                         
-                        for (int i = 0; i < 20; i++)
+                        for (int i = 0; i < 15; i++)
                         {
                             try {
                                 var mlResp = await client.GetAsync(url);
                                 if (mlResp.IsSuccessStatusCode) {
-                                    mlStatus = "\u2705 В сети";
+                                    mlStatus = "\u2705 Подключено";
                                     break;
                                 }
                             } catch { }
-                            await Task.Delay(TimeSpan.FromSeconds(3));
+                            await Task.Delay(1000);
                         }
                     }
 
-                    string tiingoStatus = Environment.GetEnvironmentVariable("TIINGO_API_KEY") != null ? "\u2705 Подключено" : "\u26A0\uFE0F Нет ключа";
+                    string tiingoStatus = "\u274C Нет ключа API";
+                    if (!string.IsNullOrEmpty(TiingoService.GetApiKey()))
+                    {
+                        tiingoStatus = "\u2705 Подключено";
+                        for (int t = 0; t < 5; t++)
+                        {
+                            if (TiingoWebSocketStream.IsConnected)
+                            {
+                                tiingoStatus = "\u2705 Подключено";
+                                break;
+                            }
+                            await Task.Delay(1000);
+                        }
+                    }
 
                     string msg = "\U0001F680 <b>ValutaBot Успешно Запущен!</b>\n\n\u2699\uFE0F <b>Системная диагностика:</b>\n- C# Core: \u2705 ОК\n- PostgreSQL: " + dbStatus + "\n- Python ML: " + mlStatus + "\n- WebSocket: " + tiingoStatus + "\n\n<i>Бот полностью в сети и мониторит рынок.</i>";
                     await ValutaBot.MiniApp.TelegramBotService.SendMessageToAdmins(msg);
