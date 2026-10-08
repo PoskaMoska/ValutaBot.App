@@ -155,7 +155,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var taSw = Stopwatch.StartNew();
         var (mainAdx, mainPdi, mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(cleanAsset, timeframe, closedCandles) : (20.0, 0.0, 0.0);
         double mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(cleanAsset, timeframe, closedCandles) : 0;
-        var taResult = _marketAnalyzer.ScoreTimeframe(cleanAsset, timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: mainAdx, atrOverride: mainAtr, isForex: isForex, pdiOverride: mainPdi, mdiOverride: mainMdi);
+        var taDetail = _marketAnalyzer.ScoreTimeframeDetailed(cleanAsset, timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: mainAdx, atrOverride: mainAtr, isForex: isForex, pdiOverride: mainPdi, mdiOverride: mainMdi);
+        var taResult = (score: taDetail.Score, confidence: taDetail.Confidence, rsiVal: taDetail.RsiVal, hmaVal: taDetail.HmaVal, volStrengthVal: taDetail.VolStrengthVal, atrVal: taDetail.AtrVal);
         taSw.Stop();
         traceLines.Add($"[3. Расчеты TA]      Индикаторы, ADX ({mainAdx:F1}) и ATR вычислены -> {taSw.ElapsedMilliseconds}ms");
 
@@ -296,22 +297,34 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
              consensus = consensus with { Probability = 0, FinalDirection = "NEUTRAL" }; // Force into HOLD block
         }
         
+        double[] metaWeights = TradeOutcomeTracker.MetaLearner?.GetWeights(cleanAsset, timeframe) ?? Array.Empty<double>();
+
+        string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taDetail);
+        string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
+        string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(new {
+            BosDirection = smcResult.BosDirection,
+            SweepDirection = smcResult.SweepDirection,
+            OrderBlockType = smcResult.OrderBlockType,
+            FvgType = smcResult.FvgType,
+            SmcScore = consensus.SmcScore
+        });
+
+        var mlFeatures = new {
+            Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+            MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+            Smc = smcResult,
+            Ta = taDetail,
+            MetaLearner = new {
+                Weights = metaWeights,
+                Prob = consensus.MlProb,
+                Score = consensus.MlScoreRaw,
+                FinalProb = consensus.Probability
+            }
+        };
+        string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
+
         if (consensus.Probability >= 57)
         {
-            var mlFeatures = new {
-                Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-                MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-                Smc = smcResult,
-                Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
-            };
-            string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
-
-            string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taSignal);
-
-            string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
-
-            string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(smcSignal);
-
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 ExtractMlRegime(mlPrediction?.ModelVersion),
@@ -328,20 +341,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         else if (consensus.Probability >= 45 && consensus.Probability < 57)
         {
-            var mlFeatures = new {
-                Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-                MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-                Smc = smcResult,
-                Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
-            };
-            string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
-
-            string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taSignal);
-
-            string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
-
-            string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(smcSignal);
-
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 ExtractMlRegime(mlPrediction?.ModelVersion),
@@ -361,24 +360,8 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             dbSw.Stop();
             
             // --- TRUE NEGATIVE NOISE COLLECTION (For 3-system Transformer architecture) ---
-            // AutoScanner makes ~288 checks per minute. A 0.5% chance gives ~1.4 random HOLD samples per minute globally.
-            // This prevents the 5GB DB from bloating while providing baseline states.
             if (System.Random.Shared.NextDouble() < 0.005)
             {
-                var mlFeatures = new {
-                    Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-                    MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-                    Smc = smcResult,
-                    Ta = new { Rsi = taResult.rsiVal, Hma = taResult.hmaVal, Atr = mainAtr, Adx = mainAdx, Score = taResult.score }
-                };
-                string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
-
-                string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taSignal);
-
-                string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
-
-                string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(smcSignal);
-
                 _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                     "NONE", false, false, 1.0, "NEUTRAL", "UNKNOWN", state.VelocityRegime ?? "UNKNOWN", mainAtr, mainAdx, taResult.rsiVal, false, minutesToNews ?? -1, "", "", 0.0, priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             }

@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
+using ValutaBot.App.MiniApp.Data.Repositories;
 
 namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines;
 
@@ -10,6 +11,8 @@ public interface IOnlineMetaLearner
 {
     double Predict(string asset, string timeframe, double ta, double of, double smc, double ml, bool tfConflict);
     void PartialFit(string asset, string timeframe, double ta, double of, double smc, double ml, bool wasWin, string direction);
+    double[] GetWeights(string asset, string timeframe);
+    Task InitializeFromDbAsync();
 }
 
 public class OnlineMetaLearner : IOnlineMetaLearner
@@ -17,26 +20,42 @@ public class OnlineMetaLearner : IOnlineMetaLearner
     private readonly ConcurrentDictionary<string, double[]> _weights = new();
     private readonly ConcurrentDictionary<string, int> _updateCounts = new();
     private readonly string _savePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "meta_weights_v4.json");
-    private const double InitialLearningRate = 0.10;
-    private const double LrDecay             = 0.002;
+    private const double InitialLearningRate = 0.08;
+    private const double LrDecay             = 0.001;
     private const double WeightDecay         = 0.001;
+
+    private static readonly double[] DefaultPriors = { 0.0, 1.10, 0.20, 0.90, 1.35 };
 
     public OnlineMetaLearner()
     {
-        LoadWeights();
+        LoadWeightsFromFile();
     }
 
     private string GetKey(string asset, string timeframe) => $"{asset}_{timeframe}";
 
     private double[] GetOrCreateWeights(string key)
     {
-        // Empirical priors from 6 months of signal_votes data (2,500+ real trades):
-        //   ML (LightGBM): 58.6% win  > weight 1.35  (best module)
-        //   TA (Skender):  53.4% win  > weight 1.10  (above average)
-        //   SMC:           51.4% win  > weight 0.90  (slightly below neutral)
-        //   OF (OrderFlow):35.8% win  > weight 0.20  (actively harmful — near-zero)
+        // Empirical priors from real trade data:
+        //   ML (LightGBM): weight 1.35
+        //   TA (Skender/Velocity): weight 1.10
+        //   SMC:           weight 0.90
+        //   OF (OrderFlow):weight 0.20 (low weight)
         // Order: [Bias, TA, OF, SMC, ML]
-        return _weights.GetOrAdd(key, _ => new double[] { 0.0, 1.10, 0.20, 0.90, 1.35 });
+        return _weights.GetOrAdd(key, _ => (double[])DefaultPriors.Clone());
+    }
+
+    public double[] GetWeights(string asset, string timeframe)
+    {
+        var w = GetOrCreateWeights(GetKey(asset, timeframe));
+        lock (w)
+        {
+            return (double[])w.Clone();
+        }
+    }
+
+    public System.Collections.Generic.Dictionary<string, double[]> GetCurrentWeights()
+    {
+        return new System.Collections.Generic.Dictionary<string, double[]>(_weights);
     }
 
     private double GetLearningRate(string key)
@@ -47,7 +66,6 @@ public class OnlineMetaLearner : IOnlineMetaLearner
 
     public double Predict(string asset, string timeframe, double ta, double of, double smc, double ml, bool tfConflict)
     {
-        // STRICT SANITIZATION
         if (!double.IsFinite(ta)) ta = 0.0;
         if (!double.IsFinite(of)) of = 0.0;
         if (!double.IsFinite(smc)) smc = 0.0;
@@ -58,16 +76,10 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         smc = Math.Clamp(smc, -1.0, 1.0);
         ml = Math.Clamp(ml, -1.0, 1.0);
 
-        // Phase 3: Adaptive Bayesian Log-Odds Transformation
-        // Raw inputs [-1.0, 1.0] are mapped to probabilities, then to log-odds.
-        // ADAPTIVE FIX: By capping the internal probability strictly to [0.15, 0.85], 
-        // we prevent discrete inputs (like SMC = 1.0) from exploding to infinity (+5.29)
-        // and unilaterally crushing smooth probability models (like ML = 0.72).
+        // Bayesian Log-Odds Transformation
         double LogOdds(double val) 
         {
-            // Map [-1, 1] to [0, 1]
             double p = (val + 1.0) / 2.0;
-            // Cap to avoid extreme log-odds dominance
             p = Math.Clamp(p, 0.15, 0.85); 
             return Math.Log(p / (1.0 - p));
         }
@@ -79,20 +91,17 @@ public class OnlineMetaLearner : IOnlineMetaLearner
 
         var w = GetOrCreateWeights(GetKey(asset, timeframe));
         double z;
-        lock (w) // DATA RACE FIX: Read weights safely
+        lock (w)
         {
             z = w[0] + (w[1] * lo_ta) + (w[2] * lo_of) + (w[3] * lo_smc) + (w[4] * lo_ml);
         }
         return 1.0 / (1.0 + Math.Exp(-z));
     }
 
-    
-    public System.Collections.Generic.Dictionary<string, double[]> GetCurrentWeights() { return new System.Collections.Generic.Dictionary<string, double[]>(_weights); }
     public void PartialFit(string asset, string timeframe, double ta, double of, double smc, double ml, bool wasWin, string direction)
     {
         if (direction == "NEUTRAL") return;
 
-        // STRICT SANITIZATION
         if (!double.IsFinite(ta)) ta = 0.0;
         if (!double.IsFinite(of)) of = 0.0;
         if (!double.IsFinite(smc)) smc = 0.0;
@@ -103,7 +112,6 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         smc = Math.Clamp(smc, -1.0, 1.0);
         ml = Math.Clamp(ml, -1.0, 1.0);
 
-        // Phase 3: Adaptive Bayesian Log-Odds Transformation
         double LogOdds(double val) 
         {
             double prob = (val + 1.0) / 2.0;
@@ -119,58 +127,71 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         double y = (direction == "BUY" && wasWin) || (direction == "PUT" && !wasWin) ? 1.0 : 0.0;
 
         string key = GetKey(asset, timeframe);
-        var w  = GetOrCreateWeights(key);
-        
-        bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
-        double penaltyMultiplier = isSubMinute ? 2.0 : 4.0;
-        double lossDecay         = isSubMinute ? 0.95 : 0.85;
+        var w = GetOrCreateWeights(key);
+        int newCount;
 
-        lock (w) // DATA RACE FIX: Mutate weights atomically
+        lock (w)
         {
             double z = w[0] + (w[1] * lo_ta) + (w[2] * lo_of) + (w[3] * lo_smc) + (w[4] * lo_ml);
             double p = 1.0 / (1.0 + Math.Exp(-z));
             double error = y - p;
-            
-            double lr = GetLearningRate(key);
-            if (!wasWin)
-            {
-                lr *= penaltyMultiplier;
-            }
 
-            // Stochastic Gradient Descent step using Log-Odds gradients
-            // This is the core fix: error * log_odds correctly rewards/punishes individual modules!
+            double lr = GetLearningRate(key);
+
+            // Symmetric balanced SGD: no asymmetric penalty destroying weights
             w[0] += lr * error;
             w[1] += lr * error * lo_ta;
             w[2] += lr * error * lo_of;
             w[3] += lr * error * lo_smc;
             w[4] += lr * error * lo_ml;
 
-            // Soft L2 Regularization (pulls weights very gently towards 1.0 to prevent drifting)
+            // Soft L2 Regularization pulling towards empirical priors
             for (int i = 1; i < w.Length; i++) 
             {
-                w[i] += (1.0 - w[i]) * WeightDecay;
+                w[i] += (DefaultPriors[i] - w[i]) * WeightDecay;
+                w[i] = Math.Clamp(w[i], 0.10, 3.5);
             }
 
-            // ADAPTIVE FIX: Never allow weights to become negative.
-            // If a module is performing poorly, its weight should drop to near 0, but not invert.
-            for (int i = 1; i < w.Length; i++)
-            {
-                if (w[i] > 4.0) w[i] = 4.0;
-                if (w[i] < 0.05) w[i] = 0.05;
-            }
-            
-            // BIAS CLAMP: Prevent the model from accumulating infinite negative bias
-            // and inverting signals. Max offset is +/- 1.5 logits.
-            if (w[0] > 1.5) w[0] = 1.5;
-            if (w[0] < -1.5) w[0] = -1.5;
+            // Bias clamp
+            w[0] = Math.Clamp(w[0], -1.0, 1.0);
         }
 
-        _updateCounts.AddOrUpdate(key, 1, (_, v) => v + 1);
-        _ = SaveWeightsAsync();
+        newCount = _updateCounts.AddOrUpdate(key, 1, (_, v) => v + 1);
+
+        // Persist to PostgreSQL asynchronously
+        double[] snapshot;
+        lock (w) { snapshot = (double[])w.Clone(); }
+        _ = TradeRepository.SaveMetaWeightAsync(key, snapshot, newCount);
+
+        // Also save to file
+        _ = SaveWeightsToFileAsync();
     }
 
+    public async Task InitializeFromDbAsync()
+    {
+        try
+        {
+            var dbWeights = await TradeRepository.LoadMetaWeightsAsync();
+            if (dbWeights.Count > 0)
+            {
+                foreach (var item in dbWeights)
+                {
+                    if (item.weights != null && item.weights.Length == 5)
+                    {
+                        _weights[item.key] = item.weights;
+                        _updateCounts[item.key] = item.updateCount;
+                    }
+                }
+                BotLogger.Info($"[OnlineMetaLearner] Successfully restored {dbWeights.Count} model weight vectors from PostgreSQL.");
+            }
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[OnlineMetaLearner] DB weight load warning: {ex.Message}");
+        }
+    }
 
-    private void LoadWeights()
+    private void LoadWeightsFromFile()
     {
         try
         {
@@ -180,20 +201,29 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                 var dict = JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, double[]>>(json);
                 if (dict != null)
                 {
-                    foreach (var kvp in dict) { var w = kvp.Value; for (int i = 1; i < w.Length; i++) { if (w[i] < 0.05) w[i] = 0.05; if (w[i] > 4.0) w[i] = 4.0; } _weights[kvp.Key] = w; }
+                    foreach (var kvp in dict) 
+                    { 
+                        var w = kvp.Value; 
+                        for (int i = 1; i < w.Length; i++) 
+                        { 
+                            if (w[i] < 0.10) w[i] = 0.10; 
+                            if (w[i] > 3.5) w[i] = 3.5; 
+                        } 
+                        _weights[kvp.Key] = w; 
+                    }
                 }
             }
         }
         catch { }
     }
 
-    private readonly System.Threading.SemaphoreSlim _saveLock = new(1, 1);
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
 
-    private Task SaveWeightsAsync()
+    private Task SaveWeightsToFileAsync()
     {
         return Task.Run(async () =>
         {
-            if (!_saveLock.Wait(0)) return; // I/O CRASH FIX: Debounce overlapping saves
+            if (!_saveLock.Wait(0)) return;
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_savePath)!);
@@ -204,7 +234,7 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                 }
                 
                 string json = JsonSerializer.Serialize(dict);
-                string tmpPath = _savePath + $".tmp.{Guid.NewGuid():N}"; // I/O CRASH FIX: Unique temp file
+                string tmpPath = _savePath + $".tmp.{Guid.NewGuid():N}";
                 await File.WriteAllTextAsync(tmpPath, json);
                 File.Move(tmpPath, _savePath, overwrite: true);
             }
@@ -216,6 +246,3 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         });
     }
 }
-
-
-

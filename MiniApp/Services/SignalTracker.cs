@@ -57,13 +57,10 @@ public static class SignalTracker
         if (MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
         string sym = asset.ToUpper();
         var now = DateTime.UtcNow;
-        long currentTicks = now.Ticks;
-        long intervalTicks = TimeSpan.FromSeconds(timeframeSecs).Ticks;
-        DateTime gridTime = new DateTime(currentTicks - (currentTicks % intervalTicks), DateTimeKind.Utc);
-        // VerifyAt uses 1.5x the timeframe as buffer: 1 candle for the trade to expire +
-        // 0.5 candle to allow broker processing / price feed latency before we check the result.
-        // Without this buffer we could read the exit price before the broker has finalized it.
-        DateTime verifyAt = gridTime.AddSeconds((int)(timeframeSecs * 1.5));
+        // FIX FORENSICS: Real broker expiry is measured from trade entry time (now), NOT from the past grid boundary.
+        // Using gridTime truncated trades placed mid-candle (e.g. 5s trades verified after 2s, 1m trades after 30s).
+        // Adding timeframeSecs + 1s buffer guarantees the trade has fully expired before verification.
+        DateTime verifyAt = now.AddSeconds(timeframeSecs + 1);
 
         string cooldownKey = $"{asset}_{timeframe}";
         

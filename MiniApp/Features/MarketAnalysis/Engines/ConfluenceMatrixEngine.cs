@@ -463,52 +463,69 @@ public class ConfluenceMatrixEngine(
             sb.AppendLine("- РљСЂРёС‚РёС‡РµСЃРєРёР№ СЂР°Р·РІРѕСЂРѕС‚ РўРµС…Р°РЅР°Р»РёР·Р°: РЎРёР»СЊРЅРѕРµ СЃРЅРёР¶РµРЅРёРµ СѓРІРµСЂРµРЅРЅРѕСЃС‚Рё");
         }
 
-        // 2.5. Anti-Knife Filter. Threshold widened 48/52 -> 42/58.
-        // RSI 42-58 is flat вЂ” filter must NOT fire there.
-        if (finalDir == "BUY" && taSignal.Rsi < 42)
+        // 2.5. Extreme Waterfall / Runaway Spike Protection (Real Knife / Rocket Filter)
+        double velSec = stateSignal.VelocityBpsPerSec;
+        bool isFastTrend = Math.Abs(velSec) >= (isSubMinute ? 1.5 : 3.0);
+
+        if (finalDir == "BUY")
         {
-            margin *= 0.5;
-            sb.AppendLine("- Anti-Knife: Р›РѕРЅРі РїСЂРё СЃРёР»СЊРЅРѕР№ РїРµСЂРµРїСЂРѕРґР°РЅРЅРѕСЃС‚Рё RSI. РЈРІРµСЂРµРЅРЅРѕСЃС‚СЊ СЃРЅРёР¶РµРЅР°.");
+            if (taSignal.Rsi < 22.0 && velSec < -1.5)
+            {
+                margin *= 0.6;
+                sb.AppendLine("- Anti-Knife: Обвальное падение (RSI < 22 + нисходящий импульс). Уверенность снижена.");
+            }
+            else if (taSignal.Rsi > 78.0 && velSec < 0)
+            {
+                margin *= 0.8;
+                sb.AppendLine("- Риск вершины: Покупка на пике при замедлении. Уверенность снижена.");
+            }
+            // Trend or Range Confirmation
+            if (isFastTrend && taSignal.Rsi >= 52.0 && taSignal.Rsi <= 76.0 && velSec > 0)
+            {
+                margin = Math.Min(0.45, margin * 1.20);
+                sb.AppendLine("- Подтверждение тренда: Здоровый восходящий импульс (RSI 52-76).");
+            }
+            else if (!isFastTrend && taSignal.Rsi < 32.0)
+            {
+                margin = Math.Min(0.45, margin * 1.25);
+                sb.AppendLine("- Подтверждение диапазона: Отбой вверх от перепроданности (RSI < 32).");
+            }
         }
-        else if (finalDir == "PUT" && taSignal.Rsi > 58)
+        else if (finalDir == "PUT")
         {
-            margin *= 0.5;
-            sb.AppendLine("- Anti-Knife: РЁРѕСЂС‚ РїСЂРё СЃРёР»СЊРЅРѕР№ РїРµСЂРµРєСѓРїР»РµРЅРЅРѕСЃС‚Рё RSI. РЈРІРµСЂРµРЅРЅРѕСЃС‚СЊ СЃРЅРёР¶РµРЅР°.");
+            if (taSignal.Rsi > 78.0 && velSec > 1.5)
+            {
+                margin *= 0.6;
+                sb.AppendLine("- Anti-Rocket: Вертикальный взлет (RSI > 78 + восходящий импульс). Уверенность снижена.");
+            }
+            else if (taSignal.Rsi < 22.0 && velSec > 0)
+            {
+                margin *= 0.8;
+                sb.AppendLine("- Риск дна: Продажа на дне при отскоке. Уверенность снижена.");
+            }
+            // Trend or Range Confirmation
+            if (isFastTrend && taSignal.Rsi <= 48.0 && taSignal.Rsi >= 24.0 && velSec < 0)
+            {
+                margin = Math.Min(0.45, margin * 1.20);
+                sb.AppendLine("- Подтверждение тренда: Здоровый нисходящий импульс (RSI 24-48).");
+            }
+            else if (!isFastTrend && taSignal.Rsi > 68.0)
+            {
+                margin = Math.Min(0.45, margin * 1.25);
+                sb.AppendLine("- Подтверждение диапазона: Отбой вниз от перекупленности (RSI > 68).");
+            }
         }
 
-
-        // 3. Р¤Р°Р·Р° СЂС‹РЅРєР° (RSI)
-        if (taSignal.Rsi > 65 && finalDir == "BUY") 
-        {
-            margin *= 0.7;
-            sb.AppendLine("- Р¤Р°Р·Р° СЂС‹РЅРєР°: РџРµСЂРµРєСѓРїР»РµРЅРЅРѕСЃС‚СЊ (СЂРёСЃРє Р»РѕРЅРіР° РЅР° РїРёРєРµ)");
-        }
-        else if (taSignal.Rsi < 35 && finalDir == "PUT")
-        {
-            margin *= 0.7;
-            sb.AppendLine("- Р¤Р°Р·Р° СЂС‹РЅРєР°: РџРµСЂРµРїСЂРѕРґР°РЅРЅРѕСЃС‚СЊ (СЂРёСЃРє С€РѕСЂС‚Р° РЅР° РґРЅРµ)");
-        }
-        else if (taSignal.Rsi > 65 && finalDir == "PUT")
-        {
-            margin = Math.Min(0.50, margin * 1.3);
-            sb.AppendLine("- Р¤Р°Р·Р° СЂС‹РЅРєР°: РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РѕС‚РєР°С‚Р° РІРЅРёР· (РџРµСЂРµРєСѓРїР»РµРЅРЅРѕСЃС‚СЊ)");
-        }
-        else if (taSignal.Rsi < 35 && finalDir == "BUY")
-        {
-            margin = Math.Min(0.50, margin * 1.3);
-            sb.AppendLine("- Р¤Р°Р·Р° СЂС‹РЅРєР°: РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РѕС‚РєР°С‚Р° РІРІРµСЂС… (РџРµСЂРµРїСЂРѕРґР°РЅРЅРѕСЃС‚СЊ)");
-        }
-
-        // 4. Р­РЅС‚СЂРѕРїРёСЏ / РЎРєРѕСЂРѕСЃС‚СЊ СЂС‹РЅРєР°
+        // 3. Энтропия / Скорость рынка
         double absVel = Math.Abs(stateSignal.VelocityBpsPerSec);
-        double dangerVel = isSubMinute ? 1.0 : 4.0; 
+        double dangerVel = isSubMinute ? 2.5 : 5.0; 
         if (absVel >= dangerVel)
         {
-            margin *= 0.8;
-            sb.AppendLine("- Р­РЅС‚СЂРѕРїРёСЏ: Р­РєСЃС‚СЂРµРјР°Р»СЊРЅР°СЏ РІРѕР»Р°С‚РёР»СЊРЅРѕСЃС‚СЊ (РҐР°РѕСЃ), Р·Р°РЅРёР¶РµРЅРёРµ СѓРІРµСЂРµРЅРЅРѕСЃС‚Рё");
+            margin *= 0.85;
+            sb.AppendLine("- Энтропия: Экстремальная волатильность (Хаос), занижение уверенности.");
         }
 
-        double finalScore = 0.5 + margin;
+                double finalScore = 0.5 + margin;
         sb.AppendLine($"-> РС‚РѕРі: {finalDir} {(int)Math.Clamp(Math.Round(finalScore * 100), 50, 100)}%");
 
         string reasoningText = sb.ToString();

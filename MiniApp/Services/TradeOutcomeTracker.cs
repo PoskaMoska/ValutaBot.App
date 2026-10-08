@@ -77,6 +77,11 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             }
             BotLogger.Info($"[TradeOutcomeTracker] Restored {calibData.Count} EMA calibration states from PostgreSQL.");
 
+            if (MetaLearner != null)
+            {
+                await MetaLearner.InitializeFromDbAsync();
+            }
+
             var outcomes = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadTradeOutcomesAsync(1000);
             BotLogger.Info($"[TradeOutcomeTracker] Loaded {outcomes.Count} historical outcomes from PostgreSQL DB (for reporting only).");
 

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Numerics;
 
 namespace ValutaBot.MiniApp;
@@ -34,153 +34,189 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<double> volumes, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default,
         double? adxOverride = null, double? atrOverride = null, bool isForex = false,
         double? pdiOverride = null, double? mdiOverride = null)
+    {
+        var d = ScoreTimeframeDetailed(asset, timeframe, prices, volumes, candles, adxOverride, atrOverride, isForex, pdiOverride, mdiOverride);
+        return (d.Score, d.Confidence, d.RsiVal, d.HmaVal, d.VolStrengthVal, d.AtrVal);
+    }
 
+    public TaScoringDetail ScoreTimeframeDetailed(
+        string asset, string timeframe, ReadOnlySpan<double> prices, ReadOnlySpan<double> volumes, ReadOnlySpan<MiniAppController.OhlcCandle> candles = default,
+        double? adxOverride = null, double? atrOverride = null, bool isForex = false,
+        double? pdiOverride = null, double? mdiOverride = null)
     {
         if (prices.Length < 14 || candles.Length < 14)
-        { BotLogger.Warn($"[TAEngine] Not enough candles for full analysis ({prices.Length}/14). Returning neutral score."); return (0.0, 50.0, 50.0, prices.Length > 0 ? prices[^1] : 0.0, 0.0, 0.0); }
+        {
+            BotLogger.Warn($"[TAEngine] Not enough candles for full analysis ({prices.Length}/14). Returning neutral score.");
+            return new TaScoringDetail(0.0, 50.0, 50.0, prices.Length > 0 ? prices[^1] : 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "NOT_ENOUGH_DATA", 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
 
-
-
-        // ── Sub-minute detection ──────────────────────────────────────────────────────────
-        // On s5/s10/s15/s30 RSI(14) covers only 70–420 seconds of price history.
-        // In that window RSI almost never crosses 30/70 → score ≈ 0 permanently → NEUTRAL bias.
-        // ADX(14) on sub-minute is always < 20 (range zone) → HMA is zeroed out → another scoring dead end.
-        // Fix: use shorter indicator periods scaled to the timeframe resolution,
-        // and replace the ADX regime branch with a micro-velocity path that reads
-        // short-term price momentum directly.
         bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
 
-        int rsiPeriod = isSubMinute ? 8  : 14;
-        int hmaPeriod = isSubMinute ? 6  : 9;
-        int adxPeriod = isSubMinute ? 7  : 14;
-        int atrPeriod = isSubMinute ? 7  : 14;
+        int rsiPeriod = isSubMinute ? 8 : 14;
+        int hmaPeriod = isSubMinute ? 6 : 9;
+        int adxPeriod = isSubMinute ? 7 : 14;
+        int atrPeriod = isSubMinute ? 7 : 14;
 
         double rsi        = ComputeRsi(asset, timeframe, candles, rsiPeriod);
         double connorsRsi = ComputeConnorsRsi(asset, timeframe, candles);
-        // FIX-HMA-SLOPE: используем slope HMA (текущий vs предыдущий) вместо price vs HMA.
-        // HMA является leading индикатором: при аптренде HMA > lastPrice, что давало score -= 0.4 (штраф BUY).
-        // Slope-based подход: HMA↑ → bullish, HMA↓ → bearish — нейтрален к leading/lagging природе.
         var (hmaCurrent, hmaPrevious) = _cache.GetHmaWithSlope(asset, timeframe, candles, hmaPeriod);
-        double hma        = hmaCurrent; // оставляем для возврата в tuple (UI/logging)
-        double hmaSlope   = hmaCurrent - hmaPrevious; // положительный = рост HMA = bullish
-        double lastPrice  = prices[^1];
-
+        double hma        = hmaCurrent;
+        double hmaSlope   = hmaCurrent - hmaPrevious;
 
         var (adxVal, pdiVal, mdiVal) = adxOverride.HasValue
             ? (adxOverride.Value, pdiOverride ?? 0.0, mdiOverride ?? 0.0)
             : (candles.Length > 0 ? ComputeTrueAdx(asset, timeframe, candles, adxPeriod) : (20.0, 0.0, 0.0));
 
-
         double atrVal = atrOverride.HasValue
             ? atrOverride.Value
             : (candles.Length > 0 ? ComputeAtr(asset, timeframe, candles, atrPeriod) : 0);
 
-        double score      = 0;
-        double confidence = 60.0;
+        double score      = 0.0;
+        double confidence = 55.0;
 
-        // ── Dynamic RSI Thresholds ────────────────────────────────────────────────────────
-        double rsiOverbought = isSubMinute ? 62.0 : 70.0;
-        double rsiOversold   = isSubMinute ? 38.0 : 30.0;
+        double volRatio = CalculateVolatilityRatio(prices);
+        double microVel = prices.Length >= 5
+            ? (prices[^1] - prices[^5]) / Math.Max(1e-8, prices[^5]) * 10_000.0
+            : 0.0;
 
-        if (!isSubMinute)
+        // Detect dead flat market (range < 35% of ATR over 10 bars)
+        bool isDeadMarket = false;
+        if (prices.Length >= 10 && atrVal > 1e-9)
         {
-            if (adxVal > 30.0) { rsiOverbought = 80.0; rsiOversold = 20.0; }
-            else if (adxVal < 20.0) { rsiOverbought = 65.0; rsiOversold = 35.0; }
+            double minP = double.MaxValue, maxP = double.MinValue;
+            for (int i = prices.Length - 10; i < prices.Length; i++)
+            {
+                if (prices[i] < minP) minP = prices[i];
+                if (prices[i] > maxP) maxP = prices[i];
+            }
+            if ((maxP - minP) < (atrVal * 0.35))
+                isDeadMarket = true;
         }
 
-        // ── Adaptive Regime Logic ─────────────────────────────────────────────────────────
-        double hmaWeight = 0.15;
+        double velContrib     = 0.0;
+        double hmaContrib     = 0.0;
+        double rsiContrib     = 0.0;
+        double connorsContrib = 0.0;
+        string regime         = "UNKNOWN";
 
         if (isSubMinute)
         {
-            // Sub-minute regime: ADX is structurally low — do NOT use it to gate HMA.
-            // Instead use micro-velocity: short-term price slope over last 5 candles.
-            // PROACTIVE FIX: Chaos Mean-Reversion Patch
-            double volRatio = CalculateVolatilityRatio(prices);
-            bool isChaos = volRatio > 1.5;
+            bool isChaos = volRatio > 1.8;
+            bool isStrongMomentum = Math.Abs(microVel) >= 4.0;
+            bool isDecelerating = prices.Length >= 4 && Math.Abs(prices[^1] - prices[^2]) < Math.Abs(prices[^2] - prices[^3]);
 
-            // Micro-velocity: slope of last 5 closes (basis points per candle)
-            double microVel = prices.Length >= 5
-                ? (prices[^1] - prices[^5]) / Math.Max(1e-8, prices[^5]) * 10_000.0
-                : 0.0;
+            if (isDeadMarket)
+            {
+                regime = "DEAD_FLAT";
+                score = 0.0;
+                confidence = 50.0;
+            }
+            else if (isChaos)
+            {
+                regime = "CHAOS_EXPANSION";
+                hmaContrib = 0.0;
+                velContrib = Math.Clamp(microVel / 50.0, -0.20, 0.20);
+                if (rsi > 70.0) rsiContrib = -0.40;
+                else if (rsi < 30.0) rsiContrib = 0.40;
 
-            // HMA direction signal — disabled in chaos (prevents buying the top)
-            // FIX-HMA-SLOPE: используем наклон HMA вместо price vs HMA
-            hmaWeight = isChaos ? 0.0 : 0.35;
-            if (hmaSlope > 0) score += hmaWeight;
-            else if (hmaSlope < 0) score -= hmaWeight;
+                score = velContrib + rsiContrib;
+                confidence = 55.0 + Math.Min(Math.Abs(microVel) * 1.0, 10.0);
+            }
+            else if (isStrongMomentum)
+            {
+                if (microVel > 0)
+                {
+                    regime = "BULLISH_MOMENTUM";
+                    hmaContrib = hmaSlope > 0 ? 0.35 : (hmaSlope < 0 ? -0.15 : 0.0);
+                    velContrib = Math.Clamp(microVel / 20.0, 0.10, 0.45);
 
+                    if (rsi >= 50.0 && rsi <= 76.0)
+                        rsiContrib = 0.20;
+                    else if (rsi > 76.0)
+                        rsiContrib = (isDecelerating || rsi > 82.0) ? -0.30 : 0.0;
+                    else if (rsi < 45.0)
+                        rsiContrib = 0.25;
 
-            // Micro-velocity contribution — disabled in chaos
-            double velContrib = isChaos ? 0.0 : Math.Clamp(microVel / 25.0, -0.40, 0.40);
-            score += velContrib;
+                    connorsContrib = Math.Clamp(((connorsRsi - 50.0) / 50.0) * 0.15, -0.15, 0.15);
+                }
+                else
+                {
+                    regime = "BEARISH_MOMENTUM";
+                    hmaContrib = hmaSlope < 0 ? -0.35 : (hmaSlope > 0 ? 0.15 : 0.0);
+                    velContrib = Math.Clamp(microVel / 20.0, -0.45, -0.10);
 
-            // RSI with tighter bands — AMPLIFIED in chaos (catch the bounce)
-            double rsiWeight = isChaos ? 0.75 : 0.40;
-            if (rsi > rsiOverbought)      score -= rsiWeight;
-            else if (rsi < rsiOversold)   score += rsiWeight;
+                    if (rsi <= 50.0 && rsi >= 24.0)
+                        rsiContrib = -0.20;
+                    else if (rsi < 24.0)
+                        rsiContrib = (isDecelerating || rsi < 18.0) ? 0.30 : 0.0;
+                    else if (rsi > 55.0)
+                        rsiContrib = -0.25;
 
-            // ConnorsRSI follow-through
-            double connorsSignalSub = (connorsRsi - 50.0) / 50.0;
-            score += Math.Clamp(connorsSignalSub * 0.15, -0.15, 0.15);
+                    connorsContrib = Math.Clamp(((connorsRsi - 50.0) / 50.0) * 0.15, -0.15, 0.15);
+                }
 
-            // Confidence boost from velocity clarity
-            double velClarity = Math.Abs(microVel);
-            confidence += Math.Min(velClarity * 1.5, 15.0);
+                score = hmaContrib + velContrib + rsiContrib + connorsContrib;
+                confidence = 60.0 + Math.Min(Math.Abs(microVel) * 1.5, 15.0);
+                if ((microVel > 0 && hmaSlope > 0) || (microVel < 0 && hmaSlope < 0))
+                    confidence += 8.0;
+            }
+            else
+            {
+                regime = "RANGING_CHANNEL";
+                hmaContrib = hmaSlope > 0 ? 0.20 : (hmaSlope < 0 ? -0.20 : 0.0);
+                velContrib = Math.Clamp(microVel / 25.0, -0.20, 0.20);
+
+                if (rsi > 68.0) rsiContrib = -0.40;
+                else if (rsi < 32.0) rsiContrib = 0.40;
+
+                connorsContrib = -Math.Clamp(((connorsRsi - 50.0) / 50.0) * 0.15, -0.15, 0.15);
+
+                score = hmaContrib + velContrib + rsiContrib + connorsContrib;
+                confidence = 55.0 + (Math.Abs(rsi - 50.0) > 18.0 ? 8.0 : 0.0);
+            }
         }
         else
         {
-            // ── Standard minute+ regime logic ────────────────────────────────
-            double trendMultiplier = Math.Clamp((adxVal - 18.0) / 10.0, 0.0, 1.0); // 18 -> 0%, 28 -> 100%
+            double trendMultiplier = Math.Clamp((adxVal - 18.0) / 10.0, 0.0, 1.0);
             double rangeMultiplier = 1.0 - trendMultiplier;
 
-            // PROACTIVE FIX: Chaos Mean-Reversion Patch
-            double volRatio = CalculateVolatilityRatio(prices);
-            if (volRatio > 1.5)
+            if (volRatio > 1.8)
             {
-                trendMultiplier = 0.0; // Force disable trend logic
-                rangeMultiplier = 1.5; // Aggressively amplify mean-reversion
+                regime = "CHAOS_MINUTE";
+                trendMultiplier = 0.0;
+                rangeMultiplier = 1.5;
+            }
+            else if (trendMultiplier > 0.5)
+            {
+                regime = pdiVal > mdiVal ? "BULLISH_TREND_MINUTE" : "BEARISH_TREND_MINUTE";
+            }
+            else
+            {
+                regime = "RANGING_MINUTE";
             }
 
-            // 1. Ranging Signals (scaled by rangeMultiplier)
-            // In chaos, rsi logic gets amplified to 0.75 (0.5 * 1.5).
-            if (rsi > rsiOverbought) score -= 0.5 * rangeMultiplier;
-            else if (rsi < rsiOversold) score += 0.5 * rangeMultiplier;
-            
-            // Neutral zone RSI (applies mostly in transition, scales down as trend strengthens)
-            if (rsi > 75.0 && rsi <= rsiOverbought) score -= 0.25 * rangeMultiplier;
-            else if (rsi < 25.0 && rsi >= rsiOversold) score += 0.25 * rangeMultiplier;
+            double rsiOverbought = (adxVal > 30.0) ? 80.0 : ((adxVal < 20.0) ? 65.0 : 70.0);
+            double rsiOversold   = (adxVal > 30.0) ? 20.0 : ((adxVal < 20.0) ? 35.0 : 30.0);
 
-            // 2. Trending Signals (scaled by trendMultiplier)
-            if (pdiVal > mdiVal) score += 0.6 * trendMultiplier;
-            if (mdiVal > pdiVal) score -= 0.6 * trendMultiplier;
+            if (rsi > rsiOverbought) rsiContrib = -0.5 * rangeMultiplier;
+            else if (rsi < rsiOversold) rsiContrib = 0.5 * rangeMultiplier;
 
-            // 3. ConnorsRSI — ТОЛЬКО mean-reversion (range mode). НЕ используется в тренде.
-            // ROOT CAUSE FIX: ConnorsRSI в trend mode создавал PUT-bias асимметрию:
-            //   - При росте:   PercentileRank→0% (равные доходности не проходят строгий >),
-            //                  ConnorsRSI≈66.7 → вклад +0.05
-            //   - При падении: все 3 компонента→0, ConnorsRSI≈0 → вклад -0.15
-            // Разность 0.20 в pre-tanh пространстве систематически занижала BUY-сигналы.
-            // PDI/MDI и HMA уже полностью покрывают трендовое направление.
+            if (pdiVal > mdiVal) velContrib += 0.6 * trendMultiplier;
+            if (mdiVal > pdiVal) velContrib -= 0.6 * trendMultiplier;
+
             double connorsSignal = (connorsRsi - 50.0) / 50.0;
-            score -= Math.Clamp(connorsSignal * 0.15, -0.15, 0.15) * rangeMultiplier; // mean-reversion only
+            connorsContrib = -Math.Clamp(connorsSignal * 0.15, -0.15, 0.15) * rangeMultiplier;
 
-            // 4. HMA Trend Signal — slope-based (FIX-HMA-SLOPE)
-            // HMA↑ = тренд набирает силу = bullish; HMA↓ = тренд разворачивается = bearish
-            hmaWeight = 0.40 * trendMultiplier;
-            if (hmaSlope > 0) score += hmaWeight;
-            else if (hmaSlope < 0) score -= hmaWeight;
+            hmaContrib = (hmaSlope > 0 ? 0.40 : (hmaSlope < 0 ? -0.40 : 0.0)) * trendMultiplier;
 
-        } // end else (minute+ regime)
+            score = rsiContrib + velContrib + connorsContrib + hmaContrib;
 
-        if (adxVal > 25.0 && !isSubMinute)
-        {
-            confidence += Math.Min((adxVal - 25.0) * 0.8, 20.0);
+            if (adxVal > 25.0)
+                confidence += Math.Min((adxVal - 25.0) * 0.8, 20.0);
         }
 
-        // Исправление: volStrength считается по rolling CVD (5 свечей) вместо разницы одного тика.
-        // Предыдущая версия брала sign(prices[^1] - prices[^2]) — чистый шум при нейтральном рынке.
         double volStrength = 0.0;
+        double volContrib  = 0.0;
         if (volumes.Length >= 5)
         {
             int volCount = 0;
@@ -195,41 +231,57 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             double lastVol = volumes[^1];
             if (avgVol > 1e-9)
             {
-                // Rolling CVD: накопленное давление покупателей/продавцов за 5 свечей вместо 1 тика
                 double rollingCvd = 0;
-                // FIX C-05: cvdLookback must also be capped by volumes.Length to avoid index confusion.
-                // Old: `i <= volumes.Length` → at i==volumes.Length, volumes[^i]=volumes[0] (oldest, wrong).
                 int cvdLookback = Math.Min(5, Math.Min(prices.Length - 1, volumes.Length - 1));
                 for (int i = 1; i <= cvdLookback; i++)
                 {
                     double pc = prices[^i] - prices[^(i + 1)];
-                    double v  = volumes[^i]; // safe: cvdLookback guarantees i < volumes.Length
+                    double v  = volumes[^i];
                     rollingCvd += pc >= 0 ? v : -v;
                 }
 
                 double ratio = lastVol / avgVol;
-                // Нормализуем CVD по среднему объёму для масштабируемости
-                double cvdNorm = avgVol > 1e-9 ? Math.Clamp(rollingCvd / (avgVol * cvdLookback), -1.0, 1.0) : 0;
+                double cvdNorm = Math.Clamp(rollingCvd / (avgVol * cvdLookback), -1.0, 1.0);
                 volStrength = cvdNorm * Math.Max(0.0, Math.Min(ratio - 0.8, 1.0));
 
-                // Volume bonus: up to +10 confidence points
                 double volBonus = Math.Abs(volStrength) * 10.0;
-                confidence += Math.Min(volBonus, 10.0);
-                score += Math.Clamp(volStrength * 0.15, -0.20, 0.20);
+                if (!isDeadMarket)
+                {
+                    confidence += Math.Min(volBonus, 10.0);
+                    volContrib = Math.Clamp(volStrength * 0.15, -0.20, 0.20);
+                    score += volContrib;
+                }
             }
         }
 
-        // RSI extremes add conviction
-        if (rsi <= 30.0 || rsi >= 70.0)
+        if (!isDeadMarket && (rsi <= 30.0 || rsi >= 70.0))
             confidence += Math.Min(Math.Abs(rsi - 50.0) * 0.3, 5.0);
 
-        // Phase 3: Z-Score / Sigmoid Normalization
-        // Instead of hard-clamping which destroys information at the edges,
-        // we use Hyperbolic Tangent (tanh) to smoothly map (-inf, inf) into (-1.0, 1.0).
+        if (isDeadMarket)
+        {
+            score = 0.0;
+            confidence = 50.0;
+        }
+
         score = Math.Tanh(score);
 
-        // Now achievable max: 60 (base) + 20 (ADX) + 10 (volume) + 5 (RSI) = 95
-        return (score, Math.Clamp(confidence, 50.0, 95.0), Math.Round(rsi, 1), Math.Round(hma, 5), Math.Round(volStrength, 2), Math.Round(atrVal, 6));
+        return new TaScoringDetail(
+            Score: score,
+            Confidence: Math.Clamp(confidence, 50.0, 95.0),
+            RsiVal: Math.Round(rsi, 1),
+            HmaVal: Math.Round(hma, 5),
+            VolStrengthVal: Math.Round(volStrength, 2),
+            AtrVal: Math.Round(atrVal, 6),
+            HmaSlope: Math.Round(hmaSlope, 6),
+            MicroVel: Math.Round(microVel, 2),
+            VolRatio: Math.Round(volRatio, 2),
+            Regime: regime,
+            VelContrib: Math.Round(velContrib, 3),
+            HmaContrib: Math.Round(hmaContrib, 3),
+            RsiContrib: Math.Round(rsiContrib, 3),
+            ConnorsContrib: Math.Round(connorsContrib, 3),
+            VolStrengthContrib: Math.Round(volContrib, 3)
+        );
     }
 
     public record GatekeeperResult(bool IsTradeable, string Reason, double Atr, double Adx);
