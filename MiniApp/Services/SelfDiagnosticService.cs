@@ -61,8 +61,11 @@ public class SelfDiagnosticService : BackgroundService
                 BotLogger.Error("[Diagnostics] Error running diagnostic scan", ex);
             }
 
-            // Run scan every 5 minutes
-            await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+            // Responsive scan: every 1 minute normally, or every 15 seconds if recovering from an incident
+            var scanInterval = (!_mlWasHealthy || !_dbWasHealthy)
+                ? TimeSpan.FromSeconds(15)
+                : TimeSpan.FromMinutes(1);
+            await Task.Delay(scanInterval, stoppingToken);
         }
     }
 
@@ -102,8 +105,8 @@ public class SelfDiagnosticService : BackgroundService
             var mlUrl = _configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
             if (httpFactory != null)
             {
-                var hc = httpFactory.CreateClient("MLPythonService");
-                hc.Timeout = TimeSpan.FromSeconds(5);
+                var hc = httpFactory.CreateClient();
+                hc.Timeout = TimeSpan.FromSeconds(3);
                 var mlResponse = await hc.GetAsync(new Uri($"{mlUrl.TrimEnd('/')}/health"), stoppingToken);
                 
                 if (mlResponse.IsSuccessStatusCode)
