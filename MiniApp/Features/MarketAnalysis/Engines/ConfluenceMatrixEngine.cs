@@ -383,6 +383,32 @@ public class ConfluenceMatrixEngine(
             BotLogger.Info($"[AutoCalib] {asset}/{timeframe} Regime={regime} | wTA={wTa:F2} wOF={wOf:F2} wSMC={wSmc:F2} wML={wMl:F2}");
         }
 
+        // --- ДИНАМИЧЕСКАЯ КОРРЕКЦИЯ ОШИБАЮЩИХСЯ МОДУЛЕЙ (BIAS SELF-CORRECTION) ---
+        // Если модуль ошибся 2+ раза подряд и упорно повторяет то же направление (Lag Trap),
+        // система активно исправляет модуль: ложный балл обнуляется в нейтраль.
+        string taCorrectionNote = "";
+        string smcCorrectionNote = "";
+        if (autoCalib != null)
+        {
+            string taFailedDir = autoCalib.GetLastFailedDirection("TechAnalysis", asset, timeframe);
+            string taCurrDir = taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL");
+            int taLosses = autoCalib.GetConsecutiveLosses("TechAnalysis", asset, timeframe);
+            if (!string.IsNullOrEmpty(taFailedDir) && taCurrDir == taFailedDir && taLosses >= 2)
+            {
+                taScore = 0.0;
+                taCorrectionNote = $"- Коррекция ТА: Залипание в {taCurrDir} после {taLosses} ошибок. Ошибочный сигнал исправлен (нейтрализован).";
+            }
+
+            string smcFailedDir = autoCalib.GetLastFailedDirection("SMC", asset, timeframe);
+            string smcCurrDir = smcScore > 0.05 ? "BUY" : (smcScore < -0.05 ? "PUT" : "NEUTRAL");
+            int smcLosses = autoCalib.GetConsecutiveLosses("SMC", asset, timeframe);
+            if (!string.IsNullOrEmpty(smcFailedDir) && smcCurrDir == smcFailedDir && smcLosses >= 2)
+            {
+                smcScore = 0.0;
+                smcCorrectionNote = $"- Коррекция SMC: Залипание в {smcCurrDir} после {smcLosses} ошибок. Ошибочный сигнал исправлен (нейтрализован).";
+            }
+        }
+
         bool tfConflict = mtfResult.DominantDirection != "NEUTRAL" && 
                          ((taScore > 0 && mtfResult.DominantDirection == "PUT") || 
                           (taScore < 0 && mtfResult.DominantDirection == "BUY"));
@@ -455,6 +481,9 @@ public class ConfluenceMatrixEngine(
         sb.AppendLine();
         sb.AppendLine("[Р”РёРЅР°РјРёС‡РµСЃРєРёРµ С„РёР»СЊС‚СЂС‹]");
         sb.AppendLine($"- Р‘Р°Р·РѕРІР°СЏ СѓРІРµСЂРµРЅРЅРѕСЃС‚СЊ: {(0.5 + margin)*100:F1}% {finalDir}");
+
+        if (!string.IsNullOrEmpty(taCorrectionNote)) sb.AppendLine(taCorrectionNote);
+        if (!string.IsNullOrEmpty(smcCorrectionNote)) sb.AppendLine(smcCorrectionNote);
 
         // 0. SMC Proximity Penalty (computed above)
         if (obPenalty < 1.0)

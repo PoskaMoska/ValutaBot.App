@@ -28,6 +28,7 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
         public int TotalTrades { get; set; }
         public double EmaWinRate { get; set; } = 0.50; // Нейтральный старт
         public int ConsecutiveLosses { get; set; } = 0;
+        public string LastFailedDirection { get; set; } = "";
     }
 
     private readonly ConcurrentDictionary<SignalKey, SourceStats> _statsMap = new();
@@ -209,7 +210,7 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
         return Math.Clamp(finalWeight, 0.05, 2.5);
     }
 
-    public void RecordSourceOutcome(string sourceName, string asset, string timeframe, bool isWin)
+    public void RecordSourceOutcome(string sourceName, string asset, string timeframe, bool isWin, string direction = "")
     {
         var statsKey = new SignalKey(sourceName, asset, timeframe);
         var stats = _statsMap.GetOrAdd(statsKey, _ => new SourceStats());
@@ -220,10 +221,12 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
             if (isWin)
             {
                 stats.ConsecutiveLosses = 0;
+                stats.LastFailedDirection = "";
             }
             else
             {
                 stats.ConsecutiveLosses++;
+                stats.LastFailedDirection = direction;
             }
             
             // EMA: alpha=0.15 (~7 trades) для быстрой адаптации к смене рынка
@@ -252,6 +255,16 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
             lock (stats) return stats.ConsecutiveLosses;
         }
         return 0;
+    }
+
+    public string GetLastFailedDirection(string sourceName, string asset, string timeframe)
+    {
+        var statsKey = new SignalKey(sourceName, asset, timeframe);
+        if (_statsMap.TryGetValue(statsKey, out var stats))
+        {
+            lock (stats) return stats.LastFailedDirection;
+        }
+        return "";
     }
 
     public void ResetAllStats()

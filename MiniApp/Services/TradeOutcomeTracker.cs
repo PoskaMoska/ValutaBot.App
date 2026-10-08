@@ -238,8 +238,8 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                     {
                         bool wasSourceCorrect = (kv.Value == winDirection);
                         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kv.Key, wasSourceCorrect);
-                        // Feed result back into AutoCalibrationEngine so it keeps win-rate EMA per source
-                        AutoCalib?.RecordSourceOutcome(kv.Key, record.Asset, record.Timeframe, wasSourceCorrect);
+                        // Feed result back into AutoCalibrationEngine so it keeps win-rate EMA and failed direction per source
+                        AutoCalib?.RecordSourceOutcome(kv.Key, record.Asset, record.Timeframe, wasSourceCorrect, kv.Value);
                     }
                 }
             }
