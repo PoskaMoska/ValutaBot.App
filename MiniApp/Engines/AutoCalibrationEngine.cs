@@ -27,6 +27,7 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
     {
         public int TotalTrades { get; set; }
         public double EmaWinRate { get; set; } = 0.50; // Нейтральный старт
+        public int ConsecutiveLosses { get; set; } = 0;
     }
 
     private readonly ConcurrentDictionary<SignalKey, SourceStats> _statsMap = new();
@@ -133,7 +134,16 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
         MarketRegime regime)
     {
         var statsKey = new SignalKey(sourceName, asset, timeframe);
-        double empiricalWinRate = _statsMap.TryGetValue(statsKey, out var stats) ? stats.EmaWinRate : 0.50;
+        double empiricalWinRate = 0.50;
+        int consecutiveLosses = 0;
+        if (_statsMap.TryGetValue(statsKey, out var stats))
+        {
+            lock (stats)
+            {
+                empiricalWinRate = stats.EmaWinRate;
+                consecutiveLosses = stats.ConsecutiveLosses;
+            }
+        }
 
         double baseWeight = sourceName switch
         {
@@ -158,8 +168,7 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
                 MarketRegime.HighVolatilityChaos => 1.4, // Liquidity sweeps — в хаосе лучший сигнал
                 _ => 1.0
             },
-            // L4-FIX: LIGHTGBM и SKENDER_MATH ранее всегда возвращали 1.0 (ветка _).
-            // Теперь калибруются по режиму — EMA-винрейт применяется корректно.
+            // LIGHTGBM и SKENDER_MATH калибруются по режиму
             "LIGHTGBM" => regime switch
             {
                 MarketRegime.TrendingImpulse    => 1.3, // ML отлично распознаёт импульсы
@@ -181,12 +190,23 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
         // Weight is heavily penalized if empirical win rate drops below 50%.
         // Weight is boosted if empirical win rate is above 50%.
         double confidenceMultiplier = (empiricalWinRate - 0.50) * 2.0; // scales -1.0 to 1.0
-        
-        // Final weight is BaseWeight modified by up to +- 50% based on empirical performance.
-        double finalWeight = baseWeight * (1.0 + (confidenceMultiplier * 0.5));
+
+        // Быстрое подавление ошибающихся модулей:
+        // Если модуль ошибся 2 раза подряд -> штраф -45%
+        // Если модуль ошибся 3+ раза подряд -> штраф -75% (голос фактически выключается)
+        double streakMultiplier = consecutiveLosses switch
+        {
+            >= 3 => 0.25,
+            2    => 0.55,
+            1    => 0.85,
+            _    => 1.00
+        };
+
+        // Final weight is BaseWeight modified by performance and streak penalty.
+        double finalWeight = baseWeight * (1.0 + (confidenceMultiplier * 0.6)) * streakMultiplier;
         
         // Clamp bounds
-        return Math.Clamp(finalWeight, 0.1, 2.5);
+        return Math.Clamp(finalWeight, 0.05, 2.5);
     }
 
     public void RecordSourceOutcome(string sourceName, string asset, string timeframe, bool isWin)
@@ -197,9 +217,17 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
         lock (stats)
         {
             stats.TotalTrades++;
+            if (isWin)
+            {
+                stats.ConsecutiveLosses = 0;
+            }
+            else
+            {
+                stats.ConsecutiveLosses++;
+            }
             
-            // EMA: alpha=0.05 (~20 trades) to prevent overfitting
-            double alpha = 0.05;
+            // EMA: alpha=0.15 (~7 trades) для быстрой адаптации к смене рынка
+            double alpha = 0.15;
             double outcomeVal = isWin ? 1.0 : 0.0;
             
             stats.EmaWinRate = (alpha * outcomeVal) + ((1.0 - alpha) * stats.EmaWinRate);
@@ -216,12 +244,28 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
         return _statsMap.TryGetValue(statsKey, out var stats) ? stats.EmaWinRate : 0.50;
     }
 
+    public int GetConsecutiveLosses(string sourceName, string asset, string timeframe)
+    {
+        var statsKey = new SignalKey(sourceName, asset, timeframe);
+        if (_statsMap.TryGetValue(statsKey, out var stats))
+        {
+            lock (stats) return stats.ConsecutiveLosses;
+        }
+        return 0;
+    }
+
+    public void ResetAllStats()
+    {
+        _statsMap.Clear();
+    }
+
     public string GetStatsReport(string sourceName, string asset, string timeframe)
     {
         var statsKey = new SignalKey(sourceName, asset, timeframe);
         if (_statsMap.TryGetValue(statsKey, out var stats))
         {
-            return $"Trades: {stats.TotalTrades}, EMA WinRate: {(stats.EmaWinRate * 100).ToString("F1", CultureInfo.InvariantCulture)}%";
+            string streak = stats.ConsecutiveLosses > 0 ? $" | Серия: -{stats.ConsecutiveLosses}" : "";
+            return $"Trades: {stats.TotalTrades}, EMA WinRate: {(stats.EmaWinRate * 100).ToString("F1", CultureInfo.InvariantCulture)}%{streak}";
         }
         return "No Data";
     }

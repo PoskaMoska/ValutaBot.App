@@ -751,6 +751,24 @@ FROM outcome_data;");
         }
 
         /// <summary>
+        /// Очищает таблицу meta_learner_weights в PostgreSQL (при переобучении моделей).
+        /// </summary>
+        public static async Task ClearMetaWeightsAsync()
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.ExecuteAsync("TRUNCATE TABLE meta_learner_weights;");
+                BotLogger.Info("[TradeRepository] Successfully truncated meta_learner_weights table.");
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] ClearMetaWeights notice: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Returns the total number of verified (fully labeled) rows in trade_outcomes.
         /// Used by CircuitBreakerService to autonomously decide whether the system
         /// is still in dataset-collection mode (CB bypassed) or live-trading mode (CB active).

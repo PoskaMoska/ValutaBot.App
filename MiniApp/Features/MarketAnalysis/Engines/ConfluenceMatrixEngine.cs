@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
@@ -367,6 +367,7 @@ public class ConfluenceMatrixEngine(
         }
 
         // Only activate if we have an autocalib engine available.
+        double wTa = 1.0, wOf = 1.0, wSmc = 1.0, wMl = 1.0;
         if (autoCalib != null)
         {
             var regime = autoCalib.DetectMarketRegime(
@@ -374,10 +375,10 @@ public class ConfluenceMatrixEngine(
                 volRatio: volRatio,
                 rsi: taSignal.Rsi);
 
-            double wTa  = autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, regime);
-            double wOf  = autoCalib.GetCalibratedRegimeWeight("OrderFlow",    asset, timeframe, regime);
-            double wSmc = autoCalib.GetCalibratedRegimeWeight("SMC",          asset, timeframe, regime);
-            double wMl  = autoCalib.GetCalibratedRegimeWeight("LIGHTGBM",     asset, timeframe, regime);
+            wTa  = autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, regime);
+            wOf  = autoCalib.GetCalibratedRegimeWeight("OrderFlow",    asset, timeframe, regime);
+            wSmc = autoCalib.GetCalibratedRegimeWeight("SMC",          asset, timeframe, regime);
+            wMl  = autoCalib.GetCalibratedRegimeWeight("LIGHTGBM",     asset, timeframe, regime);
 
             BotLogger.Info($"[AutoCalib] {asset}/{timeframe} Regime={regime} | wTA={wTa:F2} wOF={wOf:F2} wSMC={wSmc:F2} wML={wMl:F2}");
         }
@@ -389,11 +390,11 @@ public class ConfluenceMatrixEngine(
         double metaProb = 0.5;
         if (TradeOutcomeTracker.MetaLearner != null)
         {
-            // FEED RAW SCORES TO METALEARNER (Double-Dipping Fix)
-            // Unscaled scores so SGD learner can attribute error to the original signal.
-            double normTa = taScore; // Already [-1.0, 1.0]
-            double normSmc = Math.Clamp(smcScore, -1.0, 1.0); // up to [-1.0, 1.0]
-            double normMl = mlScore; // smoothly [-1.0, 1.0]
+            // FEED REGIME & AUTO-CALIBRATED SCORES TO METALEARNER
+            // When an element fails 2-3 times in a row, wTa drops to 0.55/0.25, heavily shrinking normTa so it cannot overrule ML.
+            double normTa  = Math.Clamp(taScore * wTa, -1.0, 1.0);
+            double normSmc = Math.Clamp(smcScore * wSmc, -1.0, 1.0);
+            double normMl  = Math.Clamp(mlScore * wMl, -1.0, 1.0);
             
             metaProb = TradeOutcomeTracker.MetaLearner.Predict(
                 asset, timeframe, normTa, 0.0, normSmc, normMl, tfConflict);
@@ -402,9 +403,9 @@ public class ConfluenceMatrixEngine(
         {
             // Fallback when MetaLearner is offline.
             // Here we apply AutoCalib weights manually.
-            double scaledTa = taScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
-            double scaledSmc = smcScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("SMC", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
-            double scaledMl = mlScore * (autoCalib != null ? autoCalib.GetCalibratedRegimeWeight("LIGHTGBM", asset, timeframe, ValutaBot.MiniApp.AutoCalibrationEngine.MarketRegime.RangingFlat) : 1.0);
+            double scaledTa = taScore * wTa;
+            double scaledSmc = smcScore * wSmc;
+            double scaledMl = mlScore * wMl;
 
             metaProb = Math.Clamp(0.5 + (scaledMl * 0.60) + (scaledTa * 0.40) + (scaledSmc * 0.0), 0.0, 1.0);
         }
@@ -417,7 +418,7 @@ public class ConfluenceMatrixEngine(
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"--- РЎРёРіРЅР°Р»СЊРЅС‹Р№ Р°РЅР°Р»РёР· ({asset} {timeframe}) ---");
         
-        // --- Р”РРќРђРњРР§Р•РЎРљРР™ FEEDBACK LOOP ---
+                // --- ДИНАМИЧЕСКИЙ FEEDBACK LOOP ---
         if (autoCalib != null)
         {
             double mlWr = autoCalib.GetEmpiricalWinRate("LIGHTGBM", asset, timeframe) * 100;
@@ -425,11 +426,24 @@ public class ConfluenceMatrixEngine(
             double smcWr = autoCalib.GetEmpiricalWinRate("SMC", asset, timeframe) * 100;
             double ofWr = autoCalib.GetEmpiricalWinRate("OrderFlow", asset, timeframe) * 100;
 
-            sb.AppendLine("[Feedback Loop / Р РµР№С‚РёРЅРі РјРѕРґСѓР»РµР№]");
-            sb.AppendLine($" - ML (РќРµР№СЂРѕСЃРµС‚СЊ): WinRate {mlWr:F1}% -> {(mlWr > 52 ? "Р”РѕРІРµСЂРёРµ РЈР’Р•Р›РР§Р•РќРћ" : (mlWr < 48 ? "Р”РѕРІРµСЂРёРµ РЎРќРР–Р•РќРћ" : "РќРѕСЂРјР°"))}");
-            sb.AppendLine($" - Tech Analysis: WinRate {taWr:F1}% -> {(taWr > 52 ? "Р”РѕРІРµСЂРёРµ РЈР’Р•Р›РР§Р•РќРћ" : (taWr < 48 ? "Р”РѕРІРµСЂРёРµ РЎРќРР–Р•РќРћ" : "РќРѕСЂРјР°"))}");
-            sb.AppendLine($" - Smart Money: WinRate {smcWr:F1}% -> {(smcWr > 52 ? "Р”РѕРІРµСЂРёРµ РЈР’Р•Р›РР§Р•РќРћ" : (smcWr < 48 ? "Р”РѕРІРµСЂРёРµ РЎРќРР–Р•РќРћ" : "РќРѕСЂРјР°"))}");
-            sb.AppendLine($" - OrderFlow: WinRate {ofWr:F1}% -> {(ofWr > 52 ? "Р”РѕРІРµСЂРёРµ РЈР’Р•Р›РР§Р•РќРћ" : (ofWr < 48 ? "Р”РѕРІРµСЂРёРµ РЎРќРР–Р•РќРћ" : "РќРѕСЂРјР°"))}");
+            int mlLosses = autoCalib.GetConsecutiveLosses("LIGHTGBM", asset, timeframe);
+            int taLosses = autoCalib.GetConsecutiveLosses("TechAnalysis", asset, timeframe);
+            int smcLosses = autoCalib.GetConsecutiveLosses("SMC", asset, timeframe);
+
+            static string FormatStatus(double wr, int losses)
+            {
+                if (losses >= 3) return $"ШТРАФ -75% ({losses} пор. подряд)";
+                if (losses == 2) return "ШТРАФ -45% (2 пор. подряд)";
+                if (wr > 52) return "Доверие УВЕЛИЧЕНО";
+                if (wr < 48) return "Доверие СНИЖЕНО";
+                return "Норма";
+            }
+
+            sb.AppendLine("[Feedback Loop / Рейтинг модулей]");
+            sb.AppendLine($" - ML (Нейросеть): WinRate {mlWr:F1}% -> {FormatStatus(mlWr, mlLosses)} (вес: {wMl:F2})");
+            sb.AppendLine($" - Tech Analysis: WinRate {taWr:F1}% -> {FormatStatus(taWr, taLosses)} (вес: {wTa:F2})");
+            sb.AppendLine($" - Smart Money: WinRate {smcWr:F1}% -> {FormatStatus(smcWr, smcLosses)} (вес: {wSmc:F2})");
+            sb.AppendLine($" - OrderFlow: WinRate {ofWr:F1}% -> Норма (вес: {wOf:F2})");
             sb.AppendLine();
         }
 
@@ -541,7 +555,7 @@ public class ConfluenceMatrixEngine(
             TaScore: taScore,
             OfScore: ofScore,
             SmcScore: smcScore,
-            MlProb: metaProb,
+            MlProb: rawProb,
             MlScoreRaw: mlScore
         );
     }

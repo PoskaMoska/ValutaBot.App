@@ -13,6 +13,9 @@ public interface IOnlineMetaLearner
     void PartialFit(string asset, string timeframe, double ta, double of, double smc, double ml, bool wasWin, string direction);
     double[] GetWeights(string asset, string timeframe);
     Task InitializeFromDbAsync();
+    void ResetWeights(string asset, string timeframe);
+    void ResetAllWeights();
+    Task ResetAllWeightsAndDbAsync();
 }
 
 public class OnlineMetaLearner : IOnlineMetaLearner
@@ -56,6 +59,34 @@ public class OnlineMetaLearner : IOnlineMetaLearner
     public System.Collections.Generic.Dictionary<string, double[]> GetCurrentWeights()
     {
         return new System.Collections.Generic.Dictionary<string, double[]>(_weights);
+    }
+
+    public void ResetWeights(string asset, string timeframe)
+    {
+        string key = GetKey(asset, timeframe);
+        _weights[key] = (double[])DefaultPriors.Clone();
+        _updateCounts[key] = 0;
+        _ = TradeRepository.SaveMetaWeightAsync(key, (double[])DefaultPriors.Clone(), 0);
+        BotLogger.Info($"[OnlineMetaLearner] Reset weights for {key} to default priors (ML dominant: {DefaultPriors[4]}).");
+    }
+
+    public void ResetAllWeights()
+    {
+        _weights.Clear();
+        _updateCounts.Clear();
+        try
+        {
+            if (File.Exists(_savePath)) File.Delete(_savePath);
+        }
+        catch { }
+        BotLogger.Info("[OnlineMetaLearner] All in-memory and file weights reset to default priors.");
+    }
+
+    public async Task ResetAllWeightsAndDbAsync()
+    {
+        ResetAllWeights();
+        await TradeRepository.ClearMetaWeightsAsync();
+        BotLogger.Info("[OnlineMetaLearner] All weights reset and DB table meta_learner_weights truncated.");
     }
 
     private double GetLearningRate(string key)
@@ -145,11 +176,11 @@ public class OnlineMetaLearner : IOnlineMetaLearner
             w[3] += lr * error * lo_smc;
             w[4] += lr * error * lo_ml;
 
-            // Soft L2 Regularization pulling towards empirical priors
+            // Soft L2 Regularization pulling towards empirical priors (ML dominant 1.35)
             for (int i = 1; i < w.Length; i++) 
             {
-                w[i] += (DefaultPriors[i] - w[i]) * WeightDecay;
-                w[i] = Math.Clamp(w[i], 0.10, 3.5);
+                w[i] += (DefaultPriors[i] - w[i]) * 0.005;
+                w[i] = Math.Clamp(w[i], 0.35, 3.5);
             }
 
             // Bias clamp
@@ -183,6 +214,10 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                     }
                 }
                 BotLogger.Info($"[OnlineMetaLearner] Successfully restored {dbWeights.Count} model weight vectors from PostgreSQL.");
+            }
+            else
+            {
+                BotLogger.Info("[OnlineMetaLearner] DB has 0 saved weights. Using clean empirical priors with ML dominant (weight 1.35).");
             }
         }
         catch (Exception ex)

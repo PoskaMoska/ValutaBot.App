@@ -43,7 +43,15 @@ namespace ValutaBot.MiniApp
                             string cleanAsset = AssetSanitizer.Sanitize(asset);
                             bool isForex = AssetSanitizer.IsForexAsset(cleanAsset);
                             bool success = await MLPythonService.ForceTrainGlobalAsync(asset, timeframe, isForex);
-                            if (!success) BotLogger.Warn($"[DriftDetector] Failed to Auto-Retrain {asset}/{timeframe}. Cooldown active.");
+                            if (success)
+                            {
+                                TradeOutcomeTracker.MetaLearner?.ResetWeights(asset, timeframe);
+                                BotLogger.Info($"[DriftDetector] Retrain succeeded for {asset}/{timeframe}. MetaLearner weights restored to empirical priors (ML dominant 1.35).");
+                            }
+                            else
+                            {
+                                BotLogger.Warn($"[DriftDetector] Failed to Auto-Retrain {asset}/{timeframe}. Cooldown active.");
+                            }
                         }
                         catch (Exception ex)
                         {
