@@ -593,10 +593,25 @@ def health():
     uptime = round(time.time() - START_TIME)
     with _registry_lock:
         models = [p.get_status() for p in _predictors.values()]
+
+    # SOTA Neural Brain (PatchTST) availability check
+    patch_tst_ok = False
+    patch_tst_ver = None
+    try:
+        from models.patch_tst_predictor import PatchTSTPredictor
+        patch_pred = PatchTSTPredictor.get_instance()
+        patch_tst_ok = patch_pred.is_available()
+        if patch_tst_ok:
+            patch_tst_ver = "patch_tst_v3"
+    except Exception as e:
+        log.warning(f"[Health] PatchTST status check failed: {e}")
+
     return {
         "status": "ok",
         "uptime_seconds": uptime,
         "models_loaded": len(models),
+        "patch_tst_available": patch_tst_ok,
+        "patch_tst_version": patch_tst_ver,
         "models": models,
     }
 

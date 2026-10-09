@@ -68,3 +68,13 @@ def test_feedback_endpoint_types():
     invalid_req["was_win"] = "not_a_boolean"
     resp_invalid = client.post("/feedback", json=invalid_req, headers=HEADERS)
     assert resp_invalid.status_code == 422
+
+
+def test_health_endpoint_patch_tst_status():
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "patch_tst_available" in data
+    assert data["patch_tst_available"] is True, "PatchTST brain weights must be loaded and available in production!"
+    assert data["patch_tst_version"] == "patch_tst_v3"

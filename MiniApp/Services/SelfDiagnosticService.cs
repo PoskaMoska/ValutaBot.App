@@ -23,7 +23,10 @@ public class SelfDiagnosticService : BackgroundService
     // State tracking to prevent notification spam
     private bool _dbWasHealthy = true;
     private bool _mlWasHealthy = true;
+    private bool _patchTstWasHealthy = true;
+    private bool _feedWasHealthy = true;
     private bool _memWasHealthy = true;
+    private DateTime _lastV3CheckTime = DateTime.MinValue;
 
     private readonly string _mlStateFilePath = "ml_service/data/ml_health_state.txt";
 
@@ -42,6 +45,8 @@ public class SelfDiagnosticService : BackgroundService
         }
         catch { }
         _mlWasHealthy = true;
+        _patchTstWasHealthy = true;
+        _feedWasHealthy = true;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -119,6 +124,29 @@ public class SelfDiagnosticService : BackgroundService
                         try { System.IO.File.WriteAllText(_mlStateFilePath, "true"); } catch { }
                         await TelegramBotService.SendMessageToAdmins("✅ <b>Нейросеть снова в строю</b>\nСвязь с сервером машинного обучения успешно восстановлена.");
                     }
+
+                    // Deep Neural Brain Check
+                    try
+                    {
+                        var content = await mlResponse.Content.ReadAsStringAsync(stoppingToken);
+                        using var doc = System.Text.Json.JsonDocument.Parse(content);
+                        bool patchAvailable = doc.RootElement.TryGetProperty("patch_tst_available", out var ptProp) && ptProp.GetBoolean();
+                        
+                        if (!patchAvailable && _patchTstWasHealthy)
+                        {
+                            _patchTstWasHealthy = false;
+                            await TelegramBotService.SendMessageToAdmins("⚠️ <b>PatchTST Neural Brain не активен</b>\nМодель глубокого обучения недоступна, инференс переключен на резервный LightGBM.");
+                        }
+                        else if (patchAvailable && !_patchTstWasHealthy)
+                        {
+                            _patchTstWasHealthy = true;
+                            await TelegramBotService.SendMessageToAdmins("✅ <b>PatchTST Neural Brain активен</b>\nSOTA трансформер успешно загружен и обрабатывает запросы.");
+                        }
+                    }
+                    catch (Exception exDeep)
+                    {
+                        BotLogger.Warn($"[Diagnostics] Deep ML parsing error: {exDeep.Message}");
+                    }
                 }
                 else
                 {
@@ -187,6 +215,61 @@ public class SelfDiagnosticService : BackgroundService
         catch
         {
             // Ignore if OS doesn't support reading memory counters gracefully
+        }
+        
+        // 5. Market Feed Liveness Check (subminute_candles not stalled)
+        try
+        {
+            // Forex market closes Fri 21:00 UTC and reopens Sun 21:00 UTC
+            bool isForexWeekend = (DateTime.UtcNow.DayOfWeek == DayOfWeek.Saturday) ||
+                                  (DateTime.UtcNow.DayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
+                                  (DateTime.UtcNow.DayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
+
+            if (!isForexWeekend)
+            {
+                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                var latestCandleStr = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<string>(conn,
+                    "SELECT MAX(open_time) FROM subminute_candles");
+                
+                if (DateTime.TryParse(latestCandleStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var latestCandleUtc))
+                {
+                    var stallDuration = DateTime.UtcNow - latestCandleUtc;
+                    if (stallDuration > TimeSpan.FromMinutes(2))
+                    {
+                        if (_feedWasHealthy)
+                        {
+                            _feedWasHealthy = false;
+                            await TelegramBotService.SendMessageToAdmins($"⚠️ <b>Задержка котировок рынка</b>\nСвежие свечи в subminute_candles отстают на {(int)stallDuration.TotalSeconds}с. Проверьте WebSocket/Tiingo.");
+                        }
+                    }
+                    else if (!_feedWasHealthy)
+                    {
+                        _feedWasHealthy = true;
+                        await TelegramBotService.SendMessageToAdmins("✅ <b>Поток котировок восстановлен</b>\nСвечи поступают в базу в реальном времени.");
+                    }
+                }
+            }
+        }
+        catch (Exception exFeed)
+        {
+            BotLogger.Warn($"[Diagnostics] Market feed liveness check warning: {exFeed.Message}");
+        }
+
+        // 6. V3 Dataset Accumulator Logging
+        if (DateTime.UtcNow - _lastV3CheckTime >= TimeSpan.FromMinutes(15))
+        {
+            _lastV3CheckTime = DateTime.UtcNow;
+            try
+            {
+                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                var v3Count = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<int>(conn,
+                    "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL");
+                BotLogger.Info($"[Diagnostics] V3 Dataset Progress: {v3Count} records accumulated with rich macro context.");
+            }
+            catch (Exception exV3)
+            {
+                BotLogger.Warn($"[Diagnostics] V3 count check warning: {exV3.Message}");
+            }
         }
         
         if (!currentDbHealthy || !currentMlHealthy)
