@@ -50,6 +50,22 @@ public static partial class MiniAppController
             WebRootPath = System.IO.Path.Combine(AppContext.BaseDirectory, "MiniApp", "wwwroot")
         });
 
+        // Sentry production error tracking & APM (if SENTRY_DSN configured)
+        string? sentryDsn = Environment.GetEnvironmentVariable("SENTRY_DSN") 
+                         ?? Environment.GetEnvironmentVariable("SENTRY_DSN_CSHARP") 
+                         ?? builder.Configuration["Sentry:Dsn"];
+        if (!string.IsNullOrWhiteSpace(sentryDsn))
+        {
+            builder.WebHost.UseSentry(options =>
+            {
+                options.Dsn = sentryDsn;
+                options.Environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "production";
+                options.TracesSampleRate = 0.2;
+                options.AutoSessionTracking = true;
+            });
+            Console.WriteLine("[Sentry] Production monitoring initialized.");
+        }
+
         // Security: HttpClient logs full request URLs at Information level. The Telegram API URL
         // contains the bot token, so keep these categories at Warning to avoid leaking it into logs.
         builder.Logging.AddFilter("System.Net.Http.HttpClient", Microsoft.Extensions.Logging.LogLevel.Warning);

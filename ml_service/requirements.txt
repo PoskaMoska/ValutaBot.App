@@ -14,3 +14,4 @@ orjson>=3.9.0
 python-multipart==0.0.9
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.2.0
+sentry-sdk>=2.0.0

@@ -41,6 +41,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("ml-service")
 
+# Sentry APM & Error Tracking (if SENTRY_DSN configured)
+_sentry_dsn = os.getenv("SENTRY_DSN") or os.getenv("SENTRY_DSN_PYTHON")
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            traces_sample_rate=0.2,
+            environment=os.getenv("ENVIRONMENT", "production"),
+        )
+        log.info("[Sentry] Python ML microservice monitoring initialized.")
+    except Exception as _sentry_err:
+        log.warning(f"[Sentry] Initialization error: {_sentry_err}")
+
 from contextlib import asynccontextmanager
 
 _DEFAULT_SYMBOLS = os.getenv("PRETRAIN_SYMBOLS", "EURUSD,GBPUSD,USDJPY,USDCAD,USDCHF,AUDUSD").split(",")
