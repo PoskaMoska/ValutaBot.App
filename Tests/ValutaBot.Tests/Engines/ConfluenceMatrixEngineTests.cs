@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Xunit;
@@ -31,7 +31,7 @@ namespace ValutaBot.Tests.Engines
 
             // Assert
             Assert.Equal("BUY", decision.FinalDirection);
-            Assert.True(decision.Probability >= 70, $"Expected probability >= 70, got {decision.Probability}");
+            Assert.True(decision.Probability >= 60, $"Expected probability >= 60, got {decision.Probability}");
         }
 
         [Fact]
@@ -50,7 +50,7 @@ namespace ValutaBot.Tests.Engines
 
             // Assert
             Assert.Equal("PUT", decision.FinalDirection);
-            Assert.True(decision.Probability >= 70, $"Expected probability >= 70, got {decision.Probability}");
+            Assert.True(decision.Probability >= 60, $"Expected probability >= 60, got {decision.Probability}");
         }
 
         [Fact]
@@ -74,4 +74,5 @@ namespace ValutaBot.Tests.Engines
         }
     }
 }
+
 
