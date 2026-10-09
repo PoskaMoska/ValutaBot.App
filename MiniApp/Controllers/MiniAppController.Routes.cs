@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -136,7 +136,7 @@ public static partial class MiniAppController
                     ui_flags = new
                     {
                         is_ml_overruled = isMlOverruled,
-                        warning_message = isMlOverruled ? "⚠️ Консенсус (TA+OF) перевесил сигнал Нейросети" : ""
+                        warning_message = isMlOverruled ? "⚠️ Консенсус (TA+SMC) перевесил сигнал Нейросети" : ""
                     },
                     latency_ms         = (int)Math.Round(LatencyProbe.LastRttMs),
                     send_at_offset_ms  = LatencyProbe.SendAtOffsetMs
