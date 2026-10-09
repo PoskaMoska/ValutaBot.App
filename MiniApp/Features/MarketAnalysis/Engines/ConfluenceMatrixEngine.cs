@@ -577,7 +577,7 @@ public class ConfluenceMatrixEngine(
         return new ConsensusDecision(
             CandidateDirection: finalDir,
             FinalDirection: finalDir,
-            Probability: (int)Math.Clamp(Math.Round(finalScore * 100), 50, 100),
+            Probability: (int)Math.Clamp(Math.Round(finalScore * 100), 50, 65),
             CombinedReasoningText: reasoningText,
             FinalTotalScore: (metaProb - 0.5) * 2.0,
             RecommendedExpiryText: "",

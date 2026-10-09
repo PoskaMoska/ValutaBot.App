@@ -43,10 +43,12 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
                 {
                     foreach (var kvp in dict)
                     {
-                        var parts = kvp.Key.Split('_');
-                        if (parts.Length == 2)
+                        int lastUnderscore = kvp.Key.LastIndexOf('_');
+                        if (lastUnderscore > 0 && lastUnderscore < kvp.Key.Length - 1)
                         {
-                            var key = new SignalKey(parts[0], parts[1]);
+                            string asset = kvp.Key[..lastUnderscore];
+                            string timeframe = kvp.Key[(lastUnderscore + 1)..];
+                            var key = new SignalKey(asset, timeframe);
                             _cooloffMap[key] = kvp.Value;
                         }
                     }

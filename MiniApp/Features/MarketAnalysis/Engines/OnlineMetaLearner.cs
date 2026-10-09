@@ -155,7 +155,8 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         double lo_smc = LogOdds(smc);
         double lo_ml = LogOdds(ml);
 
-        double y = (direction == "BUY" && wasWin) || (direction == "PUT" && !wasWin) ? 1.0 : 0.0;
+        string normDir = direction.StartsWith("SHADOW_") ? direction["SHADOW_".Length..] : direction;
+        double y = (normDir == "BUY" && wasWin) || (normDir == "PUT" && !wasWin) ? 1.0 : 0.0;
 
         string key = GetKey(asset, timeframe);
         var w = GetOrCreateWeights(key);

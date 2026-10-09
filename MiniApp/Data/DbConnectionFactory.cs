@@ -240,10 +240,32 @@ namespace ValutaBot.App.MiniApp.Data
                 -- causing the bot to resume trading immediately after a crash/redeploy.
                 CREATE TABLE IF NOT EXISTS circuit_breaker_state (
                     id          INTEGER PRIMARY KEY DEFAULT 1,
-                    halted_until TEXT NOT NULL,
-                    reason      TEXT NOT NULL,
-                    created_at  TEXT NOT NULL
+                    halted_until TIMESTAMPTZ NULL,
+                    reason      TEXT NULL,
+                    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
+
+                DO $$ 
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'circuit_breaker_state' 
+                          AND column_name = 'halted_until' 
+                          AND data_type = 'text'
+                    ) THEN
+                        ALTER TABLE circuit_breaker_state 
+                            ALTER COLUMN halted_until TYPE TIMESTAMPTZ USING NULLIF(halted_until, '')::timestamptz;
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'circuit_breaker_state' 
+                          AND column_name = 'created_at' 
+                          AND data_type = 'text'
+                    ) THEN
+                        ALTER TABLE circuit_breaker_state 
+                            ALTER COLUMN created_at TYPE TIMESTAMPTZ USING NULLIF(created_at, '')::timestamptz;
+                    END IF;
+                END $$;
 
                 ALTER TABLE allowed_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';
                 ALTER TABLE all_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';

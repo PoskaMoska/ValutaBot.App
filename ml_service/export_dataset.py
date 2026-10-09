@@ -200,36 +200,21 @@ def extract_macro_vector(row_dict, feat_obj):
 def determine_label(direction, was_win, pnl_bps, min_pnl_threshold=0.5):
     """
     Determines 3-class target:
-      0: HOLD (Flat market, chop, zero or negligible movement)
-      1: BUY (Market went up strongly)
-      2: PUT (Market went down strongly)
+      0: HOLD (Flat market, chop, negligible movement |pnl_bps| < threshold)
+      1: BUY (Market went up decisively: pnl_bps >= threshold)
+      2: PUT (Market went down decisively: pnl_bps <= -threshold)
+    Note: pnl_bps in the database is the exact underlying asset price return in basis points:
+      (exit_price - entry_price) / entry_price * 10000.
     """
     if direction in ("HOLD", "SHADOW_HOLD") or was_win is None:
         return 0
-    
-    if abs(pnl_bps) < min_pnl_threshold:
-        return 0  # Market didn't produce decisive expansion
-    
-    d_upper = direction.upper()
-    is_call = "BUY" in d_upper or "CALL" in d_upper
-    is_put = "PUT" in d_upper
-    
-    if is_call:
-        if was_win and pnl_bps >= min_pnl_threshold:
-            return 1  # Correct BUY
-        elif not was_win and pnl_bps <= -min_pnl_threshold:
-            return 2  # Price dropped: PUT was the right move
-        else:
-            return 0
-    elif is_put:
-        if was_win and pnl_bps >= min_pnl_threshold:
-            return 2  # Correct PUT
-        elif not was_win and pnl_bps <= -min_pnl_threshold:
-            return 1  # Price rose: BUY was the right move
-        else:
-            return 0
-    
-    return 0
+
+    if pnl_bps >= min_pnl_threshold:
+        return 1  # Ground-truth: price moved UP -> BUY was winning
+    elif pnl_bps <= -min_pnl_threshold:
+        return 2  # Ground-truth: price moved DOWN -> PUT was winning
+    else:
+        return 0  # Market flat / chop / noise -> HOLD
 
 
 import sys
@@ -237,7 +222,7 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-def export_dataset(db_url, output_path, limit=None, seq_len=160):
+def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30):
     print("=" * 60)
     print("[*] Neural Brain Dataset Exporter (V3 Architecture)")
     print(f"Connecting to database...")
@@ -271,6 +256,7 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160):
     print(f"Retrieved {total_found} rows from database.")
     
     x_candles_list = []
+    x_mtf_candles_list = []
     x_macro_list = []
     y_list = []
     y_pnl_list = []
@@ -308,14 +294,20 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160):
         if np.isnan(candle_tensor).any() or np.isinf(candle_tensor).any():
             skipped_count += 1
             continue
+
+        # 2. Normalize MTF Candles Sequence
+        mtf_candles = feat_obj.get("MtfCandles") or feat_obj.get("mtf_candles") or []
+        mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, 5), dtype=np.float32)
+        if np.isnan(mtf_tensor).any() or np.isinf(mtf_tensor).any():
+            mtf_tensor = np.zeros((seq_len_mtf, 5), dtype=np.float32)
             
-        # 2. Extract Macro Vector
+        # 3. Extract Macro Vector
         macro_vec = extract_macro_vector(row_dict, feat_obj)
         if np.isnan(macro_vec).any() or np.isinf(macro_vec).any():
             skipped_count += 1
             continue
             
-        # 3. Target Label
+        # 4. Target Label
         direction = str(row_dict.get("direction") or "")
         was_win = row_dict.get("was_win")
         pnl = float(row_dict.get("pnl_bps") or 0.0)
@@ -325,6 +317,7 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160):
         mae = float(row_dict.get("max_adverse_bps") or 0.0)
         
         x_candles_list.append(candle_tensor)
+        x_mtf_candles_list.append(mtf_tensor)
         x_macro_list.append(macro_vec)
         y_list.append(label)
         y_pnl_list.append(pnl)
@@ -346,15 +339,17 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160):
     print(f"Valid samples parsed: {valid_count} (Skipped: {skipped_count})")
     
     X_candles = np.array(x_candles_list, dtype=np.float32)
+    X_mtf_candles = np.array(x_mtf_candles_list, dtype=np.float32)
     X_macro = np.array(x_macro_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.int64)
     y_pnl = np.array(y_pnl_list, dtype=np.float32)
     y_mfe = np.array(y_mfe_list, dtype=np.float32)
     y_mae = np.array(y_mae_list, dtype=np.float32)
     
-    print(f"X_candles shape: {X_candles.shape} (N, SeqLen, Feats)")
-    print(f"X_macro shape:   {X_macro.shape} (N, Feats)")
-    print(f"y shape:         {y.shape}")
+    print(f"X_candles shape:     {X_candles.shape} (N, SeqLen, Feats)")
+    print(f"X_mtf_candles shape: {X_mtf_candles.shape} (N, SeqLenMtf, Feats)")
+    print(f"X_macro shape:       {X_macro.shape} (N, Feats)")
+    print(f"y shape:             {y.shape}")
     
     # Class breakdown
     c0 = np.sum(y == 0)
@@ -372,6 +367,7 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160):
     np.savez_compressed(
         output_path,
         X_candles=X_candles,
+        X_mtf_candles=X_mtf_candles,
         X_macro=X_macro,
         y=y,
         y_pnl=y_pnl,
@@ -395,6 +391,7 @@ if __name__ == "__main__":
     parser.add_argument("--out", default="ml_service/data/dataset_v3.npz")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=160)
+    parser.add_argument("--seq-len-mtf", type=int, default=30)
     args = parser.parse_args()
     
-    export_dataset(args.db_url, args.out, limit=args.limit, seq_len=args.seq_len)
+    export_dataset(args.db_url, args.out, limit=args.limit, seq_len=args.seq_len, seq_len_mtf=args.seq_len_mtf)

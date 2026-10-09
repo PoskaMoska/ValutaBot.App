@@ -273,6 +273,10 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 }
             });
 
+            string cleanDirection = record.Direction.StartsWith("SHADOW_") 
+                ? record.Direction["SHADOW_".Length..] 
+                : record.Direction;
+
             _ = Task.Run(async () =>
             {
                 try
@@ -284,7 +288,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                         isWin,
                         record.EntryPrice,
                         exitPriceVal,
-                        record.Direction,
+                        cleanDirection,
                         record.CreatedAt,
                         record.IsForex
                     );
@@ -295,7 +299,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 }
             });
 
-            MetaLearner?.PartialFit(record.Asset, record.Timeframe, record.TaScore, record.OfScore, record.SmcScore, record.MlScore, wasCorrect, record.Direction);
+            MetaLearner?.PartialFit(record.Asset, record.Timeframe, record.TaScore, record.OfScore, record.SmcScore, record.MlScore, wasCorrect, cleanDirection);
 
             BotLogger.Info($"[TradeOutcomeTracker] Verified trade {record.Id} ({record.Asset} {record.Timeframe}) -> {(wasCorrect ? "WIN" : "LOSS")}. Online RL weights & Walk-Forward state updated.");
 

@@ -166,9 +166,32 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         engSw.Stop();
         traceLines.Add($"[4. Структура]       SMC и OrderFlow отрисованы -> {engSw.ElapsedMilliseconds}ms");
 
-        // ML
+        // Macro Context Anchors (Computed early for Neural Brain & Database)
+        int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
+        var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
+        var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
+        TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out double liveSpreadBps);
+
+        var macroPayload = new {
+            DayRangePositionPct = dayAnchors.DayRangePositionPct,
+            DistToDayHighBps = dayAnchors.DistToDayHighBps,
+            DistToDayLowBps = dayAnchors.DistToDayLowBps,
+            DistToAsianHighBps = dayAnchors.DistToAsianHighBps,
+            DistToAsianLowBps = dayAnchors.DistToAsianLowBps,
+            DxyMomentum1mBps = dxyMetrics.DxyMomentum1mBps,
+            DxyMomentum5mBps = dxyMetrics.DxyMomentum5mBps,
+            BasketSyncScore = dxyMetrics.BasketSyncScore,
+            SpreadBps = liveSpreadBps,
+            MinutesToNews = minutesToNews ?? -1,
+            Adx = mainAdx,
+            Rsi = taDetail.RsiVal,
+            HourUtc = DateTime.UtcNow.Hour,
+            DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek
+        };
+
+        // ML (Dual-Stream Neural Brain / LightGBM)
         var mlSw = Stopwatch.StartNew();
-        var mlPrediction = _settings.EnableMachineLearning ? await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult) : null;
+        var mlPrediction = _settings.EnableMachineLearning ? await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult, macroPayload) : null;
         string lgbmDir = "NEUTRAL";
         double lgbmConf = 0.5;
         if (mlPrediction != null) {
@@ -214,7 +237,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
         
         // --- NEWS CALENDAR INTEGRATION ---
-        int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
         if (minutesToNews.HasValue && minutesToNews.Value >= 0 && minutesToNews.Value <= 15)
         {
             var nextNews = _newsCalendar?.GetNextHighImpactNews(cleanAsset);
@@ -313,10 +335,6 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         string effectiveMarketRegime = !string.IsNullOrEmpty(taDetail.Regime) && taDetail.Regime != "UNKNOWN"
             ? taDetail.Regime
             : (state.VelocityRegime ?? ExtractMlRegime(mlPrediction?.ModelVersion));
-
-        var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
-        var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
-        TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out double liveSpreadBps);
 
         var mlFeatures = new {
             Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
@@ -481,9 +499,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
             probability = consensus.Probability,
             duration = timeout.TimeoutText,
             expiryCandles = timeout.TimeoutCandles,
-            adaptiveReasoning = consensus.CombinedReasoningText,
+            adaptiveReasoning = consensus.CombinedReasoningText ?? string.Empty,
             taDirection = consensus.TaScore > 0.02 ? "BUY" : consensus.TaScore < -0.02 ? "PUT" : "NEUTRAL",
-            taConfidence = (int)Math.Clamp(Math.Abs(consensus.TaScore * 100), 0, 100),
+            taConfidence = 50 + (int)Math.Clamp(Math.Abs(consensus.TaScore * 15.0), 0, 15),
             ofDirection = "NEUTRAL",
             ofConfidence = 0,
             smcDirection = 
@@ -496,9 +514,9 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
                 (smcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
                 (smcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
                 "NEUTRAL",
-            smcConfidence = (int)Math.Clamp(Math.Abs(consensus.SmcScore * 100), 0, 100),
+            smcConfidence = 50 + (int)Math.Clamp(Math.Abs(consensus.SmcScore * 15.0), 0, 15),
             lgbmDirection = mlSignal.Direction,
-            lgbmConfidence = (int)(mlSignal.Confidence * 100),
+            lgbmConfidence = (int)Math.Clamp(Math.Round(mlSignal.Confidence * 100), 50, 65),
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
             signalsVerifiedAsset = assetStats.Verified,

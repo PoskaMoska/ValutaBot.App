@@ -59,8 +59,9 @@ public static class SignalTracker
         var now = DateTime.UtcNow;
         // FIX FORENSICS: Real broker expiry is measured from trade entry time (now), NOT from the past grid boundary.
         // Using gridTime truncated trades placed mid-candle (e.g. 5s trades verified after 2s, 1m trades after 30s).
-        // Adding timeframeSecs + 1s buffer guarantees the trade has fully expired before verification.
-        DateTime verifyAt = now.AddSeconds(timeframeSecs + 1);
+        // Adding durationSecs + 1s buffer guarantees the trade has fully expired before verification.
+        int durationSecs = Math.Max(1, expiryCandles) * timeframeSecs;
+        DateTime verifyAt = now.AddSeconds(durationSecs + 1);
 
         string cooldownKey = $"{asset}_{timeframe}";
         

@@ -33,6 +33,7 @@ node_modules/
 *.xlsx
 *.npz
 *.pt
+!ml_service/models/*.pt
 
 # Secrets - never commit real keys (use env vars / Railway dashboard)
 .env

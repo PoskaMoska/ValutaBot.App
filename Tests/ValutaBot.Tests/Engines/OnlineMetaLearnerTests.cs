@@ -45,5 +45,53 @@ namespace ValutaBot.Tests.Engines
             // Bias should remain bounded
             Assert.True(Math.Abs(weights[0]) <= 1.0, $"Bias {weights[0]} drifted too far");
         }
+
+        [Fact]
+        public void PartialFit_ShadowBuyWin_UpdatesWeightsIdenticallyToBuyWin()
+        {
+            var learnerReal = new OnlineMetaLearner();
+            var learnerShadow = new OnlineMetaLearner();
+
+            string assetReal = "REAL_" + Guid.NewGuid().ToString("N")[..6];
+            string assetShadow = "SHADOW_" + Guid.NewGuid().ToString("N")[..6];
+            string tf = "s5";
+
+            // Fit Real BUY with WIN
+            learnerReal.PartialFit(assetReal, tf, ta: 0.5, of: 0.0, smc: 0.4, ml: 0.6, wasWin: true, direction: "BUY");
+            // Fit Shadow BUY with WIN
+            learnerShadow.PartialFit(assetShadow, tf, ta: 0.5, of: 0.0, smc: 0.4, ml: 0.6, wasWin: true, direction: "SHADOW_BUY");
+
+            var wReal = learnerReal.GetWeights(assetReal, tf);
+            var wShadow = learnerShadow.GetWeights(assetShadow, tf);
+
+            for (int i = 0; i < wReal.Length; i++)
+            {
+                Assert.Equal(wReal[i], wShadow[i], precision: 5);
+            }
+        }
+
+        [Fact]
+        public void PartialFit_ShadowPutWin_UpdatesWeightsIdenticallyToPutWin()
+        {
+            var learnerReal = new OnlineMetaLearner();
+            var learnerShadow = new OnlineMetaLearner();
+
+            string assetReal = "REAL_" + Guid.NewGuid().ToString("N")[..6];
+            string assetShadow = "SHADOW_" + Guid.NewGuid().ToString("N")[..6];
+            string tf = "s5";
+
+            // Fit Real PUT with WIN
+            learnerReal.PartialFit(assetReal, tf, ta: -0.5, of: 0.0, smc: -0.4, ml: -0.6, wasWin: true, direction: "PUT");
+            // Fit Shadow PUT with WIN
+            learnerShadow.PartialFit(assetShadow, tf, ta: -0.5, of: 0.0, smc: -0.4, ml: -0.6, wasWin: true, direction: "SHADOW_PUT");
+
+            var wReal = learnerReal.GetWeights(assetReal, tf);
+            var wShadow = learnerShadow.GetWeights(assetShadow, tf);
+
+            for (int i = 0; i < wReal.Length; i++)
+            {
+                Assert.Equal(wReal[i], wShadow[i], precision: 5);
+            }
+        }
     }
 }

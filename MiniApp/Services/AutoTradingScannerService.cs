@@ -25,7 +25,7 @@ public class AutoTradingScannerService : BackgroundService
     private readonly ILogger<AutoTradingScannerService> _logger;
     private readonly ICircuitBreakerService _circuitBreaker;
     private readonly TradingBotSettings _settings;
-    private static readonly string[] _targetPairs = { "EURUSD", "GBPUSD", "USDJPY", "AUDUSD" };
+    private static readonly string[] _targetPairs = { "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF" };
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
 
@@ -136,7 +136,7 @@ public class AutoTradingScannerService : BackgroundService
         }
         catch (Exception ex)
         {
-            if (ex.Message.Contains("повторять")) _logger.LogWarning($"[AutoScanner-Fast] Blocked: {ex.Message}"); else _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
+            if (ex.Message.Contains("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ")) _logger.LogWarning($"[AutoScanner-Fast] Blocked: {ex.Message}"); else _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
         }
     }
 

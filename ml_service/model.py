@@ -720,7 +720,8 @@ class ForexPredictor:
             # WIN + PUT  → price went down  → label 0
             # LOSS + BUY → price went down  → label 0
             # LOSS + PUT → price went up    → label 1
-            if direction.upper() == "BUY":
+            clean_dir = direction.upper().replace("SHADOW_", "").strip()
+            if clean_dir == "BUY":
                 y = np.array([1 if was_win else 0])
             else:
                 y = np.array([0 if was_win else 1])

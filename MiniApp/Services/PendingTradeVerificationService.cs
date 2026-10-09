@@ -117,7 +117,7 @@ public class PendingTradeVerificationService : BackgroundService
             {
                 try
                 {
-                    var exc = await conn.QueryFirstOrDefaultAsync<dynamic>(@"
+                    var exc = await conn.QueryFirstOrDefaultAsync<(double? max_high, double? min_low)>(@"
                         SELECT MAX(high_price) as max_high, MIN(low_price) as min_low
                         FROM subminute_candles
                         WHERE asset = @Asset
@@ -129,11 +129,12 @@ public class PendingTradeVerificationService : BackgroundService
                         VerifyAt = record.VerifyAt.ToString("O") 
                     });
 
-                    double maxH = (exc != null && exc.max_high != null) ? Convert.ToDouble(exc.max_high) : exitPrice.Value;
-                    double minL = (exc != null && exc.min_low != null) ? Convert.ToDouble(exc.min_low) : exitPrice.Value;
+                    double exitVal = exitPrice.Value;
+                    double maxH = exc.max_high ?? exitVal;
+                    double minL = exc.min_low ?? exitVal;
 
-                    if (maxH < exitPrice.Value) maxH = exitPrice.Value;
-                    if (minL > exitPrice.Value) minL = exitPrice.Value;
+                    if (maxH < exitVal) maxH = exitVal;
+                    if (minL > exitVal) minL = exitVal;
                     if (maxH < record.EntryPrice) maxH = record.EntryPrice;
                     if (minL > record.EntryPrice) minL = record.EntryPrice;
 

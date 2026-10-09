@@ -214,7 +214,7 @@ export async function executeAnalysis() {
             }
 
             document.getElementById('resProb').innerText = data.probability + '%';
-            document.getElementById('resProb').style.color = data.probability >= 90 ? '#00e676' : data.probability >= 85 ? '#ffd600' : 'var(--accent)';
+            document.getElementById('resProb').style.color = data.probability >= 58 ? '#00e676' : data.probability >= 54 ? '#ffd600' : 'var(--accent)';
 
             // Measured fact vs model score: show real asset winrate when measured
             // (the big % is a rescaled model score, NOT a measured win probability).

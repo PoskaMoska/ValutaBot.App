@@ -330,7 +330,8 @@ public static class MLPythonService
         MiniAppController.OhlcCandle[] candles,
         bool isForex = false,
         MiniAppController.OhlcCandle[]? mtfCandles = null,
-        ValutaBot.MiniApp.SmcEngine.SmcAnalysisResult? smcResult = null)
+        ValutaBot.MiniApp.SmcEngine.SmcAnalysisResult? smcResult = null,
+        object? macroContext = null)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl))
             return null;
@@ -366,9 +367,11 @@ public static class MLPythonService
             bool smcHasFvg = smcResult?.HasFvg ?? false;
             object payload = mappedMtf != null 
                 ? new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex, mtf_candles = mappedMtf,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL" }
+                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL",
+                        macro_context = macroContext }
                 : new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL" };
+                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL",
+                        macro_context = macroContext };
 
             byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(payload);
             using var content = new ByteArrayContent(jsonBytes);

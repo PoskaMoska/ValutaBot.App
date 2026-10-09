@@ -182,6 +182,8 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
 
         builder.Environment.WebRootPath = System.IO.Path.Combine(AppContext.BaseDirectory, "MiniApp", "wwwroot");
         var app = builder.Build();
+        // Initialize Database, Tables & Core Engines before starting services
+        await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync();
 
         // FIX #1: MetaLearner was NULL in production because it was never assigned.
         ValutaBot.MiniApp.TradeOutcomeTracker.MetaLearner = app.Services.GetRequiredService<ValutaBot.MiniApp.Features.MarketAnalysis.Engines.IOnlineMetaLearner>();
