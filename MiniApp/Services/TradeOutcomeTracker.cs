@@ -141,7 +141,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 TaDirection = record.SourceDirections.GetValueOrDefault("TechAnalysis", "NEUTRAL"),
                 MlDirection = record.SourceDirections.GetValueOrDefault("LIGHTGBM", "NEUTRAL"),
                 SmcDirection = record.SourceDirections.GetValueOrDefault("SMC", "NEUTRAL"),
-                OfDirection = record.SourceDirections.GetValueOrDefault("OrderFlow", "NEUTRAL"),
+                OfDirection = "NEUTRAL",
                 ConflictCount = record.SourceDirections.Count(kv => kv.Value != "NEUTRAL" && kv.Value != record.Direction && !record.Direction.StartsWith("SHADOW")),
                 ConfidenceBucket = $"{record.Probability / 10 * 10}-{record.Probability / 10 * 10 + 10}",
                 WasCloseCall = Math.Abs(record.PnlBps) < 2.0,

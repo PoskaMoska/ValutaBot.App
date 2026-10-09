@@ -367,7 +367,7 @@ public class ConfluenceMatrixEngine(
         }
 
         // Only activate if we have an autocalib engine available.
-        double wTa = 1.0, wOf = 1.0, wSmc = 1.0, wMl = 1.0;
+        double wTa = 1.0, wSmc = 1.0, wMl = 1.0;
         if (autoCalib != null)
         {
             var regime = autoCalib.DetectMarketRegime(
@@ -376,11 +376,10 @@ public class ConfluenceMatrixEngine(
                 rsi: taSignal.Rsi);
 
             wTa  = autoCalib.GetCalibratedRegimeWeight("TechAnalysis", asset, timeframe, regime);
-            wOf  = autoCalib.GetCalibratedRegimeWeight("OrderFlow",    asset, timeframe, regime);
             wSmc = autoCalib.GetCalibratedRegimeWeight("SMC",          asset, timeframe, regime);
             wMl  = autoCalib.GetCalibratedRegimeWeight("LIGHTGBM",     asset, timeframe, regime);
 
-            BotLogger.Info($"[AutoCalib] {asset}/{timeframe} Regime={regime} | wTA={wTa:F2} wOF={wOf:F2} wSMC={wSmc:F2} wML={wMl:F2}");
+            BotLogger.Info($"[AutoCalib] {asset}/{timeframe} Regime={regime} | wTA={wTa:F2} wSMC={wSmc:F2} wML={wMl:F2}");
         }
 
         // --- ДИНАМИЧЕСКАЯ КОРРЕКЦИЯ ОШИБАЮЩИХСЯ МОДУЛЕЙ (BIAS SELF-CORRECTION) ---
@@ -450,7 +449,6 @@ public class ConfluenceMatrixEngine(
             double mlWr = autoCalib.GetEmpiricalWinRate("LIGHTGBM", asset, timeframe) * 100;
             double taWr = autoCalib.GetEmpiricalWinRate("TechAnalysis", asset, timeframe) * 100;
             double smcWr = autoCalib.GetEmpiricalWinRate("SMC", asset, timeframe) * 100;
-            double ofWr = autoCalib.GetEmpiricalWinRate("OrderFlow", asset, timeframe) * 100;
 
             int mlLosses = autoCalib.GetConsecutiveLosses("LIGHTGBM", asset, timeframe);
             int taLosses = autoCalib.GetConsecutiveLosses("TechAnalysis", asset, timeframe);
@@ -469,15 +467,13 @@ public class ConfluenceMatrixEngine(
             sb.AppendLine($" - ML (Нейросеть): WinRate {mlWr:F1}% -> {FormatStatus(mlWr, mlLosses)} (вес: {wMl:F2})");
             sb.AppendLine($" - Tech Analysis: WinRate {taWr:F1}% -> {FormatStatus(taWr, taLosses)} (вес: {wTa:F2})");
             sb.AppendLine($" - Smart Money: WinRate {smcWr:F1}% -> {FormatStatus(smcWr, smcLosses)} (вес: {wSmc:F2})");
-            sb.AppendLine($" - OrderFlow: WinRate {ofWr:F1}% -> Норма (вес: {wOf:F2})");
             sb.AppendLine();
         }
 
-        sb.AppendLine("[Р‘Р°Р·РѕРІС‹Рµ РѕС†РµРЅРєРё]");
+        sb.AppendLine("[Базовые оценки]");
         sb.AppendLine($"- ML (LightGBM): {mlScore:F2} {(mlSignal.Direction != "NEUTRAL" ? mlSignal.Direction : "")}");
         sb.AppendLine($"- Tech Analysis: {taScore:F2} {(taScore > 0 ? "BUY" : (taScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine($"- Smart Money: {smcScore:F2} {(smcScore > 0 ? "BUY" : (smcScore < 0 ? "PUT" : "NEUTRAL"))}");
-        sb.AppendLine($"- OrderFlow: {ofScore:F2} {(ofScore > 0 ? "BUY" : (ofScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine();
         sb.AppendLine("[Р”РёРЅР°РјРёС‡РµСЃРєРёРµ С„РёР»СЊС‚СЂС‹]");
         sb.AppendLine($"- Р‘Р°Р·РѕРІР°СЏ СѓРІРµСЂРµРЅРЅРѕСЃС‚СЊ: {(0.5 + margin)*100:F1}% {finalDir}");

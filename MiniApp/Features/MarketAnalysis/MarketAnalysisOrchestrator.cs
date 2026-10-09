@@ -150,7 +150,7 @@ public class MarketAnalysisOrchestrator(
         await smcTask;
         var smcResult = await smcTask;
         engSw.Stop();
-        traceLines.Add($"[4. Структура]       SMC и OrderFlow отрисованы -> {engSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[4. Структура]       SMC отрисован -> {engSw.ElapsedMilliseconds}ms");
 
         // Macro Context Anchors (Computed early for Neural Brain & Database)
         int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
@@ -257,7 +257,6 @@ public class MarketAnalysisOrchestrator(
         var sourceDirections = new Dictionary<string, string>
         {
             ["TechAnalysis"] = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
-            ["OrderFlow"]    = DirectionExtensions.FromScore(consensus.OfScore, 0.05).ToSignal(),
             ["SMC"]          = DirectionExtensions.FromScore(consensus.SmcScore).ToSignal(),
             ["LIGHTGBM"]     = lgbmDir,
         };
