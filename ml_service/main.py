@@ -15,8 +15,7 @@ import logging
 import os
 import time
 import threading
-import sqlite3
-from typing import Dict, List, Optional
+from typing import Any
 
 import orjson
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Response, UploadFile, File, Form
@@ -29,7 +28,7 @@ from model import ForexPredictor, TF_MAP, is_forex_symbol, _run_training_worker,
 _API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
 _process_pool = None
 
-def verify_secret(x_internal_secret: str = Header(None)):
+def verify_secret(x_internal_secret: str | None = Header(default=None)):
     if x_internal_secret != _API_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid Internal Secret")
 
@@ -393,7 +392,7 @@ app.add_middleware(
 # │ Global model registry                                                  │
 # └────────────────────────────────────────────────────────────────────────┘
 # key: "SYMBOL_interval"  (e.g. "BTCUSDT_1m")
-_predictors: Dict[str, ForexPredictor] = {}
+_predictors: dict[str, ForexPredictor] = {}
 _registry_lock = threading.Lock()
 
 START_TIME = time.time()
@@ -419,7 +418,7 @@ def _get_predictor(symbol: str, interval: str, regime: str = "ALL") -> ForexPred
 # └────────────────────────────────────────────────────────────────────────┘
 
 class CandleItem(BaseModel):
-    openTime: Optional[int] = None
+    openTime: int | None = None
     open: float
     high: float
     low: float
@@ -430,8 +429,8 @@ class CandleItem(BaseModel):
 class PredictRequest(BaseModel):
     symbol: str                     # e.g. "BTCUSDT" or "EURUSD"
     interval: str                   # e.g. "1m" or "m5"
-    candles: List[CandleItem]       # OHLCV history, latest last
-    mtf_candles: Optional[List[CandleItem]] = None # Higher timeframe OHLCV
+    candles: list[CandleItem]       # OHLCV history, latest last
+    mtf_candles: list[CandleItem] | None = None # Higher timeframe OHLCV
     is_forex: bool = False
     smc_bos_dir: str = "NONE"
     smc_has_ob: bool = False
@@ -439,26 +438,28 @@ class PredictRequest(BaseModel):
     of_delta_ratio: float = 0.0
     of_state: str = "NEUTRAL"
     dynamic_horizon: int = 3
+    macro_context: dict | None = None
 
 
 class PredictResponse(BaseModel):
     direction: str                  # "BUY" | "PUT" | "NEUTRAL"
     confidence: float               # 0.0 – 1.0
     model_version: str
-    accuracy: Optional[float] = None
-    auc: Optional[float] = None
-    n_train: Optional[int] = None
-    variance_estimate: Optional[float] = None   # B6: predicted uncertainty [0,1], higher = less reliable
-    raw_confidence: Optional[float] = None
-    top_features: Optional[List[str]] = None       # B6: confidence before variance-based dampening
+    horizon_candles: int = 3
+    accuracy: float | None = None
+    auc: float | None = None
+    n_train: int | None = None
+    variance_estimate: float | None = None   # B6: predicted uncertainty [0,1], higher = less reliable
+    raw_confidence: float | None = None
+    top_features: list[str] | None = None       # B6: confidence before variance-based dampening
 
 
 class TrainRequest(BaseModel):
     symbol: str
     interval: str
     regime: str = "ALL"
-    candles: Optional[List[CandleItem]] = None   # if None -> fetch from DB
-    mtf_candles: Optional[List[CandleItem]] = None
+    candles: list[CandleItem] | None = None   # if None -> fetch from DB
+    mtf_candles: list[CandleItem] | None = None
 
 
 class TrainResponse(BaseModel):
@@ -468,7 +469,7 @@ class TrainResponse(BaseModel):
     accuracy: float = 0.0
     auc: float = 0.0
     version: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class TrainFeedback(BaseModel):
@@ -479,6 +480,7 @@ class TrainFeedback(BaseModel):
     direction: str
     was_win: bool
     timestamp: str
+    is_forex: bool | None = None
 
 
 # ┌────────────────────────────────────────────────────────────────────────┐
@@ -576,7 +578,7 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
         return []
 
 
-def _candles_to_dicts(items: List[CandleItem]) -> List[dict]:
+def _candles_to_dicts(items: list[CandleItem]) -> list[dict]:
     # FIX C-10: openTime was missing -> features.py had no 'opentime' column ->
     # hour_sin/hour_cos were always 0.0 at inference (but real values during training).
     # This caused a permanent input space shift between train and inference.
@@ -930,7 +932,7 @@ def train_sync(req: TrainRequest):
     )
 
 
-def _background_train(symbol: str, interval: str, candles: Optional[list] = None, mtf_candles: Optional[list] = None):
+def _background_train(symbol: str, interval: str, candles: list | None = None, mtf_candles: list | None = None):
     log.info(f"[BG Train] Starting clustered training for {symbol}_{interval} in process pool")
     for regime in ["ALL", "FLAT", "TREND", "CHAOS"]:
         _dispatch_training_to_pool(symbol, interval, regime, candles, mtf_candles, False)

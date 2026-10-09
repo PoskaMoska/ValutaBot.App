@@ -170,7 +170,7 @@ public static partial class MiniAppController
                 DayOfWeek day = DateTime.UtcNow.DayOfWeek;
                 string? symbol = ValutaBot.MiniApp.AssetSanitizer.MapSymbolByDayOfWeek(clean, day);
                 var ohlc = await fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, asset, 30);
-                var payload = (ohlc ?? Array.Empty<OhlcCandle>())
+                var payload = (ohlc ?? [])
                     .TakeLast(30)
                     .Select(c => new
                     {

@@ -38,12 +38,12 @@ public static class MLPythonService
 
     public class MarketDataColumnar
     {
-        public long[] openTime { get; set; } = Array.Empty<long>();
-        public double[] open { get; set; } = Array.Empty<double>();
-        public double[] high { get; set; } = Array.Empty<double>();
-        public double[] low { get; set; } = Array.Empty<double>();
-        public double[] close { get; set; } = Array.Empty<double>();
-        public double[] volume { get; set; } = Array.Empty<double>();
+        public long[] openTime { get; set; } = [];
+        public double[] open { get; set; } = [];
+        public double[] high { get; set; } = [];
+        public double[] low { get; set; } = [];
+        public double[] close { get; set; } = [];
+        public double[] volume { get; set; } = [];
     }
 
     private static MarketDataColumnar ToColumnar(System.Collections.Generic.IList<MiniAppController.OhlcCandle> candles)

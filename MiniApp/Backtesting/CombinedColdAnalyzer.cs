@@ -63,8 +63,7 @@ namespace ValutaBot.App.MiniApp.Backtesting
                     if (smcResult.BosDirection == "BULLISH" || smcResult.SweepDirection == "BULLISH_SWEEP") smcScore += 1;
                     else if (smcResult.BosDirection == "BEARISH" || smcResult.SweepDirection == "BEARISH_SWEEP") smcScore -= 1;
 
-                    // OF REMOVED — always 0
-                    double ofScore = 0;
+                    // OF REMOVED
                     
                     double mlScore = 0;
                     // (ML Python Service call is bypassed during cold backtest generation 

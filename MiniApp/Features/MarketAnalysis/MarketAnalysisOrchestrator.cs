@@ -11,45 +11,31 @@ using ValutaBot.App.MiniApp.Models;
 
 namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 
-public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
+public class MarketAnalysisOrchestrator(
+    MarketDataFetcher fetcher,
+    IRiskGatekeeper riskGatekeeper,
+    IMathEngine mathEngine,
+    IMarketAnalyzer marketAnalyzer,
+    IConfluenceMatrixEngine cmEngine,
+    ITradeTimeoutEngine timeoutEngine,
+    Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings,
+    ILogger<MarketAnalysisOrchestrator> logger,
+    ValutaBot.MiniApp.Services.INewsCalendarService? newsCalendar = null
+) : IMarketAnalysisOrchestrator
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastSampleTimeByAssetTf = new();
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     
-    private readonly MarketDataFetcher _fetcher;
-    private readonly IRiskGatekeeper _riskGatekeeper;
-    private readonly IMathEngine _mathEngine;
-    private readonly IMarketAnalyzer _marketAnalyzer;
-    private readonly IConfluenceMatrixEngine _cmEngine;
-    private readonly ITradeTimeoutEngine _timeoutEngine;
-    private readonly TradingBotSettings _settings;
-    private readonly ILogger<MarketAnalysisOrchestrator> _logger;
-
-        private readonly ValutaBot.MiniApp.Services.INewsCalendarService? _newsCalendar;
-
-    public MarketAnalysisOrchestrator(
-        MarketDataFetcher fetcher,
-        IRiskGatekeeper riskGatekeeper,
-        IMathEngine mathEngine,
-        IMarketAnalyzer marketAnalyzer,
-        IConfluenceMatrixEngine cmEngine,
-        ITradeTimeoutEngine timeoutEngine,
-        Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings,
-        ILogger<MarketAnalysisOrchestrator> logger,
-        ValutaBot.MiniApp.Services.INewsCalendarService? newsCalendar = null
-    )
-    {
-        _newsCalendar = newsCalendar;
-        _fetcher = fetcher;
-        _riskGatekeeper = riskGatekeeper;
-        _mathEngine = mathEngine;
-        _marketAnalyzer = marketAnalyzer;
-        _cmEngine = cmEngine;
-        _timeoutEngine = timeoutEngine;
-        _settings = settings.Value;
-        _logger = logger;
-    }
+    private readonly MarketDataFetcher _fetcher = fetcher;
+    private readonly IRiskGatekeeper _riskGatekeeper = riskGatekeeper;
+    private readonly IMathEngine _mathEngine = mathEngine;
+    private readonly IMarketAnalyzer _marketAnalyzer = marketAnalyzer;
+    private readonly IConfluenceMatrixEngine _cmEngine = cmEngine;
+    private readonly ITradeTimeoutEngine _timeoutEngine = timeoutEngine;
+    private readonly TradingBotSettings _settings = settings.Value;
+    private readonly ILogger<MarketAnalysisOrchestrator> _logger = logger;
+    private readonly ValutaBot.MiniApp.Services.INewsCalendarService? _newsCalendar = newsCalendar;
 
     /// <summary>
     /// Extracts the ML regime token (TREND/FLAT/CHAOS/ALL) from a model version such as
@@ -146,7 +132,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
         }
         var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1 && higherTf != null) 
             ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= DateTime.UtcNow) ? higherCandles : higherCandles.Take(higherCandles.Length - 1).ToArray())
-            : Array.Empty<MiniAppController.OhlcCandle>();
+            : [];
 
         // 6. Engines (Parallel)
         var engSw = Stopwatch.StartNew();
@@ -320,7 +306,7 @@ public class MarketAnalysisOrchestrator : IMarketAnalysisOrchestrator
              consensus = consensus with { Probability = 0, FinalDirection = "NEUTRAL" }; // Force into HOLD block
         }
         
-        double[] metaWeights = TradeOutcomeTracker.MetaLearner?.GetWeights(cleanAsset, timeframe) ?? Array.Empty<double>();
+        double[] metaWeights = TradeOutcomeTracker.MetaLearner?.GetWeights(cleanAsset, timeframe) ?? [];
 
         string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taDetail);
         string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
