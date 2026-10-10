@@ -746,9 +746,11 @@ async def predict(request: Request):
     raw_body = await request.body()
     data = orjson.loads(raw_body)
     
-    symbol = data["symbol"]
-    interval_raw = data["interval"]
-    candles = data["candles"]
+    symbol = data.get("symbol") or data.get("asset")
+    if not symbol:
+        raise HTTPException(status_code=422, detail="Missing required field: 'symbol' or 'asset'")
+    interval_raw = data.get("interval") or data.get("timeframe") or "1m"
+    candles = data.get("candles") or []
     mtf_candles = data.get("mtf_candles")
     is_forex = data.get("is_forex", False)
 
