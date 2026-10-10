@@ -13,6 +13,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Polly;
 using Polly.Retry;
+using Prometheus;
 using ValutaBot.App.MiniApp.Models;
 
 namespace ValutaBot.MiniApp;
@@ -229,6 +230,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
             await next();
         });
 
+        app.UseHttpMetrics();
         app.UseRateLimiter();
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
 

@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Prometheus;
 using ValutaBot.App.MiniApp.Models;
 
 namespace ValutaBot.MiniApp;
@@ -14,6 +15,8 @@ public static partial class MiniAppController
 {
     public static void RegisterRoutes(WebApplication app)
     {
+        // Prometheus /metrics endpoint for Grafana, Railway, and external APM scrapers
+        app.MapMetrics();
         app.MapGet("/", async (HttpContext context) =>
         {
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -63,12 +66,14 @@ public static partial class MiniAppController
                     hc.Timeout = TimeSpan.FromSeconds(3);
                     var mlResponse = await hc.GetAsync(mlUrl);
                     bool mlIsOk = mlResponse.IsSuccessStatusCode;
+                    if (!mlIsOk) ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
                     return Results.Ok(new { status = "Healthy", db = "Ok", ml = mlIsOk ? "Ok" : "Down" });
                 }
                 return Results.Ok(new { status = "Healthy", db = "Ok", ml = "Unknown" });
             }
             catch (Exception ex)
             {
+                ValutaMetrics.HealthCheckFailures.WithLabels("db").Inc();
                 return Results.Json(new { status = "Unhealthy", error = ex.Message }, statusCode: 500);
             }
         });
@@ -94,8 +99,10 @@ public static partial class MiniAppController
 
             try
             {
+                using var timer = ValutaMetrics.PipelineDuration.NewTimer();
                 var orchestrator = context.RequestServices.GetRequiredService<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator>();
                 var result = await orchestrator.ExecuteAnalysisAsync(assetTrimmed, tf, userSettings);
+                ValutaMetrics.PredictionsTotal.WithLabels(assetTrimmed, tf, result.direction ?? "UNKNOWN", result.lgbmModelVersion ?? "NONE").Inc();
                 // result is now a strongly-typed AnalysisResponseDto — read fields directly, no JSON parsing needed
                 double confidence = Math.Clamp(result.lgbmConfidence / 100.0, 0.0, 1.0);
                 double variance   = 0.0; // not currently in DTO; reserved for future

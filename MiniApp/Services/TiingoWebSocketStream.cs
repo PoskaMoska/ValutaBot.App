@@ -247,6 +247,7 @@ public static class TiingoWebSocketStream
                         if (midPrice > 0)
                         {
                             _livePrices[ticker] = midPrice;
+                            ValutaMetrics.WebSocketTicksTotal.WithLabels(ticker).Inc();
                             long tickTimeUtc = DateTime.UtcNow.Ticks;
                             if (DateTime.TryParse(dateStr, null, System.Globalization.DateTimeStyles.AdjustToUniversal, out var dt))
                             {
