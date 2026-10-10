@@ -330,14 +330,16 @@ public static partial class MiniAppController
         {
             var query = context.Request.Query;
             
-            // SECURITY: Verify Postback Secret
-            string expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET") ?? Guid.NewGuid().ToString();
-            string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
-            
-            if (string.IsNullOrEmpty(providedSecret) || providedSecret != expectedSecret)
+            // SECURITY: Verify Postback Secret (if configured in environment)
+            string? expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET");
+            if (!string.IsNullOrWhiteSpace(expectedSecret))
             {
-                BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
-                return Results.Unauthorized();
+                string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
+                if (providedSecret != expectedSecret)
+                {
+                    BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
+                    return Results.Unauthorized();
+                }
             }
 
             string pocketId = query.TryGetValue("pocketId", out var pVal) ? pVal.ToString().Trim() : "";
