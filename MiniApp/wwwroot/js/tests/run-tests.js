@@ -42,6 +42,17 @@ const html = `
     <div id="consensusRadarCard">
         <!-- The elements above are actually inside here in real UI, but for tests just having it exist is enough -->
     </div>
+    <div id="aiCopilotCard" style="display:none;">
+        <div id="copilotFocusDot"></div>
+        <div id="copilotFocusText"></div>
+        <div id="copilotHeadline"></div>
+        <div id="copilotMessage"></div>
+        <div id="copilotActionWrap" style="display:none;">
+            <button id="copilotActionBtn">
+                <span id="copilotActionLabel"></span>
+            </button>
+        </div>
+    </div>
     <button id="btnGet"></button>
     <div id="mainSphere"></div>
     <div id="errorDisplay"></div>
@@ -78,7 +89,15 @@ const mockBackendResponse = {
         smcDirection: "PUT",
         smcConfidence: 65,
         ofDirection: "NEUTRAL",
-        ofConfidence: 0
+        ofConfidence: 0,
+        copilotAdvice: {
+            status: "GOLDEN",
+            title: "🏆 Идеальное совпадение таймфреймов (Golden Setup)",
+            message: "Младший и старший тренды синхронизированы.",
+            recommendedAsset: "EUR/USD OTC",
+            recommendedTf: "M1",
+            qualityScore: 95
+        }
     },
     config: { ml: true, smc: true, of: true }
 };
@@ -95,6 +114,21 @@ window.tg = null;
 window.getCustomInitData = () => "";
 window.currentAsset = "EUR/USD OTC";
 window.currentTf = "m1";
+window.applyCopilotRecommendation = () => {};
+
+// Load UI functions from ui.js
+try {
+    let transformedUiCode = uiJsCode
+        .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?/g, '/* mocked import */')
+        .replace(/export\s+(async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(/g, 'window.$2 = $1function(')
+        .replace(/export\s+const\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
+        .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =');
+    window.eval(transformedUiCode);
+} catch (e) {
+    console.error("UI setup error:", e);
+}
+
+// Override canvas and heavy visual mocks for headless testing
 window.switchResultTab = () => {};
 window.updateTrafficLight = () => {};
 window.pricesToBars = () => [];
@@ -105,14 +139,13 @@ window.renderMiniChart = () => {};
 window.flashResults = () => {};
 window.stopStatusBar = () => {};
 window.hideAiChart = () => {};
-window.parseMd = (s) => s;
-// Added missing mocks
-window.renderError = (msg, catchMsg) => { console.error("renderError called:", msg, catchMsg); };
-window.clearResults = () => {};
-window.startStatusBar = () => {};
 window.showAiChart = () => {};
 window.updateAiChartData = () => {};
 window.updateLivePriceUI = () => {};
+window.parseMd = (s) => s;
+window.renderError = (msg, catchMsg) => { console.error("renderError called:", msg, catchMsg); };
+window.clearResults = () => {};
+window.startStatusBar = () => {};
 window.requestAnimationFrame = (cb) => {
     return setTimeout(cb, 16);
 };
@@ -137,7 +170,7 @@ try {
 
 async function runTest() {
     let passed = 0;
-    let total = 16; // 14 for success, 2 for error
+    let total = 19; // 17 for success, 2 for error
 
     function assertEq(name, actual, expected) {
         if (actual === expected) {
@@ -179,6 +212,9 @@ async function runTest() {
     assertEq("SMC Radar is PUT", getVal('radarSmc').includes('ВНИЗ (65%)'), true);
     assertEq("OrderFlow Radar is DISABLED", getVal('radarOf') === '', true);
     assertEq("Confluence Card display", document.getElementById('confluenceCard').style.display, 'block');
+    assertEq("AI Copilot Card display", document.getElementById('aiCopilotCard').style.display, 'block');
+    assertEq("AI Copilot Headline matches", getVal('copilotHeadline'), '🏆 Идеальное совпадение таймфреймов (Golden Setup)');
+    assertEq("AI Copilot Action Wrap visible", document.getElementById('copilotActionWrap').style.display, 'block');
 
 
     // --- SCENARIO 2: Error 500 ---
@@ -205,6 +241,7 @@ async function runTest() {
 
     console.log(`\nTests completed: ${passed}/${total} passed.`);
     if (passed !== total) process.exit(1);
+    process.exit(0);
 }
 
 // Intercept window errors

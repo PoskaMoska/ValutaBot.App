@@ -1,5 +1,5 @@
-import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20260922_1';
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20260922_1';
+import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20261011_copilot';
+import { switchResultTab, updateTrafficLight } from './ui.js?v=20261011_copilot';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
@@ -102,6 +102,40 @@ function setTf(el) {
     initPriceWebSocket();
     resetSignalKey();
 }
+
+export function applyCopilotRecommendation(rec) {
+    if (!rec) return;
+    if (rec.asset) {
+        const item = document.querySelector(`.asset-item[data-asset="${rec.asset}"]`);
+        if (item) {
+            setAsset(item);
+        } else {
+            currentAsset = rec.asset;
+            const selEl = document.getElementById('selectedAsset');
+            if (selEl) selEl.innerText = rec.asset;
+            initPriceWebSocket();
+            resetSignalKey();
+        }
+    }
+    if (rec.tf) {
+        const tfUpper = rec.tf.toUpperCase();
+        const tfItem = document.querySelector(`.tf-btn[data-tf="${tfUpper}"]`) ||
+                       document.querySelector(`.tf-btn[data-tf="${rec.tf.toLowerCase()}"]`);
+        if (tfItem) {
+            setTf(tfItem);
+        } else {
+            currentTf = rec.tf.toLowerCase();
+            const selEl = document.getElementById('selectedTf');
+            if (selEl) selEl.innerText = tfUpper;
+            initPriceWebSocket();
+            resetSignalKey();
+        }
+    }
+    setTimeout(() => {
+        executeAnalysis();
+    }, 250);
+}
+
 
 function handleGlobalInteraction(e) {
     const target = e.target;

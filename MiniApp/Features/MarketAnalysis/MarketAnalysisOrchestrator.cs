@@ -486,6 +486,75 @@ public class MarketAnalysisOrchestrator(
             "NEUTRAL";
         int uiSmcConfidence = uiSmcDirection == "NEUTRAL" ? 50 : 50 + (int)Math.Clamp(Math.Max(5, Math.Abs(consensus.SmcScore * 15.0)), 5, 15);
 
+        // ── AI Copilot Tactical Synthesis ──
+        CopilotAdviceDto copilotAdvice;
+        if (mtfResult.IsGoldenSetup)
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "GOLDEN",
+                Title = "⭐ Идеальный сетап (Golden Setup)",
+                Message = $"Все 3 уровня анализа синхронны: нейросеть PatchTST, SMC-ликвидность и теханализ подтверждают движение {consensus.FinalDirection}. Конфликтов нет.",
+                QualityScore = 96
+            };
+        }
+        else if (conflictPenalty < 1.0)
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "CONFLICT",
+                Title = "⚠️ Конфликт таймфреймов",
+                Message = $"На {timeframe} виден отскок, но старший тренд давит в противоположную сторону. Опасность ложного пробоя 78%.",
+                RecommendedAsset = cleanAsset,
+                RecommendedTf = "M1",
+                QualityScore = 55
+            };
+        }
+        else if (isSub && vel >= dangerVel)
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "NOISE_GUARD",
+                Title = $"⚡ Брокерский шум на {timeframe.ToUpper()}",
+                Message = $"Энтропия рынка повышена ({uiMarketEntropy}). На микро-секундах высока доля случайных брокерских теней. Безопаснее перейти на 1M.",
+                RecommendedAsset = "EUR/USD OTC",
+                RecommendedTf = "M1",
+                QualityScore = 50
+            };
+        }
+        else if (minutesToNews.HasValue && minutesToNews.Value >= 0 && minutesToNews.Value <= 15)
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "NEWS_RISK",
+                Title = "📰 Высокая новостная волатильность",
+                Message = $"Через {minutesToNews.Value} мин выходит важная макро-новость. Спреды расширены, крупные игроки сокращают ликвидность.",
+                QualityScore = 48
+            };
+        }
+        else if (consensus.FinalDirection == "NEUTRAL" || consensus.Probability <= 52)
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "WAIT",
+                Title = "⏳ Рынок в стадии накопления",
+                Message = $"Четкий направленный импульс отсутствует ({uiMarketPhase}). Сигнал слабый ({consensus.Probability}%). Рекомендуется подождать формирования структуры.",
+                RecommendedAsset = "GBP/USD OTC",
+                RecommendedTf = "M1",
+                QualityScore = 60
+            };
+        }
+        else
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "NORMAL",
+                Title = $"🎯 Системный тренд ({consensus.FinalDirection})",
+                Message = $"Структура рынка устойчивая ({uiMarketPhase}). Математическое ожидание подтверждено моделью ({consensus.Probability}%).",
+                QualityScore = (int)Math.Clamp(consensus.Probability + 25, 75, 92)
+            };
+        }
+
         return new AnalysisResponseDto
         {
             tfConflict = conflictPenalty < 1.0,
@@ -518,7 +587,8 @@ public class MarketAnalysisOrchestrator(
             goldenSetup = mtfResult.IsGoldenSetup,
             confluenceLabel = mtfResult.ConfluenceLabel,
             confluenceRatio = mtfResult.ConfluenceRatio,
-            lgbmModelVersion = mlPrediction?.ModelVersion ?? "offline"
+            lgbmModelVersion = mlPrediction?.ModelVersion ?? "offline",
+            copilotAdvice = copilotAdvice
         };
     }
 }

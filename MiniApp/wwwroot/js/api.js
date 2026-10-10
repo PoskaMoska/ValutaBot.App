@@ -1,5 +1,5 @@
-import { tg, currentAsset, currentTf, getCustomInitData } from './main.js?v=20260922_1';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData } from './ui.js?v=20260922_1';
+import { tg, currentAsset, currentTf, getCustomInitData, applyCopilotRecommendation } from './main.js?v=20261011_copilot';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData, updateAiCopilot } from './ui.js?v=20261011_copilot';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -473,6 +473,11 @@ export async function executeAnalysis() {
             // fallback to legacy price bars for old backend responses.
             if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);
             else if (durBars.length) renderMiniChart('durChart', durBars, '');
+
+            // AI Copilot Tactical Intelligence
+            updateAiCopilot(data, (rec) => {
+                applyCopilotRecommendation(rec);
+            });
 
             const tabReg = document.getElementById('resultsTabBar');
             if (tabReg) tabReg.style.display = 'flex';

@@ -45,4 +45,17 @@ public record AnalysisResponseDto
     // These fields are optionally present when ML responds with reasoning
     public string? llmReport { get; init; }
     public string? lgbmModelVersion { get; init; }
+    
+    // AI Copilot Quantum Intelligence Advice
+    public CopilotAdviceDto? copilotAdvice { get; init; }
+}
+
+public record CopilotAdviceDto
+{
+    public string Status { get; init; } = "NORMAL"; // GOLDEN, CONFLICT, NOISE_GUARD, NEWS_RISK, WAIT, NORMAL
+    public string Title { get; init; } = "";
+    public string Message { get; init; } = "";
+    public string? RecommendedAsset { get; init; }
+    public string? RecommendedTf { get; init; }
+    public int QualityScore { get; init; } = 85;
 }

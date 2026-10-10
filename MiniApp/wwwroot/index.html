@@ -19,7 +19,7 @@
             });
         }
     </script>
-    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="/css/style.css?v=20261011_copilot">
 </head>
 <body>
 
@@ -165,6 +165,33 @@
             </div>
         </div>
 
+        <!-- AI COPILOT TACTICAL CARD -->
+        <div class='ai-copilot-card' id='aiCopilotCard' style='display:none;'>
+            <div class='copilot-header'>
+                <div class='copilot-badge-wrap'>
+                    <span class='copilot-icon'>🧠</span>
+                    <span class='copilot-title'>AI Ко-пилот</span>
+                </div>
+                <div class='copilot-focus' id='copilotFocusBadge'>
+                    <span class='focus-dot' id='copilotFocusDot'></span>
+                    <span class='focus-text' id='copilotFocusText'>Фокус: 95%</span>
+                </div>
+            </div>
+            
+            <div class='copilot-body'>
+                <div class='copilot-headline' id='copilotHeadline'>--</div>
+                <div class='copilot-text' id='copilotMessage'>--</div>
+            </div>
+
+            <!-- Quick Action / Recommendation Button -->
+            <div class='copilot-action-wrap' id='copilotActionWrap' style='display:none;'>
+                <button class='copilot-action-btn' id='copilotActionBtn'>
+                    <span class='action-icon'>🎯</span>
+                    <span class='action-label' id='copilotActionLabel'>Переключить на EUR/USD (1M)</span>
+                </button>
+            </div>
+        </div>
+
         <!-- Tab Bar removed by user request so all info is on one screen -->
 
         <!-- ═══ TAB: ИИ Аналитика ═══ -->
@@ -282,6 +309,6 @@
         </div>
     </div>
     
-    <script type="module" src="/js/main.js?v=20260922_1"></script>
+    <script type="module" src="/js/main.js?v=20261011_copilot"></script>
 </body>
 </html>

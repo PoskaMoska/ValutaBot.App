@@ -1,4 +1,4 @@
-import { lastPriceVal } from './api.js?v=20260922_1';
+import { lastPriceVal } from './api.js?v=20261011_copilot';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');
@@ -56,6 +56,7 @@ export function clearResults() {
     safeSetHtml('durChart', '');
     safeSetStyle('resultsTabBar', 'display', 'none');
     safeSetStyle('resultsGrid', 'display', 'none');
+    safeSetStyle('aiCopilotCard', 'display', 'none');
     safeSetStyle('tabContentAI', 'display', 'none');
     safeSetStyle('mlEnsembleCard', 'display', 'none');
     safeSetStyle('confluenceCard', 'display', 'none');
@@ -515,3 +516,128 @@ function renderAiChartLoop() {
     ctx.restore();
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
 }
+
+// Session psychometrics tracker
+let lastAnalysisTimestamp = 0;
+let recentAnalysisCount = 0;
+let analysisCountResetTimer = null;
+
+export function getSessionPsychometrics() {
+    const now = Date.now();
+    let speedPenalty = 0;
+    
+    if (lastAnalysisTimestamp > 0) {
+        const deltaSec = (now - lastAnalysisTimestamp) / 1000;
+        if (deltaSec < 12) {
+            speedPenalty += 25; // impulsive clicking / tilt risk
+        } else if (deltaSec < 25) {
+            speedPenalty += 10;
+        }
+    }
+    
+    recentAnalysisCount++;
+    if (analysisCountResetTimer) clearTimeout(analysisCountResetTimer);
+    analysisCountResetTimer = setTimeout(() => {
+        recentAnalysisCount = 0;
+    }, 60000);
+    
+    if (recentAnalysisCount > 5) {
+        speedPenalty += 15; // overtrading
+    }
+
+    lastAnalysisTimestamp = now;
+    return { speedPenalty };
+}
+
+export function updateAiCopilot(data, onActionCallback) {
+    const card = document.getElementById('aiCopilotCard');
+    if (!card) return;
+
+    if (!data || !data.copilotAdvice) {
+        card.style.display = 'none';
+        return;
+    }
+
+    const advice = data.copilotAdvice;
+    card.style.display = 'block';
+
+    const psycho = getSessionPsychometrics();
+    const baseScore = advice.qualityScore || 85;
+    const focusScore = Math.max(30, Math.min(99, baseScore - psycho.speedPenalty));
+
+    const focusDot = document.getElementById('copilotFocusDot');
+    const focusText = document.getElementById('copilotFocusText');
+    if (focusText) {
+        focusText.innerText = `Фокус: ${focusScore}%`;
+    }
+    if (focusDot) {
+        if (focusScore >= 80) {
+            focusDot.style.background = '#10b981';
+            focusDot.style.boxShadow = '0 0 8px #10b981';
+        } else if (focusScore >= 60) {
+            focusDot.style.background = '#f59e0b';
+            focusDot.style.boxShadow = '0 0 8px #f59e0b';
+        } else {
+            focusDot.style.background = '#ef4444';
+            focusDot.style.boxShadow = '0 0 8px #ef4444';
+        }
+    }
+
+    card.classList.remove('state-golden', 'state-danger', 'state-caution');
+    if (advice.status === 'GOLDEN') {
+        card.classList.add('state-golden');
+    } else if (advice.status === 'NOISE_GUARD' || advice.status === 'CONFLICT' || advice.status === 'NEWS_RISK' || psycho.speedPenalty >= 25) {
+        card.classList.add('state-danger');
+    } else if (advice.status === 'WAIT') {
+        card.classList.add('state-caution');
+    }
+
+    const headlineEl = document.getElementById('copilotHeadline');
+    if (headlineEl) {
+        if (psycho.speedPenalty >= 25) {
+            headlineEl.innerText = '⚠️ Внимание: Высокая частота входов (Тильт-контроль)';
+        } else {
+            headlineEl.innerText = advice.title || 'Рекомендация Ко-пилота';
+        }
+    }
+
+    const msgEl = document.getElementById('copilotMessage');
+    if (msgEl) {
+        if (psycho.speedPenalty >= 25) {
+            msgEl.innerText = `Ты делаешь частые запросы с интервалом менее 12 сек. Вход на эмоциях без паузы приводит к сливу в 78% случаев. ${advice.message}`;
+        } else {
+            msgEl.innerText = advice.message || '';
+        }
+    }
+
+    const actionWrap = document.getElementById('copilotActionWrap');
+    const actionBtn = document.getElementById('copilotActionBtn');
+    const actionLabel = document.getElementById('copilotActionLabel');
+
+    if (actionWrap && actionBtn && (advice.recommendedAsset || advice.recommendedTf)) {
+        actionWrap.style.display = 'block';
+        const targetAsset = advice.recommendedAsset;
+        const targetTf = advice.recommendedTf;
+        let btnText = '🎯 ';
+        if (targetAsset && targetTf) {
+            btnText += `Переключить на ${targetAsset} (${targetTf.toUpperCase()})`;
+        } else if (targetAsset) {
+            btnText += `Переключить на ${targetAsset}`;
+        } else if (targetTf) {
+            btnText += `Переключить на ${targetTf.toUpperCase()}`;
+        }
+
+        if (actionLabel) actionLabel.innerText = btnText;
+
+        const newBtn = actionBtn.cloneNode(true);
+        actionBtn.parentNode.replaceChild(newBtn, actionBtn);
+        newBtn.addEventListener('click', () => {
+            if (typeof onActionCallback === 'function') {
+                onActionCallback({ asset: targetAsset, tf: targetTf });
+            }
+        });
+    } else if (actionWrap) {
+        actionWrap.style.display = 'none';
+    }
+}
+
