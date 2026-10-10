@@ -604,6 +604,10 @@ def _candles_to_dicts(items: list[CandleItem]) -> list[dict]:
 # │ Routes                                                                 │
 # └────────────────────────────────────────────────────────────────────────┘
 
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "ml_service"}
+
 @app.get("/health")
 def health():
     uptime = round(time.time() - START_TIME)

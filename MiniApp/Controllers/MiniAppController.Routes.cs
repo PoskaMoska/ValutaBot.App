@@ -65,13 +65,14 @@ public static partial class MiniAppController
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 await Dapper.SqlMapper.QueryFirstOrDefaultAsync<int>(conn, "SELECT 1");
 
-                // 2. Проверяем ML сервис (просто пинг базового урла)
+                // 2. Проверяем ML сервис (просто пинг /health)
                 var mlUrl = app.Configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
                 var hc = HttpFactory?.CreateClient();
                 if (hc != null)
                 {
                     hc.Timeout = TimeSpan.FromSeconds(3);
-                    var mlResponse = await hc.GetAsync(mlUrl);
+                    var mlHealthUrl = $"{mlUrl.TrimEnd('/')}/health";
+                    var mlResponse = await hc.GetAsync(mlHealthUrl);
                     bool mlIsOk = mlResponse.IsSuccessStatusCode;
                     if (!mlIsOk) ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
                     return Results.Ok(new { status = "Healthy", db = "Ok", ml = mlIsOk ? "Ok" : "Down" });
