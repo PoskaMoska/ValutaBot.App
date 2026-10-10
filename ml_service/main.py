@@ -802,25 +802,8 @@ async def predict(request: Request):
     candle_dicts = candles
     mtf_candle_dicts = mtf_candles
     
-    # Determine current market regime using GMM
-    regime = "ALL"
-    try:
-        from features import build_features
-        from model import get_regime_router
-        
-        # C# already drops the actively forming unclosed candle before sending the payload.
-        # We use the payload directly to avoid double-dropping and Train-Serve skew.
-        closed_candles = candle_dicts
-        closed_mtf = mtf_candle_dicts
-        
-        feats = build_features(closed_candles, closed_mtf)
-        if not feats.empty:
-            router = get_regime_router(symbol, interval)
-            regime = router.predict_live(feats.iloc[-10:])
-    except Exception as e:
-        log.error(f"[Predict] Failed to calc regime, fallback to ALL: {e}")
-
-    # --- SOTA Neural Brain (PatchTST-Lite): Dual-Stream Sequence Transformer ---
+    # --- Fast-Path: SOTA Neural Brain (PatchTST-Lite): Dual-Stream Sequence Transformer ---
+    # Runs in ~50ms using direct numpy normalization, avoiding slow 100+ pandas indicator calculations.
     try:
         from models.patch_tst_predictor import PatchTSTPredictor
         patch_predictor = PatchTSTPredictor.get_instance()
@@ -852,6 +835,25 @@ async def predict(request: Request):
                 return Response(content=orjson.dumps(resp), media_type="application/json")
     except Exception as e:
         log.warning(f"[Predict] Neural Brain execution error, falling back to LightGBM: {e}")
+
+    # --- Fallback: LightGBM Predictor with GMM Regime Router ---
+    # Only executed if PatchTST is unavailable or failed.
+    regime = "ALL"
+    try:
+        from features import build_features
+        from model import get_regime_router
+        
+        # C# already drops the actively forming unclosed candle before sending the payload.
+        # We use the payload directly to avoid double-dropping and Train-Serve skew.
+        closed_candles = candle_dicts
+        closed_mtf = mtf_candle_dicts
+        
+        feats = build_features(closed_candles, closed_mtf)
+        if not feats.empty:
+            router = get_regime_router(symbol, interval)
+            regime = router.predict_live(feats.iloc[-10:])
+    except Exception as e:
+        log.error(f"[Predict] Failed to calc regime, fallback to ALL: {e}")
 
     # Primary predictor: The clean, high-capacity Dual-Scale master model (ALL)
     predictor = _get_predictor(symbol, interval, "ALL")
