@@ -474,6 +474,18 @@ public class MarketAnalysisOrchestrator(
         if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
         else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
 
+        string uiSmcDirection = 
+            (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
+            (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 
+            (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : 
+            (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : 
+            (smcSignal.OrderBlockType ?? "").Contains("BULLISH") ? "BUY" : 
+            (smcSignal.OrderBlockType ?? "").Contains("BEARISH") ? "PUT" : 
+            (smcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
+            (smcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
+            "NEUTRAL";
+        int uiSmcConfidence = uiSmcDirection == "NEUTRAL" ? 50 : 50 + (int)Math.Clamp(Math.Max(5, Math.Abs(consensus.SmcScore * 15.0)), 5, 15);
+
         return new AnalysisResponseDto
         {
             tfConflict = conflictPenalty < 1.0,
@@ -489,17 +501,8 @@ public class MarketAnalysisOrchestrator(
             taConfidence = 50 + (int)Math.Clamp(Math.Abs(consensus.TaScore * 15.0), 0, 15),
             ofDirection = "NEUTRAL",
             ofConfidence = 0,
-            smcDirection = 
-                (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 
-                (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : 
-                (smcSignal.OrderBlockType ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.OrderBlockType ?? "").Contains("BEARISH") ? "PUT" : 
-                (smcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
-                (smcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
-                "NEUTRAL",
-            smcConfidence = 50 + (int)Math.Clamp(Math.Abs(consensus.SmcScore * 15.0), 0, 15),
+            smcDirection = uiSmcDirection,
+            smcConfidence = uiSmcConfidence,
             lgbmDirection = mlSignal.Direction,
             lgbmConfidence = (int)Math.Clamp(Math.Round(mlSignal.Confidence * 100), 50, 65),
             winRateOverall = stats.WinRate,
@@ -514,7 +517,8 @@ public class MarketAnalysisOrchestrator(
             chartOhlc = candles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
             goldenSetup = mtfResult.IsGoldenSetup,
             confluenceLabel = mtfResult.ConfluenceLabel,
-            confluenceRatio = mtfResult.ConfluenceRatio
+            confluenceRatio = mtfResult.ConfluenceRatio,
+            lgbmModelVersion = mlPrediction?.ModelVersion ?? "offline"
         };
     }
 }

@@ -333,10 +333,15 @@ public class ConfluenceMatrixEngine(
         double ofScore = 0.0;
 
         double smcScore = 0;
-        if (smcSignal.BosDirection == "BULLISH_BOS") smcScore += 0.5;
-        if (smcSignal.BosDirection == "BEARISH_BOS") smcScore -= 0.5;
-        if (smcSignal.SweepDirection == "BULLISH_SWEEP") smcScore += 0.5;
-        if (smcSignal.SweepDirection == "BEARISH_SWEEP") smcScore -= 0.5;
+        if ((smcSignal.BosDirection ?? "").Contains("BULLISH")) smcScore += 0.5;
+        if ((smcSignal.BosDirection ?? "").Contains("BEARISH")) smcScore -= 0.5;
+        if ((smcSignal.SweepDirection ?? "").Contains("BULLISH")) smcScore += 0.5;
+        if ((smcSignal.SweepDirection ?? "").Contains("BEARISH")) smcScore -= 0.5;
+        if ((smcSignal.OrderBlockType ?? "").Contains("BULLISH")) smcScore += 0.25;
+        if ((smcSignal.OrderBlockType ?? "").Contains("BEARISH")) smcScore -= 0.25;
+        if ((smcSignal.FvgType ?? "").Contains("BULLISH")) smcScore += 0.25;
+        if ((smcSignal.FvgType ?? "").Contains("BEARISH")) smcScore -= 0.25;
+        smcScore = Math.Clamp(smcScore, -1.0, 1.0);
 
         double rawProb = mlSignal.RawConfidence ?? (mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? (1.0 - mlSignal.Confidence) : 0.5));
         double mlScore = (rawProb - 0.5) * 2.0; // Smooth scaling [-1.0, 1.0]

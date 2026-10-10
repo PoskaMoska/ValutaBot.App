@@ -135,15 +135,16 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("MLPythonService", client => 
         {
+            client.Timeout = TimeSpan.FromSeconds(15);
         }).AddStandardResilienceHandler(options =>
         {
             options.Retry.MaxRetryAttempts = 1;
-            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(botSettings.FastFailTimeoutSeconds);
-            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(botSettings.FastFailTimeoutSeconds + 1);
-            options.CircuitBreaker.SamplingDuration          = TimeSpan.FromSeconds(15);
-            options.CircuitBreaker.MinimumThroughput         = 3;
-            options.CircuitBreaker.FailureRatio              = 0.5;
-            options.CircuitBreaker.BreakDuration             = TimeSpan.FromSeconds(30);
+            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(Math.Max(6, botSettings.FastFailTimeoutSeconds));
+            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(Math.Max(12, botSettings.FastFailTimeoutSeconds * 2));
+            options.CircuitBreaker.SamplingDuration          = TimeSpan.FromSeconds(30);
+            options.CircuitBreaker.MinimumThroughput         = 5;
+            options.CircuitBreaker.FailureRatio              = 0.7;
+            options.CircuitBreaker.BreakDuration             = TimeSpan.FromSeconds(15);
         });
         builder.Services.AddHttpClient("Telegram", client => 
         {
