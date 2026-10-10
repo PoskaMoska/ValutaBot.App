@@ -5,6 +5,20 @@
     <meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>
     <title>TradeBE Бот Анализа</title>
     <script src='https://telegram.org/js/telegram-web-app.js'></script>
+    <!-- Sentry Error & Performance Tracking -->
+    <script src="https://browser.sentry-cdn.com/8.54.0/bundle.min.js" crossorigin="anonymous"></script>
+    <script>
+        if (window.Sentry) {
+            Sentry.init({
+                dsn: "https://03c95800849404ee0cc543ddd1d4192a@o4512228571611136.ingest.de.sentry.io/4512228593303632",
+                environment: "production",
+                tracesSampleRate: 0.1,
+                initialScope: {
+                    tags: { component: "miniapp-frontend" }
+                }
+            });
+        }
+    </script>
     <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>

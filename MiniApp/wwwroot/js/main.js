@@ -6,6 +6,15 @@ if (tg) {
     try {
         tg.expand();
         tg.ready();
+        if (window.Sentry && tg.initDataUnsafe?.user) {
+            const u = tg.initDataUnsafe.user;
+            Sentry.setUser({
+                id: String(u.id || ''),
+                username: u.username || '',
+                first_name: u.first_name || ''
+            });
+            Sentry.setTag('tg_platform', tg.platform || 'unknown');
+        }
     } catch(e) {}
 }
 

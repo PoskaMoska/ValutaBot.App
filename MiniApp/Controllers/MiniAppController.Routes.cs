@@ -49,6 +49,13 @@ public static partial class MiniAppController
             return Results.Ok(new { t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
         });
 
+        // Sentry verification test endpoint (captures a test event in Sentry)
+        app.MapGet("/api/sentry-test", () =>
+        {
+            var eventId = Sentry.SentrySdk.CaptureMessage("ValutaBot Sentry Production Verification Test", Sentry.SentryLevel.Info);
+            return Results.Ok(new { status = "Event emitted to Sentry", eventId = eventId.ToString() });
+        });
+
         // SELF-HEALING: Endpoint Здоровья для Railway
         app.MapGet("/api/health", async (HttpContext context) =>
         {

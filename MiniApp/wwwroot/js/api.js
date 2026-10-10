@@ -488,5 +488,15 @@ export async function executeAnalysis() {
         btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';
         const catchMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${window.location.href}`;
         renderError(e.message, catchMsg);
+        if (window.Sentry) {
+            Sentry.captureException(e, {
+                extra: {
+                    asset: currentAsset,
+                    tf: currentTf,
+                    platform: tg ? tg.platform : 'unknown',
+                    tokenLength: tg && tg.initData ? tg.initData.length : 0
+                }
+            });
+        }
     }
 }
