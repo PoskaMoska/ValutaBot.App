@@ -24,17 +24,13 @@
   <ItemGroup>
     <Compile Remove="Tests\**" />
     <Compile Remove="Benchmarks\**" />
-    <Compile Remove="RefactorTool\**" />
     <Content Remove="Tests\**" />
     <Content Remove="Benchmarks\**" />
-    <Content Remove="RefactorTool\**" />
     <None Remove="Tests\**" />
     <None Remove="Benchmarks\**" />
-    <None Remove="RefactorTool\**" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.89" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.8.0" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Polly" Version="8.5.2" />

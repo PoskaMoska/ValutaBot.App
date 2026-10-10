@@ -1,5 +1,12 @@
+# Build output & binaries
 bin/
 obj/
+out/
+test_out/
+test_out2/
+scratch*/
+RefactorTool/
+
 *.user
 *.suo
 *.DotSettings
@@ -11,18 +18,25 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
 # Trained ML model files — track production _v2.pkl models
 *.pkl
 !ml_service/data/models/*_v2.pkl
+
+# Logs
 retrain_v3.log
+server_logs.txt
+*.log
+Logs/
+
 .venv/
 venv/
 ValutaBot.db
 app.db
+*.db
+!ml_service/data/models/*.db
 
 _Archive_Scripts/
-Logs/
-ml_service/data/ValutaTicks.db
 
 # Dependencies
 node_modules/
