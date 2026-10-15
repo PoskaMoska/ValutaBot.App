@@ -1,19 +1,26 @@
 """
-train_brain.py - Offline Training & Validation Pipeline for SequenceBrain (V3)
+train_brain.py - Production-Ready Training & Calibration Pipeline for Temporal Brains (V3)
 
-Trains the PyTorch Hybrid Temporal Brain on exported dataset_v3.npz using:
+Trains PyTorch Financial Sequence Models (SequenceBrain and DualStreamPatchBrain) on dataset_v3.npz using:
 - Chronological Time-Series Train / Validation Split (Strictly no future lookahead)
-- Class-Balanced Focal Loss / Weighted Cross-Entropy (Handles heavy HOLD noise)
-- Multi-task Regularization (Auxiliary PnL regression)
-- Metric Tracking:
-  - Selective WinRate @ Confidence Threshold (>= 60%, >= 70%)
-  - Precision / Recall / F1 on directional trades (BUY / PUT)
-  - Loss & Accuracy
-- Model checkpointing to ml_service/models/sequence_brain_v3.pt
+- Class-Balanced Focal Loss with Label Smoothing (Handles heavy HOLD noise & prevents overconfidence)
+- Multi-Task Regularization (Auxiliary continuous PnL regression)
+- OneCycleLR Learning Rate Scheduler for fast and stable convergence
+- Dynamic Weight Decay Scheduling (higher early, lower late)
+- Gradient Accumulation for effective large batches on resource-constrained GPUs
+- Mixed Precision (torch.amp) with automatic CUDA detection
+- Early Stopping (patience=5 epochs, monitoring validation loss)
+- Post-Training Temperature Scaling Calibration (optimizing NLL loss on validation set)
+- Comprehensive Metric Tracking:
+  - Expected Calibration Error (ECE)
+  - Per-class Precision, Recall, and F1
+  - Directional Trade WinRates at confidence cutoffs (50%, 55%, 60%, 65%, 70%)
+- Checkpoint persistence containing model weights, calibrated temperature, and validation stats
 """
 
 import os
 import sys
+import math
 import argparse
 import numpy as np
 import torch
@@ -29,103 +36,259 @@ if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
 from models.sequence_brain import SequenceBrain
+from models.patch_tst_brain import DualStreamPatchBrain
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0):
+    """
+    Multi-class Focal Loss with optional class weighting (alpha) and label smoothing.
+    Addresses class imbalance (HOLD dominance) while regularizing overconfident logits.
+    """
+    def __init__(self, alpha=None, gamma=2.0, label_smoothing=0.05):
         super().__init__()
         self.alpha = alpha  # tensor of shape [C]
         self.gamma = gamma
+        self.label_smoothing = label_smoothing
 
     def forward(self, inputs, targets):
         # inputs: [B, C], targets: [B]
-        ce_loss = F.cross_entropy(inputs, targets, reduction="none")
-        pt = torch.exp(-ce_loss)  # probability of true class
-        focal_loss = ((1.0 - pt) ** self.gamma) * ce_loss
-        
+        num_classes = inputs.size(-1)
+        log_p = F.log_softmax(inputs, dim=-1)
+        p = torch.exp(log_p)
+
+        # Focal modulation factor: (1 - p_t)^gamma
+        focal_weight = (1.0 - p) ** self.gamma
+
         if self.alpha is not None:
-            at = self.alpha.gather(0, targets)
-            focal_loss = at * focal_loss
-            
-        return focal_loss.mean()
+            focal_weight = focal_weight * self.alpha.unsqueeze(0)
+
+        # Label smoothing target distribution
+        one_hot = torch.zeros_like(inputs).scatter_(1, targets.unsqueeze(1), 1.0)
+        if self.label_smoothing > 0.0:
+            targets_smooth = one_hot * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
+        else:
+            targets_smooth = one_hot
+
+        loss = - (targets_smooth * focal_weight * log_p).sum(dim=-1)
+        return loss.mean()
 
 
-def evaluate(model, loader, device, conf_thresholds=(0.50, 0.60, 0.70)):
+class TemperatureScaler(nn.Module):
+    """
+    Learns a scalar temperature T > 0 such that calibrated probabilities are:
+        p = softmax(logits / T)
+    Optimized via NLL on validation set post-training.
+    """
+    def __init__(self, init_temp=1.0):
+        super().__init__()
+        self.log_temp = nn.Parameter(torch.tensor([math.log(init_temp)], dtype=torch.float32))
+
+    @property
+    def temperature(self):
+        return torch.exp(self.log_temp)
+
+    def forward(self, logits):
+        return logits / self.temperature
+
+
+def calibrate_temperature(val_logits, val_labels, max_iter=50):
+    """
+    Optimizes temperature scaling parameter on validation logits using L-BFGS.
+    """
+    val_logits = val_logits.detach()
+    val_labels = val_labels.detach()
+
+    scaler = TemperatureScaler(init_temp=1.0)
+    optimizer = torch.optim.LBFGS([scaler.log_temp], lr=0.05, max_iter=max_iter)
+
+    def eval_fn():
+        optimizer.zero_grad()
+        loss = F.cross_entropy(scaler(val_logits), val_labels)
+        loss.backward()
+        return loss
+
+    optimizer.step(eval_fn)
+    temp = float(scaler.temperature.item())
+    # Bound temperature within reasonable range [0.1, 10.0]
+    return max(0.1, min(10.0, temp))
+
+
+def compute_ece(probs, targets, n_bins=10):
+    """
+    Computes Expected Calibration Error (ECE) by partitioning predictions
+    into equally spaced confidence bins.
+    """
+    confidences = np.max(probs, axis=1)
+    predictions = np.argmax(probs, axis=1)
+    accuracies = (predictions == targets)
+
+    bin_boundaries = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+
+    for i in range(n_bins):
+        b_low, b_high = bin_boundaries[i], bin_boundaries[i + 1]
+        if i == 0:
+            in_bin = (confidences >= b_low) & (confidences <= b_high)
+        else:
+            in_bin = (confidences > b_low) & (confidences <= b_high)
+
+        prop_in_bin = np.mean(in_bin)
+        if prop_in_bin > 0:
+            accuracy_in_bin = np.mean(accuracies[in_bin])
+            avg_conf_in_bin = np.mean(confidences[in_bin])
+            ece += np.abs(avg_conf_in_bin - accuracy_in_bin) * prop_in_bin
+
+    return float(ece)
+
+
+def evaluate(
+    model,
+    loader,
+    device,
+    is_dual_stream=False,
+    temperature=1.0,
+    conf_thresholds=(0.50, 0.55, 0.60, 0.65, 0.70)
+):
+    """
+    Evaluates model performance on given DataLoader.
+    Computes loss, accuracy, ECE, per-class precision/recall/F1, and selective winrates.
+    """
     model.eval()
     total_loss = 0.0
-    all_preds = []
+    all_logits = []
     all_targets = []
-    all_probs = []
+
+    use_cuda = device.type == "cuda"
 
     with torch.no_grad():
-        for batch_xc, batch_xm, batch_y, batch_pnl in loader:
+        for batch_xc, batch_mtf, batch_xm, batch_y, batch_pnl in loader:
             batch_xc = batch_xc.to(device)
+            batch_mtf = batch_mtf.to(device)
             batch_xm = batch_xm.to(device)
             batch_y = batch_y.to(device)
 
-            logits, aux_pnl = model(batch_xc, batch_xm)
-            loss = F.cross_entropy(logits, batch_y)
+            with torch.amp.autocast(device_type=device.type, enabled=use_cuda):
+                if is_dual_stream:
+                    logits, aux_pnl = model(batch_xc, batch_mtf, batch_xm)
+                else:
+                    logits, aux_pnl = model(batch_xc, batch_xm)
+
+                loss = F.cross_entropy(logits / temperature, batch_y)
+
             total_loss += loss.item() * len(batch_y)
+            all_logits.append((logits / temperature).cpu())
+            all_targets.append(batch_y.cpu())
 
-            probs = F.softmax(logits, dim=-1)
-            preds = torch.argmax(logits, dim=-1)
+    val_logits = torch.cat(all_logits, dim=0)
+    val_targets = torch.cat(all_targets, dim=0).numpy()
+    probs = F.softmax(val_logits, dim=-1).numpy()
+    preds = np.argmax(probs, axis=-1)
 
-            all_preds.extend(preds.cpu().numpy())
-            all_targets.extend(batch_y.cpu().numpy())
-            all_probs.extend(probs.cpu().numpy())
-
-    total_samples = len(all_targets)
+    total_samples = len(val_targets)
     avg_loss = total_loss / max(1, total_samples)
+    overall_acc = np.mean(preds == val_targets) * 100.0
+    ece = compute_ece(probs, val_targets)
 
-    all_preds = np.array(all_preds)
-    all_targets = np.array(all_targets)
-    all_probs = np.array(all_probs)
-
-    overall_acc = np.mean(all_preds == all_targets) * 100.0
-
-    # Directional metrics (excluding HOLD predictions)
     stats = {
         "loss": avg_loss,
         "acc": overall_acc,
+        "ece": ece,
         "total": total_samples,
+        "logits": val_logits,
+        "targets": val_targets,
+        "probs": probs
     }
+
+    # Per-Class Precision, Recall, F1
+    for c in range(3):
+        tp = np.sum((preds == c) & (val_targets == c))
+        fp = np.sum((preds == c) & (val_targets != c))
+        fn = np.sum((preds != c) & (val_targets == c))
+
+        p = tp / max(1, tp + fp)
+        r = tp / max(1, tp + fn)
+        f1 = (2 * p * r) / max(1e-6, p + r)
+
+        stats[f"prec_{c}"] = float(p * 100.0)
+        stats[f"rec_{c}"] = float(r * 100.0)
+        stats[f"f1_{c}"] = float(f1 * 100.0)
+        stats[f"count_{c}"] = int(np.sum(val_targets == c))
+
+    # Directional trades (BUY=1 and PUT=2 combined)
+    dir_tp = np.sum(((preds == 1) & (val_targets == 1)) | ((preds == 2) & (val_targets == 2)))
+    dir_fp = np.sum(((preds == 1) & (val_targets != 1)) | ((preds == 2) & (val_targets != 2)))
+    dir_fn = np.sum(((preds == 0) & ((val_targets == 1) | (val_targets == 2))))
+    dir_p = dir_tp / max(1, dir_tp + dir_fp)
+    dir_r = dir_tp / max(1, dir_tp + dir_fn)
+    dir_f1 = (2 * dir_p * dir_r) / max(1e-6, dir_p + dir_r)
+
+    stats["dir_prec"] = float(dir_p * 100.0)
+    stats["dir_rec"] = float(dir_r * 100.0)
+    stats["dir_f1"] = float(dir_f1 * 100.0)
 
     # Selective WinRate for directional signals at various confidence cutoffs
     for th in conf_thresholds:
-        # Check if model predicted BUY (1) or PUT (2) with probability >= th
-        buy_mask = (all_probs[:, 1] >= th)
-        put_mask = (all_probs[:, 2] >= th)
-
-        # Combined directional trades
+        buy_mask = (probs[:, 1] >= th)
+        put_mask = (probs[:, 2] >= th)
         dir_mask = buy_mask | put_mask
-        n_trades = np.sum(dir_mask)
+        n_trades = int(np.sum(dir_mask))
 
         if n_trades > 0:
-            trade_preds = np.where(buy_mask[dir_mask], 1, 2)
-            trade_actuals = all_targets[dir_mask]
+            trade_preds = np.where(probs[dir_mask, 1] >= probs[dir_mask, 2], 1, 2)
+            trade_actuals = val_targets[dir_mask]
             win_rate = np.mean(trade_preds == trade_actuals) * 100.0
         else:
             win_rate = 0.0
 
-        stats[f"wr_{int(th*100)}"] = win_rate
-        stats[f"n_{int(th*100)}"] = int(n_trades)
+        stats[f"wr_{int(th * 100)}"] = float(win_rate)
+        stats[f"n_{int(th * 100)}"] = int(n_trades)
 
     return stats
 
 
+def get_weight_decay(epoch, total_epochs, start_wd=1e-3, min_wd=1e-5):
+    """
+    Cosine decay schedule for weight decay: higher early, lower late.
+    """
+    progress = min(1.0, max(0.0, (epoch - 1) / max(1, total_epochs - 1)))
+    return min_wd + 0.5 * (start_wd - min_wd) * (1.0 + math.cos(math.pi * progress))
+
+
 def train_model(
     data_path="ml_service/data/dataset_v3.npz",
+    model_type="sequence",
     epochs=25,
     batch_size=64,
     lr=1e-3,
     val_split=0.20,
-    save_path="ml_service/models/sequence_brain_v3.pt",
-    backbone="hybrid"
+    save_path=None,
+    backbone="hybrid",
+    patience=5,
+    grad_accum=1,
+    label_smoothing=0.05,
+    weight_decay_start=1e-3,
+    weight_decay_end=1e-5,
+    d_model=64,
+    dropout=0.25
 ):
-    print("=" * 65)
-    print("[*] Sequence Brain Offline Training Engine (V3)")
-    print(f"Data file: {data_path}")
-    print("=" * 65)
+    is_dual_stream = model_type.lower() in ("dual_stream", "dual_stream_patch_brain", "patch_tst")
+
+    if save_path is None:
+        if is_dual_stream:
+            save_path = "ml_service/models/patch_tst_brain_v3.pt"
+        else:
+            save_path = "ml_service/models/sequence_brain_v3.pt"
+
+    print("=" * 75)
+    model_display_name = "DualStreamPatchBrain (PatchTST-Lite)" if is_dual_stream else f"SequenceBrain ({backbone})"
+    print(f"[*] Brain Training Engine: {model_display_name}")
+    print(f"    Data file:             {data_path}")
+    print(f"    Output checkpoint:     {save_path}")
+    print(f"    Batch Size:            {batch_size} (effective: {batch_size * grad_accum} with accum={grad_accum})")
+    print(f"    Peak LR:               {lr:.2e} (OneCycleLR)")
+    print(f"    Label Smoothing:       {label_smoothing:.2f}")
+    print(f"    Early Stop Patience:   {patience} epochs")
+    print("=" * 75)
 
     if not os.path.exists(data_path):
         print(f"[-] Error: Data file {data_path} not found! Run export_dataset.py first.")
@@ -137,152 +300,297 @@ def train_model(
     y = data["y"]
     y_pnl = data["y_pnl"]
 
+    # Load MTF candles if present, otherwise create zeros
+    if "X_mtf_candles" in data:
+        X_mtf = data["X_mtf_candles"]
+    else:
+        X_mtf = np.zeros((len(X_candles), 30, X_candles.shape[2]), dtype=np.float32)
+
     N = len(y)
-    print(f"[+] Loaded {N} samples.")
-    print(f"    X_candles: {X_candles.shape}")
-    print(f"    X_macro:   {X_macro.shape}")
-    print(f"    y:         {y.shape}")
+    candle_features = X_candles.shape[2]
+    seq_len = X_candles.shape[1]
+    seq_len_mtf = X_mtf.shape[1]
+    macro_features = X_macro.shape[1]
+
+    print(f"[+] Loaded {N:,} samples.")
+    print(f"    X_candles:     {X_candles.shape} (Channels: {candle_features})")
+    print(f"    X_mtf_candles: {X_mtf.shape}")
+    print(f"    X_macro:       {X_macro.shape} (Features: {macro_features})")
+    print(f"    y:             {y.shape}")
 
     # Chronological Split (strictly respecting temporal causality)
     split_idx = int(N * (1.0 - val_split))
-    print(f"[+] Splitting: Train = {split_idx} (First {int((1-val_split)*100)}%), Val = {N - split_idx} (Last {int(val_split*100)}%)")
+    val_count = N - split_idx
+    print(f"[+] Splitting: Train = {split_idx:,} (First {int((1-val_split)*100)}%), Val = {val_count:,} (Last {int(val_split*100)}%)")
 
     train_xc, val_xc = X_candles[:split_idx], X_candles[split_idx:]
+    train_mtf, val_mtf = X_mtf[:split_idx], X_mtf[split_idx:]
     train_xm, val_xm = X_macro[:split_idx], X_macro[split_idx:]
     train_y, val_y = y[:split_idx], y[split_idx:]
     train_pnl, val_pnl = y_pnl[:split_idx], y_pnl[split_idx:]
 
     # Class balance weights
     class_counts = np.bincount(train_y, minlength=3)
-    print(f"    Train class counts: HOLD={class_counts[0]}, BUY={class_counts[1]}, PUT={class_counts[2]}")
-    
-    # Smooth inverse frequencies
+    print(f"    Train class counts: HOLD={class_counts[0]:,}, BUY={class_counts[1]:,}, PUT={class_counts[2]:,}")
+
     weights = len(train_y) / (3.0 * np.maximum(class_counts, 1.0))
     weights = np.clip(weights, 0.2, 8.0).astype(np.float32)
     print(f"    Class weights for Loss: HOLD={weights[0]:.2f}, BUY={weights[1]:.2f}, PUT={weights[2]:.2f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[+] Training Device: {device}")
+    use_cuda = device.type == "cuda"
+    print(f"[+] Training Device: {device} (Mixed Precision AMP: {'Enabled' if use_cuda else 'Disabled (CPU)'})")
 
-    # Build PyTorch Datasets & DataLoaders
+    # PyTorch Datasets & DataLoaders
     train_dataset = TensorDataset(
         torch.tensor(train_xc, dtype=torch.float32),
+        torch.tensor(train_mtf, dtype=torch.float32),
         torch.tensor(train_xm, dtype=torch.float32),
         torch.tensor(train_y, dtype=torch.long),
         torch.tensor(train_pnl, dtype=torch.float32)
     )
     val_dataset = TensorDataset(
         torch.tensor(val_xc, dtype=torch.float32),
+        torch.tensor(val_mtf, dtype=torch.float32),
         torch.tensor(val_xm, dtype=torch.float32),
         torch.tensor(val_y, dtype=torch.long),
         torch.tensor(val_pnl, dtype=torch.float32)
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=use_cuda)
 
-    # Initialize SequenceBrain Model
-    model = SequenceBrain(
-        candle_features=5,
-        seq_len=160,
-        macro_features=X_macro.shape[1],
-        d_model=64,
-        nhead=4,
-        num_layers=2,
-        num_classes=3,
-        dropout=0.25,
-        backbone=backbone
-    ).to(device)
+    # Initialize Architecture
+    if is_dual_stream:
+        model = DualStreamPatchBrain(
+            candle_features=candle_features,
+            seq_len_micro=seq_len,
+            seq_len_mtf=seq_len_mtf,
+            macro_features=macro_features,
+            d_model=d_model,
+            nhead=4,
+            num_layers=2,
+            num_classes=3,
+            dropout=dropout
+        ).to(device)
+    else:
+        model = SequenceBrain(
+            candle_features=candle_features,
+            seq_len=seq_len,
+            macro_features=macro_features,
+            d_model=d_model,
+            nhead=4,
+            num_layers=2,
+            num_classes=3,
+            dropout=dropout,
+            backbone=backbone
+        ).to(device)
 
     alpha_tensor = torch.tensor(weights, dtype=torch.float32).to(device)
-    criterion_cls = FocalLoss(alpha=alpha_tensor, gamma=2.0)
+    criterion_cls = FocalLoss(alpha=alpha_tensor, gamma=2.0, label_smoothing=label_smoothing)
     criterion_pnl = nn.SmoothL1Loss()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay_start)
+
+    steps_per_epoch = math.ceil(len(train_loader) / grad_accum)
+    total_steps = epochs * steps_per_epoch
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        total_steps=total_steps,
+        pct_start=0.3,
+        anneal_strategy="cos",
+        div_factor=25.0,
+        final_div_factor=1000.0
+    )
+
+    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
     best_val_loss = float("inf")
-    best_wr_60 = 0.0
+    best_epoch = 0
+    best_val_stats = None
+    patience_counter = 0
 
-    print("\n" + "-" * 75)
-    print(f"{'Epoch':<6} | {'Tr Loss':<8} | {'Val Loss':<8} | {'Val Acc':<8} | {'WR @50%':<10} | {'WR @60%':<10} | {'Trades@60'}")
-    print("-" * 75)
+    print("\n" + "-" * 88)
+    print(f"{'Epoch':<6} | {'Tr Loss':<8} | {'Val Loss':<8} | {'Val Acc':<8} | {'ECE':<7} | {'WR @50%':<10} | {'WR @60%':<10} | {'WR @70%':<10} | {'LR':<8}")
+    print("-" * 88)
 
     for epoch in range(1, epochs + 1):
+        # Weight decay scheduling: higher early, lower late
+        current_wd = get_weight_decay(epoch, epochs, start_wd=weight_decay_start, min_wd=weight_decay_end)
+        for param_group in optimizer.param_groups:
+            param_group["weight_decay"] = current_wd
+
         model.train()
         running_loss = 0.0
+        optimizer.zero_grad()
 
-        for batch_xc, batch_xm, batch_y, batch_pnl in train_loader:
+        for step, (batch_xc, batch_mtf, batch_xm, batch_y, batch_pnl) in enumerate(train_loader):
             batch_xc = batch_xc.to(device)
+            batch_mtf = batch_mtf.to(device)
             batch_xm = batch_xm.to(device)
             batch_y = batch_y.to(device)
             batch_pnl = batch_pnl.to(device)
 
-            optimizer.zero_grad()
-            logits, aux_pnl = model(batch_xc, batch_xm)
+            with torch.amp.autocast(device_type=device.type, enabled=use_cuda):
+                if is_dual_stream:
+                    logits, aux_pnl = model(batch_xc, batch_mtf, batch_xm)
+                else:
+                    logits, aux_pnl = model(batch_xc, batch_xm)
 
-            loss_cls = criterion_cls(logits, batch_y)
-            loss_reg = criterion_pnl(aux_pnl, batch_pnl / 10.0)
-            total_loss = loss_cls + 0.1 * loss_reg
+                loss_cls = criterion_cls(logits, batch_y)
+                loss_reg = criterion_pnl(aux_pnl, batch_pnl / 10.0)
+                total_loss = (loss_cls + 0.1 * loss_reg) / grad_accum
 
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-            optimizer.step()
+            scaler.scale(total_loss).backward()
+            running_loss += total_loss.item() * grad_accum * len(batch_y)
 
-            running_loss += total_loss.item() * len(batch_y)
+            # Gradient accumulation step
+            if (step + 1) % grad_accum == 0 or (step + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                scheduler.step()
 
-        scheduler.step()
         train_loss = running_loss / len(train_dataset)
-
-        val_stats = evaluate(model, val_loader, device)
+        val_stats = evaluate(model, val_loader, device, is_dual_stream=is_dual_stream)
+        current_lr = scheduler.get_last_lr()[0]
 
         print(
             f"{epoch:<6d} | "
             f"{train_loss:<8.4f} | "
             f"{val_stats['loss']:<8.4f} | "
             f"{val_stats['acc']:<7.2f}% | "
-            f"{val_stats['wr_50']:<6.2f}% ({val_stats['n_50']:<3}) | "
-            f"{val_stats['wr_60']:<6.2f}% ({val_stats['n_60']:<3}) | "
-            f"{val_stats['n_60']}"
+            f"{val_stats['ece']:<7.4f} | "
+            f"{val_stats['wr_50']:<5.1f}% ({val_stats['n_50']:<3}) | "
+            f"{val_stats['wr_60']:<5.1f}% ({val_stats['n_60']:<3}) | "
+            f"{val_stats['wr_70']:<5.1f}% ({val_stats['n_70']:<3}) | "
+            f"{current_lr:<8.2e}"
         )
 
-        # Checkpoint if improved
+        # Early stopping and checkpointing
         if val_stats["loss"] < best_val_loss:
             best_val_loss = val_stats["loss"]
-            best_wr_60 = val_stats["wr_60"]
+            best_epoch = epoch
+            best_val_stats = val_stats
+            patience_counter = 0
+
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            compact_val_stats = {k: v for k, v in val_stats.items() if k not in ("logits", "targets", "probs")}
             torch.save({
                 "epoch": epoch,
+                "model_name": "dual_stream_patch_brain" if is_dual_stream else "sequence_brain",
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "val_stats": val_stats,
-                "class_weights": weights,
-                "backbone": backbone
+                "val_stats": compact_val_stats,
+                "val_acc": float(val_stats["acc"]),
+                "val_loss": float(val_stats["loss"]),
+                "ece": float(val_stats["ece"]),
+                "class_weights": weights.tolist(),
+                "backbone": backbone if not is_dual_stream else "patch_tst",
+                "candle_features": candle_features,
+                "seq_len": seq_len,
+                "seq_len_mtf": seq_len_mtf,
+                "macro_features": macro_features,
+                "d_model": d_model
             }, save_path)
+            print(f"       --> Checkpoint saved (val_loss={best_val_loss:.4f}, ECE={val_stats['ece']:.4f})")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"\n[!] Early stopping triggered at epoch {epoch} (no improvement for {patience} epochs).")
+                print(f"    Best checkpoint was at Epoch {best_epoch} with val_loss={best_val_loss:.4f}.")
+                break
 
-    print("-" * 75)
-    print(f"[+] Training complete. Best model checkpoint saved to: {save_path}")
-    print(f"    Best Validation Loss: {best_val_loss:.4f} | Best WR @60%: {best_wr_60:.2f}%")
+    print("-" * 88)
+
+    # Reload best model weights for temperature calibration
+    if os.path.exists(save_path):
+        checkpoint = torch.load(save_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+
+    # Temperature Scaling Calibration
+    print("\n" + "=" * 75)
+    print("[*] Optimizing Temperature Scaling Calibration on Validation Set...")
+    print("=" * 75)
+
+    val_stats_raw = evaluate(model, val_loader, device, is_dual_stream=is_dual_stream, temperature=1.0)
+    learned_temperature = calibrate_temperature(val_stats_raw["logits"], torch.tensor(val_stats_raw["targets"]))
+    val_stats_calibrated = evaluate(model, val_loader, device, is_dual_stream=is_dual_stream, temperature=learned_temperature)
+
+    print(f"[+] Fitted Temperature Parameter T: {learned_temperature:.4f}")
+    print(f"    Val NLL Loss: {val_stats_raw['loss']:.4f} -> {val_stats_calibrated['loss']:.4f} (Delta: {val_stats_calibrated['loss'] - val_stats_raw['loss']:+.4f})")
+    print(f"    Val ECE:      {val_stats_raw['ece']:.4f} -> {val_stats_calibrated['ece']:.4f} (Delta: {val_stats_calibrated['ece'] - val_stats_raw['ece']:+.4f})")
+
+    print("\n" + "-" * 75)
+    print("FINAL VALIDATION REPORT (Calibrated):")
+    print(f"  Overall Accuracy:    {val_stats_calibrated['acc']:.2f}%")
+    print(f"  Class 0 (HOLD):      Prec: {val_stats_calibrated['prec_0']:.1f}% | Rec: {val_stats_calibrated['rec_0']:.1f}% | F1: {val_stats_calibrated['f1_0']:.1f}% (N={val_stats_calibrated['count_0']})")
+    print(f"  Class 1 (BUY):       Prec: {val_stats_calibrated['prec_1']:.1f}% | Rec: {val_stats_calibrated['rec_1']:.1f}% | F1: {val_stats_calibrated['f1_1']:.1f}% (N={val_stats_calibrated['count_1']})")
+    print(f"  Class 2 (PUT):       Prec: {val_stats_calibrated['prec_2']:.1f}% | Rec: {val_stats_calibrated['rec_2']:.1f}% | F1: {val_stats_calibrated['f1_2']:.1f}% (N={val_stats_calibrated['count_2']})")
+    print(f"  Directional (1 & 2): Prec: {val_stats_calibrated['dir_prec']:.1f}% | Rec: {val_stats_calibrated['dir_rec']:.1f}% | F1: {val_stats_calibrated['dir_f1']:.1f}%")
+
+    print("\nSelective Directional WinRates:")
+    for th in (0.50, 0.55, 0.60, 0.65, 0.70):
+        key_wr = f"wr_{int(th*100)}"
+        key_n = f"n_{int(th*100)}"
+        print(f"  Confidence >= {int(th*100)}%: WinRate = {val_stats_calibrated[key_wr]:6.2f}% ({val_stats_calibrated[key_n]:5d} trades)")
+
+    # Save final checkpoint with temperature and updated stats
+    # Clean out large tensors before saving
+    val_stats_calibrated.pop("logits", None)
+    val_stats_calibrated.pop("targets", None)
+    val_stats_calibrated.pop("probs", None)
+
+    checkpoint["temperature"] = learned_temperature
+    checkpoint["val_stats"] = val_stats_calibrated
+    checkpoint["val_acc"] = float(val_stats_calibrated["acc"])
+    checkpoint["val_loss"] = float(val_stats_calibrated["loss"])
+    checkpoint["ece"] = float(val_stats_calibrated["ece"])
+
+    torch.save(checkpoint, save_path)
+    file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
+    print("=" * 75)
+    print(f"[+] Final checkpoint with temperature saved to: {save_path} ({file_size_mb:.2f} MB)")
     print("=" * 75)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train SequenceBrain on dataset_v3")
-    parser.add_argument("--data", default="ml_service/data/dataset_v3.npz")
-    parser.add_argument("--epochs", type=int, default=15)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--val-split", type=float, default=0.20)
-    parser.add_argument("--save", default="ml_service/models/sequence_brain_v3.pt")
-    parser.add_argument("--backbone", choices=["hybrid", "transformer"], default="hybrid")
+    parser = argparse.ArgumentParser(description="Train Neural Temporal Brains (SequenceBrain or DualStreamPatchBrain)")
+    parser.add_argument("--data", default="ml_service/data/dataset_v3.npz", help="Path to exported .npz dataset")
+    parser.add_argument("--model", choices=["sequence", "dual_stream", "sequence_brain", "dual_stream_patch_brain", "patch_tst"], default="sequence", help="Model architecture")
+    parser.add_argument("--backbone", choices=["hybrid", "transformer"], default="hybrid", help="Backbone for SequenceBrain (hybrid: BiGRU+Conv, transformer: TransformerEncoder)")
+    parser.add_argument("--epochs", type=int, default=25, help="Maximum training epochs")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size per training step")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Peak learning rate for OneCycleLR")
+    parser.add_argument("--val-split", type=float, default=0.20, help="Chronological validation split ratio (latest data)")
+    parser.add_argument("--save", default=None, help="Output path for checkpoint (defaults according to model)")
+    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience (epochs without val_loss improvement)")
+    parser.add_argument("--grad-accum", type=int, default=1, help="Gradient accumulation steps")
+    parser.add_argument("--label-smoothing", type=float, default=0.05, help="Label smoothing epsilon for FocalLoss")
+    parser.add_argument("--weight-decay-start", type=float, default=1e-3, help="Initial weight decay for AdamW")
+    parser.add_argument("--weight-decay-end", type=float, default=1e-5, help="Final weight decay for AdamW")
+    parser.add_argument("--d-model", type=int, default=64, help="Hidden model dimension")
+    parser.add_argument("--dropout", type=float, default=0.25, help="Dropout probability")
     args = parser.parse_args()
 
     train_model(
         data_path=args.data,
+        model_type=args.model,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         val_split=args.val_split,
         save_path=args.save,
-        backbone=args.backbone
+        backbone=args.backbone,
+        patience=args.patience,
+        grad_accum=args.grad_accum,
+        label_smoothing=args.label_smoothing,
+        weight_decay_start=args.weight_decay_start,
+        weight_decay_end=args.weight_decay_end,
+        d_model=args.d_model,
+        dropout=args.dropout
     )

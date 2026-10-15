@@ -73,6 +73,7 @@ class SequenceBrain(nn.Module):
         # 1. Multi-scale Convolutional Feature Extractor
         # Conv1d expects [B, Channels, Length]
         self.conv1 = nn.Conv1d(candle_features, d_model // 2, kernel_size=3, padding=1)
+        self.spatial_drop = nn.Dropout2d(dropout)  # Drops entire feature channels
         self.conv2 = nn.Conv1d(candle_features, d_model // 2, kernel_size=7, padding=3)
         self.conv_norm = nn.LayerNorm(d_model)
 
@@ -133,6 +134,9 @@ class SequenceBrain(nn.Module):
         # Predicts continuous PnL and MFE to force latent representation to learn magnitude
         self.pnl_regressor = nn.Linear(64, 1)
 
+        # Learned temperature for output calibration (optimized during training)
+        self.temperature = nn.Parameter(torch.tensor(1.5))
+
     def forward(self, x_candles: torch.Tensor, x_macro: torch.Tensor):
         """
         x_candles: [B, seq_len, 5]
@@ -148,6 +152,7 @@ class SequenceBrain(nn.Module):
         
         # Transpose back: [B, seq_len, d_model]
         seq_features = conv_out.transpose(1, 2)
+        seq_features = self.spatial_drop(seq_features.unsqueeze(2)).squeeze(2)  # Channel dropout
         seq_features = self.conv_norm(seq_features)
 
         if self.backbone_type == "transformer":

@@ -53,3 +53,7 @@ node_modules/
 .env
 ml_service/.env
 *.env.local
+
+# Research data (broker tick logs, Dukascopy cache)
+ml_service/data/po_ticks/
+ml_service/data/dukascopy/

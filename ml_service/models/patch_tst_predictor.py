@@ -1,11 +1,15 @@
 """
-patch_tst_predictor.py - Live inference wrapper for DualStreamPatchBrain (PatchTST-Lite).
+patch_tst_predictor.py - Universal Live Inference Wrapper for Neural Brains.
 
-Runs calibrated sequence inference:
-1. Prepares micro-candles (160 timesteps) & MTF candles (30 timesteps).
+Auto-detects model architecture and configuration from checkpoint metadata:
+- SequenceBrain (hybrid BiGRU or transformer) → forward(x_candles, x_macro)
+- DualStreamPatchBrain (PatchTST-Lite) → forward(x_micro, x_mtf, x_macro)
+
+Calibrated inference pipeline:
+1. Prepares micro-candles (seq_len timesteps) & MTF candles (seq_len_mtf timesteps).
 2. Extracts 23-element macro context vector (DXY momentum, day anchors, spread, SMC tags).
-3. Executes DualStreamPatchBrain forward pass.
-4. Produces direction (BUY/PUT) and honest calibrated probability [50%..65%].
+3. Executes model forward pass with temperature-scaled softmax.
+4. Produces direction (BUY/PUT) and calibrated probability (no hard ceiling).
 """
 
 import os
@@ -32,12 +36,17 @@ TF_SECONDS = {
 }
 
 
-def normalize_candles_live(candles: List[Dict], seq_len: int = 160) -> np.ndarray:
+def normalize_candles_live(candles: List[Dict], seq_len: int = 160, n_channels: int = 5) -> np.ndarray:
     """
     Normalizes raw OHLCV candles to relative returns matching training distribution.
-    Features: [(close-open)/open, (high-open)/open, (low-open)/open, (close-prev)/prev, log1p(vol)/10]
+
+    5-channel mode (legacy):
+      [(close-open)/open, (high-open)/open, (low-open)/open, (close-prev)/prev, log1p(vol)/10]
+
+    4-channel mode (v3 — excludes zero-volume channel):
+      [(close-open)/open, (high-open)/open, (low-open)/open, (close-prev)/prev]
     """
-    arr = np.zeros((seq_len, 5), dtype=np.float32)
+    arr = np.zeros((seq_len, n_channels), dtype=np.float32)
     if not candles:
         return arr
 
@@ -51,7 +60,6 @@ def normalize_candles_live(candles: List[Dict], seq_len: int = 160) -> np.ndarra
         hi = float(c.get("high", op))
         lo = float(c.get("low", op))
         cl = float(c.get("close", op))
-        vol = float(c.get("volume", 1.0))
 
         if op <= 0:
             op = 1e-5
@@ -65,7 +73,10 @@ def normalize_candles_live(candles: List[Dict], seq_len: int = 160) -> np.ndarra
         else:
             arr[idx, 3] = 0.0
 
-        arr[idx, 4] = math.log1p(max(0.0, vol)) / 10.0
+        if n_channels >= 5:
+            vol = float(c.get("volume", 1.0))
+            arr[idx, 4] = math.log1p(max(0.0, vol)) / 10.0
+
         prev_close = cl
 
     return arr
@@ -135,13 +146,22 @@ def build_macro_vector_live(
 
 class PatchTSTPredictor:
     """
-    Inference engine for DualStreamPatchBrain.
+    Universal inference engine that auto-detects model architecture from checkpoint.
+    Supports both SequenceBrain and DualStreamPatchBrain transparently.
     """
     _instance: Optional["PatchTSTPredictor"] = None
 
     def __init__(self):
         self.model = None
         self.device = "cpu"
+        self._temperature = 1.5  # Conservative default; overridden by checkpoint
+        self._is_dual_stream = False
+        self._candle_features = 4  # Default to 4-channel (v3); overridden by checkpoint
+        self._seq_len = 160
+        self._seq_len_mtf = 30
+        self._model_name = "unknown"
+        self._arch_tag = "neural_brain"
+        self.metrics: Dict = {}
         self._load_model()
 
     @classmethod
@@ -153,6 +173,7 @@ class PatchTSTPredictor:
     def _load_model(self):
         try:
             import torch
+            from models.sequence_brain import SequenceBrain
             from models.patch_tst_brain import DualStreamPatchBrain
 
             self.device = torch.device("cpu")
@@ -162,29 +183,74 @@ class PatchTSTPredictor:
                 return
 
             checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-            macro_dim = checkpoint.get("macro_features", 23)
 
-            model = DualStreamPatchBrain(
-                candle_features=5,
-                seq_len_micro=160,
-                seq_len_mtf=30,
-                macro_features=macro_dim,
-                d_model=64,
-                nhead=4,
-                num_layers=2,
-                num_classes=3,
-                dropout=0.0
-            )
+            # Read architecture metadata from checkpoint
+            self._model_name = checkpoint.get("model_name", "dual_stream_patch_brain")
+            self._candle_features = checkpoint.get("candle_features", 5)
+            self._seq_len = checkpoint.get("seq_len", 160)
+            self._seq_len_mtf = checkpoint.get("seq_len_mtf", 30)
+            macro_dim = checkpoint.get("macro_features", 23)
+            d_model = checkpoint.get("d_model", 64)
+            backbone = checkpoint.get("backbone", "hybrid")
+
+            self._is_dual_stream = self._model_name in ("dual_stream_patch_brain", "patch_tst")
+
+            if self._is_dual_stream:
+                model = DualStreamPatchBrain(
+                    candle_features=self._candle_features,
+                    seq_len_micro=self._seq_len,
+                    seq_len_mtf=self._seq_len_mtf,
+                    macro_features=macro_dim,
+                    d_model=d_model,
+                    nhead=4,
+                    num_layers=2,
+                    num_classes=3,
+                    dropout=0.0
+                )
+            else:
+                model = SequenceBrain(
+                    candle_features=self._candle_features,
+                    seq_len=self._seq_len,
+                    macro_features=macro_dim,
+                    d_model=d_model,
+                    nhead=4,
+                    num_layers=2,
+                    num_classes=3,
+                    dropout=0.0,
+                    backbone=backbone
+                )
 
             state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
-            model.load_state_dict(state_dict)
+            # Strict except for the learned `temperature` scalar (absent in legacy checkpoints).
+            res = model.load_state_dict(state_dict, strict=False)
+            bad_missing = [k for k in res.missing_keys if k != "temperature"]
+            if bad_missing or res.unexpected_keys:
+                raise RuntimeError(
+                    f"Checkpoint/architecture mismatch: missing={bad_missing}, unexpected={list(res.unexpected_keys)}"
+                )
             model.eval()
+
+            self._temperature = float(checkpoint.get("temperature", 1.5)) if checkpoint.get("temperature") is not None else 1.5
 
             self.model = model
             val_acc = checkpoint.get("val_acc", 0.0)
-            log.info(f"[PatchTSTPredictor] Loaded model from {model_path.name} (Val Acc: {val_acc:.2f}%)")
+            vs = checkpoint.get("val_stats") or {}
+            self._arch_tag = "patch_tst_v3" if self._is_dual_stream else "seq_brain_v3"
+            self.metrics = {
+                "accuracy": round(float(val_acc) / 100.0, 4),
+                "val_loss": checkpoint.get("val_loss"),
+                "ece": checkpoint.get("ece"),
+                "wr_60": vs.get("wr_60"),
+                "n_val": vs.get("n_val"),
+                "epoch": checkpoint.get("epoch"),
+            }
+            arch_label = "DualStreamPatchBrain" if self._is_dual_stream else f"SequenceBrain({backbone})"
+            log.info(
+                f"[PatchTSTPredictor] Loaded {arch_label} from {model_path.name} "
+                f"(channels={self._candle_features}, Val Acc: {val_acc:.2f}%, T={self._temperature:.2f})"
+            )
         except Exception as e:
-            log.error(f"[PatchTSTPredictor] Failed to load PyTorch model: {e}")
+            log.error(f"[PatchTSTPredictor] Failed to load PyTorch model: {e}", exc_info=True)
             self.model = None
 
     def is_available(self) -> bool:
@@ -211,45 +277,61 @@ class PatchTSTPredictor:
             import torch
             import torch.nn.functional as F
 
-            x_micro_np = normalize_candles_live(candles, seq_len=160)
-            x_mtf_np = normalize_candles_live(mtf_candles or [], seq_len=30)
+            # Use channel count from checkpoint (4 or 5)
+            x_micro_np = normalize_candles_live(candles, seq_len=self._seq_len, n_channels=self._candle_features)
             x_macro_np = build_macro_vector_live(symbol, interval, candles, macro_context, smc_context)
 
             x_micro_t = torch.tensor(x_micro_np, dtype=torch.float32).unsqueeze(0).to(self.device)
-            x_mtf_t = torch.tensor(x_mtf_np, dtype=torch.float32).unsqueeze(0).to(self.device)
             x_macro_t = torch.tensor(x_macro_np, dtype=torch.float32).unsqueeze(0).to(self.device)
 
             with torch.no_grad():
-                logits, _ = self.model(x_micro_t, x_mtf_t, x_macro_t)
-                probs = F.softmax(logits, dim=-1)[0].cpu().numpy()
+                if self._is_dual_stream:
+                    # DualStreamPatchBrain expects (x_micro, x_mtf, x_macro)
+                    x_mtf_np = normalize_candles_live(
+                        mtf_candles or [], seq_len=self._seq_len_mtf, n_channels=self._candle_features
+                    )
+                    x_mtf_t = torch.tensor(x_mtf_np, dtype=torch.float32).unsqueeze(0).to(self.device)
+                    logits, _ = self.model(x_micro_t, x_mtf_t, x_macro_t)
+                else:
+                    # SequenceBrain expects (x_candles, x_macro)
+                    logits, _ = self.model(x_micro_t, x_macro_t)
+
+                # Temperature scaling
+                temp = self._temperature
+                scaled_logits = logits / temp
+                probs = F.softmax(scaled_logits, dim=-1)[0].cpu().numpy()
 
             p_hold = float(probs[0])
             p_buy = float(probs[1])
             p_put = float(probs[2])
 
-            # 1. Determine direction
+            # Determine direction from directional probabilities
             if p_buy >= p_put:
                 direction = "BUY"
-                denom = p_buy + p_put
-                p_dir = p_buy / denom if denom > 0 else 0.5
+                raw_dir_prob = p_buy / max(p_buy + p_put, 1e-8)
             else:
                 direction = "PUT"
-                denom = p_buy + p_put
-                p_dir = p_put / denom if denom > 0 else 0.5
+                raw_dir_prob = p_put / max(p_buy + p_put, 1e-8)
 
-            # 2. Honest Statistical Calibration
-            # Dampen directional edge by market chop/noise probability
-            chop_factor = max(0.15, 1.0 - p_hold * 0.70)
-            calibrated_prob = 0.50 + (p_dir - 0.50) * chop_factor
+            # Calibrated confidence: blend directional certainty with hold probability.
+            # High p_hold = market is choppy → reduce confidence toward 50%.
+            # This is NOT a hard cap — strong directional signals still produce high confidence.
+            directional_mass = 1.0 - p_hold  # how much probability is on BUY+PUT combined
+            calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * directional_mass
 
-            # Bound strictly between 50% and 65% for binary options realism
-            calibrated_prob = round(float(np.clip(calibrated_prob, 0.50, 0.65)), 4)
-            raw_prob = round(float(p_dir), 4)
+            # Safety floor at 50% (never below chance), no ceiling — let the model speak
+            calibrated_prob = max(0.50, round(float(calibrated_prob), 4))
+            raw_prob = round(float(raw_dir_prob), 4)
 
-            log.info(f"[PatchTST Brain] {symbol} {interval} -> {direction} | Calibrated: {calibrated_prob*100:.1f}% | Raw: {raw_prob*100:.1f}% | HOLD: {p_hold*100:.1f}%")
+            arch_tag = "patch_tst_v3" if self._is_dual_stream else "seq_brain_v3"
+            log.info(
+                f"[Neural Brain] {symbol} {interval} -> {direction} | "
+                f"Calibrated: {calibrated_prob*100:.1f}% | Raw: {raw_prob*100:.1f}% | "
+                f"HOLD: {p_hold*100:.1f}% | Temp: {temp:.2f} | Arch: {self._model_name}"
+            )
 
-            return direction, calibrated_prob, "patch_tst_v3", 3, raw_prob
+            return direction, calibrated_prob, arch_tag, 3, raw_prob
 
         except Exception as e:
-            log.error(f"[PatchTST Brain] Inference error: {e}", exc_info=True)
+            log.error(f"[Neural Brain] Inference error: {e}", exc_info=True)
             return None

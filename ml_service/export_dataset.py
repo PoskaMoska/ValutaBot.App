@@ -70,15 +70,15 @@ MACRO_FEATURE_NAMES = [
 ]
 
 
-def normalize_candles(candles_list, seq_len=160):
+def normalize_candles(candles_list, seq_len=160, channels=5):
     """
-    Normalizes a sequence of OHLCV candles into a stationary [seq_len, 5] array.
+    Normalizes a sequence of OHLCV candles into a stationary [seq_len, channels] array.
     Features per candle:
       0: (Close - Open) / Open
       1: (High - Open) / Open
       2: (Low - Open) / Open
       3: (Close - PrevClose) / PrevClose (or 0 for first)
-      4: log1p(Volume) / 10.0
+      4: log1p(Volume) / 10.0 (included when channels == 5)
     """
     if len(candles_list) < seq_len:
         # Pad with first candle
@@ -88,7 +88,7 @@ def normalize_candles(candles_list, seq_len=160):
         # Take the most recent seq_len candles
         candles_list = candles_list[-seq_len:]
 
-    arr = np.zeros((seq_len, 5), dtype=np.float32)
+    arr = np.zeros((seq_len, channels), dtype=np.float32)
     prev_close = None
 
     for i, c in enumerate(candles_list):
@@ -96,7 +96,6 @@ def normalize_candles(candles_list, seq_len=160):
         hi = float(c.get("High", op))
         lo = float(c.get("Low", op))
         cl = float(c.get("Close", op))
-        vol = float(c.get("Volume", 0.0))
 
         if op <= 0:
             op = 1e-5
@@ -110,7 +109,9 @@ def normalize_candles(candles_list, seq_len=160):
         else:
             arr[i, 3] = 0.0
 
-        arr[i, 4] = math.log1p(max(0.0, vol)) / 10.0
+        if channels >= 5:
+            vol = float(c.get("Volume", 0.0))
+            arr[i, 4] = math.log1p(max(0.0, vol)) / 10.0
         prev_close = cl
 
     return arr
@@ -222,7 +223,7 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30):
+def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=5):
     print("=" * 60)
     print("[*] Neural Brain Dataset Exporter (V3 Architecture)")
     print(f"Connecting to database...")
@@ -242,6 +243,17 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30)
             max_favorable_bps, max_adverse_bps
         FROM trade_outcomes
         WHERE features_json IS NOT NULL
+        UNION ALL
+        SELECT 
+            id, asset, timeframe, direction, 
+            entry_price, exit_price, pnl_bps, was_win,
+            created_at, features_json,
+            price_entropy, adx_at_signal, atr_at_signal, rsi_at_signal,
+            minutes_to_news, hour_utc, day_of_week,
+            smc_has_ob, smc_has_fvg,
+            max_favorable_bps, max_adverse_bps
+        FROM trade_outcomes_archive_20261008
+        WHERE features_json IS NOT NULL
         ORDER BY created_at ASC
     """
     if limit:
@@ -254,6 +266,24 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30)
     rows = cur.fetchall()
     total_found = len(rows)
     print(f"Retrieved {total_found} rows from database.")
+
+    # Temporal sort validation
+    created_idx = cols.index("created_at")
+    neg_gaps = 0
+    prev_dt = None
+    for idx, r in enumerate(rows):
+        dt = r[created_idx]
+        if prev_dt is not None and dt is not None and dt < prev_dt:
+            neg_gaps += 1
+            if neg_gaps <= 5:
+                print(f"[-] WARNING: Negative time gap detected at row {idx}: {prev_dt} -> {dt} (gap: {dt - prev_dt})")
+        if dt is not None:
+            prev_dt = dt
+
+    if neg_gaps > 0:
+        print(f"[-] WARNING: Total {neg_gaps} negative time gap(s) found in temporal sequence!")
+    else:
+        print(f"[+] Temporal sort validated: strictly non-decreasing timestamps (0 negative gaps).")
     
     x_candles_list = []
     x_mtf_candles_list = []
@@ -290,16 +320,16 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30)
             continue
             
         # 1. Normalize Candles Sequence
-        candle_tensor = normalize_candles(candles, seq_len=seq_len)
+        candle_tensor = normalize_candles(candles, seq_len=seq_len, channels=channels)
         if np.isnan(candle_tensor).any() or np.isinf(candle_tensor).any():
             skipped_count += 1
             continue
 
         # 2. Normalize MTF Candles Sequence
         mtf_candles = feat_obj.get("MtfCandles") or feat_obj.get("mtf_candles") or []
-        mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, 5), dtype=np.float32)
+        mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf, channels=channels) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, channels), dtype=np.float32)
         if np.isnan(mtf_tensor).any() or np.isinf(mtf_tensor).any():
-            mtf_tensor = np.zeros((seq_len_mtf, 5), dtype=np.float32)
+            mtf_tensor = np.zeros((seq_len_mtf, channels), dtype=np.float32)
             
         # 3. Extract Macro Vector
         macro_vec = extract_macro_vector(row_dict, feat_obj)
@@ -352,14 +382,53 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30)
     print(f"y shape:             {y.shape}")
     
     # Class breakdown
-    c0 = np.sum(y == 0)
-    c1 = np.sum(y == 1)
-    c2 = np.sum(y == 2)
+    c0 = int(np.sum(y == 0))
+    c1 = int(np.sum(y == 1))
+    c2 = int(np.sum(y == 2))
     tot = len(y) if len(y) > 0 else 1
-    print("\nTarget Class Distribution:")
-    print(f"  Class 0 (HOLD / Chop): {c0:6d} ({c0/tot*100:5.2f}%)")
-    print(f"  Class 1 (BUY):         {c1:6d} ({c1/tot*100:5.2f}%)")
-    print(f"  Class 2 (PUT):         {c2:6d} ({c2/tot*100:5.2f}%)")
+
+    # Data Quality Report
+    nan_candles = int(np.isnan(X_candles).sum())
+    inf_candles = int(np.isinf(X_candles).sum())
+    nan_mtf = int(np.isnan(X_mtf_candles).sum())
+    inf_mtf = int(np.isinf(X_mtf_candles).sum())
+    nan_macro = int(np.isnan(X_macro).sum())
+    inf_macro = int(np.isinf(X_macro).sum())
+    nan_y = int(np.isnan(y).sum())
+    nan_pnl = int(np.isnan(y_pnl).sum())
+    total_nans = nan_candles + nan_mtf + nan_macro + nan_y + nan_pnl
+    total_infs = inf_candles + inf_mtf + inf_macro
+
+    total_candle_timesteps = int(X_candles.shape[0] * X_candles.shape[1])
+    total_mtf_timesteps = int(X_mtf_candles.shape[0] * X_mtf_candles.shape[1])
+    if channels >= 5:
+        vol_zeros_c = int(np.sum(X_candles[:, :, 4] == 0.0))
+        vol_zero_pct = (vol_zeros_c / max(1, total_candle_timesteps)) * 100.0
+        vol_zeros_mtf = int(np.sum(X_mtf_candles[:, :, 4] == 0.0))
+        vol_zero_mtf_pct = (vol_zeros_mtf / max(1, total_mtf_timesteps)) * 100.0
+    else:
+        vol_zeros_c = 0
+        vol_zero_pct = 0.0
+        vol_zeros_mtf = 0
+        vol_zero_mtf_pct = 0.0
+
+    print("\n" + "=" * 60)
+    print("[+] DATA QUALITY REPORT")
+    print(f"  Valid samples parsed:     {valid_count} (Skipped: {skipped_count})")
+    print(f"  Candle shape:             {X_candles.shape} (channels={channels})")
+    print(f"  MTF candle shape:         {X_mtf_candles.shape}")
+    print(f"  Macro vector shape:       {X_macro.shape}")
+    print(f"  NaN counts:               Total={total_nans} (Candles={nan_candles}, MTF={nan_mtf}, Macro={nan_macro}, Target={nan_y+nan_pnl})")
+    print(f"  Inf counts:               Total={total_infs} (Candles={inf_candles}, MTF={inf_mtf}, Macro={inf_macro})")
+    if channels >= 5:
+        print(f"  Micro Volume zeros:       {vol_zeros_c:,} / {total_candle_timesteps:,} ({vol_zero_pct:.2f}%)")
+        print(f"  MTF Volume zeros:         {vol_zeros_mtf:,} / {total_mtf_timesteps:,} ({vol_zero_mtf_pct:.2f}%)")
+    else:
+        print(f"  Volume channel:           Excluded (4-channel mode: OHLC relative returns)")
+    print(f"  Class 0 (HOLD / Chop):    {c0:6d} ({c0/tot*100:5.2f}%)")
+    print(f"  Class 1 (BUY):            {c1:6d} ({c1/tot*100:5.2f}%)")
+    print(f"  Class 2 (PUT):            {c2:6d} ({c2/tot*100:5.2f}%)")
+    print("=" * 60)
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
@@ -392,6 +461,14 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=160)
     parser.add_argument("--seq-len-mtf", type=int, default=30)
+    parser.add_argument("--channels", type=int, choices=[4, 5], default=5, help="Candle feature channels: 4 (OHLC) or 5 (OHLCV)")
     args = parser.parse_args()
     
-    export_dataset(args.db_url, args.out, limit=args.limit, seq_len=args.seq_len, seq_len_mtf=args.seq_len_mtf)
+    export_dataset(
+        args.db_url,
+        args.out,
+        limit=args.limit,
+        seq_len=args.seq_len,
+        seq_len_mtf=args.seq_len_mtf,
+        channels=args.channels
+    )

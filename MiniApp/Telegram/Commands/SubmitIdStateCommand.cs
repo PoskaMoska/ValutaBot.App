@@ -41,36 +41,61 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
                     await RegistrationRepository.SaveRegistrationAsync(reg);
                 }
 
-                if (foundReg)
+                if (foundReg && reg != null)
                 {
                     if (hasDeposited)
                     {
                         await UserRepository.AddAllowedUserAsync(chatId);
-                        await TelegramBotService.SendMessage(token, chatId, "✅ <b>Депозит подтвержден. Доступ открыт.</b>");
+                        await TelegramBotService.SendMessage(token, chatId, "🎉 <b>Поздравляем! Ваш депозит подтвержден, открыт бессрочный доступ к TradeAI!</b>");
                         await TelegramBotService.SendUserWelcome(token, chatId, webAppUrl);
                     }
                     else
                     {
-                        var depositKeyboard = new
+                        // Check if 3-day trial was already started for this pocketId (anti-abuse)
+                        if (reg.TrialStartedAt.HasValue)
                         {
-                            inline_keyboard = new object[]
+                            if (reg.TrialEndsAt.HasValue && reg.TrialEndsAt.Value > DateTime.UtcNow)
                             {
-                                new object[]
-                                {
-                                    new { text = "💵 Проверить депозит", callback_data = $"check_dep_{pocketId}" }
-                                }
+                                int remainingHours = Math.Max(1, (int)Math.Ceiling((reg.TrialEndsAt.Value - DateTime.UtcNow).TotalHours));
+                                await TelegramBotService.SendMessage(token, chatId, 
+                                    $"ℹ️ <b>Для вашего аккаунта Pocket Option (ID: {pocketId}) уже активен пробный период.</b>\n\n" +
+                                    $"Осталось времени: <b>{remainingHours} ч.</b>\n\n" +
+                                    $"Используйте кнопку <b>📊 Открыть TradeAI</b> в меню внизу чата для запуска.");
+                                await TelegramBotService.SendUserWelcome(token, chatId, webAppUrl);
                             }
-                        };
-                        var payload = new 
-                        { 
-                            chat_id = chatId, 
-                            text = "✅ <b>ID сохранен. Регистрация найдена. Теперь внесите депозит на аккаунт Pocket Option (от $10) и нажмите кнопку проверки.</b>", 
-                            parse_mode = "HTML", 
-                            reply_markup = depositKeyboard 
-                        };
-                        var json = JsonSerializer.Serialize(payload);
-                        using var content = new StringContent(json, Encoding.UTF8, "application/json");
-                        await TelegramBotService._httpClient.PostAsync(new Uri($"https://api.telegram.org/bot{token}/sendMessage"), content);
+                            else
+                            {
+                                var depositKeyboard = new
+                                {
+                                    inline_keyboard = new object[]
+                                    {
+                                        new object[]
+                                        {
+                                            new { text = "💳 Я внёс депозит — Активировать бота", callback_data = $"check_dep_{pocketId}" }
+                                        }
+                                    }
+                                };
+                                await TelegramBotService.SendMessageWithKeyboard(token, chatId,
+                                    $"🔒 <b>Пробный 3-дневный период для данного аккаунта Pocket Option (ID: {pocketId}) уже завершён.</b>\n\n" +
+                                    "Чтобы продолжить пользоваться ботом и закрепить бессрочный доступ, пожалуйста, внесите депозит на ваш брокерский счёт и нажмите кнопку проверки ниже.",
+                                    depositKeyboard);
+                            }
+                        }
+                        else
+                        {
+                            // First time activating trial!
+                            reg.TrialStartedAt = DateTime.UtcNow;
+                            reg.TrialEndsAt = DateTime.UtcNow.AddDays(3);
+                            reg.ChatId = chatId;
+                            await RegistrationRepository.SaveRegistrationAsync(reg);
+
+                            string trialWelcomeText = 
+                                $"🎉 <b>Добро пожаловать!</b> Вам открыт полный доступ к боту на 3 дня (ID: <code>{pocketId}</code>).\n\n" +
+                                "Рекомендуем протестировать первые сигналы на демо-счёте брокера, чтобы освоиться с таймфреймами и стратегией Smart Money. Удачных сделок!";
+
+                            await TelegramBotService.SendMessage(token, chatId, trialWelcomeText);
+                            await TelegramBotService.SendUserWelcome(token, chatId, webAppUrl);
+                        }
                     }
                 }
                 else

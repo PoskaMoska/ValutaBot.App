@@ -78,7 +78,12 @@ namespace ValutaBot.App.MiniApp.Data
                     chat_id BIGINT NOT NULL,
                     has_registered BOOLEAN NOT NULL,
                     has_deposited BOOLEAN NOT NULL,
-                    deposit_amount DOUBLE PRECISION NOT NULL
+                    deposit_amount DOUBLE PRECISION NOT NULL,
+                    trial_started_at TIMESTAMPTZ NULL,
+                    trial_ends_at TIMESTAMPTZ NULL,
+                    reminder_day2_sent BOOLEAN NOT NULL DEFAULT FALSE,
+                    reminder_day3_sent BOOLEAN NOT NULL DEFAULT FALSE,
+                    trial_expired_sent BOOLEAN NOT NULL DEFAULT FALSE
                 );
 
                 CREATE TABLE IF NOT EXISTS trade_outcomes (
@@ -269,6 +274,16 @@ namespace ValutaBot.App.MiniApp.Data
 
                 ALTER TABLE allowed_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';
                 ALTER TABLE all_users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '';
+
+                -- 3-day Trial columns for registrations
+                DO $$
+                BEGIN
+                    BEGIN ALTER TABLE registrations ADD COLUMN trial_started_at TIMESTAMPTZ NULL; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE registrations ADD COLUMN trial_ends_at TIMESTAMPTZ NULL; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE registrations ADD COLUMN reminder_day2_sent BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE registrations ADD COLUMN reminder_day3_sent BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE registrations ADD COLUMN trial_expired_sent BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                END $$;
             ");
 
             BotLogger.Info("[PostgreSQL DB] Database tables initialized successfully.");

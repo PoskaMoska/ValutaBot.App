@@ -27,7 +27,28 @@ public partial class TelegramBotService : BackgroundService
 
     public static async Task<bool> IsUserAllowed(long chatId)
     {
-        return await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsAdminAsync(chatId) || await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsUserAllowedAsync(chatId);
+        if (await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsAdminAsync(chatId))
+            return true;
+
+        if (await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsUserAllowedAsync(chatId))
+            return true;
+
+        var reg = await ValutaBot.App.MiniApp.Data.Repositories.RegistrationRepository.GetRegistrationByChatIdAsync(chatId);
+        if (reg != null && reg.HasRegistered)
+        {
+            if (reg.HasDeposited)
+            {
+                await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAllowedUserAsync(chatId);
+                return true;
+            }
+
+            if (reg.TrialEndsAt.HasValue && reg.TrialEndsAt.Value > DateTime.UtcNow)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static async Task SendMessageToAdmins(string text)

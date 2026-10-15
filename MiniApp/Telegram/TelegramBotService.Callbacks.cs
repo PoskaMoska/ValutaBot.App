@@ -25,7 +25,8 @@ public partial class TelegramBotService
             UserStates[chatId] = UserState.AwaitingId;
             await AnswerCallbackQuery(token, queryId, "Введите ваш ID");
             await SendMessage(token, chatId, "✍️ <b>Пожалуйста, введите ваш ID аккаунта Pocket Option.</b>\n\n" +
-                                           "Вы можете найти его в личном кабинете Pocket Option (это число из 7-10 цифр в вашем профиле).");
+                                           "Вы можете найти его в личном кабинете Pocket Option (это число из 7-10 цифр в вашем профиле).\n\n" +
+                                           "🎁 После ввода вам сразу откроется 3 дня бесплатного тест-драйва!");
         }
         else if (data.StartsWith("check_dep_"))
         {
@@ -46,7 +47,7 @@ public partial class TelegramBotService
             if (hasDeposited)
             {
                 await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAllowedUserAsync(chatId);
-                await SendMessage(token, chatId, "✅ <b>Депозит подтвержден. Доступ открыт.</b>");
+                await SendMessage(token, chatId, "🎉 <b>Депозит подтвержден. Бессрочный доступ открыт!</b>");
                 await SendUserWelcome(token, chatId, webAppUrl);
             }
             else
@@ -64,7 +65,7 @@ public partial class TelegramBotService
                 var payload = new 
                 { 
                     chat_id = chatId, 
-                    text = "❌ <b>Депозит не обнаружен.</b>\n\nПожалуйста, убедитесь, что вы пополнили баланс на брокерском счете Pocket Option. Если вы уже внесли депозит, подождите 1-2 минуты и попробуйте снова.", 
+                    text = "❌ <b>Депозит пока не обнаружен.</b>\n\nПожалуйста, убедитесь, что вы пополнили баланс на брокерском счете Pocket Option. Если вы уже внесли депозит, брокеру может потребоваться 1-2 минуты для синхронизации данных. Попробуйте нажать кнопку еще раз.", 
                     parse_mode = "HTML", 
                     reply_markup = retryKeyboard 
                 };

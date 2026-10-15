@@ -25,7 +25,10 @@ public class AutoTradingScannerService : BackgroundService
     private readonly ILogger<AutoTradingScannerService> _logger;
     private readonly ICircuitBreakerService _circuitBreaker;
     private readonly TradingBotSettings _settings;
-    private static readonly string[] _targetPairs = { "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF" };
+    private static readonly string[] _targetPairs = { 
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
+        "EURUSD_OTC", "GBPUSD_OTC", "USDJPY_OTC", "AUDUSD_OTC", "USDCAD_OTC", "USDCHF_OTC"
+    };
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
 
@@ -99,7 +102,7 @@ public class AutoTradingScannerService : BackgroundService
 
     private async Task ProcessSubminuteScanAsync(string pair, string tf, CancellationToken stoppingToken)
     {
-        if (IsWeekendPause()) return;
+        if (IsWeekendPause(pair)) return;
 
         if (_settings.DatasetCollectionMode)
         {
@@ -203,8 +206,14 @@ public class AutoTradingScannerService : BackgroundService
         }
     }
 
-    private bool IsWeekendPause()
+    private bool IsWeekendPause(string? pair = null)
     {
+        // OTC pairs and Pocket Option streams operate 24/7 without weekend pause
+        if (PocketOptionWebSocketStream.IsConnected || (pair != null && pair.Contains("OTC", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
         var dayOfWeek = DateTime.UtcNow.DayOfWeek;
         return dayOfWeek == DayOfWeek.Saturday ||
                (dayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||

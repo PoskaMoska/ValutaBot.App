@@ -622,7 +622,7 @@ def health():
         patch_pred = PatchTSTPredictor.get_instance()
         patch_tst_ok = patch_pred.is_available()
         if patch_tst_ok:
-            patch_tst_ver = "patch_tst_v3"
+            patch_tst_ver = patch_pred._arch_tag
     except Exception as e:
         log.warning(f"[Health] PatchTST status check failed: {e}")
 
@@ -826,17 +826,18 @@ async def predict(request: Request):
             )
             if neural_res is not None:
                 n_dir, n_conf, n_ver, n_hor, n_raw = neural_res
+                m = patch_predictor.metrics or {}
                 resp = {
                     "direction": n_dir,
                     "confidence": round(float(n_conf), 4),
                     "model_version": n_ver,
                     "horizon_candles": n_hor,
-                    "accuracy": 0.7128,
-                    "auc": 0.725,
-                    "n_train": 12968,
+                    "accuracy": m.get("accuracy"),
+                    "auc": None,
+                    "n_train": m.get("n_val"),
                     "variance_estimate": None,
                     "raw_confidence": round(float(n_raw), 4),
-                    "top_features": ["PatchTST_MicroCrossAttn", "DxyMacroEmbedding", "MTFStructure"],
+                    "top_features": ["NeuralBrain_SequenceEncoder", "MacroContext", "SMCFlags"],
                 }
                 return Response(content=orjson.dumps(resp), media_type="application/json")
     except Exception as e:

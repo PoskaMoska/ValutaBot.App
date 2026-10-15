@@ -13,7 +13,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
 
         public async Task ExecuteAsync(long chatId, string command, string cleanText, bool isAdmin, string token, string webAppUrl)
         {
-            bool isAllowedUser = await UserRepository.IsUserAllowedAsync(chatId);
+            bool isAllowedUser = await TelegramBotService.IsUserAllowed(chatId);
 
             if (isAdmin)
             {

@@ -117,6 +117,9 @@ class DualStreamPatchBrain(nn.Module):
         # Auxiliary magnitude regressor (Multi-task PnL regularization)
         self.pnl_regressor = nn.Linear(64, 1)
 
+        # Learned temperature for output calibration
+        self.temperature = nn.Parameter(torch.tensor(1.5))
+
     def forward(
         self,
         x_micro: torch.Tensor,

@@ -39,7 +39,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             }
             else
             {
-                bool isAllowedUser = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsUserAllowedAsync(chatId);
+                bool isAllowedUser = await TelegramBotService.IsUserAllowed(chatId);
 
                 // FIX: If the user typed an unknown slash command, just say so instead of resending the full welcome menu
                 if (cleanText.StartsWith("/"))
