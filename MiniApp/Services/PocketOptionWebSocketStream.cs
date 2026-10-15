@@ -121,7 +121,14 @@ public static class PocketOptionWebSocketStream
             while (!token.IsCancellationRequested)
             {
                 await Task.Delay(15000, token);
-                bool isDead = (DateTime.UtcNow - _lastMessageTime).TotalSeconds > 40;
+                var idleSeconds = (DateTime.UtcNow - _lastMessageTime).TotalSeconds;
+                if (idleSeconds > 15 && _webSocket?.State == WebSocketState.Open)
+                {
+                    try {
+                        await _webSocket.SendAsync(Encoding.UTF8.GetBytes("2"), WebSocketMessageType.Text, true, token);
+                    } catch { }
+                }
+                bool isDead = idleSeconds > 40;
                 if (isDead && _webSocket?.State == WebSocketState.Open)
                 {
                     BotLogger.Warn("[PO WS] Watchdog detected silent drop (>40s no ticks). Dropping connection to reconnect...");
@@ -286,7 +293,22 @@ public static class PocketOptionWebSocketStream
             }
             if (text == "3") continue;
 
-            // 3. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
+            // 3. Auth success trigger: subscribe to all OTC assets (must run before 451- check consumes updateAssets/successauth)
+            if (text != null && (text.Contains("successauth") || text.Contains("updateAssets")) && !subscribed)
+            {
+                subscribed = true;
+                BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {string.Join(", ", _subscribedAssets)}");
+                foreach (var asset in _subscribedAssets)
+                {
+                    string sub1 = $"42[\"changeSymbol\",{{\"asset\":\"{asset}\",\"period\":60}}]";
+                    string sub2 = $"42[\"subfor\",\"{asset}\"]";
+                    await ws.SendAsync(Encoding.UTF8.GetBytes(sub1), WebSocketMessageType.Text, true, connectionToken);
+                    await ws.SendAsync(Encoding.UTF8.GetBytes(sub2), WebSocketMessageType.Text, true, connectionToken);
+                }
+                BotLogger.Info("[PO WS] Subscriptions dispatched.");
+            }
+
+            // 4. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
             if (text != null && text.StartsWith("451-"))
             {
                 try
@@ -301,7 +323,7 @@ public static class PocketOptionWebSocketStream
                 continue;
             }
 
-            // 4. Regular JSON event: 42["<event>", ...]
+            // 5. Regular JSON event: 42["<event>", ...]
             if (text != null && text.StartsWith("42"))
             {
                 try
@@ -319,21 +341,6 @@ public static class PocketOptionWebSocketStream
                     }
                 }
                 catch { }
-            }
-
-            // 5. Auth success trigger: subscribe to all OTC assets
-            if (text != null && (text.Contains("successauth") || text.Contains("updateAssets")) && !subscribed)
-            {
-                subscribed = true;
-                BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {string.Join(", ", _subscribedAssets)}");
-                foreach (var asset in _subscribedAssets)
-                {
-                    string sub1 = $"42[\"changeSymbol\",{{\"asset\":\"{asset}\",\"period\":60}}]";
-                    string sub2 = $"42[\"subfor\",\"{asset}\"]";
-                    await ws.SendAsync(Encoding.UTF8.GetBytes(sub1), WebSocketMessageType.Text, true, connectionToken);
-                    await ws.SendAsync(Encoding.UTF8.GetBytes(sub2), WebSocketMessageType.Text, true, connectionToken);
-                }
-                BotLogger.Info("[PO WS] Subscriptions dispatched.");
             }
         }
     }

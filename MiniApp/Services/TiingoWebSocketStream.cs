@@ -265,8 +265,10 @@ public static class TiingoWebSocketStream
                             }
 
                             if (!PriceFeed.UsePocketOption)
+                            {
                                 ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice(ticker, midPrice, new DateTime(tickTimeUtc, DateTimeKind.Utc));
-                            _ = RealtimeTickCollector.OnPriceUpdateAsync(ticker, midPrice, tickTimeUtc);
+                                _ = RealtimeTickCollector.OnPriceUpdateAsync(ticker, midPrice, tickTimeUtc);
+                            }
                         }
                     }
                 }
