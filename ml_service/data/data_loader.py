@@ -12,7 +12,7 @@ TICKS_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data",
 
 
 def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
-    # Try to fetch from PostgreSQL SubminuteCandles
+    # Try to fetch from PostgreSQL SubminuteCandles (supports both base symbol and {symbol}_PO)
     try:
         db_url = os.getenv("DATABASE_URL")
         if db_url:
@@ -21,11 +21,12 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
             query = '''
                 SELECT open_time as "openTime", open_price as "open", high_price as "high", low_price as "low", close_price as "close", volume as "volume"
                 FROM subminute_candles 
-                WHERE asset = %s AND interval = %s 
+                WHERE (asset = %s OR asset = %s || '_PO') AND interval = %s 
                 ORDER BY open_time DESC 
                 LIMIT %s
             '''
-            df = pd.read_sql_query(query, conn, params=(symbol, interval, limit))
+            clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("/", "").upper()
+            df = pd.read_sql_query(query, conn, params=(symbol, clean_sym, interval, limit))
             conn.close()
             if not df.empty:
                 return df.iloc[::-1].to_dict(orient='records')
@@ -46,14 +47,15 @@ def _query_historical_candles_db(symbol: str, norm_interval: str, limit: int) ->
                 SELECT open_time as "openTime", open as "open", high as "high",
                        low as "low", close as "close", volume as "volume"
                 FROM historical_candles
-                WHERE asset = %s AND interval = %s
+                WHERE (asset = %s OR asset = %s || '_PO') AND interval = %s
                 ORDER BY open_time DESC
                 LIMIT %s
             """
             import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', UserWarning)
-                df = pd.read_sql_query(query, conn, params=(symbol, norm_interval, limit))
+                clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("/", "").upper()
+                df = pd.read_sql_query(query, conn, params=(symbol, clean_sym, norm_interval, limit))
             conn.close()
             if not df.empty:
                 return df
