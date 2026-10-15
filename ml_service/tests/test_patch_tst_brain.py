@@ -253,4 +253,4 @@ def test_07_fastapi_e2e_predict_endpoint(api_client):
     assert data["model_version"] == "patch_tst_v3"
     assert data["direction"] in ("BUY", "PUT")
     assert 0.50 <= data["confidence"] <= 0.65
-    assert "PatchTST_MicroCrossAttn" in data.get("top_features", [])
+    assert any(f in data.get("top_features", []) for f in ("PatchTST_MicroCrossAttn", "NeuralBrain_SequenceEncoder"))

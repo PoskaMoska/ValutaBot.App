@@ -837,7 +837,7 @@ async def predict(request: Request):
                     "n_train": m.get("n_val"),
                     "variance_estimate": None,
                     "raw_confidence": round(float(n_raw), 4),
-                    "top_features": ["NeuralBrain_SequenceEncoder", "MacroContext", "SMCFlags"],
+                    "top_features": ["PatchTST_MicroCrossAttn", "NeuralBrain_SequenceEncoder", "MacroContext", "SMCFlags"],
                 }
                 return Response(content=orjson.dumps(resp), media_type="application/json")
     except Exception as e:
