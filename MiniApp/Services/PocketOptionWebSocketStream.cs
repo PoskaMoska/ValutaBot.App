@@ -373,6 +373,9 @@ public static class PocketOptionWebSocketStream
                 string asset = aProp.GetString() ?? "";
                 if (hProp.ValueKind == JsonValueKind.Array)
                 {
+                    // History is replayed into candles only once per asset per process (cold start).
+                    // Later history frames (sent on every re-subscribe) are stored in po_ticks only.
+                    bool feedCandles = _backfilledAssets.TryAdd(asset, 0);
                     int count = 0;
                     foreach (var pt in hProp.EnumerateArray())
                     {
@@ -380,37 +383,41 @@ public static class PocketOptionWebSocketStream
                         {
                             double srvTs = pt[0].GetDouble();
                             double price = pt[1].GetDouble();
-                            HandleTick(asset, srvTs, price);
+                            HandleTick(asset, srvTs, price, isBackfill: true, feedCandles: feedCandles);
                             count++;
                         }
                     }
-                    BotLogger.Info($"[PO WS] Ingested {count} historical ticks for {asset}.");
+                    BotLogger.Info($"[PO WS] History for {asset}: {count} ticks (candle backfill: {feedCandles}).");
                 }
             }
         }
         catch { }
     }
 
-    private static void HandleTick(string asset, double srvTs, double price)
+    private static readonly ConcurrentDictionary<string, byte> _backfilledAssets = new(StringComparer.OrdinalIgnoreCase);
+
+    private static void HandleTick(string asset, double srvTs, double price, bool isBackfill = false, bool feedCandles = true)
     {
         double utcSec = srvTs - ServerTimeOffsetSec;
         long tickTimeUtc = DateTimeOffset.FromUnixTimeMilliseconds((long)(utcSec * 1000)).UtcTicks;
 
-        string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
-        string otcAsset = cleanAsset + "_OTC";
+        string baseAsset = PriceFeed.BaseAsset(asset);          // EURUSD_otc -> EURUSD
+        string candleKey = baseAsset + PriceFeed.PoSuffix;      // -> EURUSD_PO (never mixed with Tiingo "EURUSD")
 
-        _livePrices[cleanAsset] = price;
-        _livePrices[otcAsset] = price;
-        _lastMessageTime = DateTime.UtcNow;
+        if (!isBackfill)
+        {
+            _livePrices[baseAsset] = price;
+            _lastMessageTime = DateTime.UtcNow;
+            ValutaMetrics.WebSocketTicksTotal.WithLabels(candleKey).Inc();
+            // Macro context gets PO prices only when PO is the active feed (Tiingo then stays out of it).
+            if (PriceFeed.UsePocketOption)
+                ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice(
+                    baseAsset, price, new DateTime(tickTimeUtc, DateTimeKind.Utc));
+        }
         Interlocked.Increment(ref _totalTicksIngested);
 
-        ValutaMetrics.WebSocketTicksTotal.WithLabels(cleanAsset).Inc();
-        ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice(
-            cleanAsset, price, new DateTime(tickTimeUtc, DateTimeKind.Utc));
-
-        // Feed to RealtimeTickCollector for subminute candle generation (s5, s10, s15, s30, 1min)
-        _ = RealtimeTickCollector.OnPriceUpdateAsync(cleanAsset, price, tickTimeUtc);
-        _ = RealtimeTickCollector.OnPriceUpdateAsync(otcAsset, price, tickTimeUtc);
+        if (feedCandles)
+            _ = RealtimeTickCollector.OnPriceUpdateAsync(candleKey, price, tickTimeUtc, isBackfill);
 
         // Queue tick for DB persistence in po_ticks
         long recvMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();

@@ -109,6 +109,34 @@ public class MarketDataFetcher
         string cleanAsset = AssetSanitizer.Sanitize(assetToFetch);
         if (cleanAsset.Length == 6) cleanAsset = $"{cleanAsset.Substring(0, 3)}/{cleanAsset.Substring(3, 3)}";
 
+        // POCKET OPTION MODE: the only valid candles are the broker's own OTC candles ("{ASSET}_PO").
+        // Never fall back to Tiingo — a Tiingo candle differs from PO OTC by up to ~1000 pips.
+        if (PriceFeed.UsePocketOption)
+        {
+            string poKey = PriceFeed.CandleKey(cleanAsset);
+            string tfKey = rawInterval.ToLower() == "1min" ? "m1" : rawInterval.ToLower();
+            int tfSecs = Math.Max(5, TimeframeSeconds(tfKey));
+
+            if (!(tfKey.StartsWith("s") || tfKey == "m1"))
+            {
+                // Higher-TF context (m5, m15, ...) is aggregated from PO 1m candles. May be short right after start.
+                int group = Math.Max(1, tfSecs / 60);
+                var m1 = await RealtimeTickCollector.GetRecentCandles(poKey, "m1", Math.Min(limit * group, 3000));
+                return m1.Length >= group ? AggregateCandles(m1, group).TakeLast(limit).ToArray() : Array.Empty<MiniAppController.OhlcCandle>();
+            }
+
+            var poCandles = await RealtimeTickCollector.GetRecentCandles(poKey, tfKey, limit);
+            if (poCandles.Length == 0)
+                throw new ExchangeUnavailableException("PO feed: no candles", $"Нет котировок Pocket Option для {poKey}. Поток PO не подключен.");
+
+            double ageSecs = (DateTime.UtcNow - poCandles[^1].Timestamp).TotalSeconds;
+            if (ageSecs > Math.Max(25, tfSecs * 3))
+                throw new ExchangeUnavailableException("PO feed: stale", $"Котировки Pocket Option для {poKey} устарели ({ageSecs:F0}с).");
+
+            RecordSuccess();
+            return poCandles;
+        }
+
         bool isWeekend = IsWeekendNow();
 
         // Убрана привязка к OTC по просьбе пользователя.

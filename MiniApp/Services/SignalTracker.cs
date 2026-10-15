@@ -54,7 +54,7 @@ public static class SignalTracker
         string reasoningText = "", string mlModelVersion = "", double mlModelAccuracy = 0.0,
         double priceEntropy = 0.0, int trendMaturity = 0, double pricePositionPct = 0.5, bool bbSqueeze = false, string? taTelemetry = null, string? mlTelemetry = null, string? smcTelemetry = null)
     {
-        if (MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
+        if (!PriceFeed.UsePocketOption && MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
         string sym = asset.ToUpper();
         var now = DateTime.UtcNow;
         // FIX FORENSICS: Real broker expiry is measured from trade entry time (now), NOT from the past grid boundary.

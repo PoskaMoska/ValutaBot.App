@@ -62,7 +62,8 @@ public class PendingTradeVerificationService : BackgroundService
 
         try
         {
-            string cleanAsset = record.Asset.ToUpper().Replace("/", "").Replace("-", "").Replace(" OTC", "").Replace("_OTC", "");
+            // Settle on the SAME feed the signal was built from: "EURUSD_PO" in Pocket Option mode, "EURUSD" for Tiingo.
+            string cleanAsset = PriceFeed.CandleKey(record.Asset);
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
             
@@ -90,8 +91,9 @@ public class PendingTradeVerificationService : BackgroundService
                 MinAllowedTime = minAllowedSub.ToString("O")
             });
 
-            // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m)
-            if (!exitPrice.HasValue || exitPrice.Value <= 0)
+            // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m).
+            // Not in PO mode: historical_candles holds Tiingo prices, which must never settle an OTC trade.
+            if (!PriceFeed.UsePocketOption && (!exitPrice.HasValue || exitPrice.Value <= 0))
             {
                 DateTime minAllowedHist = record.VerifyAt.AddSeconds(-120);
                 exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"

@@ -25,11 +25,15 @@ public class AutoTradingScannerService : BackgroundService
     private readonly ILogger<AutoTradingScannerService> _logger;
     private readonly ICircuitBreakerService _circuitBreaker;
     private readonly TradingBotSettings _settings;
-    private static readonly string[] _targetPairs = { 
-        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
-        "EURUSD_OTC", "GBPUSD_OTC", "USDJPY_OTC", "AUDUSD_OTC", "USDCAD_OTC", "USDCHF_OTC"
-    };
-    private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30" };
+    private static readonly string[] _basePairs = { "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF" };
+
+    // Candle keys the scanner listens to: "EURUSD_PO" (Pocket Option OTC) or "EURUSD" (Tiingo legacy).
+    private static readonly string[] _targetPairs = _basePairs.Select(PriceFeed.CandleKey).ToArray();
+
+    // PO mode: all 5 target horizons (5s, 10s, 15s, 30s, 1m) come from the PO tick feed, event-driven.
+    private static readonly string[] _subminuteTfs = PriceFeed.UsePocketOption
+        ? new[] { "s5", "s10", "s15", "s30", "m1" }
+        : new[] { "s5", "s10", "s15", "s30" };
     private static readonly string[] _minuteTfs = { "m1" };
 
     // Minimum candles per timeframe to trigger a scan — capped by physical limits:
@@ -37,6 +41,7 @@ public class AutoTradingScannerService : BackgroundService
     // s10:  6 candles/min × 30 min = 180 max → require 120
     // s15:  4 candles/min × 30 min = 120 max → require  80
     // s30:  2 candles/min × 30 min =  60 max → require  40
+    // m1:   1 candle/min            → require 40 (PO mode)
     // FIX: Old hardcoded 160 physically blocked s15 and s30 from ever scanning.
     private static readonly System.Collections.Generic.Dictionary<string, int> _minCandlesPerTf =
         new(StringComparer.OrdinalIgnoreCase)
@@ -45,7 +50,12 @@ public class AutoTradingScannerService : BackgroundService
             ["s10"] = 120,
             ["s15"] = 80,
             ["s30"] = 40,
+            ["m1"]  = 40,
         };
+
+    /// <summary>Name passed to the analysis pipeline: "EURUSD_PO" -> "EURUSD_OTC" (sanitizer maps it to EURUSD).</summary>
+    private static string AnalysisAsset(string candleKey)
+        => PriceFeed.IsPoKey(candleKey) ? PriceFeed.BaseAsset(candleKey) + "_OTC" : candleKey;
 
 
     public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger, ICircuitBreakerService circuitBreaker, IOptions<TradingBotSettings> settings)
@@ -129,7 +139,7 @@ public class AutoTradingScannerService : BackgroundService
                 if ((DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30)
                 {
                     _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles)...");
-                    await orchestrator.ExecuteAnalysisAsync(pair, tf, userSettings);
+                    await orchestrator.ExecuteAnalysisAsync(AnalysisAsset(pair), tf, userSettings);
                 }
                 else
                 {
@@ -145,6 +155,12 @@ public class AutoTradingScannerService : BackgroundService
 
     private async Task RunMinuteScannerAsync(CancellationToken stoppingToken)
     {
+        if (PriceFeed.UsePocketOption)
+        {
+            _logger.LogInformation("[AutoScanner] PO mode: 1m is scanned from the Pocket Option feed; Tiingo REST minute loop disabled.");
+            return;
+        }
+
         int currentPairIndex = 0;
         int currentTfIndex = 0;
 
@@ -209,7 +225,7 @@ public class AutoTradingScannerService : BackgroundService
     private bool IsWeekendPause(string? pair = null)
     {
         // OTC pairs and Pocket Option streams operate 24/7 without weekend pause
-        if (PocketOptionWebSocketStream.IsConnected || (pair != null && pair.Contains("OTC", StringComparison.OrdinalIgnoreCase)))
+        if (PriceFeed.UsePocketOption || (pair != null && pair.Contains("OTC", StringComparison.OrdinalIgnoreCase)))
         {
             return false;
         }

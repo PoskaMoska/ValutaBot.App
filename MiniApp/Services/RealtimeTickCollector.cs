@@ -277,7 +277,7 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        public static Task OnPriceUpdateAsync(string asset, double price, long tickTimeUtc)
+        public static Task OnPriceUpdateAsync(string asset, double price, long tickTimeUtc, bool isBackfill = false)
         {
             string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
             long nowTicks = tickTimeUtc;
@@ -288,11 +288,11 @@ namespace ValutaBot.MiniApp
             QueueTick(cleanAsset, "s30", price, nowTicks, TimeSpan.FromSeconds(30).Ticks);
             QueueTick(cleanAsset, "1min", price, nowTicks, TimeSpan.FromSeconds(60).Ticks);
 
-            UpdateAccumulator(_s5,  cleanAsset, price, nowTicks, TimeSpan.FromSeconds(5).Ticks);
-            UpdateAccumulator(_s10, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(10).Ticks);
-            UpdateAccumulator(_s15, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(15).Ticks);
-            UpdateAccumulator(_s30, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(30).Ticks);
-            UpdateAccumulator(_m1, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(60).Ticks);
+            UpdateAccumulator(_s5,  cleanAsset, price, nowTicks, TimeSpan.FromSeconds(5).Ticks, isBackfill);
+            UpdateAccumulator(_s10, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(10).Ticks, isBackfill);
+            UpdateAccumulator(_s15, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(15).Ticks, isBackfill);
+            UpdateAccumulator(_s30, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(30).Ticks, isBackfill);
+            UpdateAccumulator(_m1, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(60).Ticks, isBackfill);
             
             return Task.CompletedTask;
         }
@@ -316,16 +316,18 @@ namespace ValutaBot.MiniApp
 
         private static void UpdateAccumulator(
             ConcurrentDictionary<string, CandleAccumulator> dict,
-            string asset, double price, long nowTicks, long intervalTicks)
+            string asset, double price, long nowTicks, long intervalTicks, bool isBackfill = false)
         {
             var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
             var acc = dict.GetOrAdd(asset, _ => new CandleAccumulator());
             lock (acc)
             {
+                if (acc.OpenTime != default && openTime < acc.OpenTime) return; // late tick: never rewind the live candle
                 if (acc.OpenTime != openTime && acc.OpenTime != default)
                 {
                     acc.Reset(openTime);
-                    OnCandleClosed?.Invoke(asset, dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1");
+                    if (!isBackfill)
+                        OnCandleClosed?.Invoke(asset, dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1");
                 }
                 else if (acc.OpenTime == default)
                     acc.OpenTime = openTime;
