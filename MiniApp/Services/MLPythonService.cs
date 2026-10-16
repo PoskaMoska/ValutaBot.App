@@ -364,13 +364,23 @@ public static class MLPythonService
 
             string smcBosDir = smcResult?.BosDirection ?? "NONE";
             bool smcHasOb = smcResult?.HasOrderBlock ?? false;
+            string smcObType = smcResult?.OrderBlockType ?? "NONE";
             bool smcHasFvg = smcResult?.HasFvg ?? false;
+            string smcFvgType = smcResult?.FvgType ?? "NONE";
+            bool smcHasSwp = smcResult?.HasLiquiditySweep ?? false;
+            string smcSwpDir = smcResult?.SweepDirection ?? "NONE";
             object payload = mappedMtf != null 
                 ? new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex, mtf_candles = mappedMtf,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL",
+                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_ob_type = smcObType,
+                        smc_has_fvg = smcHasFvg, smc_fvg_type = smcFvgType,
+                        smc_has_swp = smcHasSwp, smc_swp_dir = smcSwpDir,
+                        of_delta_ratio = 1.0, of_state = "NEUTRAL",
                         macro_context = macroContext }
                 : new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_has_fvg = smcHasFvg, of_delta_ratio = 1.0, of_state = "NEUTRAL",
+                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_ob_type = smcObType,
+                        smc_has_fvg = smcHasFvg, smc_fvg_type = smcFvgType,
+                        smc_has_swp = smcHasSwp, smc_swp_dir = smcSwpDir,
+                        of_delta_ratio = 1.0, of_state = "NEUTRAL",
                         macro_context = macroContext };
 
             byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(payload);

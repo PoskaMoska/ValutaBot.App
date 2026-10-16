@@ -174,11 +174,31 @@ def extract_macro_vector(row_dict, feat_obj):
     tf_str = (row_dict.get("timeframe") or "s5").lower()
     tf_sec = float(TF_SECONDS.get(tf_str, 5)) / 60.0
     
-    # 19-22. SMC Tags
-    has_ob = 1.0 if (row_dict.get("smc_has_ob") or smc.get("HasOrderBlock")) else 0.0
-    has_fvg = 1.0 if (row_dict.get("smc_has_fvg") or smc.get("HasFvg")) else 0.0
-    has_swp = 1.0 if smc.get("HasLiquiditySweep") else 0.0
-    has_bos = 1.0 if smc.get("HasBos") else 0.0
+    # 19-22. Signed SMC Directional Sensors (+1.0 Bullish, -1.0 Bearish, 0.0 None)
+    def _signed_smc(dir_str, has_flag):
+        s = str(dir_str or "").upper()
+        if "BULL" in s:
+            return 1.0
+        if "BEAR" in s:
+            return -1.0
+        return 1.0 if has_flag else 0.0
+
+    has_ob = _signed_smc(
+        smc.get("OrderBlockType") or row_dict.get("smc_ob_type"),
+        bool(row_dict.get("smc_has_ob") or smc.get("HasOrderBlock"))
+    )
+    has_fvg = _signed_smc(
+        smc.get("FvgType") or row_dict.get("smc_fvg_type"),
+        bool(row_dict.get("smc_has_fvg") or smc.get("HasFvg"))
+    )
+    has_swp = _signed_smc(
+        smc.get("SweepDirection") or row_dict.get("smc_swp_dir"),
+        bool(smc.get("HasLiquiditySweep"))
+    )
+    has_bos = _signed_smc(
+        smc.get("BosDirection") or row_dict.get("smc_bos_dir"),
+        bool(smc.get("HasBos"))
+    )
     
     # 23. Asset ID
     asset_str = (

@@ -152,7 +152,43 @@ public class MarketAnalysisOrchestrator(
         engSw.Stop();
         traceLines.Add($"[4. Структура]       SMC отрисован -> {engSw.ElapsedMilliseconds}ms");
 
-        // Macro Context Anchors (Computed early for Neural Brain & Database)
+        // Macro & Mathematical Sensors (Computed BEFORE Neural Brain so live inference receives real PriceEntropy & context)
+        double priceEntropy = 0.0;
+        int trendMaturity = 0;
+        double pricePositionPct = 0.5;
+        bool bbSqueeze = false;
+
+        if (closedCandles.Length >= 20)
+        {
+            var last20 = closedCandles.Skip(closedCandles.Length - 20).ToList();
+            double maxHigh = last20.Max(c => c.High);
+            double minLow = last20.Min(c => c.Low);
+            if (maxHigh > minLow) {
+                pricePositionPct = (currentLivePrice - minLow) / (maxHigh - minLow);
+            }
+
+            double sma20 = last20.Average(c => c.Close);
+            double stdev20 = Math.Sqrt(last20.Average(c => Math.Pow(c.Close - sma20, 2)));
+            bbSqueeze = (stdev20 * 4) / sma20 < 0.0005; // 5 bps bandwidth
+
+            int streak = 0;
+            bool? upTrend = null;
+            for (int i = closedCandles.Length - 1; i >= 1; i--) {
+                bool isUp = closedCandles[i].Close > closedCandles[i-1].Close;
+                bool isDown = closedCandles[i].Close < closedCandles[i-1].Close;
+                if (upTrend == null) {
+                    if (isUp) upTrend = true;
+                    else if (isDown) upTrend = false;
+                    else break;
+                }
+                if (upTrend == true && isUp) streak++;
+                else if (upTrend == false && isDown) streak++;
+                else break;
+            }
+            trendMaturity = streak;
+            priceEntropy = mainAtr > 0 ? (stdev20 / mainAtr) : 0.0;
+        }
+
         int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
         var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
         var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
@@ -170,6 +206,10 @@ public class MarketAnalysisOrchestrator(
             DxyMomentum5mBps = dxyMetrics.DxyMomentum5mBps,
             BasketSyncScore = dxyMetrics.BasketSyncScore,
             SpreadBps = liveSpreadBps,
+            PriceEntropy = priceEntropy,
+            TrendMaturity = trendMaturity,
+            PricePositionPct = pricePositionPct,
+            BbSqueeze = bbSqueeze,
             MinutesToNews = minutesToNews ?? -1,
             Adx = mainAdx,
             Rsi = taDetail.RsiVal,
@@ -262,43 +302,6 @@ public class MarketAnalysisOrchestrator(
             ["SMC"]          = DirectionExtensions.FromScore(consensus.SmcScore).ToSignal(),
             ["LIGHTGBM"]     = lgbmDir,
         };
-
-        // Phase 3 Context calculations (strictly on closedCandles to avoid 1-tick unclosed bar bias)
-        double priceEntropy = 0.0;
-        int trendMaturity = 0;
-        double pricePositionPct = 0.5;
-        bool bbSqueeze = false;
-        
-        if (closedCandles.Length >= 20)
-        {
-            var last20 = closedCandles.Skip(closedCandles.Length - 20).ToList();
-            double maxHigh = last20.Max(c => c.High);
-            double minLow = last20.Min(c => c.Low);
-            if (maxHigh > minLow) {
-                pricePositionPct = (currentLivePrice - minLow) / (maxHigh - minLow);
-            }
-            
-            double sma20 = last20.Average(c => c.Close);
-            double stdev20 = Math.Sqrt(last20.Average(c => Math.Pow(c.Close - sma20, 2)));
-            bbSqueeze = (stdev20 * 4) / sma20 < 0.0005; // 5 bps bandwidth
-            
-            int streak = 0;
-            bool? upTrend = null;
-            for (int i = closedCandles.Length - 1; i >= 1; i--) {
-                bool isUp = closedCandles[i].Close > closedCandles[i-1].Close;
-                bool isDown = closedCandles[i].Close < closedCandles[i-1].Close;
-                if (upTrend == null) {
-                    if (isUp) upTrend = true;
-                    else if (isDown) upTrend = false;
-                    else break;
-                }
-                if (upTrend == true && isUp) streak++;
-                else if (upTrend == false && isDown) streak++;
-                else break;
-            }
-            trendMaturity = streak;
-            priceEntropy = mainAtr > 0 ? (stdev20 / mainAtr) : 0.0;
-        }
 
         // RECORD (Fire and forget) ONLY IF CONFIDENCE IS HIGH ENOUGH
         int targetHorizon = timeout.TimeoutCandles;

@@ -122,10 +122,30 @@ def build_macro_vector_live(
     tf_str = str(interval).lower()
     tf_sec = float(TF_SECONDS.get(tf_str, 5)) / 60.0
 
-    has_ob = 1.0 if (smc.get("smc_has_ob") or smc.get("HasOrderBlock")) else 0.0
-    has_fvg = 1.0 if (smc.get("smc_has_fvg") or smc.get("HasFvg")) else 0.0
-    has_swp = 1.0 if (smc.get("smc_has_swp") or smc.get("HasLiquiditySweep")) else 0.0
-    has_bos = 1.0 if (smc.get("smc_bos_dir", "NONE") not in ("NONE", "") or smc.get("HasBos")) else 0.0
+    def _signed_smc(dir_str: str, has_flag: bool) -> float:
+        s = str(dir_str or "").upper()
+        if "BULL" in s:
+            return 1.0
+        if "BEAR" in s:
+            return -1.0
+        return 1.0 if has_flag else 0.0
+
+    has_ob = _signed_smc(
+        smc.get("smc_ob_type") or smc.get("OrderBlockType") or "",
+        bool(smc.get("smc_has_ob") or smc.get("HasOrderBlock"))
+    )
+    has_fvg = _signed_smc(
+        smc.get("smc_fvg_type") or smc.get("FvgType") or "",
+        bool(smc.get("smc_has_fvg") or smc.get("HasFvg"))
+    )
+    has_swp = _signed_smc(
+        smc.get("smc_swp_dir") or smc.get("SweepDirection") or "",
+        bool(smc.get("smc_has_swp") or smc.get("HasLiquiditySweep"))
+    )
+    has_bos = _signed_smc(
+        smc.get("smc_bos_dir") or smc.get("BosDirection") or "",
+        bool(smc.get("smc_bos_dir", "NONE") not in ("NONE", "") or smc.get("HasBos"))
+    )
 
     asset_clean = (
         symbol.upper()

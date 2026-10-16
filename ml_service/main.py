@@ -781,7 +781,11 @@ async def predict(request: Request):
     # Extract rich SMC/OF features
     smc_bos_dir = data.get("smc_bos_dir", "NONE")
     smc_has_ob = data.get("smc_has_ob", False)
+    smc_ob_type = data.get("smc_ob_type", "NONE")
     smc_has_fvg = data.get("smc_has_fvg", False)
+    smc_fvg_type = data.get("smc_fvg_type", "NONE")
+    smc_has_swp = data.get("smc_has_swp", False)
+    smc_swp_dir = data.get("smc_swp_dir", "NONE")
     of_delta_ratio = data.get("of_delta_ratio", 1.0)
     of_state = data.get("of_state", "NEUTRAL")
 
@@ -837,7 +841,11 @@ async def predict(request: Request):
             smc_ctx = {
                 "smc_bos_dir": smc_bos_dir,
                 "smc_has_ob": smc_has_ob,
+                "smc_ob_type": smc_ob_type,
                 "smc_has_fvg": smc_has_fvg,
+                "smc_fvg_type": smc_fvg_type,
+                "smc_has_swp": smc_has_swp,
+                "smc_swp_dir": smc_swp_dir,
             }
             macro_ctx = data.get("macro_context")
             neural_res = patch_predictor.predict(
