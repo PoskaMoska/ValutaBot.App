@@ -45,6 +45,8 @@ public static class PocketOptionWebSocketStream
     private readonly record struct PoTickRow(string Asset, double Ts, double Price, long RecvMs);
 
     private const string DefaultTradingUrl = "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket";
+    private const string TryDemoTradingUrl = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket";
+    private const string AlphanumericChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     private static readonly SemaphoreSlim _sendLock = new(1, 1);
     private static DateTime _lastPsHeartbeat = DateTime.UtcNow;
@@ -52,6 +54,23 @@ public static class PocketOptionWebSocketStream
     private static string? _cachedTradingUrl;
     private static int _consecutiveAuthFailures = 0;
     private static DateTime _lastAuthAlertUtc = DateTime.MinValue;
+
+    public static (string authPayloadJson, string tradingUrl) GenerateTryDemoSession()
+    {
+        Span<char> chars = stackalloc char[10];
+        for (int i = 0; i < chars.Length; i++)
+        {
+            chars[i] = AlphanumericChars[Random.Shared.Next(AlphanumericChars.Length)];
+        }
+        string token = new string(chars);
+        string payload = JsonSerializer.Serialize(new
+        {
+            token,
+            balance = 50000,
+            isFastHistory = true
+        });
+        return (payload, TryDemoTradingUrl);
+    }
 
     // Live price store: last tick per symbol
     private static readonly ConcurrentDictionary<string, double> _livePrices = new(StringComparer.OrdinalIgnoreCase);
@@ -184,17 +203,14 @@ public static class PocketOptionWebSocketStream
             return (builtPayload, envUrl);
         }
 
-        return (null, null);
+        // Fallback 3: Zero-login autonomous Try-Demo session (client-generated 10-char token)
+        var autoSession = GenerateTryDemoSession();
+        _cachedAuthPayloadJson = autoSession.authPayloadJson;
+        _cachedTradingUrl = autoSession.tradingUrl;
+        BotLogger.Info("[PO WS] Generated autonomous zero-login Try-Demo session.");
+        return autoSession;
     }
 
-    /// <summary>
-    /// Hot-reloads the Pocket Option WebSocket session token in PostgreSQL and triggers an immediate reconnect.
-    /// Accepts:
-    /// - 42["auth",{"session":"...","isDemo":1,"uid":129671966,...}]
-    /// - {"authPayload":{...},"tradingUrl":"..."}
-    /// - {"session":"...","isDemo":1,"uid":129671966,...}
-    /// - Raw 20..64 char session token string (e.g. g8ldchs07f...)
-    /// </summary>
     public static async Task<(bool ok, string message)> UpdateSessionAsync(string rawInput)
     {
         if (string.IsNullOrWhiteSpace(rawInput))
@@ -206,13 +222,20 @@ public static class PocketOptionWebSocketStream
 
         try
         {
+            // Case 0: "auto" -> generate autonomous zero-login Try-Demo token
+            if (string.Equals(trimmed, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                (newAuthPayloadJson, tradingUrl) = GenerateTryDemoSession();
+            }
             // Case 1: Socket.IO frame 42["auth",{...}]
-            if (trimmed.StartsWith("42["))
+            else if (trimmed.StartsWith("42["))
             {
                 using var doc = JsonDocument.Parse(trimmed.Substring(2));
                 if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() >= 2)
                 {
                     newAuthPayloadJson = doc.RootElement[1].GetRawText();
+                    if (doc.RootElement[1].TryGetProperty("token", out _))
+                        tradingUrl = TryDemoTradingUrl;
                 }
             }
             // Case 2: JSON object
@@ -230,6 +253,11 @@ public static class PocketOptionWebSocketStream
                 {
                     newAuthPayloadJson = root.GetRawText();
                 }
+                else if (root.TryGetProperty("token", out _))
+                {
+                    newAuthPayloadJson = root.GetRawText();
+                    tradingUrl = TryDemoTradingUrl;
+                }
             }
             // Case 3: Raw session string (optionally followed by uid)
             else
@@ -237,41 +265,57 @@ public static class PocketOptionWebSocketStream
                 var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 string tokenStr = parts[0].Trim('"', '\'');
                 if (tokenStr.Length < 10 || tokenStr.Length > 128)
-                    return (false, "Неверный формат токена (ожидается строка session 26 символов или JSON 42[\"auth\",...]).");
+                    return (false, "Неверный формат токена (ожидается 'auto', строка session или JSON 42[\"auth\",...]).");
 
-                long uid = 129671966;
-                if (parts.Length >= 2 && long.TryParse(parts[1], out long explicitUid))
+                if (tokenStr.Length == 10)
                 {
-                    uid = explicitUid;
-                }
-                else if (!string.IsNullOrEmpty(_cachedAuthPayloadJson))
-                {
-                    try
+                    newAuthPayloadJson = JsonSerializer.Serialize(new
                     {
-                        using var oldDoc = JsonDocument.Parse(_cachedAuthPayloadJson);
-                        if (oldDoc.RootElement.TryGetProperty("uid", out var uProp) && uProp.TryGetInt64(out long oldUid) && oldUid > 0)
-                            uid = oldUid;
-                    }
-                    catch { }
+                        token = tokenStr,
+                        balance = 50000,
+                        isFastHistory = true
+                    });
+                    tradingUrl = TryDemoTradingUrl;
                 }
-
-                newAuthPayloadJson = JsonSerializer.Serialize(new
+                else
                 {
-                    session = tokenStr,
-                    isDemo = 1,
-                    uid,
-                    platform = 2,
-                    isFastHistory = true,
-                    isOptimized = true
-                });
+                    long uid = 129671966;
+                    if (parts.Length >= 2 && long.TryParse(parts[1], out long explicitUid))
+                    {
+                        uid = explicitUid;
+                    }
+                    else if (!string.IsNullOrEmpty(_cachedAuthPayloadJson))
+                    {
+                        try
+                        {
+                            using var oldDoc = JsonDocument.Parse(_cachedAuthPayloadJson);
+                            if (oldDoc.RootElement.TryGetProperty("uid", out var uProp) && uProp.TryGetInt64(out long oldUid) && oldUid > 0)
+                                uid = oldUid;
+                        }
+                        catch { }
+                    }
+
+                    newAuthPayloadJson = JsonSerializer.Serialize(new
+                    {
+                        session = tokenStr,
+                        isDemo = 1,
+                        uid,
+                        platform = 2,
+                        isFastHistory = true,
+                        isOptimized = true
+                    });
+                    tradingUrl = DefaultTradingUrl;
+                }
             }
 
             if (string.IsNullOrEmpty(newAuthPayloadJson))
                 return (false, "Не удалось извлечь authPayload из переданной строки.");
 
             using var verifyDoc = JsonDocument.Parse(newAuthPayloadJson);
-            if (!verifyDoc.RootElement.TryGetProperty("session", out var sessProp) || string.IsNullOrWhiteSpace(sessProp.GetString()))
-                return (false, "В authPayload отсутствует поле 'session'.");
+            bool hasSession = verifyDoc.RootElement.TryGetProperty("session", out var sessProp) && !string.IsNullOrWhiteSpace(sessProp.GetString());
+            bool hasToken = verifyDoc.RootElement.TryGetProperty("token", out var tokProp) && !string.IsNullOrWhiteSpace(tokProp.GetString());
+            if (!hasSession && !hasToken)
+                return (false, "В authPayload отсутствует поле 'session' или 'token'.");
 
             string fullStateJson = $"{{\"authPayload\":{newAuthPayloadJson},\"tradingUrl\":{JsonSerializer.Serialize(tradingUrl)}}}";
 
@@ -473,30 +517,34 @@ public static class PocketOptionWebSocketStream
     private static async Task HandleAuthRejectedAsync()
     {
         int fails = Interlocked.Increment(ref _consecutiveAuthFailures);
-        BotLogger.Warn($"[PO WS] Server returned 41 (Auth Rejected) before successauth (consecutive failures: {fails}).");
+        var (autoPayload, autoUrl) = GenerateTryDemoSession();
+        _cachedAuthPayloadJson = autoPayload;
+        _cachedTradingUrl = autoUrl;
+        BotLogger.Warn($"[PO WS] Server returned 41 (Auth Rejected, fail #{fails}). Auto-healing with fresh Try-Demo session ({autoUrl})...");
+
+        try
+        {
+            string fullStateJson = $"{{\"authPayload\":{autoPayload},\"tradingUrl\":{JsonSerializer.Serialize(autoUrl)}}}";
+            using var conn = DbConnectionFactory.GetConnection();
+            await conn.OpenAsync();
+            await conn.ExecuteAsync(@"
+                INSERT INTO po_collector_state (id, state, updated_at, status)
+                VALUES (1, @State, now(), 'AUTO_HEALED')
+                ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = now(), status = 'AUTO_HEALED';
+            ", new { State = fullStateJson });
+        }
+        catch { }
+
         if (fails >= 3)
         {
             Status = "AUTH_EXPIRED";
-            try
-            {
-                using var conn = DbConnectionFactory.GetConnection();
-                await conn.OpenAsync();
-                await conn.ExecuteAsync(@"
-                    INSERT INTO po_collector_state (id, status)
-                    VALUES (1, 'AUTH_EXPIRED')
-                    ON CONFLICT (id) DO UPDATE SET status = 'AUTH_EXPIRED';
-                ");
-            }
-            catch { }
-
             if ((DateTime.UtcNow - _lastAuthAlertUtc).TotalMinutes >= 30)
             {
                 _lastAuthAlertUtc = DateTime.UtcNow;
                 string alertText =
-                    "🚨 <b>[Pocket Option WS] Сессия авторизации отклонена сервером (код 41)!</b>\n\n" +
-                    "Для мгновенного восстановления потока без перезапуска отправьте сюда команду:\n" +
-                    "<code>/po_auth &lt;новый_session_или_42[\"auth\",...]&gt;</code>";
-                BotLogger.NotifyAdmin("[PO WS] Auth token rejected (code 41). Use /po_auth in Telegram to hot-reload.");
+                    "🚨 <b>[Pocket Option WS] Сессия авторизации отклонена сервером (код 41)!</b>\n" +
+                    "Автоматическая ротация Try-Demo токена не прошла 3 раза подряд. Проверьте <code>/po_status</code> или выполните <code>/po_auth auto</code>.";
+                BotLogger.NotifyAdmin("[PO WS] Auth token rejected 3x (code 41).");
                 try
                 {
                     string? botToken = TelegramNotifier.GetToken();

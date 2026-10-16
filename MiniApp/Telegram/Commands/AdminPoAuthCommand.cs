@@ -41,12 +41,11 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
                 sb.AppendLine($"• Текущий статус: <code>{PocketOptionWebSocketStream.Status}</code> (Connected: <b>{PocketOptionWebSocketStream.IsConnected}</b>)");
                 sb.AppendLine($"• Всего тиков за сессию: <b>{PocketOptionWebSocketStream.TotalTicksIngested:N0}</b>");
                 sb.AppendLine($"• Последний тик (UTC): <code>{(PocketOptionWebSocketStream.LastTickUtc == DateTime.MinValue ? "нет" : PocketOptionWebSocketStream.LastTickUtc.ToString("yyyy-MM-dd HH:mm:ss"))}</code>\n");
-                sb.AppendLine("<b>Как обновить сессию без перезапуска:</b>");
-                sb.AppendLine("1️⃣ Отправьте фрейм авторизации из браузера (DevTools → Network → WS → <code>42[\"auth\",...]</code>):");
-                sb.AppendLine("<code>/po_auth 42[\"auth\",{\"session\":\"...\",\"isDemo\":1,\"uid\":129671966,\"platform\":2}]</code>\n");
-                sb.AppendLine("2️⃣ Или отправьте только новую строку <code>session</code> (26 символов):");
-                sb.AppendLine("<code>/po_auth d725c16a468b2fe5b5f8dc105e</code>\n");
-                sb.AppendLine("3️⃣ Проверить статус потока: <code>/po_status</code>");
+                sb.AppendLine("<b>Автономная генерация токена (рекомендуется, без браузера и логина):</b>");
+                sb.AppendLine("• <code>/po_auth auto</code> — сам сгенерирует новый 10-значный Try-Demo токен и переподключит поток (это также происходит автоматически при истечении сессии).\n");
+                sb.AppendLine("<b>Или вручную из браузера (опционально):</b>");
+                sb.AppendLine("• <code>/po_auth &lt;session&gt;</code> или <code>/po_auth 42[\"auth\",...]</code>\n");
+                sb.AppendLine("Проверить статус потока: <code>/po_status</code>");
                 await TelegramBotService.SendMessage(token, chatId, sb.ToString());
                 return;
             }
