@@ -63,6 +63,8 @@ class Store:
         self.total = 0
         self.per_asset = {}
         self.last_tick = 0.0
+        self.auth_payload = None
+        self.trading_url = None
         if self.db_url:
             self._connect()
 
@@ -87,15 +89,51 @@ class Store:
         with self.conn.cursor() as c:
             c.execute("SELECT state FROM po_collector_state WHERE id=1")
             r = c.fetchone()
-        return json.loads(r[0]) if r and r[0] else None
+        st = json.loads(r[0]) if r and r[0] else None
+        if isinstance(st, dict):
+            if st.get("authPayload") and not self.auth_payload:
+                self.auth_payload = st["authPayload"]
+            if st.get("tradingUrl") and not self.trading_url:
+                self.trading_url = st["tradingUrl"]
+        return st
 
-    def save_state(self, state):
+    def merge_state(self, state, auth_payload=None, trading_url=None):
+        merged = dict(state) if isinstance(state, dict) else {}
+        existing = None
+        if self.conn:
+            try:
+                with self.conn.cursor() as c:
+                    c.execute("SELECT state FROM po_collector_state WHERE id=1")
+                    r = c.fetchone()
+                existing = json.loads(r[0]) if r and r[0] else None
+            except Exception:
+                existing = None
+        if isinstance(existing, dict):
+            if "authPayload" in existing and "authPayload" not in merged:
+                merged["authPayload"] = existing["authPayload"]
+            if "tradingUrl" in existing and "tradingUrl" not in merged:
+                merged["tradingUrl"] = existing["tradingUrl"]
+        if self.auth_payload and "authPayload" not in merged:
+            merged["authPayload"] = self.auth_payload
+        if self.trading_url and "tradingUrl" not in merged:
+            merged["tradingUrl"] = self.trading_url
+        if auth_payload:
+            merged["authPayload"] = auth_payload
+            self.auth_payload = auth_payload
+        if trading_url:
+            merged["tradingUrl"] = trading_url
+            self.trading_url = trading_url
+        return merged
+
+    def save_state(self, state, auth_payload=None, trading_url=None):
+        merged = self.merge_state(state, auth_payload, trading_url)
         if not self.conn:
-            return
+            return merged
         with self.conn.cursor() as c:
             c.execute("""INSERT INTO po_collector_state (id, state, updated_at) VALUES (1, %s, now())
                          ON CONFLICT (id) DO UPDATE SET state=EXCLUDED.state, updated_at=now()""",
-                      (json.dumps(state),))
+                      (json.dumps(merged),))
+        return merged
 
     def heartbeat(self, status):
         if not self.conn:
@@ -112,7 +150,14 @@ class Store:
         except Exception:
             return
         for m in msgs:
-            if m.get("ev") != "updateStream":
+            ev = m.get("ev")
+            if ev == "auth_captured":
+                if m.get("authPayload"):
+                    self.auth_payload = m["authPayload"]
+                if m.get("tradingUrl"):
+                    self.trading_url = m["tradingUrl"]
+                continue
+            if ev != "updateStream":
                 continue
             try:
                 rows = json.loads(m["d"])
@@ -151,18 +196,24 @@ class Store:
 
 # ----------------------------------------------------------------------------- browser
 async def new_context(pw, headed, state):
+    # Playwright storage_state only accepts cookies/origins; strip extra keys like authPayload/tradingUrl
+    pw_state = None
+    if isinstance(state, dict) and ("cookies" in state or "origins" in state):
+        pw_state = {"cookies": state.get("cookies", []), "origins": state.get("origins", [])}
     browser = await pw.chromium.launch(
         headless=not headed,
         args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"])
     ctx = await browser.new_context(
-        storage_state=state, user_agent=UA, locale="ru-RU", viewport={"width": 1366, "height": 768})
+        storage_state=pw_state, user_agent=UA, locale="ru-RU", viewport={"width": 1366, "height": 768})
     await ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
     return browser, ctx
 
 
 async def do_login(args, store):
+    trading_page_url = os.environ.get("PO_URL", "https://pocketoption.com/ru/cabinet/demo-quick-high-low/")
     async with async_playwright() as pw:
         browser, ctx = await new_context(pw, True, None)
+        await ctx.add_init_script(CAPTURE_JS)
         page = await ctx.new_page()
         try:
             await page.goto(LOGIN_URL, wait_until="commit", timeout=120000)
@@ -176,10 +227,33 @@ async def do_login(args, store):
             await asyncio.sleep(2)
         else:
             log("Login not detected, aborting."); await browser.close(); return 1
-        await asyncio.sleep(5)
+
+        # Wait or navigate to trading page so capture.js intercepts the WebSocket 42["auth",...] frame
+        if "demo" not in page.url and "quick-high-low" not in page.url:
+            try:
+                await page.goto(trading_page_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+
+        captured_auth = None
+        captured_url = None
+        for _ in range(30):
+            try:
+                res = await page.evaluate(
+                    "() => ({ authPayload: window.__poAuthPayload || null, tradingUrl: window.__poTradingUrl || null })"
+                )
+                if res and res.get("authPayload"):
+                    captured_auth = res["authPayload"]
+                    captured_url = res.get("tradingUrl")
+                    log(f"Captured WebSocket authPayload (uid={captured_auth.get('uid')}) from {captured_url}")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
         state = await ctx.storage_state()
-        STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
-        store.save_state(state)
+        merged = store.save_state(state, captured_auth, captured_url)
+        STATE_FILE.write_text(json.dumps(merged), encoding="utf-8")
         log(f"Session saved to {STATE_FILE.name}" + (" and to the database" if store.conn else ""))
         await browser.close()
     return 0
@@ -258,8 +332,7 @@ async def collect(args, store):
                             "  ".join(f"{a}={n}" for a, n in sorted(store.per_asset.items())))
                         last_report = now
                     if now - last_state >= STATE_SAVE_SEC:
-                        state = await ctx.storage_state()
-                        store.save_state(state)
+                        state = store.save_state(await ctx.storage_state())
                         if STATE_FILE.parent.exists() and not os.environ.get("RAILWAY_ENVIRONMENT"):
                             STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
                         last_state = now

@@ -73,7 +73,13 @@
     const nativeSend = ws.send.bind(ws);
     ws.send = function (data) {
       if (typeof data === 'string' && evName(data) === 'auth' && !ws._aux && /po\.market/.test(url)) {
-        try { authPayload = JSON.parse(data.slice(data.indexOf('[')))[1]; tradingUrl = url; } catch (e) { /* ignore */ }
+        try {
+          authPayload = JSON.parse(data.slice(data.indexOf('[')))[1];
+          tradingUrl = url;
+          window.__poAuthPayload = authPayload;
+          window.__poTradingUrl = tradingUrl;
+          push({ t: Date.now(), ev: 'auth_captured', authPayload: authPayload, tradingUrl: tradingUrl });
+        } catch (e) { /* ignore */ }
       }
       return nativeSend(data);
     };

@@ -44,8 +44,14 @@ public static class PocketOptionWebSocketStream
 
     private readonly record struct PoTickRow(string Asset, double Ts, double Price, long RecvMs);
 
+    private const string DefaultTradingUrl = "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket";
+
     private static readonly SemaphoreSlim _sendLock = new(1, 1);
     private static DateTime _lastPsHeartbeat = DateTime.UtcNow;
+    private static string? _cachedAuthPayloadJson;
+    private static string? _cachedTradingUrl;
+    private static int _consecutiveAuthFailures = 0;
+    private static DateTime _lastAuthAlertUtc = DateTime.MinValue;
 
     // Live price store: last tick per symbol
     private static readonly ConcurrentDictionary<string, double> _livePrices = new(StringComparer.OrdinalIgnoreCase);
@@ -60,6 +66,8 @@ public static class PocketOptionWebSocketStream
     public static bool IsConnected => _webSocket?.State == WebSocketState.Open;
     public static long TotalTicksIngested => Interlocked.Read(ref _totalTicksIngested);
     public static string Status { get; private set; } = "IDLE";
+    public static DateTime LastTickUtc => _lastMessageTime;
+    public static int ConsecutiveAuthFailures => Volatile.Read(ref _consecutiveAuthFailures);
 
     private static async Task SendTextAsync(ClientWebSocket ws, string payload, CancellationToken token)
     {
@@ -131,14 +139,164 @@ public static class PocketOptionWebSocketStream
                 var root = doc.RootElement;
                 string? tradingUrl = root.TryGetProperty("tradingUrl", out var u) ? u.GetString() : null;
                 string? authPayloadJson = root.TryGetProperty("authPayload", out var a) ? a.GetRawText() : null;
-                return (authPayloadJson, tradingUrl);
+
+                if (!string.IsNullOrEmpty(authPayloadJson) && !string.IsNullOrEmpty(tradingUrl))
+                {
+                    _cachedAuthPayloadJson = authPayloadJson;
+                    _cachedTradingUrl = tradingUrl;
+                    return (authPayloadJson, tradingUrl);
+                }
             }
         }
         catch (Exception ex)
         {
             BotLogger.Warn($"[PO WS] Failed to read session from DB: {ex.Message}");
         }
+
+        // Fallback 1: Last known valid session cached in memory
+        if (!string.IsNullOrEmpty(_cachedAuthPayloadJson) && !string.IsNullOrEmpty(_cachedTradingUrl))
+        {
+            BotLogger.Info("[PO WS] Using cached in-memory session fallback.");
+            return (_cachedAuthPayloadJson, _cachedTradingUrl);
+        }
+
+        // Fallback 2: Environment variables (PO_AUTH_PAYLOAD or PO_SESSION_TOKEN)
+        string? envPayload = Environment.GetEnvironmentVariable("PO_AUTH_PAYLOAD");
+        string envUrl = Environment.GetEnvironmentVariable("PO_TRADING_URL") ?? DefaultTradingUrl;
+        if (!string.IsNullOrWhiteSpace(envPayload))
+        {
+            return (envPayload.Trim(), envUrl);
+        }
+
+        string? envToken = Environment.GetEnvironmentVariable("PO_SESSION_TOKEN");
+        if (!string.IsNullOrWhiteSpace(envToken))
+        {
+            long uid = long.TryParse(Environment.GetEnvironmentVariable("PO_UID"), out var parsedUid) ? parsedUid : 129671966;
+            string builtPayload = JsonSerializer.Serialize(new
+            {
+                session = envToken.Trim(),
+                isDemo = 1,
+                uid,
+                platform = 2,
+                isFastHistory = true,
+                isOptimized = true
+            });
+            return (builtPayload, envUrl);
+        }
+
         return (null, null);
+    }
+
+    /// <summary>
+    /// Hot-reloads the Pocket Option WebSocket session token in PostgreSQL and triggers an immediate reconnect.
+    /// Accepts:
+    /// - 42["auth",{"session":"...","isDemo":1,"uid":129671966,...}]
+    /// - {"authPayload":{...},"tradingUrl":"..."}
+    /// - {"session":"...","isDemo":1,"uid":129671966,...}
+    /// - Raw 20..64 char session token string (e.g. g8ldchs07f...)
+    /// </summary>
+    public static async Task<(bool ok, string message)> UpdateSessionAsync(string rawInput)
+    {
+        if (string.IsNullOrWhiteSpace(rawInput))
+            return (false, "Пустой токен.");
+
+        string trimmed = rawInput.Trim();
+        string tradingUrl = _cachedTradingUrl ?? DefaultTradingUrl;
+        string? newAuthPayloadJson = null;
+
+        try
+        {
+            // Case 1: Socket.IO frame 42["auth",{...}]
+            if (trimmed.StartsWith("42["))
+            {
+                using var doc = JsonDocument.Parse(trimmed.Substring(2));
+                if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() >= 2)
+                {
+                    newAuthPayloadJson = doc.RootElement[1].GetRawText();
+                }
+            }
+            // Case 2: JSON object
+            else if (trimmed.StartsWith("{"))
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("authPayload", out var ap))
+                {
+                    newAuthPayloadJson = ap.GetRawText();
+                    if (root.TryGetProperty("tradingUrl", out var tu) && !string.IsNullOrWhiteSpace(tu.GetString()))
+                        tradingUrl = tu.GetString()!;
+                }
+                else if (root.TryGetProperty("session", out _))
+                {
+                    newAuthPayloadJson = root.GetRawText();
+                }
+            }
+            // Case 3: Raw session string (optionally followed by uid)
+            else
+            {
+                var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                string tokenStr = parts[0].Trim('"', '\'');
+                if (tokenStr.Length < 10 || tokenStr.Length > 128)
+                    return (false, "Неверный формат токена (ожидается строка session 26 символов или JSON 42[\"auth\",...]).");
+
+                long uid = 129671966;
+                if (parts.Length >= 2 && long.TryParse(parts[1], out long explicitUid))
+                {
+                    uid = explicitUid;
+                }
+                else if (!string.IsNullOrEmpty(_cachedAuthPayloadJson))
+                {
+                    try
+                    {
+                        using var oldDoc = JsonDocument.Parse(_cachedAuthPayloadJson);
+                        if (oldDoc.RootElement.TryGetProperty("uid", out var uProp) && uProp.TryGetInt64(out long oldUid) && oldUid > 0)
+                            uid = oldUid;
+                    }
+                    catch { }
+                }
+
+                newAuthPayloadJson = JsonSerializer.Serialize(new
+                {
+                    session = tokenStr,
+                    isDemo = 1,
+                    uid,
+                    platform = 2,
+                    isFastHistory = true,
+                    isOptimized = true
+                });
+            }
+
+            if (string.IsNullOrEmpty(newAuthPayloadJson))
+                return (false, "Не удалось извлечь authPayload из переданной строки.");
+
+            using var verifyDoc = JsonDocument.Parse(newAuthPayloadJson);
+            if (!verifyDoc.RootElement.TryGetProperty("session", out var sessProp) || string.IsNullOrWhiteSpace(sessProp.GetString()))
+                return (false, "В authPayload отсутствует поле 'session'.");
+
+            string fullStateJson = $"{{\"authPayload\":{newAuthPayloadJson},\"tradingUrl\":{JsonSerializer.Serialize(tradingUrl)}}}";
+
+            using var conn = DbConnectionFactory.GetConnection();
+            await conn.OpenAsync();
+            await conn.ExecuteAsync(@"
+                INSERT INTO po_collector_state (id, state, updated_at, status)
+                VALUES (1, @State, now(), 'RECONNECTING')
+                ON CONFLICT (id) DO UPDATE SET
+                    state = EXCLUDED.state,
+                    updated_at = now(),
+                    status = 'RECONNECTING';
+            ", new { State = fullStateJson });
+
+            _cachedAuthPayloadJson = newAuthPayloadJson;
+            _cachedTradingUrl = tradingUrl;
+            Interlocked.Exchange(ref _consecutiveAuthFailures, 0);
+
+            try { _connectionCts?.Cancel(); } catch { }
+            return (true, $"Токен сохранён в po_collector_state (session={sessProp.GetString()![..Math.Min(6, sessProp.GetString()!.Length)]}***). Переподключение потока запущено.");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Ошибка разбора или сохранения токена: {ex.Message}");
+        }
     }
 
     private static async Task WatchdogLoopAsync(CancellationToken token)
@@ -295,6 +453,8 @@ public static class PocketOptionWebSocketStream
 
     private static async Task SubscribeAllAssetsAsync(ClientWebSocket ws, CancellationToken connectionToken)
     {
+        Interlocked.Exchange(ref _consecutiveAuthFailures, 0);
+        Status = "ONLINE";
         BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {string.Join(", ", _subscribedAssets)}");
         await Task.Delay(150, connectionToken);
         foreach (var asset in _subscribedAssets)
@@ -308,6 +468,50 @@ public static class PocketOptionWebSocketStream
         await SendTextAsync(ws, "42[\"ps\"]", connectionToken);
         _lastPsHeartbeat = DateTime.UtcNow;
         BotLogger.Info("[PO WS] Subscriptions dispatched.");
+    }
+
+    private static async Task HandleAuthRejectedAsync()
+    {
+        int fails = Interlocked.Increment(ref _consecutiveAuthFailures);
+        BotLogger.Warn($"[PO WS] Server returned 41 (Auth Rejected) before successauth (consecutive failures: {fails}).");
+        if (fails >= 3)
+        {
+            Status = "AUTH_EXPIRED";
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.OpenAsync();
+                await conn.ExecuteAsync(@"
+                    INSERT INTO po_collector_state (id, status)
+                    VALUES (1, 'AUTH_EXPIRED')
+                    ON CONFLICT (id) DO UPDATE SET status = 'AUTH_EXPIRED';
+                ");
+            }
+            catch { }
+
+            if ((DateTime.UtcNow - _lastAuthAlertUtc).TotalMinutes >= 30)
+            {
+                _lastAuthAlertUtc = DateTime.UtcNow;
+                string alertText =
+                    "🚨 <b>[Pocket Option WS] Сессия авторизации отклонена сервером (код 41)!</b>\n\n" +
+                    "Для мгновенного восстановления потока без перезапуска отправьте сюда команду:\n" +
+                    "<code>/po_auth &lt;новый_session_или_42[\"auth\",...]&gt;</code>";
+                BotLogger.NotifyAdmin("[PO WS] Auth token rejected (code 41). Use /po_auth in Telegram to hot-reload.");
+                try
+                {
+                    string? botToken = TelegramNotifier.GetToken();
+                    if (!string.IsNullOrEmpty(botToken))
+                    {
+                        var admins = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.GetAdminChatIdsAsync();
+                        foreach (long adminId in admins)
+                        {
+                            await TelegramBotService.SendMessage(botToken, adminId, alertText);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
     }
 
     private static async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken connectionToken)
@@ -352,13 +556,21 @@ public static class PocketOptionWebSocketStream
                 continue;
             }
 
-            // 2. Socket.IO ping/pong heartbeat
+            // 2. Socket.IO ping/pong heartbeat & 41 namespace disconnect (Auth Rejected)
             if (text == "2")
             {
                 await SendTextAsync(ws, "3", connectionToken);
                 continue;
             }
             if (text == "3") continue;
+            if (text == "41")
+            {
+                if (!subscribed)
+                {
+                    await HandleAuthRejectedAsync();
+                }
+                break;
+            }
 
             // 3. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
             if (text != null && text.StartsWith("451-"))
