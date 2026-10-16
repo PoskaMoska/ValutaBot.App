@@ -215,31 +215,35 @@ public static partial class MiniAppController
             return Results.Ok();
         });
 
-                app.MapGet("/api/stats/overnight", async (HttpContext context) =>
+        app.MapGet("/api/stats/overnight", async (HttpContext context) =>
         {
             try
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 await conn.OpenAsync();
                 
-                var total = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes;");
-                var lastNight = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours');");
-                var wins = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND is_win = true;");
+                var total = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '2026-10-15 21:55:00+00'::timestamptz;");
+                var lastNight = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;");
+                var wins = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND direction IN ('BUY', 'PUT') AND was_win = true;");
+                var datasetSamples12h = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND features_json IS NOT NULL;");
                 var losses = lastNight - wins;
                 
-                var candles = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM subminute_candles;");
-                var ticks = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM subminute_candles WHERE open_time >= (NOW() - INTERVAL '12 hours');");
+                var candles = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM subminute_candles WHERE asset LIKE '%_PO';");
+                var ticks = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM subminute_candles WHERE asset LIKE '%_PO' AND open_time >= (NOW() - INTERVAL '12 hours')::text;");
+                var rawTicks = await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn, "SELECT COUNT(*) FROM po_ticks;");
                 
                 double winrate = lastNight > 0 ? (double)wins / lastNight * 100 : 0;
                 
                 return Results.Ok(new {
-                    TotalTradesInDb = total,
-                    TradesOvernight12h = lastNight,
+                    TotalPoEraOutcomesInDb = total,
+                    LiveTradesOvernight12h = lastNight,
+                    DatasetSamplesOvernight12h = datasetSamples12h,
                     WinsOvernight = wins,
                     LossesOvernight = losses,
                     WinRateOvernight = Math.Round(winrate, 1) + "%",
-                    TotalSubminuteCandles = candles,
+                    TotalPoSubminuteCandles = candles,
                     CandlesGatheredOvernight = ticks,
+                    TotalPoRawTicks = rawTicks,
                     Status = "Database connection stable."
                 });
             }
@@ -270,6 +274,9 @@ public static partial class MiniAppController
                         ROUND(SUM(CASE WHEN was_win = true THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) as WinRate
                     FROM trade_outcomes
                     WHERE features_json IS NOT NULL
+                      AND direction IN ('BUY', 'PUT')
+                      AND was_win IS NOT NULL
+                      AND created_at >= '2026-10-15 21:55:00+00'::timestamptz
                     GROUP BY asset, timeframe
                     ORDER BY asset, timeframe
                 ");

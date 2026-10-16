@@ -164,22 +164,37 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             };
 
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord);
-            
-            if (CircuitBreaker != null)
+
+            // Background neutral samples (HOLD) are strictly for offline Transformer training (export_dataset.py).
+            // They must never affect Circuit Breaker, consecutive loss streaks, post-mortem dumps, or online RL weights.
+            if (record.Direction is "HOLD" or "NEUTRAL" or "SHADOW_NEUTRAL")
             {
-                _ = CircuitBreaker.CheckStateAsync(); // Fire and forget so it doesn't block verification
+                return;
             }
 
-            // 🔥 DRIFT DETECTION 🔥
-            _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
+            bool isLiveDirectional = record.Direction is "BUY" or "PUT";
+
+            if (isLiveDirectional)
+            {
+                if (CircuitBreaker != null)
+                {
+                    _ = CircuitBreaker.CheckStateAsync(); // Fire and forget so it doesn't block verification
+                }
+
+                // 🔥 DRIFT DETECTION 🔥
+                _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
+            }
 
             bool isExactDoji = Math.Abs(record.PnlBps) < 1e-4; // Exact tie / Refund
             string lossKey = $"{record.Asset}_{record.Timeframe}";
             
             if (isExactDoji)
             {
-                // A tie breaks the loss streak!
-                _consecutiveLosses[lossKey] = 0;
+                if (isLiveDirectional)
+                {
+                    // A tie breaks the loss streak!
+                    _consecutiveLosses[lossKey] = 0;
+                }
                 BotLogger.Warn($"[TradeOutcomeTracker] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
                 return;
             }
@@ -187,27 +202,30 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             bool wasCorrect = record.WasCorrect ?? false;
             double exitPriceVal = record.ExitPrice ?? record.EntryPrice;
             
-            if (wasCorrect)
+            if (isLiveDirectional)
             {
-                _consecutiveLosses[lossKey] = 0;
-            }
-            else
-            {
-                _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
-
-                // DUMP POST-MORTEM SNAPSHOT ON LOSS
-                try
+                if (wasCorrect)
                 {
-                    string dumpDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "losses");
-                    System.IO.Directory.CreateDirectory(dumpDir);
-                    string dumpFile = System.IO.Path.Combine(dumpDir, $"loss_{record.Asset}_{record.Timeframe}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.json");
-                    string json = System.Text.Json.JsonSerializer.Serialize(outcomeRecord, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-                    await System.IO.File.WriteAllTextAsync(dumpFile, json);
-                    BotLogger.Warn($"[PostMortem] Snapshot saved for loss on {record.Asset} at {dumpFile}");
+                    _consecutiveLosses[lossKey] = 0;
                 }
-                catch (Exception ex)
+                else
                 {
-                    BotLogger.Error("Failed to write post-mortem snapshot", ex);
+                    _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
+
+                    // DUMP POST-MORTEM SNAPSHOT ON LIVE LOSS
+                    try
+                    {
+                        string dumpDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "losses");
+                        System.IO.Directory.CreateDirectory(dumpDir);
+                        string dumpFile = System.IO.Path.Combine(dumpDir, $"loss_{record.Asset}_{record.Timeframe}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.json");
+                        string json = System.Text.Json.JsonSerializer.Serialize(outcomeRecord, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                        await System.IO.File.WriteAllTextAsync(dumpFile, json);
+                        BotLogger.Warn($"[PostMortem] Snapshot saved for loss on {record.Asset} at {dumpFile}");
+                    }
+                    catch (Exception ex)
+                    {
+                        BotLogger.Error("Failed to write post-mortem snapshot", ex);
+                    }
                 }
             }
 
@@ -231,7 +249,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 return;
             }
 
-            if (record.SourceDirections != null && record.SourceDirections.Count > 0)
+            if (isLiveDirectional && record.SourceDirections != null && record.SourceDirections.Count > 0)
             {
                 string winDirection = exitPriceVal > record.EntryPrice ? "BUY" : "PUT";
                 foreach (var kv in record.SourceDirections)

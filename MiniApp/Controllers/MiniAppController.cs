@@ -274,22 +274,36 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                         }
                     }
 
-                    string tiingoStatus = "\u274C Нет ключа API";
-                    if (!string.IsNullOrEmpty(TiingoService.GetApiKey()))
+                    string wsStatus = "\u274C Ожидание подключения";
+                    if (PriceFeed.UsePocketOption)
                     {
-                        tiingoStatus = "\u2705 Подключено";
+                        for (int t = 0; t < 8; t++)
+                        {
+                            if (PocketOptionWebSocketStream.IsConnected)
+                            {
+                                wsStatus = "\u2705 Pocket Option OTC (24/7)";
+                                break;
+                            }
+                            await Task.Delay(1000);
+                        }
+                        if (!PocketOptionWebSocketStream.IsConnected)
+                            wsStatus = "\u23F3 Подключение к Pocket Option OTC...";
+                    }
+                    else if (!string.IsNullOrEmpty(TiingoService.GetApiKey()))
+                    {
+                        wsStatus = "\u2705 Подключено";
                         for (int t = 0; t < 5; t++)
                         {
                             if (TiingoWebSocketStream.IsConnected)
                             {
-                                tiingoStatus = "\u2705 Подключено";
+                                wsStatus = "\u2705 Подключено";
                                 break;
                             }
                             await Task.Delay(1000);
                         }
                     }
 
-                    string msg = "\U0001F680 <b>ValutaBot Успешно Запущен!</b>\n\n\u2699\uFE0F <b>Системная диагностика:</b>\n- C# Core: \u2705 ОК\n- PostgreSQL: " + dbStatus + "\n- Python ML: " + mlStatus + "\n- WebSocket: " + tiingoStatus + "\n\n<i>Бот полностью в сети и мониторит рынок.</i>";
+                    string msg = "\U0001F680 <b>ValutaBot Успешно Запущен!</b>\n\n\u2699\uFE0F <b>Системная диагностика:</b>\n- C# Датчики: \u2705 ОК\n- PostgreSQL: " + dbStatus + "\n- Нейросеть (PatchTST): " + mlStatus + "\n- WebSocket: " + wsStatus + "\n\n<i>Бот полностью в сети и мониторит рынок.</i>";
                     await ValutaBot.MiniApp.TelegramBotService.SendMessageToAdmins(msg);
                 }
                 catch (Exception ex)

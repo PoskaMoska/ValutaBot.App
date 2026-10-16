@@ -1,5 +1,5 @@
-import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20261011_copilot';
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20261011_copilot';
+import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20261016_neural';
+import { switchResultTab, updateTrafficLight } from './ui.js?v=20261016_neural';
 
 export const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {

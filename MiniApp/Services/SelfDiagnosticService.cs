@@ -220,16 +220,19 @@ public class SelfDiagnosticService : BackgroundService
         // 5. Market Feed Liveness Check (subminute_candles not stalled)
         try
         {
-            // Forex market closes Fri 21:00 UTC and reopens Sun 21:00 UTC
-            bool isForexWeekend = (DateTime.UtcNow.DayOfWeek == DayOfWeek.Saturday) ||
-                                  (DateTime.UtcNow.DayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
-                                  (DateTime.UtcNow.DayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
+            // Pocket Option OTC operates 24/7; legacy Forex closes Fri 21:00 UTC to Sun 21:00 UTC
+            bool isFeedPaused = !PriceFeed.UsePocketOption && (
+                (DateTime.UtcNow.DayOfWeek == DayOfWeek.Saturday) ||
+                (DateTime.UtcNow.DayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
+                (DateTime.UtcNow.DayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21));
 
-            if (!isForexWeekend)
+            if (!isFeedPaused)
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
-                var latestCandleStr = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<string>(conn,
-                    "SELECT MAX(open_time) FROM subminute_candles");
+                string feedQuery = PriceFeed.UsePocketOption
+                    ? "SELECT MAX(open_time) FROM subminute_candles WHERE asset LIKE '%_PO'"
+                    : "SELECT MAX(open_time) FROM subminute_candles";
+                var latestCandleStr = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<string>(conn, feedQuery);
                 
                 if (DateTime.TryParse(latestCandleStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var latestCandleUtc))
                 {
@@ -239,13 +242,13 @@ public class SelfDiagnosticService : BackgroundService
                         if (_feedWasHealthy)
                         {
                             _feedWasHealthy = false;
-                            await TelegramBotService.SendMessageToAdmins($"⚠️ <b>Задержка котировок рынка</b>\nСвежие свечи в subminute_candles отстают на {(int)stallDuration.TotalSeconds}с. Проверьте WebSocket/Tiingo.");
+                            await TelegramBotService.SendMessageToAdmins($"⚠️ <b>Задержка котировок рынка</b>\nСвежие свечи в subminute_candles отстают на {(int)stallDuration.TotalSeconds}с. Проверьте поток Pocket Option OTC WebSocket.");
                         }
                     }
                     else if (!_feedWasHealthy)
                     {
                         _feedWasHealthy = true;
-                        await TelegramBotService.SendMessageToAdmins("✅ <b>Поток котировок восстановлен</b>\nСвечи поступают в базу в реальном времени.");
+                        await TelegramBotService.SendMessageToAdmins("✅ <b>Поток котировок Pocket Option OTC восстановлен</b>\nСвечи поступают в базу в реальном времени.");
                     }
                 }
             }
@@ -262,9 +265,9 @@ public class SelfDiagnosticService : BackgroundService
             try
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
-                var v3Count = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<int>(conn,
-                    "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL");
-                BotLogger.Info($"[Diagnostics] V3 Dataset Progress: {v3Count} records accumulated with rich macro context.");
+                var poV3Count = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<int>(conn,
+                    "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL AND created_at >= '2026-10-15 21:55:00+00'::timestamptz");
+                BotLogger.Info($"[Diagnostics] V3 PO-Era Dataset Progress: {poV3Count} clean Pocket Option OTC records accumulated with 160-candle sequences & macro context.");
             }
             catch (Exception exV3)
             {

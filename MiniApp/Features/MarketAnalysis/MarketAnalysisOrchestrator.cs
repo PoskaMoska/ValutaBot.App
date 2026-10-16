@@ -368,11 +368,13 @@ public class MarketAnalysisOrchestrator(
         string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
         // Risk & Market Invariant: S5 has an empirically proven negative expectancy (41.01% WR) due to broker spread & execution jitter.
-        // Route S5 signals to SHADOW trades to preserve data collection while protecting live execution.
+        // Route S5 signals and Circuit-Breaker-halted signals to SHADOW trades to preserve 24/7 dataset collection while protecting live execution.
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
+        bool isDirectional = consensus.FinalDirection is "BUY" or "PUT";
+        bool isCbHalted = TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true;
         string sampleKey = $"{cleanAsset}_{timeframe}";
 
-        if (consensus.Probability >= 57 && !isS5)
+        if (isDirectional && consensus.Probability >= 57 && !isS5 && !isCbHalted)
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
@@ -389,7 +391,7 @@ public class MarketAnalysisOrchestrator(
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
-        else if (consensus.Probability >= 45 || isS5)
+        else if (isDirectional && (consensus.Probability >= 45 || isS5 || isCbHalted))
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
@@ -404,7 +406,8 @@ public class MarketAnalysisOrchestrator(
                 mlPrediction?.Accuracy ?? 0.0,
                 priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             dbSw.Stop();
-            traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{(isS5 ? ", S5 noise guard" : "")}) -> {dbSw.ElapsedMilliseconds}ms");
+            string shadowReason = isCbHalted ? ", CB halt guard" : (isS5 ? ", S5 noise guard" : "");
+            traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else
         {
@@ -423,7 +426,7 @@ public class MarketAnalysisOrchestrator(
             }
             else
             {
-                traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 53% -> {dbSw.ElapsedMilliseconds}ms");
+                traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 57% -> {dbSw.ElapsedMilliseconds}ms");
             }
         }
 
@@ -493,13 +496,23 @@ public class MarketAnalysisOrchestrator(
 
         // ── AI Copilot Tactical Synthesis ──
         CopilotAdviceDto copilotAdvice;
-        if (mtfResult.IsGoldenSetup)
+        if (isCbHalted)
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "CIRCUIT_BREAKER",
+                Title = "🛡️ Аварийный тормоз (Circuit Breaker)",
+                Message = $"Зафиксирована серия убытков на повышенной волатильности. Вход временно заблокирован для защиты депозита, нейросеть продолжает фоновое обучение.",
+                QualityScore = 35
+            };
+        }
+        else if (mtfResult.IsGoldenSetup && isDirectional && consensus.Probability >= 57)
         {
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "GOLDEN",
                 Title = "⭐ Идеальный сетап (Golden Setup)",
-                Message = $"Все 3 уровня анализа синхронны: нейросеть PatchTST, SMC-ликвидность и теханализ подтверждают движение {consensus.FinalDirection}. Конфликтов нет.",
+                Message = $"Все 3 уровня анализа синхронны: нейросеть ({mlPrediction?.ModelVersion ?? "Neural Brain"}), датчики SMC и теханализ подтверждают движение {consensus.FinalDirection}. Конфликтов нет.",
                 QualityScore = 96
             };
         }
@@ -509,7 +522,7 @@ public class MarketAnalysisOrchestrator(
             {
                 Status = "CONFLICT",
                 Title = "⚠️ Конфликт таймфреймов",
-                Message = $"На {timeframe} виден отскок, но старший тренд давит в противоположную сторону. Опасность ложного пробоя 78%.",
+                Message = $"На {timeframe} локальный импульс спорит со старшим трендом. Опасность ложного пробоя повышена.",
                 RecommendedAsset = cleanAsset,
                 RecommendedTf = "M1",
                 QualityScore = 55
@@ -537,7 +550,7 @@ public class MarketAnalysisOrchestrator(
                 QualityScore = 48
             };
         }
-        else if (consensus.FinalDirection == "NEUTRAL" || consensus.Probability <= 52)
+        else if (!isDirectional || consensus.Probability <= 52)
         {
             copilotAdvice = new CopilotAdviceDto
             {
@@ -555,7 +568,7 @@ public class MarketAnalysisOrchestrator(
             {
                 Status = "NORMAL",
                 Title = $"🎯 Системный тренд ({consensus.FinalDirection})",
-                Message = $"Структура рынка устойчивая ({uiMarketPhase}). Математическое ожидание подтверждено моделью ({consensus.Probability}%).",
+                Message = $"Структура рынка устойчивая ({uiMarketPhase}). Математическое ожидание подтверждено нейросетью ({consensus.Probability}%).",
                 QualityScore = (int)Math.Clamp(consensus.Probability + 25, 75, 92)
             };
         }
@@ -578,7 +591,7 @@ public class MarketAnalysisOrchestrator(
             smcDirection = uiSmcDirection,
             smcConfidence = uiSmcConfidence,
             lgbmDirection = mlSignal.Direction,
-            lgbmConfidence = (int)Math.Clamp(Math.Round(mlSignal.Confidence * 100), 50, 65),
+            lgbmConfidence = (int)Math.Clamp(Math.Round(mlSignal.Confidence * 100), 50, 99),
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
             signalsVerifiedAsset = assetStats.Verified,

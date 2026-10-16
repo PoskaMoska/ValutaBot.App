@@ -37,6 +37,7 @@ namespace ValutaBot.MiniApp.Services
 
         // In-memory cached state (with TTL)
         private DateTime? _haltedUntil;
+        private DateTime? _lastCooldownExpiredUtc;
         private string _haltReason = string.Empty;
         private DateTime _cacheLoadedAt = DateTime.MinValue;
 
@@ -113,12 +114,13 @@ namespace ValutaBot.MiniApp.Services
                 if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
                     return true;
 
-                // Halt expired → clear state and delete DB row
+                // Halt expired → record expiration watermark, clear state, and delete DB row
                 if (_haltedUntil.HasValue && DateTime.UtcNow >= _haltedUntil.Value)
                 {
+                    _lastCooldownExpiredUtc = _haltedUntil.Value;
                     _haltedUntil = null;
                     _haltReason = string.Empty;
-                    BotLogger.Info("[CircuitBreaker] Cooldown expired. Trading resumed.");
+                    BotLogger.Info($"[CircuitBreaker] Cooldown expired. Fresh evaluation window starts after {_lastCooldownExpiredUtc:HH:mm:ss} UTC.");
                     _ = Task.Run(async () => await DeleteHaltFromDbAsync());
                 }
                 return false;
@@ -157,7 +159,10 @@ namespace ValutaBot.MiniApp.Services
 
             try
             {
-                var recentOutcomes = await TradeRepository.GetRecentOutcomesAsync(_settings.CircuitBreakerWindowSize);
+                DateTime? sinceUtc;
+                lock (_lock) { sinceUtc = _lastCooldownExpiredUtc; }
+
+                var recentOutcomes = await TradeRepository.GetRecentOutcomesAsync(_settings.CircuitBreakerWindowSize, sinceUtc);
                 if (recentOutcomes == null || recentOutcomes.Count == 0) return;
 
                 bool shouldHalt = false;
@@ -274,6 +279,12 @@ namespace ValutaBot.MiniApp.Services
                     {
                         _haltedUntil = haltedUntil;
                         _haltReason = reason ?? string.Empty;
+                    }
+                    else if (haltedUntil.HasValue && DateTime.UtcNow >= haltedUntil.Value)
+                    {
+                        _lastCooldownExpiredUtc = haltedUntil.Value;
+                        _haltedUntil = null;
+                        _haltReason = string.Empty;
                     }
                 }
             }

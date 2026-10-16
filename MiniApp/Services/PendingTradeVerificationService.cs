@@ -179,10 +179,10 @@ public class PendingTradeVerificationService : BackgroundService
 
         double priceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
 
-        // Guard: NEUTRAL сигнал не несёт обучающей информации
-        if (record.Direction == "NEUTRAL")
+        // Guard: NEUTRAL / SHADOW_NEUTRAL сигнал не несёт обучающей информации
+        if (record.Direction is "NEUTRAL" or "SHADOW_NEUTRAL")
         {
-            BotLogger.Warn($"[PendingVerifier] NEUTRAL direction for {record.Id} — skipping, deleting.");
+            BotLogger.Warn($"[PendingVerifier] {record.Direction} direction for {record.Id} — skipping, deleting.");
             await TradeRepository.DeletePendingTradeAsync(record.Id);
             return;
         }
@@ -192,8 +192,8 @@ public class PendingTradeVerificationService : BackgroundService
         record.ExitPrice = exitPrice.Value;
         record.PnlBps = Math.Round(priceDiff * 10000, 2);
         
-        if (isExactDoji) {
-            record.WasCorrect = null; // TIE
+        if (isExactDoji || record.Direction is "HOLD" or "SHADOW_HOLD") {
+            record.WasCorrect = null; // TIE or neutral HOLD sample
         } else {
             record.WasCorrect = (record.Direction.EndsWith("BUY") && exitPrice.Value > record.EntryPrice)
                              || (record.Direction.EndsWith("PUT") && exitPrice.Value < record.EntryPrice);

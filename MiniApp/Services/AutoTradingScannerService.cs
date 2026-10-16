@@ -116,20 +116,15 @@ public class AutoTradingScannerService : BackgroundService
     {
         if (IsWeekendPause(pair)) return;
 
-        if (_settings.DatasetCollectionMode)
-        {
-            // Allowed
-        }
-        else if (_circuitBreaker.IsHalted())
+        if (!_settings.DatasetCollectionMode && _circuitBreaker.IsHalted())
         {
             long nowTicks = DateTime.UtcNow.Ticks;
             long prevTicks = Interlocked.Read(ref _lastCircuitBreakerWarnTicks);
             if (nowTicks - prevTicks >= TimeSpan.FromSeconds(60).Ticks &&
                 Interlocked.CompareExchange(ref _lastCircuitBreakerWarnTicks, nowTicks, prevTicks) == prevTicks)
             {
-                _logger.LogWarning($"[AutoScanner] Circuit Breaker Active ({_circuitBreaker.GetHaltedReason()}). Pausing scan...");
+                _logger.LogWarning($"[AutoScanner] Circuit Breaker Active ({_circuitBreaker.GetHaltedReason()}). Routing scans to SHADOW mode for continuous dataset collection.");
             }
-            return;
         }
 
         try

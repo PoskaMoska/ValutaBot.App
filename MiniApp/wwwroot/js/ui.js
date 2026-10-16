@@ -1,4 +1,4 @@
-import { lastPriceVal } from './api.js?v=20261011_copilot';
+import { lastPriceVal } from './api.js?v=20261016_neural';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');
@@ -240,9 +240,9 @@ export function renderError(rawError, debugText) {
     if (rawError) {
         const errLower = rawError.toLowerCase();
         
-        if (errLower.includes('run out of api credits') || errLower.includes('api credits') || (errLower.includes('limit') && errLower.includes('twelvedata'))) {
-            title = '⚠️ Лимит TwelveData исчерпан';
-            desc = 'Превышен суточный лимит запросов к API TwelveData (800 шт). Пожалуйста, подождите обновления лимита (следующий день).';
+        if (errLower.includes('run out of api credits') || errLower.includes('api credits')) {
+            title = '⚠️ Лимит запросов исчерпан';
+            desc = 'Превышен лимит запросов к внешнему потоку данных. Пожалуйста, повторите попытку чуть позже.';
         } else if (errLower.includes('too many requests') || errLower.includes('rate limit') || errLower.includes('429')) {
             title = '⚠️ Превышен лимит запросов';
             const match = rawError.match(/(\d+)s/);
@@ -262,10 +262,10 @@ export function renderError(rawError, debugText) {
             desc = 'Не указан Pocket Option ID.';
         } else if (errLower.includes('api key') || errLower.includes('apikey')) {
             title = '⚠️ Сбой конфигурации';
-            desc = 'На сервере не настроен API-ключ TwelveData.';
+            desc = 'Ошибка авторизации потока котировок на сервере.';
         } else if (errLower.includes('plan') || errLower.includes('subscription') || errLower.includes('tier')) {
-            title = '⚠️ Ограничение тарифа';
-            desc = 'Ваш тариф TwelveData не поддерживает этот актив или таймфрейм. Попробуйте выбрать другой инструмент.';
+            title = '⚠️ Ограничение доступа';
+            desc = 'Данный инструмент или таймфрейм временно недоступен. Попробуйте выбрать другую валютную пару.';
         } else if (errLower.includes('fetch') || errLower.includes('network') || errLower.includes('failed') || errLower.includes('connect')) {
             title = '⚠️ Ошибка соединения';
             desc = 'Не удалось подключиться к серверу. Пожалуйста, проверьте интернет-соединение.';
@@ -586,7 +586,7 @@ export function updateAiCopilot(data, onActionCallback) {
     card.classList.remove('state-golden', 'state-danger', 'state-caution');
     if (advice.status === 'GOLDEN') {
         card.classList.add('state-golden');
-    } else if (advice.status === 'NOISE_GUARD' || advice.status === 'CONFLICT' || advice.status === 'NEWS_RISK' || psycho.speedPenalty >= 25) {
+    } else if (advice.status === 'CIRCUIT_BREAKER' || advice.status === 'NOISE_GUARD' || advice.status === 'CONFLICT' || advice.status === 'NEWS_RISK' || psycho.speedPenalty >= 25) {
         card.classList.add('state-danger');
     } else if (advice.status === 'WAIT') {
         card.classList.add('state-caution');

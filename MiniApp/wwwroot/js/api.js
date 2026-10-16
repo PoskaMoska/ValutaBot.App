@@ -1,5 +1,5 @@
-import { tg, currentAsset, currentTf, getCustomInitData, applyCopilotRecommendation } from './main.js?v=20261011_copilot';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData, updateAiCopilot } from './ui.js?v=20261011_copilot';
+import { tg, currentAsset, currentTf, getCustomInitData, applyCopilotRecommendation } from './main.js?v=20261016_neural';
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData, updateAiCopilot } from './ui.js?v=20261016_neural';
 
 export let priceSocket = null;
 export let lastPriceVal = 0;
@@ -255,7 +255,7 @@ export async function executeAnalysis() {
             }
             if (data.tfConflict) {
                 const rp = document.getElementById('resProb');
-                if (rp) rp.innerHTML += " <span title='Старший таймфрейм против сигнала — оценка уже снижена'>⚠️</span>";
+                if (rp) rp.innerHTML += " <span title='Конфликт со старшим таймфреймом (учтен нейросетью)'>⚠️</span>";
             }
 
 

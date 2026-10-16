@@ -76,7 +76,7 @@ namespace ValutaBot.Tests.Engines
         [Fact]
         public async Task EvaluateMatrixAsync_ProbabilityClampedToRealisticBoundaries()
         {
-            // Extreme Bullish Inputs
+            // Extreme Bullish Inputs (Neural Brain Mode)
             var taBull = new TaSignal(10.0, 100.0, 90, 100, 10.0, 100);
             var smcBull = new SmcSignal("BULLISH_BOS", "BULLISH_SWEEP", "BULLISH_OB", "BULLISH_FVG", "Hyper Bullish");
             var ofBull = new OrderflowSignal(10.0, "Hyper buying");
@@ -86,12 +86,13 @@ namespace ValutaBot.Tests.Engines
 
             var decisionBull = await _engine.EvaluateMatrixAsync("EURUSD", "1m", true, 1.0, taBull, smcBull, ofBull, mlBull, stateBull, mtfBull);
 
-            // Assert: Clamped strictly to maximum realistic 65%
-            Assert.True(decisionBull.Probability <= 65, $"Probability must not exceed calibrated 65%, got {decisionBull.Probability}");
-            Assert.True(decisionBull.Probability >= 50, $"Probability must not drop below 50%, got {decisionBull.Probability}");
-            Assert.Contains(decisionBull.FinalDirection, new[] { "BUY", "PUT" });
+            // Assert: Clamped strictly to [50%, 99%] in Direct Neural Brain Mode
+            Assert.InRange(decisionBull.Probability, 50, 99);
+            Assert.Equal("BUY", decisionBull.FinalDirection);
+            Assert.True(decisionBull.MlProb > 0.5, $"Expected MlProb > 0.5 for BUY, got {decisionBull.MlProb}");
+            Assert.True(decisionBull.MlScoreRaw > 0.0, $"Expected MlScoreRaw > 0 for BUY, got {decisionBull.MlScoreRaw}");
 
-            // Extreme Bearish Inputs
+            // Extreme Bearish Inputs (Neural Brain Mode)
             var taBear = new TaSignal(-10.0, 100.0, 10, 100, 10.0, 100);
             var smcBear = new SmcSignal("BEARISH_BOS", "BEARISH_SWEEP", "BEARISH_OB", "BEARISH_FVG", "Hyper Bearish");
             var ofBear = new OrderflowSignal(-10.0, "Hyper selling");
@@ -101,10 +102,11 @@ namespace ValutaBot.Tests.Engines
 
             var decisionBear = await _engine.EvaluateMatrixAsync("EURUSD", "1m", true, 1.0, taBear, smcBear, ofBear, mlBear, stateBear, mtfBear);
 
-            // Assert: Clamped strictly to maximum realistic 65%
-            Assert.True(decisionBear.Probability <= 65, $"Probability must not exceed calibrated 65%, got {decisionBear.Probability}");
-            Assert.True(decisionBear.Probability >= 50, $"Probability must not drop below 50%, got {decisionBear.Probability}");
+            // Assert: Clamped strictly to [50%, 99%] and properly signed (< 0.5 MlProb, < 0 MlScoreRaw) for PUT
+            Assert.InRange(decisionBear.Probability, 50, 99);
             Assert.Equal("PUT", decisionBear.FinalDirection);
+            Assert.True(decisionBear.MlProb < 0.5, $"Expected MlProb < 0.5 for PUT, got {decisionBear.MlProb}");
+            Assert.True(decisionBear.MlScoreRaw < 0.0, $"Expected MlScoreRaw < 0 for PUT, got {decisionBear.MlScoreRaw}");
         }
     }
 }

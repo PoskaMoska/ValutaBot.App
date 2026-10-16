@@ -88,17 +88,22 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
 
     public static class TradeRepository
     {
+        private const string PoEraCutoff = "2026-10-15 21:55:00+00";
+
         public static async Task<EvolutionDumpDto?> GetEvolutionDumpAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return null;
             try
             {
                 using var conn = DbConnectionFactory.GetConnection();
-                var dto = await conn.QueryFirstOrDefaultAsync<EvolutionDumpDto>(@"
+                string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                    ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                    : "";
+                var dto = await conn.QueryFirstOrDefaultAsync<EvolutionDumpDto>($@"
 WITH outcome_data AS (
     SELECT 
         id,
-        created_at::timestamp as dt,
+        created_at::timestamptz as dt,
         CASE 
             WHEN direction = 'BUY' AND was_win = true THEN 'BUY'
             WHEN direction = 'BUY' AND was_win = false THEN 'PUT'
@@ -106,17 +111,23 @@ WITH outcome_data AS (
             WHEN direction = 'PUT' AND was_win = false THEN 'BUY'
             ELSE 'NEUTRAL'
         END as win_dir,
-        CASE 
-            WHEN ml_score > 0 THEN 'BUY'
-            WHEN ml_score < 0 THEN 'PUT'
-            ELSE 'NEUTRAL'
-        END as ml_dir,
+        COALESCE(
+            NULLIF(ml_direction, ''),
+            CASE 
+                WHEN ml_score > 0 THEN 'BUY'
+                WHEN ml_score < 0 THEN 'PUT'
+                ELSE 'NEUTRAL'
+            END
+        ) as ml_dir,
         CASE 
             WHEN ta_score > 0 THEN 'BUY'
             WHEN ta_score < 0 THEN 'PUT'
             ELSE 'NEUTRAL'
         END as ta_dir
     FROM trade_outcomes
+    WHERE direction IN ('BUY', 'PUT')
+      AND was_win IS NOT NULL
+      {eraFilter}
 )
 SELECT 
     COUNT(id) as TotalTrades,
@@ -322,12 +333,18 @@ FROM outcome_data;");
             try
             {
                 using var conn = DbConnectionFactory.GetConnection();
-                var rows = await conn.QueryAsync(@"
+                string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                    ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                    : "";
+                var rows = await conn.QueryAsync($@"
                     SELECT id as ""Id"", asset as ""Asset"", timeframe as ""Timeframe"", direction as ""Direction"",
                            entry_price as ""EntryPrice"", exit_price as ""ExitPrice"", pnl_bps as ""PnlBps"",
                            was_win as ""WasWin"", ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"",
                            ml_prob as ""MlProb"", ml_score as ""MlScore"", created_at as ""CreatedAt"", verified_at as ""VerifiedAt""
                     FROM trade_outcomes
+                    WHERE direction IN ('BUY', 'PUT')
+                      AND was_win IS NOT NULL
+                      {eraFilter}
                     ORDER BY verified_at DESC
                     LIMIT @limit
                 ", new { limit });
@@ -495,9 +512,17 @@ FROM outcome_data;");
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return (0, 0, 0);
             using var conn = DbConnectionFactory.GetConnection();
-            int pending = (int)(await conn.ExecuteScalarAsync<long?>("SELECT COUNT(*) FROM pending_trades") ?? 0L);
-            var res = await conn.QueryFirstOrDefaultAsync(
-                "SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct FROM trade_outcomes");
+            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                : "";
+            int pending = (int)(await conn.ExecuteScalarAsync<long?>(
+                "SELECT COUNT(*) FROM pending_trades WHERE direction IN ('BUY', 'PUT')") ?? 0L);
+            var res = await conn.QueryFirstOrDefaultAsync($@"
+                SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
+                FROM trade_outcomes
+                WHERE direction IN ('BUY', 'PUT')
+                  AND was_win IS NOT NULL
+                  {eraFilter}");
             
             int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
             int correct = res != null ? Convert.ToInt32(res.Correct) : 0;
@@ -508,9 +533,19 @@ FROM outcome_data;");
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return (0, 0, 0);
             using var conn = DbConnectionFactory.GetConnection();
-            int pending = (int)(await conn.ExecuteScalarAsync<long?>("SELECT COUNT(*) FROM pending_trades WHERE asset = @asset AND timeframe = @timeframe", new { asset, timeframe }) ?? 0L);
-            var res = await conn.QueryFirstOrDefaultAsync(
-                "SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct FROM trade_outcomes WHERE asset = @asset AND timeframe = @timeframe",
+            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                : "";
+            int pending = (int)(await conn.ExecuteScalarAsync<long?>(
+                "SELECT COUNT(*) FROM pending_trades WHERE asset = @asset AND timeframe = @timeframe AND direction IN ('BUY', 'PUT')",
+                new { asset, timeframe }) ?? 0L);
+            var res = await conn.QueryFirstOrDefaultAsync($@"
+                SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
+                FROM trade_outcomes
+                WHERE asset = @asset AND timeframe = @timeframe
+                  AND direction IN ('BUY', 'PUT')
+                  AND was_win IS NOT NULL
+                  {eraFilter}",
                 new { asset, timeframe });
             
             int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
@@ -522,12 +557,20 @@ FROM outcome_data;");
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<(string, string, int, int, int)>();
             using var conn = DbConnectionFactory.GetConnection();
+            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                : "";
             
             var pendingRows = await conn.QueryAsync(
-                "SELECT asset, timeframe, COUNT(*) as Pending FROM pending_trades GROUP BY asset, timeframe");
+                "SELECT asset, timeframe, COUNT(*) as Pending FROM pending_trades WHERE direction IN ('BUY', 'PUT') GROUP BY asset, timeframe");
             
-            var rows = await conn.QueryAsync(
-                "SELECT asset, timeframe, COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct FROM trade_outcomes GROUP BY asset, timeframe");
+            var rows = await conn.QueryAsync($@"
+                SELECT asset, timeframe, COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
+                FROM trade_outcomes
+                WHERE direction IN ('BUY', 'PUT')
+                  AND was_win IS NOT NULL
+                  {eraFilter}
+                GROUP BY asset, timeframe");
             
             var result = new List<(string, string, int, int, int)>();
             foreach (var r in rows)
@@ -647,29 +690,41 @@ FROM outcome_data;");
                 BotLogger.Warn($"[TradeRepository] EnsureCalibrationTable notice: {ex.Message}");
             }
         }
-        public static async Task<System.Collections.Generic.List<bool?>> GetRecentOutcomesAsync(int limit = 10)
+        public static async Task<System.Collections.Generic.List<bool?>> GetRecentOutcomesAsync(int limit = 10, DateTime? sinceUtc = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool?>();
             using var conn = DbConnectionFactory.GetConnection();
-            var rows = await conn.QueryAsync<bool?>(@"
+            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                : "";
+            string sinceFilter = sinceUtc.HasValue
+                ? "AND verified_at > @SinceUtc"
+                : "";
+            var rows = await conn.QueryAsync<bool?>($@"
                 SELECT was_win 
                 FROM trade_outcomes 
                 WHERE verified_at IS NOT NULL 
                   AND direction IN ('BUY', 'PUT')
+                  {eraFilter}
+                  {sinceFilter}
                 ORDER BY verified_at DESC 
                 LIMIT @Limit
-            ", new { Limit = limit });
+            ", new { Limit = limit, SinceUtc = sinceUtc });
             return rows.ToList();
         }
         public static async Task<System.Collections.Generic.List<bool>> GetRecentOutcomesForAssetAsync(string asset, string timeframe, int limit = 20)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool>();
             using var conn = DbConnectionFactory.GetConnection();
-            var rows = await conn.QueryAsync<bool>(@"
+            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                : "";
+            var rows = await conn.QueryAsync<bool>($@"
                 SELECT was_win 
                 FROM trade_outcomes 
                 WHERE asset = @Asset AND timeframe = @Timeframe AND was_win IS NOT NULL 
                   AND direction IN ('BUY', 'PUT')
+                  {eraFilter}
                 ORDER BY verified_at DESC 
                 LIMIT @Limit
             ", new { Asset = asset, Timeframe = timeframe, Limit = limit });
@@ -771,7 +826,7 @@ FROM outcome_data;");
         }
 
         /// <summary>
-        /// Returns the total number of verified (fully labeled) rows in trade_outcomes.
+        /// Returns the total number of verified (fully labeled) real BUY/PUT rows in trade_outcomes.
         /// Used by CircuitBreakerService to autonomously decide whether the system
         /// is still in dataset-collection mode (CB bypassed) or live-trading mode (CB active).
         /// </summary>
@@ -784,9 +839,9 @@ FROM outcome_data;");
                 if (ValutaBot.MiniApp.PriceFeed.UsePocketOption)
                 {
                     return await conn.ExecuteScalarAsync<int>(
-                        "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '2026-10-15 21:55:00+00'::timestamptz;");
+                        $"SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '{PoEraCutoff}'::timestamptz AND direction IN ('BUY', 'PUT');");
                 }
-                return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes;");
+                return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes WHERE direction IN ('BUY', 'PUT');");
             }
             catch (Exception ex)
             {
