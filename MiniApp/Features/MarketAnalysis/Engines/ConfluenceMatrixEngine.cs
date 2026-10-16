@@ -376,7 +376,7 @@ public class ConfluenceMatrixEngine(
             coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
             coPilot.AppendLine($" - Датчик структуры SMC: {smcScore:F2} (BOS={smcSignal.BosDirection}, OB={smcSignal.OrderBlockType}, FVG={smcSignal.FvgType})");
             coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult.DominantDirection}");
-            coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal.VelocityRegime} ({stateSignal.VelocityBpsPerSec:F2} bps/s)");
+            coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal.VelocityBpsPerSec:F2} bps/s");
             coPilot.AppendLine($"-> Итог Нейромозга: {neuralDir} {neuralProbPct}%");
 
             string neuralReasoning = coPilot.ToString();
