@@ -37,20 +37,47 @@ public static class PocketOptionWebSocketStream
 
     private static string[] _subscribedAssets = DefaultAssets;
 
+    private const int ReconnectAfterConnectedMs = 1_000;
     private const int MinBackoffMs = 5_000;
     private const int MaxBackoffMs = 60_000;
     private const double ServerTimeOffsetSec = 7200.0; // Pocket Option server time is UTC+2
 
+    private readonly record struct PoTickRow(string Asset, double Ts, double Price, long RecvMs);
+
+    private static readonly SemaphoreSlim _sendLock = new(1, 1);
+    private static DateTime _lastPsHeartbeat = DateTime.UtcNow;
+
     // Live price store: last tick per symbol
     private static readonly ConcurrentDictionary<string, double> _livePrices = new(StringComparer.OrdinalIgnoreCase);
 
+    // Watermark per candle asset key (e.g. EURUSD_PO) to prevent duplicate volume while backfilling reconnect gaps
+    private static readonly ConcurrentDictionary<string, double> _lastCandleSrvTs = new(StringComparer.OrdinalIgnoreCase);
+
     // Queue for batching tick inserts into PostgreSQL
-    private static readonly BlockingCollection<(string asset, double ts, double price, long recvMs)> _tickDbQueue =
-        new(new ConcurrentQueue<(string asset, double ts, double price, long recvMs)>(), 50_000);
+    private static readonly BlockingCollection<PoTickRow> _tickDbQueue =
+        new(new ConcurrentQueue<PoTickRow>(), 50_000);
 
     public static bool IsConnected => _webSocket?.State == WebSocketState.Open;
     public static long TotalTicksIngested => Interlocked.Read(ref _totalTicksIngested);
     public static string Status { get; private set; } = "IDLE";
+
+    private static async Task SendTextAsync(ClientWebSocket ws, string payload, CancellationToken token)
+    {
+        if (ws.State != WebSocketState.Open) return;
+        byte[] bytes = Encoding.UTF8.GetBytes(payload);
+        await _sendLock.WaitAsync(token);
+        try
+        {
+            if (ws.State == WebSocketState.Open)
+            {
+                await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+            }
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
 
     public static bool TryGetLivePrice(string symbol, out double price)
     {
@@ -121,15 +148,30 @@ public static class PocketOptionWebSocketStream
             while (!token.IsCancellationRequested)
             {
                 await Task.Delay(15000, token);
-                var idleSeconds = (DateTime.UtcNow - _lastMessageTime).TotalSeconds;
-                if (idleSeconds > 15 && _webSocket?.State == WebSocketState.Open)
+                var ws = _webSocket;
+                if (ws == null || ws.State != WebSocketState.Open) continue;
+
+                var now = DateTime.UtcNow;
+                var idleSeconds = (now - _lastMessageTime).TotalSeconds;
+                if (idleSeconds > 15)
                 {
-                    try {
-                        await _webSocket.SendAsync(Encoding.UTF8.GetBytes("2"), WebSocketMessageType.Text, true, token);
-                    } catch { }
+                    try { await SendTextAsync(ws, "2", token); } catch { }
                 }
+
+                // Send Socket.IO application-level status heartbeat 42["ps"] every ~45s
+                // to prevent demo-api-eu.po.market from dropping the connection on its 3-minute timer.
+                if ((now - _lastPsHeartbeat).TotalSeconds >= 45)
+                {
+                    try
+                    {
+                        await SendTextAsync(ws, "42[\"ps\"]", token);
+                        _lastPsHeartbeat = now;
+                    }
+                    catch { }
+                }
+
                 bool isDead = idleSeconds > 40;
-                if (isDead && _webSocket?.State == WebSocketState.Open)
+                if (isDead && ws.State == WebSocketState.Open)
                 {
                     BotLogger.Warn("[PO WS] Watchdog detected silent drop (>40s no ticks). Dropping connection to reconnect...");
                     try { _connectionCts?.Cancel(); } catch { }
@@ -181,7 +223,7 @@ public static class PocketOptionWebSocketStream
                     }
 
                     // Step 2: Send Socket.IO connect packet: '40'
-                    await ws.SendAsync(Encoding.UTF8.GetBytes("40"), WebSocketMessageType.Text, true, connCts.Token);
+                    await SendTextAsync(ws, "40", connCts.Token);
 
                     // Step 3: Wait for server connect ACK: '40{"sid":...}'
                     var (ack, _) = await ReceiveFrameAsync(ws, connCts.Token);
@@ -192,12 +234,13 @@ public static class PocketOptionWebSocketStream
 
                     // Step 4: Send auth packet: 42["auth", <payload>]
                     string authPacket = "42[\"auth\"," + authPayloadJson + "]";
-                    await ws.SendAsync(Encoding.UTF8.GetBytes(authPacket), WebSocketMessageType.Text, true, connCts.Token);
+                    await SendTextAsync(ws, authPacket, connCts.Token);
                     BotLogger.Info("[PO WS] Authentication frame sent. Awaiting subscription confirmation...");
 
                     wasConnected = true;
                     Status = "ONLINE";
                     _lastMessageTime = DateTime.UtcNow;
+                    _lastPsHeartbeat = DateTime.UtcNow;
 
                     await ReceiveLoopAsync(ws, connCts.Token);
                 }
@@ -208,7 +251,8 @@ public static class PocketOptionWebSocketStream
                 catch (Exception ex)
                 {
                     Status = "RECONNECTING";
-                    BotLogger.Error($"[PO WS] Connection error: {ex.Message}. Retrying in {backoffMs / 1000}s...");
+                    int retrySec = (wasConnected ? ReconnectAfterConnectedMs : backoffMs) / 1000;
+                    BotLogger.Error($"[PO WS] Connection error: {ex.Message}. Retrying in {retrySec}s...");
                 }
                 finally
                 {
@@ -216,8 +260,9 @@ public static class PocketOptionWebSocketStream
                     if (ReferenceEquals(_webSocket, ws)) _webSocket = null;
                 }
 
+                int delayMs = wasConnected ? ReconnectAfterConnectedMs : backoffMs;
                 backoffMs = wasConnected ? MinBackoffMs : Math.Min(backoffMs * 2, MaxBackoffMs);
-                await Task.Delay(backoffMs, token);
+                await Task.Delay(delayMs, token);
             }
         }
         catch (OperationCanceledException) { }
@@ -246,6 +291,23 @@ public static class PocketOptionWebSocketStream
             return (null, bytes);
         }
         return (Encoding.UTF8.GetString(bytes), null);
+    }
+
+    private static async Task SubscribeAllAssetsAsync(ClientWebSocket ws, CancellationToken connectionToken)
+    {
+        BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {string.Join(", ", _subscribedAssets)}");
+        await Task.Delay(150, connectionToken);
+        foreach (var asset in _subscribedAssets)
+        {
+            string sub1 = $"42[\"changeSymbol\",{{\"asset\":\"{asset}\",\"period\":60}}]";
+            string sub2 = $"42[\"subfor\",\"{asset}\"]";
+            await SendTextAsync(ws, sub1, connectionToken);
+            await SendTextAsync(ws, sub2, connectionToken);
+            await Task.Delay(50, connectionToken);
+        }
+        await SendTextAsync(ws, "42[\"ps\"]", connectionToken);
+        _lastPsHeartbeat = DateTime.UtcNow;
+        BotLogger.Info("[PO WS] Subscriptions dispatched.");
     }
 
     private static async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken connectionToken)
@@ -281,6 +343,11 @@ public static class PocketOptionWebSocketStream
                     string json = Encoding.UTF8.GetString(binary);
                     ParseHistoryJson(json);
                 }
+                else if (pendingEvent == "successauth" && !subscribed)
+                {
+                    subscribed = true;
+                    await SubscribeAllAssetsAsync(ws, connectionToken);
+                }
                 pendingEvent = null;
                 continue;
             }
@@ -288,27 +355,12 @@ public static class PocketOptionWebSocketStream
             // 2. Socket.IO ping/pong heartbeat
             if (text == "2")
             {
-                await ws.SendAsync(Encoding.UTF8.GetBytes("3"), WebSocketMessageType.Text, true, connectionToken);
+                await SendTextAsync(ws, "3", connectionToken);
                 continue;
             }
             if (text == "3") continue;
 
-            // 3. Auth success trigger: subscribe to all OTC assets (must run before 451- check consumes updateAssets/successauth)
-            if (text != null && (text.Contains("successauth") || text.Contains("updateAssets")) && !subscribed)
-            {
-                subscribed = true;
-                BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {string.Join(", ", _subscribedAssets)}");
-                foreach (var asset in _subscribedAssets)
-                {
-                    string sub1 = $"42[\"changeSymbol\",{{\"asset\":\"{asset}\",\"period\":60}}]";
-                    string sub2 = $"42[\"subfor\",\"{asset}\"]";
-                    await ws.SendAsync(Encoding.UTF8.GetBytes(sub1), WebSocketMessageType.Text, true, connectionToken);
-                    await ws.SendAsync(Encoding.UTF8.GetBytes(sub2), WebSocketMessageType.Text, true, connectionToken);
-                }
-                BotLogger.Info("[PO WS] Subscriptions dispatched.");
-            }
-
-            // 4. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
+            // 3. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
             if (text != null && text.StartsWith("451-"))
             {
                 try
@@ -323,9 +375,15 @@ public static class PocketOptionWebSocketStream
                 continue;
             }
 
-            // 5. Regular JSON event: 42["<event>", ...]
+            // 4. Regular JSON event: 42["<event>", ...]
             if (text != null && text.StartsWith("42"))
             {
+                if (!subscribed && text.Contains("successauth"))
+                {
+                    subscribed = true;
+                    await SubscribeAllAssetsAsync(ws, connectionToken);
+                }
+
                 try
                 {
                     using var doc = JsonDocument.Parse(text.Substring(2));
@@ -380,30 +438,45 @@ public static class PocketOptionWebSocketStream
                 string asset = aProp.GetString() ?? "";
                 if (hProp.ValueKind == JsonValueKind.Array)
                 {
-                    // History is replayed into candles only once per asset per process (cold start).
-                    // Later history frames (sent on every re-subscribe) are stored in po_ticks only.
-                    bool feedCandles = _backfilledAssets.TryAdd(asset, 0);
                     int count = 0;
+                    int fedCount = 0;
                     foreach (var pt in hProp.EnumerateArray())
                     {
                         if (pt.ValueKind == JsonValueKind.Array && pt.GetArrayLength() >= 2)
                         {
                             double srvTs = pt[0].GetDouble();
                             double price = pt[1].GetDouble();
-                            HandleTick(asset, srvTs, price, isBackfill: true, feedCandles: feedCandles);
+                            if (HandleTick(asset, srvTs, price, isBackfill: true))
+                            {
+                                fedCount++;
+                            }
                             count++;
                         }
                     }
-                    BotLogger.Info($"[PO WS] History for {asset}: {count} ticks (candle backfill: {feedCandles}).");
+                    BotLogger.Info($"[PO WS] History for {asset}: {count} ticks ({fedCount} new ticks fed to candles).");
                 }
             }
         }
         catch { }
     }
 
-    private static readonly ConcurrentDictionary<string, byte> _backfilledAssets = new(StringComparer.OrdinalIgnoreCase);
+    private static bool TryAdvanceCandleWatermark(string candleKey, double srvTs)
+    {
+        while (true)
+        {
+            if (_lastCandleSrvTs.TryGetValue(candleKey, out double prevTs))
+            {
+                if (srvTs <= prevTs) return false;
+                if (_lastCandleSrvTs.TryUpdate(candleKey, srvTs, prevTs)) return true;
+            }
+            else
+            {
+                if (_lastCandleSrvTs.TryAdd(candleKey, srvTs)) return true;
+            }
+        }
+    }
 
-    private static void HandleTick(string asset, double srvTs, double price, bool isBackfill = false, bool feedCandles = true)
+    private static bool HandleTick(string asset, double srvTs, double price, bool isBackfill = false)
     {
         double utcSec = srvTs - ServerTimeOffsetSec;
         long tickTimeUtc = DateTimeOffset.FromUnixTimeMilliseconds((long)(utcSec * 1000)).UtcTicks;
@@ -423,24 +496,27 @@ public static class PocketOptionWebSocketStream
         }
         Interlocked.Increment(ref _totalTicksIngested);
 
-        if (feedCandles)
+        bool fedToCandles = TryAdvanceCandleWatermark(candleKey, srvTs);
+        if (fedToCandles)
+        {
             _ = RealtimeTickCollector.OnPriceUpdateAsync(candleKey, price, tickTimeUtc, isBackfill);
+        }
 
         // Queue tick for DB persistence in po_ticks
         long recvMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _tickDbQueue.TryAdd((asset, utcSec, price, recvMs));
+        _tickDbQueue.TryAdd(new PoTickRow(asset, utcSec, price, recvMs));
+        return fedToCandles;
     }
 
     private static async Task DbBatchFlusherAsync(CancellationToken token)
     {
-        var batch = new List<(string asset, double ts, double price, long recvMs)>(1000);
+        var batch = new List<PoTickRow>(2000);
 
         while (!token.IsCancellationRequested)
         {
             try
             {
                 await Task.Delay(3000, token);
-                batch.Clear();
 
                 while (batch.Count < 2000 && _tickDbQueue.TryTake(out var item))
                 {
@@ -454,7 +530,7 @@ public static class PocketOptionWebSocketStream
 
                     await conn.ExecuteAsync(@"
                         INSERT INTO po_ticks (asset, ts, price, recv_ms)
-                        VALUES (@asset, @ts, @price, @recvMs)
+                        VALUES (@Asset, @Ts, @Price, @RecvMs)
                         ON CONFLICT (asset, ts) DO NOTHING;
                     ", batch);
 
@@ -463,12 +539,18 @@ public static class PocketOptionWebSocketStream
                         VALUES (1, now(), 'ONLINE')
                         ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, status = EXCLUDED.status;
                     ");
+
+                    batch.Clear();
                 }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
                 BotLogger.Warn($"[PO WS] DB flush error: {ex.Message}");
+                if (batch.Count >= 10_000)
+                {
+                    batch.Clear();
+                }
             }
         }
     }

@@ -110,6 +110,8 @@ public class AutoTradingScannerService : BackgroundService
         await Task.WhenAll(workers);
     }
 
+    private long _lastCircuitBreakerWarnTicks = 0;
+
     private async Task ProcessSubminuteScanAsync(string pair, string tf, CancellationToken stoppingToken)
     {
         if (IsWeekendPause(pair)) return;
@@ -120,7 +122,13 @@ public class AutoTradingScannerService : BackgroundService
         }
         else if (_circuitBreaker.IsHalted())
         {
-            _logger.LogWarning($"[AutoScanner] Circuit Breaker Active. Pausing scan...");
+            long nowTicks = DateTime.UtcNow.Ticks;
+            long prevTicks = Interlocked.Read(ref _lastCircuitBreakerWarnTicks);
+            if (nowTicks - prevTicks >= TimeSpan.FromSeconds(60).Ticks &&
+                Interlocked.CompareExchange(ref _lastCircuitBreakerWarnTicks, nowTicks, prevTicks) == prevTicks)
+            {
+                _logger.LogWarning($"[AutoScanner] Circuit Breaker Active ({_circuitBreaker.GetHaltedReason()}). Pausing scan...");
+            }
             return;
         }
 

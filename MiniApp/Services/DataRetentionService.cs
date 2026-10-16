@@ -39,15 +39,22 @@ public class DataRetentionService : BackgroundService
         
         var histCutoff = DateTime.UtcNow.Subtract(_historicalRetention).ToString("yyyy-MM-ddTHH:mm:ssZ");
         var subCutoff = DateTime.UtcNow.Subtract(_subminuteRetention).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        double tickCutoffEpoch = DateTimeOffset.UtcNow.Subtract(_subminuteRetention).ToUnixTimeSeconds();
         
         using var conn = DbConnectionFactory.GetConnection();
         
         int histDeleted = await conn.ExecuteAsync("DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff = histCutoff });
         int subDeleted = await conn.ExecuteAsync("DELETE FROM subminute_candles WHERE open_time < @cutoff", new { cutoff = subCutoff });
-        
-        if (histDeleted > 0 || subDeleted > 0)
+        int tickDeleted = 0;
+        try
         {
-            BotLogger.Info($"[DataRetention] Pruned old data: {histDeleted} historical (>30d), {subDeleted} subminute (>3d).");
+            tickDeleted = await conn.ExecuteAsync("DELETE FROM po_ticks WHERE ts < @cutoff", new { cutoff = tickCutoffEpoch });
+        }
+        catch { }
+        
+        if (histDeleted > 0 || subDeleted > 0 || tickDeleted > 0)
+        {
+            BotLogger.Info($"[DataRetention] Pruned old data: {histDeleted} historical (>30d), {subDeleted} subminute (>3d), {tickDeleted} po_ticks (>3d).");
         }
     }
 }

@@ -152,7 +152,24 @@ async def run_collector():
                 pending_event = None
                 last_flush = time.time()
                 last_report = time.time()
+                last_ps = time.time()
                 backoff = 5 # reset backoff on success
+
+                async def subscribe_all():
+                    nonlocal authenticated, subscribed, last_ps
+                    authenticated = True
+                    subscribed = True
+                    collector.update_status("ONLINE")
+                    log("Authenticated successfully! Subscribing to OTC assets...")
+                    await asyncio.sleep(0.15)
+                    assets = [a.strip() for a in os.environ.get("PO_ASSETS", ",".join(DEFAULT_ASSETS)).split(",") if a.strip()]
+                    for a in assets:
+                        await ws.send("42" + json.dumps(["changeSymbol", {"asset": a, "period": 60}]))
+                        await ws.send("42" + json.dumps(["subfor", a]))
+                        await asyncio.sleep(0.05)
+                    await ws.send('42["ps"]')
+                    last_ps = time.time()
+                    log(f"Subscribed to: {', '.join(assets)}")
 
                 while not stop_event.is_set():
                     try:
@@ -182,53 +199,48 @@ async def run_collector():
                                 log(f"Received history for {asset}: {len(data.get('history', []))} ticks")
                             except Exception:
                                 pass
+                        elif pending_event == "successauth" and not subscribed:
+                            await subscribe_all()
                         pending_event = None
-                        continue
+                    else:
+                        # Text frame handling
+                        if raw == "2":
+                            await ws.send("3")
+                            continue
+                        elif raw == "3":
+                            continue
 
-                    # Text frame handling
-                    if raw == "2":
-                        await ws.send("3")
-                        continue
-                    elif raw == "3":
-                        continue
+                        # Parse Socket.IO packet type
+                        if raw.startswith("451-"):
+                            # Binary attachment placeholder
+                            try:
+                                meta = json.loads(raw[4:])
+                                if isinstance(meta, list) and len(meta) > 0:
+                                    pending_event = meta[0]
+                            except Exception:
+                                pending_event = None
+                        elif raw.startswith("42"):
+                            if "successauth" in raw and not subscribed:
+                                await subscribe_all()
+                            try:
+                                data = json.loads(raw[2:])
+                                ev = data[0] if isinstance(data, list) and len(data) > 0 else ""
+                                if ev == "updateStream" and len(data) > 1:
+                                    rows = data[1] if isinstance(data[1], list) else json.loads(data[1])
+                                    for asset, srv_ts, price in rows:
+                                        collector.add_tick(asset, srv_ts, price, recv_ms)
+                            except Exception:
+                                pass
 
-                    # Parse Socket.IO packet type
-                    if raw.startswith("451-"):
-                        # Binary attachment placeholder
-                        try:
-                            meta = json.loads(raw[4:])
-                            if isinstance(meta, list) and len(meta) > 0:
-                                pending_event = meta[0]
-                        except Exception:
-                            pending_event = None
-                    elif raw.startswith("42"):
-                        try:
-                            data = json.loads(raw[2:])
-                            ev = data[0] if isinstance(data, list) and len(data) > 0 else ""
-                            if ev == "updateStream" and len(data) > 1:
-                                rows = data[1] if isinstance(data[1], list) else json.loads(data[1])
-                                for asset, srv_ts, price in rows:
-                                    collector.add_tick(asset, srv_ts, price, recv_ms)
-                        except Exception:
-                            pass
-
-                    # Check for auth success
-                    if ("successauth" in raw or "updateAssets" in raw) and not subscribed:
-                        authenticated = True
-                        subscribed = True
-                        collector.update_status("ONLINE")
-                        log("Authenticated successfully! Subscribing to OTC assets...")
-                        assets = [a.strip() for a in os.environ.get("PO_ASSETS", ",".join(DEFAULT_ASSETS)).split(",") if a.strip()]
-                        for a in assets:
-                            await ws.send("42" + json.dumps(["changeSymbol", {"asset": a, "period": 60}]))
-                            await ws.send("42" + json.dumps(["subfor", a]))
-                        log(f"Subscribed to: {', '.join(assets)}")
-
-                    # Periodic flush and stats
+                    # Periodic flush, keep-alive, and stats
                     now = time.time()
                     if now - last_flush >= 3.0:
                         collector.flush()
                         last_flush = now
+
+                    if subscribed and now - last_ps >= 45.0:
+                        await ws.send('42["ps"]')
+                        last_ps = now
 
                     if now - last_report >= 30.0:
                         status_str = "  ".join(f"{k}={v}" for k, v in sorted(collector.per_asset.items()))
@@ -240,9 +252,10 @@ async def run_collector():
             collector.flush()
             collector.update_status("RECONNECTING")
             log(f"Connection closed or error: {e.__class__.__name__}: {str(e)[:200]}")
-            log(f"Reconnecting in {backoff} seconds...")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            retry_s = 1 if subscribed else backoff
+            log(f"Reconnecting in {retry_s} seconds...")
+            await asyncio.sleep(retry_s)
+            backoff = 5 if subscribed else min(backoff * 2, 60)
 
     collector.flush()
     collector.update_status("STOPPED")

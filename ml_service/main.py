@@ -518,10 +518,11 @@ def _normalize_interval(interval: str) -> str:
 
 def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, limit: int = 200) -> list:
     """
-    FIX #5: Читать свечи строго До момента входа (БЕЗ строго ДО момента входа (entry_timestamp).
-    Это устраняет SGD Look-Ahead Bias.
+    FIX #5: Читать свечи строго До момента входа (entry_timestamp).
+    Это устраняет SGD Look-Ahead Bias и гарантирует чтение актуальных свечей Pocket Option (*_PO).
     """
     import os
+    import warnings
     import pandas as _pd
     import logging
     log = logging.getLogger("SGD")
@@ -529,23 +530,32 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
     try:
         from datetime import datetime, timezone as _tz, timedelta
         entry_dt = datetime.fromisoformat(entry_timestamp.replace("Z", "+00:00"))
+        if entry_dt.tzinfo is None:
+            entry_dt = entry_dt.replace(tzinfo=_tz.utc)
         
         # Calculate strict closed-candle cutoff (ROOT CAUSE #2 FIX)
         def _get_sec(iv: str) -> int:
-            if iv.endswith("m"): return int(iv[:-1]) * 60
-            if iv.endswith("h"): return int(iv[:-1]) * 3600
-            if iv.endswith("d"): return int(iv[:-1]) * 86400
-            if iv.startswith("s"): return int(iv[1:])
-            if iv.startswith("m"): return int(iv[1:]) * 60
-            if iv.startswith("h"): return int(iv[1:]) * 3600
+            iv_l = iv.lower()
+            if iv_l == "1min": return 60
+            if iv_l.endswith("m"): return int(iv_l[:-1]) * 60
+            if iv_l.endswith("h"): return int(iv_l[:-1]) * 3600
+            if iv_l.endswith("d"): return int(iv_l[:-1]) * 86400
+            if iv_l.startswith("s"): return int(iv_l[1:])
+            if iv_l.startswith("m"): return int(iv_l[1:]) * 60
+            if iv_l.startswith("h"): return int(iv_l[1:]) * 3600
             return 60
             
         interval_sec = _get_sec(interval)
         cutoff_dt = entry_dt - timedelta(seconds=interval_sec)
+        # Prevent training on stale/frozen candles from days/hours ago if feed had a gap
+        min_cutoff_dt = cutoff_dt - timedelta(seconds=max(interval_sec * limit * 4, 3600))
         
-        # Use cutoff_dt for both unix and string comparisons
-        cutoff_unix = int(cutoff_dt.timestamp())
-        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S.0000000Z") # Format as expected by DB
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+        min_cutoff_str = min_cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+
+        clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("_otc", "").replace("/", "").strip().upper()
+        use_po = os.getenv("PRICE_SOURCE", "pocket_option").strip().lower() not in ("tiingo", "forex")
+        target_asset = f"{clean_sym}_PO" if use_po else clean_sym
         
         db_url = os.getenv("DATABASE_URL")
         df = _pd.DataFrame()
@@ -555,37 +565,47 @@ def _fetch_candles_at_entry(symbol: str, interval: str, entry_timestamp: str, li
                 conn = psycopg2.connect(db_url)
                 norm = _normalize_interval(interval)
                 
-                # Попробуем subminute_candles (если младший таймфрейм)
-                if interval.startswith("s"):
-                    query = """
-                        SELECT open_time as "openTime", open_price as "open", high_price as "high", 
-                               low_price as "low", close_price as "close", volume as "volume"
-                        FROM subminute_candles
-                        WHERE asset = %s AND interval = %s AND open_time <= %s
-                        ORDER BY open_time DESC LIMIT %s
-                    """
-                    df = _pd.read_sql_query(query, conn, params=(symbol, interval, cutoff_str, limit))
-                
-                else:
-                    # Если не s-таймфрейм, берем historical_candles
-                    query = """
-                        SELECT open_time as "openTime", open as "open", high as "high",
-                               low as "low", close as "close", volume as "volume"
-                        FROM historical_candles
-                        WHERE asset = %s AND interval = %s AND open_time <= %s
-                        ORDER BY open_time DESC LIMIT %s
-                    """
-                    df = _pd.read_sql_query(query, conn, params=(symbol, norm, cutoff_str, limit))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    if interval.lower().startswith("s"):
+                        query = """
+                            SELECT open_time as "openTime", open_price as "open", high_price as "high", 
+                                   low_price as "low", close_price as "close", volume as "volume"
+                            FROM subminute_candles
+                            WHERE asset = %s AND interval = %s AND open_time >= %s AND open_time <= %s
+                            ORDER BY open_time DESC LIMIT %s
+                        """
+                        df = _pd.read_sql_query(query, conn, params=(target_asset, interval.lower(), min_cutoff_str, cutoff_str, limit))
+                    else:
+                        query = """
+                            SELECT open_time as "openTime", open as "open", high as "high",
+                                   low as "low", close as "close", volume as "volume"
+                            FROM historical_candles
+                            WHERE asset = %s AND interval = %s AND open_time >= %s AND open_time <= %s
+                            ORDER BY open_time DESC LIMIT %s
+                        """
+                        df = _pd.read_sql_query(query, conn, params=(target_asset, norm, min_cutoff_str, cutoff_str, limit))
+                        if len(df) < 65 and norm == "1m":
+                            # Fallback to subminute_candles 1min if historical_candles hasn't accumulated enough rows yet
+                            sub_query = """
+                                SELECT open_time as "openTime", open_price as "open", high_price as "high", 
+                                       low_price as "low", close_price as "close", volume as "volume"
+                                FROM subminute_candles
+                                WHERE asset = %s AND interval = '1min' AND open_time >= %s AND open_time <= %s
+                                ORDER BY open_time DESC LIMIT %s
+                            """
+                            df_sub = _pd.read_sql_query(sub_query, conn, params=(target_asset, min_cutoff_str, cutoff_str, limit))
+                            if len(df_sub) > len(df):
+                                df = df_sub
                 
                 conn.close()
             except Exception as e:
                 log.warning(f"PostgreSQL fetch failed in _fetch_candles_at_entry: {e}")
         
         if df.empty:
-            log.warning(f"[SGD] No candles before entry for {symbol}/{interval}. PostgreSQL returned empty.")
+            log.warning(f"[SGD] No recent candles before entry for {target_asset}/{interval} (window {min_cutoff_str}..{cutoff_str}).")
             return []
 
-        # Переворачиваем колонки в нужный реверс, если не высшие алиасы уже заданы
         return df.iloc[::-1].to_dict(orient="records")
     except Exception as e:
         log.warning(f"[SGD] _fetch_candles_at_entry failed: {e}.")

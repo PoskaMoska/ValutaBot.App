@@ -12,21 +12,32 @@ TICKS_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data",
 
 
 def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
-    # Try to fetch from PostgreSQL SubminuteCandles (supports both base symbol and {symbol}_PO)
+    # Fetch from PostgreSQL subminute_candles without mixing *_PO and Tiingo series
     try:
         db_url = os.getenv("DATABASE_URL")
         if db_url:
             import psycopg2
+            import warnings
             conn = psycopg2.connect(db_url)
             query = '''
                 SELECT open_time as "openTime", open_price as "open", high_price as "high", low_price as "low", close_price as "close", volume as "volume"
                 FROM subminute_candles 
-                WHERE (asset = %s OR asset = %s || '_PO') AND interval = %s 
+                WHERE asset = %s AND interval = %s 
                 ORDER BY open_time DESC 
                 LIMIT %s
             '''
-            clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("/", "").upper()
-            df = pd.read_sql_query(query, conn, params=(symbol, clean_sym, interval, limit))
+            clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("_otc", "").replace("/", "").strip().upper()
+            use_po = os.getenv("PRICE_SOURCE", "pocket_option").strip().lower() not in ("tiingo", "forex")
+            primary_asset = f"{clean_sym}_PO" if use_po else clean_sym
+            db_interval = "1min" if interval.lower() in ("1m", "m1") else interval.lower()
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                df = pd.read_sql_query(query, conn, params=(primary_asset, db_interval, limit))
+                if len(df) < 150 and primary_asset != clean_sym:
+                    df_fallback = pd.read_sql_query(query, conn, params=(clean_sym, db_interval, limit))
+                    if len(df_fallback) > len(df):
+                        df = df_fallback
             conn.close()
             if not df.empty:
                 return df.iloc[::-1].to_dict(orient='records')
@@ -36,26 +47,35 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
     return []
 
 
-
 def _query_historical_candles_db(symbol: str, norm_interval: str, limit: int) -> pd.DataFrame:
     db_url = os.getenv("DATABASE_URL")
     if db_url:
         try:
             import psycopg2
+            import warnings
             conn = psycopg2.connect(db_url)
             query = """
                 SELECT open_time as "openTime", open as "open", high as "high",
                        low as "low", close as "close", volume as "volume"
                 FROM historical_candles
-                WHERE (asset = %s OR asset = %s || '_PO') AND interval = %s
+                WHERE asset = %s AND interval = %s
                 ORDER BY open_time DESC
                 LIMIT %s
             """
-            import warnings
+            clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("_otc", "").replace("/", "").strip().upper()
+            use_po = os.getenv("PRICE_SOURCE", "pocket_option").strip().lower() not in ("tiingo", "forex")
+            primary_asset = f"{clean_sym}_PO" if use_po else clean_sym
+            min_required = min(limit, 1500)
+
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', UserWarning)
-                clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("/", "").upper()
-                df = pd.read_sql_query(query, conn, params=(symbol, clean_sym, norm_interval, limit))
+                df = pd.read_sql_query(query, conn, params=(primary_asset, norm_interval, limit))
+                # Only fall back to pure base symbol if *_PO does not yet have enough rows for training;
+                # never stitch *_PO and Tiingo rows into the same DataFrame.
+                if len(df) < min_required and primary_asset != clean_sym:
+                    df_fallback = pd.read_sql_query(query, conn, params=(clean_sym, norm_interval, limit))
+                    if len(df_fallback) > len(df):
+                        df = df_fallback
             conn.close()
             if not df.empty:
                 return df
