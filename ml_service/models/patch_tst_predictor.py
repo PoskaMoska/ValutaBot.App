@@ -334,28 +334,34 @@ class PatchTSTPredictor:
             p_buy = float(probs[1])
             p_put = float(probs[2])
 
-            # Determine direction from directional probabilities
+            # Determine direction from directional probabilities (conditional on non-flat movement)
+            p_dir_sum = max(p_buy + p_put, 1e-8)
+            p_buy_cond = p_buy / p_dir_sum
+            p_put_cond = p_put / p_dir_sum
+
             if p_buy >= p_put:
                 direction = "BUY"
-                raw_dir_prob = p_buy / max(p_buy + p_put, 1e-8)
+                raw_dir_prob = p_buy_cond
             else:
                 direction = "PUT"
-                raw_dir_prob = p_put / max(p_buy + p_put, 1e-8)
+                raw_dir_prob = p_put_cond
 
-            # Calibrated confidence: blend directional certainty with hold probability.
-            # High p_hold = market is choppy → reduce confidence toward 50%.
-            # This is NOT a hard cap — strong directional signals still produce high confidence.
-            directional_mass = 1.0 - p_hold  # how much probability is on BUY+PUT combined
-            calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * directional_mass
+            # Calibrated confidence:
+            # Because 3-class training datasets have ~78% HOLD class prior, p_hold hovers around ~0.75-0.80
+            # on normal bars. Multiplying by (1 - p_hold) unconditionally crushed all probabilities into 50-54%.
+            # Instead, use conditional directional probability and only dampen when p_hold exceeds the 0.80 chop threshold.
+            chop_penalty = 1.0 if p_hold <= 0.80 else max(0.25, (1.0 - p_hold) / 0.20)
+            calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * chop_penalty
 
             # Safety floor at 50% (never below chance), no ceiling — let the model speak
-            calibrated_prob = max(0.50, round(float(calibrated_prob), 4))
-            raw_prob = round(float(raw_dir_prob), 4)
+            calibrated_prob = max(0.50, min(0.99, round(float(calibrated_prob), 4)))
+            # Signed P(BUY) in [0, 1] (>0.5 for BUY, <0.5 for PUT) so C# mlScore = (rawProb - 0.5)*2 has the right sign
+            raw_prob = round(float(p_buy_cond), 4)
 
             arch_tag = "patch_tst_v3" if self._is_dual_stream else "seq_brain_v3"
             log.info(
                 f"[Neural Brain] {symbol} {interval} -> {direction} | "
-                f"Calibrated: {calibrated_prob*100:.1f}% | Raw: {raw_prob*100:.1f}% | "
+                f"Calibrated: {calibrated_prob*100:.1f}% | P(BUY|dir): {raw_prob*100:.1f}% | "
                 f"HOLD: {p_hold*100:.1f}% | Temp: {temp:.2f} | Arch: {self._model_name}"
             )
 

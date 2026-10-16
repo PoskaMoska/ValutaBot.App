@@ -343,35 +343,74 @@ public class ConfluenceMatrixEngine(
         if ((smcSignal.FvgType ?? "").Contains("BEARISH")) smcScore -= 0.25;
         smcScore = Math.Clamp(smcScore, -1.0, 1.0);
 
-        double rawProb = mlSignal.RawConfidence ?? (mlSignal.Direction == "BUY" ? mlSignal.Confidence : (mlSignal.Direction == "PUT" ? (1.0 - mlSignal.Confidence) : 0.5));
-        double mlScore = (rawProb - 0.5) * 2.0; // Smooth scaling [-1.0, 1.0]
+        // Properly signed P(BUY) in [0, 1]: > 0.5 for BUY, < 0.5 for PUT
+        double directionalConf = Math.Clamp(mlSignal.Confidence, 0.5, 0.99);
+        double rawProb = mlSignal.Direction == "BUY"
+            ? directionalConf
+            : (mlSignal.Direction == "PUT" ? (1.0 - directionalConf) : 0.5);
+        double mlScore = (rawProb - 0.5) * 2.0; // Smooth signed scaling [-1.0, +1.0] (+ for BUY, - for PUT)
 
-        // --- SMC SOFT PENALTY (replaces Hard Gate) ---
-        // Old logic: returned hardcoded NEUTRAL 50% whenever ANY OB existed within 30 bars.
-        // Problem: on flat/ranging markets there is ALWAYS an OB in memory from both sides,
-        // so the old gate fired constantly and killed every ML signal.
-        //
-        // New logic: only penalize when SMC structure STRONGLY opposes the ML direction.
-        // "Strongly" = smcScore magnitude >= 0.5 (at least one confirmed BOS or Sweep signal).
-        // A weak smcScore (|score| < 0.5) means only an OB exists with no structural confirmation
-        // вЂ” this is not enough to override a 69% ML signal. We apply a soft penalty (Г—0.60)
-        // rather than a hard block, so the final probability may still exceed 53% if ML is confident.
+        bool isNeuralBrain = !string.IsNullOrEmpty(mlSignal.ModelVersion) &&
+                             (mlSignal.ModelVersion.Contains("patch_tst", StringComparison.OrdinalIgnoreCase) ||
+                              mlSignal.ModelVersion.Contains("seq_brain", StringComparison.OrdinalIgnoreCase) ||
+                              mlSignal.ModelVersion.Contains("neural", StringComparison.OrdinalIgnoreCase));
+
+        // ══════════════════════════════════════════════════════════════════════════
+        // SOTA FEATURE-DRIVEN NEURAL ARCHITECTURE (C# Sensors -> Neural Brain -> AI Co-Pilot)
+        // When the Neural Brain (DualStreamPatchBrain / SequenceBrain) is active, C# sensors
+        // (Entropy, signed SMC, MTF candles, ADX/RSI, Day/Asian anchors) have ALREADY been fed
+        // directly into the neural network's cross-modal attention layers.
+        // C# does NOT vote, average, or cap the Neural Brain's decision.
+        // ══════════════════════════════════════════════════════════════════════════
+        if (isNeuralBrain && (mlSignal.Direction == "BUY" || mlSignal.Direction == "PUT"))
+        {
+            string neuralDir = mlSignal.Direction;
+            int neuralProbPct = (int)Math.Clamp(Math.Round(directionalConf * 100.0), 50, 99);
+
+            var coPilot = new System.Text.StringBuilder();
+            coPilot.AppendLine($"--- Сигнальный анализ ({asset} {timeframe}) [NEURAL BRAIN] ---");
+            coPilot.AppendLine($"[Нейромозг: {mlSignal.ModelVersion}]");
+            coPilot.AppendLine($" - Вердикт нейросети: {neuralDir} ({neuralProbPct}%)");
+            coPilot.AppendLine();
+            coPilot.AppendLine("[Показания математических датчиков C# (вход нейросети)]");
+            coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
+            coPilot.AppendLine($" - Датчик структуры SMC: {smcScore:F2} (BOS={smcSignal.BosDirection}, OB={smcSignal.OrderBlockType}, FVG={smcSignal.FvgType})");
+            coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult.DominantDirection}");
+            coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal.VelocityRegime} ({stateSignal.VelocityBpsPerSec:F2} bps/s)");
+            coPilot.AppendLine($"-> Итог Нейромозга: {neuralDir} {neuralProbPct}%");
+
+            string neuralReasoning = coPilot.ToString();
+            BotLogger.Info($"\n{neuralReasoning}");
+
+            return new ConsensusDecision(
+                CandidateDirection: neuralDir,
+                FinalDirection: neuralDir,
+                Probability: neuralProbPct,
+                CombinedReasoningText: neuralReasoning,
+                FinalTotalScore: mlScore,
+                RecommendedExpiryText: "",
+                TaScore: taScore,
+                OfScore: ofScore,
+                SmcScore: smcScore,
+                MlProb: rawProb,
+                MlScoreRaw: mlScore
+            );
+        }
+
+        // --- LEGACY FALLBACK (only used when Neural Brain is offline) ---
         double obPenalty = 1.0;
         string obGateNote = "";
         if (mlSignal.Direction == "BUY" && smcScore < -0.5)
         {
-            // Strong bearish SMC structure conflicts with ML BUY вЂ” reduce margin by 40%
             obPenalty = 0.60;
-            obGateNote = "вљ пёЏ SMC Conflict Penalty: РЎРёР»СЊРЅР°СЏ РјРµРґРІРµР¶СЊСЏ СЃС‚СЂСѓРєС‚СѓСЂР° SMC РїСЂРѕС‚РёРІ BUY (РѕСЃР»Р°Р±Р»РµРЅ).";
+            obGateNote = "⚠️ SMC Conflict Penalty: Сильная медвежья структура SMC против BUY (ослаблен).";
         }
         else if (mlSignal.Direction == "PUT" && smcScore > 0.5)
         {
-            // Strong bullish SMC structure conflicts with ML PUT вЂ” reduce margin by 40%
             obPenalty = 0.60;
-            obGateNote = "вљ пёЏ SMC Conflict Penalty: РЎРёР»СЊРЅР°СЏ Р±С‹С‡СЊСЏ СЃС‚СЂСѓРєС‚СѓСЂР° SMC РїСЂРѕС‚РёРІ PUT (РѕСЃР»Р°Р±Р»РµРЅ).";
+            obGateNote = "⚠️ SMC Conflict Penalty: Сильная бычья структура SMC против PUT (ослаблен).";
         }
 
-        // Only activate if we have an autocalib engine available.
         double wTa = 1.0, wSmc = 1.0, wMl = 1.0;
         if (autoCalib != null)
         {
@@ -387,9 +426,6 @@ public class ConfluenceMatrixEngine(
             BotLogger.Info($"[AutoCalib] {asset}/{timeframe} Regime={regime} | wTA={wTa:F2} wSMC={wSmc:F2} wML={wMl:F2}");
         }
 
-        // --- ДИНАМИЧЕСКАЯ КОРРЕКЦИЯ ОШИБАЮЩИХСЯ МОДУЛЕЙ (BIAS SELF-CORRECTION) ---
-        // Если модуль ошибся 2+ раза подряд и упорно повторяет то же направление (Lag Trap),
-        // система активно исправляет модуль: ложный балл обнуляется в нейтраль.
         string taCorrectionNote = "";
         string smcCorrectionNote = "";
         if (autoCalib != null)
@@ -420,8 +456,6 @@ public class ConfluenceMatrixEngine(
         double metaProb = 0.5;
         if (TradeOutcomeTracker.MetaLearner != null)
         {
-            // FEED REGIME & AUTO-CALIBRATED SCORES TO METALEARNER
-            // When an element fails 2-3 times in a row, wTa drops to 0.55/0.25, heavily shrinking normTa so it cannot overrule ML.
             double normTa  = Math.Clamp(taScore * wTa, -1.0, 1.0);
             double normSmc = Math.Clamp(smcScore * wSmc, -1.0, 1.0);
             double normMl  = Math.Clamp(mlScore * wMl, -1.0, 1.0);
@@ -431,8 +465,6 @@ public class ConfluenceMatrixEngine(
         }
         else
         {
-            // Fallback when MetaLearner is offline.
-            // Here we apply AutoCalib weights manually.
             double scaledTa = taScore * wTa;
             double scaledSmc = smcScore * wSmc;
             double scaledMl = mlScore * wMl;
@@ -441,14 +473,11 @@ public class ConfluenceMatrixEngine(
         }
         
         string finalDir = metaProb >= 0.5 ? "BUY" : "PUT";
-        
-        // РћРїСЂРµРґРµР»РµРЅРёРµ РјР°СЂР¶Рё СѓРІРµСЂРµРЅРЅРѕСЃС‚Рё (РѕС‚ 0.0 РґРѕ 0.5)
         double margin = Math.Abs(metaProb - 0.5);
 
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"--- РЎРёРіРЅР°Р»СЊРЅС‹Р№ Р°РЅР°Р»РёР· ({asset} {timeframe}) ---");
+        sb.AppendLine($"--- Сигнальный анализ ({asset} {timeframe}) ---");
         
-                // --- ДИНАМИЧЕСКИЙ FEEDBACK LOOP ---
         if (autoCalib != null)
         {
             double mlWr = autoCalib.GetEmpiricalWinRate("LIGHTGBM", asset, timeframe) * 100;
@@ -480,34 +509,30 @@ public class ConfluenceMatrixEngine(
         sb.AppendLine($"- Tech Analysis: {taScore:F2} {(taScore > 0 ? "BUY" : (taScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine($"- Smart Money: {smcScore:F2} {(smcScore > 0 ? "BUY" : (smcScore < 0 ? "PUT" : "NEUTRAL"))}");
         sb.AppendLine();
-        sb.AppendLine("[Р”РёРЅР°РјРёС‡РµСЃРєРёРµ С„РёР»СЊС‚СЂС‹]");
-        sb.AppendLine($"- Р‘Р°Р·РѕРІР°СЏ СѓРІРµСЂРµРЅРЅРѕСЃС‚СЊ: {(0.5 + margin)*100:F1}% {finalDir}");
+        sb.AppendLine("[Динамические фильтры]");
+        sb.AppendLine($"- Базовая уверенность: {(0.5 + margin)*100:F1}% {finalDir}");
 
         if (!string.IsNullOrEmpty(taCorrectionNote)) sb.AppendLine(taCorrectionNote);
         if (!string.IsNullOrEmpty(smcCorrectionNote)) sb.AppendLine(smcCorrectionNote);
 
-        // 0. SMC Proximity Penalty (computed above)
         if (obPenalty < 1.0)
         {
             margin *= obPenalty;
             sb.AppendLine($"- {obGateNote}");
         }
 
-        // 1. РЁС‚СЂР°С„ РєРѕРЅС„Р»РёРєС‚Р° С‚Р°Р№РјС„СЂРµР№РјРѕРІ
         if (tfConflict)
         {
             margin *= 0.8;
-            sb.AppendLine("- РљРѕРЅС„Р»РёРєС‚ С‚Р°Р№РјС„СЂРµР№РјРѕРІ: РЎРЅРёР¶РµРЅРёРµ СѓРІРµСЂРµРЅРЅРѕСЃС‚Рё");
+            sb.AppendLine("- Конфликт таймфреймов: Снижение уверенности");
         }
 
-        // 2. РљСЂРёС‚РёС‡РµСЃРєРёР№ РєРѕРЅС„Р»РёРєС‚ РўРµС…РђРЅР°Р»РёР·Р°
         if (Math.Abs(taScore) > 0.8 && ((taScore > 0 && finalDir == "PUT") || (taScore < 0 && finalDir == "BUY")))
         {
             margin *= 0.5;
-            sb.AppendLine("- РљСЂРёС‚РёС‡РµСЃРєРёР№ СЂР°Р·РІРѕСЂРѕС‚ РўРµС…Р°РЅР°Р»РёР·Р°: РЎРёР»СЊРЅРѕРµ СЃРЅРёР¶РµРЅРёРµ СѓРІРµСЂРµРЅРЅРѕСЃС‚Рё");
+            sb.AppendLine("- Критический разворот Теханализа: Сильное снижение уверенности");
         }
 
-        // 2.5. Extreme Waterfall / Runaway Spike Protection (Real Knife / Rocket Filter)
         double velSec = stateSignal.VelocityBpsPerSec;
         bool isFastTrend = Math.Abs(velSec) >= (isSubMinute ? 1.5 : 3.0);
 
@@ -523,7 +548,6 @@ public class ConfluenceMatrixEngine(
                 margin *= 0.8;
                 sb.AppendLine("- Риск вершины: Покупка на пике при замедлении. Уверенность снижена.");
             }
-            // Trend or Range Confirmation
             if (isFastTrend && taSignal.Rsi >= 52.0 && taSignal.Rsi <= 76.0 && velSec > 0)
             {
                 margin = Math.Min(0.45, margin * 1.20);
@@ -547,7 +571,6 @@ public class ConfluenceMatrixEngine(
                 margin *= 0.8;
                 sb.AppendLine("- Риск дна: Продажа на дне при отскоке. Уверенность снижена.");
             }
-            // Trend or Range Confirmation
             if (isFastTrend && taSignal.Rsi <= 48.0 && taSignal.Rsi >= 24.0 && velSec < 0)
             {
                 margin = Math.Min(0.45, margin * 1.20);
@@ -560,7 +583,6 @@ public class ConfluenceMatrixEngine(
             }
         }
 
-        // 3. Энтропия / Скорость рынка
         double absVel = Math.Abs(stateSignal.VelocityBpsPerSec);
         double dangerVel = isSubMinute ? 2.5 : 5.0; 
         if (absVel >= dangerVel)
@@ -569,8 +591,8 @@ public class ConfluenceMatrixEngine(
             sb.AppendLine("- Энтропия: Экстремальная волатильность (Хаос), занижение уверенности.");
         }
 
-                double finalScore = 0.5 + margin;
-        sb.AppendLine($"-> РС‚РѕРі: {finalDir} {(int)Math.Clamp(Math.Round(finalScore * 100), 50, 100)}%");
+        double finalScore = 0.5 + margin;
+        sb.AppendLine($"-> Итог: {finalDir} {(int)Math.Clamp(Math.Round(finalScore * 100), 50, 100)}%");
 
         string reasoningText = sb.ToString();
         BotLogger.Info($"\n{reasoningText}");
