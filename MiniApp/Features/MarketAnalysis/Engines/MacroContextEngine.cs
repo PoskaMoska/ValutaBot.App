@@ -39,10 +39,11 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
 
         public static async Task<DayLevelAnchors> GetDayLevelAnchorsAsync(string asset, double currentPrice)
         {
-            string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace(" OTC", "").Replace("_OTC", "");
+            string cleanAsset = ValutaBot.MiniApp.PriceFeed.BaseAsset(asset);
+            string candleKey = ValutaBot.MiniApp.PriceFeed.CandleKey(cleanAsset);
             var now = DateTime.UtcNow;
 
-            if (_dayAnchorsCache.TryGetValue(cleanAsset, out var cached) && now < cached.expiry)
+            if (_dayAnchorsCache.TryGetValue(candleKey, out var cached) && now < cached.expiry)
             {
                 // Update live distances using current live price
                 double posPct = (cached.anchors.DayHigh > cached.anchors.DayLow)
@@ -79,7 +80,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
                     FROM subminute_candles 
                     WHERE asset = @Asset 
                       AND open_time >= @DayStart;
-                ", new { Asset = cleanAsset, DayStart = dayStart, AsianEnd = asianEnd });
+                ", new { Asset = candleKey, DayStart = dayStart, AsianEnd = asianEnd });
 
                 double dayH = row?.day_high ?? currentPrice;
                 double dayL = row?.day_low ?? currentPrice;
@@ -107,12 +108,12 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
                     DistToAsianLowBps: distAsiaL
                 );
 
-                _dayAnchorsCache[cleanAsset] = (anchors, now.AddSeconds(60));
+                _dayAnchorsCache[candleKey] = (anchors, now.AddSeconds(60));
                 return anchors;
             }
             catch (Exception ex)
             {
-                BotLogger.Warn($"[MacroContext] Day anchors fetch failed for {cleanAsset}: {ex.Message}");
+                BotLogger.Warn($"[MacroContext] Day anchors fetch failed for {candleKey}: {ex.Message}");
                 return new DayLevelAnchors(currentPrice, currentPrice, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             }
         }

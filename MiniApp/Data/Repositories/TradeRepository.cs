@@ -655,6 +655,7 @@ FROM outcome_data;");
                 SELECT was_win 
                 FROM trade_outcomes 
                 WHERE verified_at IS NOT NULL 
+                  AND direction IN ('BUY', 'PUT')
                 ORDER BY verified_at DESC 
                 LIMIT @Limit
             ", new { Limit = limit });
@@ -668,17 +669,18 @@ FROM outcome_data;");
                 SELECT was_win 
                 FROM trade_outcomes 
                 WHERE asset = @Asset AND timeframe = @Timeframe AND was_win IS NOT NULL 
+                  AND direction IN ('BUY', 'PUT')
                 ORDER BY verified_at DESC 
                 LIMIT @Limit
             ", new { Asset = asset, Timeframe = timeframe, Limit = limit });
             return rows.ToList();
         }
 
-        // в”Ђв”Ђ MetaLearner Persistence в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        // ── MetaLearner Persistence ──────────────────────────────────────────────
 
         /// <summary>
-        /// РЎРѕР·РґР°С‘С‚ С‚Р°Р±Р»РёС†Сѓ meta_learner_weights РµСЃР»Рё РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚.
-        /// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РїСЂРё РёРЅРёС†РёР°Р»РёР·Р°С†РёРё TradeOutcomeTracker.
+        /// Создаёт таблицу meta_learner_weights если не существует.
+        /// Вызывается при инициализации TradeOutcomeTracker.
         /// </summary>
         public static async Task EnsureMetaWeightsTableAsync()
         {
@@ -701,7 +703,7 @@ FROM outcome_data;");
         }
 
         /// <summary>
-        /// РЎРѕС…СЂР°РЅСЏРµС‚ РІРµСЃР° РѕРґРЅРѕРіРѕ РєР»СЋС‡Р° MetaLearner РІ PostgreSQL (upsert).
+        /// Сохраняет веса одного ключа MetaLearner в PostgreSQL (upsert).
         /// </summary>
         public static async Task SaveMetaWeightAsync(string key, double[] weights, int updateCount)
         {
@@ -726,7 +728,7 @@ FROM outcome_data;");
         }
 
         /// <summary>
-        /// Р—Р°РіСЂСѓР¶Р°РµС‚ РІСЃРµ РІРµСЃР° MetaLearner РёР· PostgreSQL РїСЂРё СЃС‚Р°СЂС‚Рµ.
+        /// Загружает все веса MetaLearner из PostgreSQL при старте.
         /// </summary>
         public static async Task<System.Collections.Generic.List<(string key, double[] weights, int updateCount)>> LoadMetaWeightsAsync()
         {
@@ -779,6 +781,11 @@ FROM outcome_data;");
             {
                 if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
                 using var conn = DbConnectionFactory.GetConnection();
+                if (ValutaBot.MiniApp.PriceFeed.UsePocketOption)
+                {
+                    return await conn.ExecuteScalarAsync<int>(
+                        "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '2026-10-15 21:55:00+00'::timestamptz;");
+                }
                 return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes;");
             }
             catch (Exception ex)

@@ -181,7 +181,17 @@ def extract_macro_vector(row_dict, feat_obj):
     has_bos = 1.0 if smc.get("HasBos") else 0.0
     
     # 23. Asset ID
-    asset_str = (row_dict.get("asset") or "").upper().replace("/", "")
+    asset_str = (
+        (row_dict.get("asset") or "")
+        .upper()
+        .replace("_OTC", "")
+        .replace(" OTC", "")
+        .replace("_PO", "")
+        .replace("/", "")
+        .replace("-", "")
+        .replace("_", "")
+        .strip()
+    )
     asset_id = float(ASSET_MAP.get(asset_str, 6.0))
     
     vec = np.array([
@@ -223,7 +233,9 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=5):
+PO_CUTOFF_UTC = "2026-10-15 21:55:00+00"
+
+def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=5, include_tiingo=False, min_date=PO_CUTOFF_UTC):
     print("=" * 60)
     print("[*] Neural Brain Dataset Exporter (V3 Architecture)")
     print(f"Connecting to database...")
@@ -232,35 +244,55 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
     conn = psycopg2.connect(db_url)
     cur = conn.cursor()
     
-    query = """
-        SELECT 
-            id, asset, timeframe, direction, 
-            entry_price, exit_price, pnl_bps, was_win,
-            created_at, features_json,
-            price_entropy, adx_at_signal, atr_at_signal, rsi_at_signal,
-            minutes_to_news, hour_utc, day_of_week,
-            smc_has_ob, smc_has_fvg,
-            max_favorable_bps, max_adverse_bps
-        FROM trade_outcomes
-        WHERE features_json IS NOT NULL
-        UNION ALL
-        SELECT 
-            id, asset, timeframe, direction, 
-            entry_price, exit_price, pnl_bps, was_win,
-            created_at, features_json,
-            price_entropy, adx_at_signal, atr_at_signal, rsi_at_signal,
-            minutes_to_news, hour_utc, day_of_week,
-            smc_has_ob, smc_has_fvg,
-            max_favorable_bps, max_adverse_bps
-        FROM trade_outcomes_archive_20261008
-        WHERE features_json IS NOT NULL
-        ORDER BY created_at ASC
-    """
+    if include_tiingo:
+        query = """
+            SELECT 
+                id, asset, timeframe, direction, 
+                entry_price, exit_price, pnl_bps, was_win,
+                created_at, features_json,
+                price_entropy, adx_at_signal, atr_at_signal, rsi_at_signal,
+                minutes_to_news, hour_utc, day_of_week,
+                smc_has_ob, smc_has_fvg,
+                max_favorable_bps, max_adverse_bps
+            FROM trade_outcomes
+            WHERE features_json IS NOT NULL
+            UNION ALL
+            SELECT 
+                id, asset, timeframe, direction, 
+                entry_price, exit_price, pnl_bps, was_win,
+                created_at, features_json,
+                price_entropy, adx_at_signal, atr_at_signal, rsi_at_signal,
+                minutes_to_news, hour_utc, day_of_week,
+                smc_has_ob, smc_has_fvg,
+                max_favorable_bps, max_adverse_bps
+            FROM trade_outcomes_archive_20261008
+            WHERE features_json IS NOT NULL
+            ORDER BY created_at ASC
+        """
+        params = ()
+    else:
+        print(f"[*] Filtering strictly Pocket Option OTC era (created_at >= {min_date}, no Tiingo archive)")
+        query = """
+            SELECT 
+                id, asset, timeframe, direction, 
+                entry_price, exit_price, pnl_bps, was_win,
+                created_at, features_json,
+                price_entropy, adx_at_signal, atr_at_signal, rsi_at_signal,
+                minutes_to_news, hour_utc, day_of_week,
+                smc_has_ob, smc_has_fvg,
+                max_favorable_bps, max_adverse_bps
+            FROM trade_outcomes
+            WHERE features_json IS NOT NULL
+              AND created_at >= %s::timestamptz
+            ORDER BY created_at ASC
+        """
+        params = (min_date,)
+
     if limit:
-        query += f" LIMIT {limit}"
+        query += f" LIMIT {int(limit)}"
         
     print(f"Executing query...")
-    cur.execute(query)
+    cur.execute(query, params)
     
     cols = [desc[0] for desc in cur.description]
     rows = cur.fetchall()
@@ -315,6 +347,17 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
             continue
             
         candles = feat_obj.get("Candles") or feat_obj.get("candles") or []
+        # Strip trailing unclosed 1-tick candle if present from legacy orchestrator serialization
+        if len(candles) > 10:
+            last_c = candles[-1]
+            c_o = last_c.get("Open", last_c.get("open"))
+            c_h = last_c.get("High", last_c.get("high"))
+            c_l = last_c.get("Low", last_c.get("low"))
+            c_c = last_c.get("Close", last_c.get("close"))
+            c_v = float(last_c.get("Volume", last_c.get("volume", 0)) or 0)
+            if c_v <= 1.0 and c_o is not None and c_o == c_h == c_l == c_c:
+                candles = candles[:-1]
+
         if len(candles) < 10:
             skipped_count += 1
             continue
@@ -462,6 +505,8 @@ if __name__ == "__main__":
     parser.add_argument("--seq-len", type=int, default=160)
     parser.add_argument("--seq-len-mtf", type=int, default=30)
     parser.add_argument("--channels", type=int, choices=[4, 5], default=5, help="Candle feature channels: 4 (OHLC) or 5 (OHLCV)")
+    parser.add_argument("--include-tiingo", action="store_true", help="Include legacy Tiingo era rows (not recommended for PO OTC)")
+    parser.add_argument("--min-date", default=PO_CUTOFF_UTC, help="Minimum created_at UTC timestamp for PO era")
     args = parser.parse_args()
     
     export_dataset(
@@ -470,5 +515,7 @@ if __name__ == "__main__":
         limit=args.limit,
         seq_len=args.seq_len,
         seq_len_mtf=args.seq_len_mtf,
-        channels=args.channels
+        channels=args.channels,
+        include_tiingo=args.include_tiingo,
+        min_date=args.min_date
     )

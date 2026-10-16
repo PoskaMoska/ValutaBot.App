@@ -25,7 +25,7 @@ _MODEL_PATH = Path(__file__).parent / "patch_tst_brain_v3.pt"
 _FALLBACK_MODEL_PATH = Path(__file__).parent / "sequence_brain_v3.pt"
 
 ASSET_MAP = {
-    "EURUSD": 0, "GBPUSD": 1, "USDJPY": 2, "AUDUSD": 3,
+    "EURUSD": 0, "GBPUSD": 1, "AUDUSD": 2, "USDJPY": 3,
     "USDCAD": 4, "USDCHF": 5, "EURJPY": 6, "GBPJPY": 7,
     "BTCUSD": 8, "ETHUSD": 9
 }
@@ -127,7 +127,16 @@ def build_macro_vector_live(
     has_swp = 1.0 if (smc.get("smc_has_swp") or smc.get("HasLiquiditySweep")) else 0.0
     has_bos = 1.0 if (smc.get("smc_bos_dir", "NONE") not in ("NONE", "") or smc.get("HasBos")) else 0.0
 
-    asset_clean = symbol.upper().replace("/", "").replace("_", "")
+    asset_clean = (
+        symbol.upper()
+        .replace("_OTC", "")
+        .replace(" OTC", "")
+        .replace("_PO", "")
+        .replace("/", "")
+        .replace("-", "")
+        .replace("_", "")
+        .strip()
+    )
     asset_id = float(ASSET_MAP.get(asset_clean, 6.0))
 
     vec = np.array([

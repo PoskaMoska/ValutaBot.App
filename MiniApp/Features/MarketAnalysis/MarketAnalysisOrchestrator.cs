@@ -156,7 +156,9 @@ public class MarketAnalysisOrchestrator(
         int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
         var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
         var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
-        TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out double liveSpreadBps);
+        double liveSpreadBps = 0.0;
+        if (!PriceFeed.UsePocketOption)
+            TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out liveSpreadBps);
 
         var macroPayload = new {
             DayRangePositionPct = dayAnchors.DayRangePositionPct,
@@ -261,15 +263,15 @@ public class MarketAnalysisOrchestrator(
             ["LIGHTGBM"]     = lgbmDir,
         };
 
-        // Phase 3 Context calculations
+        // Phase 3 Context calculations (strictly on closedCandles to avoid 1-tick unclosed bar bias)
         double priceEntropy = 0.0;
         int trendMaturity = 0;
         double pricePositionPct = 0.5;
         bool bbSqueeze = false;
         
-        if (candles.Length >= 20)
+        if (closedCandles.Length >= 20)
         {
-            var last20 = candles.Skip(candles.Length - 20).ToList();
+            var last20 = closedCandles.Skip(closedCandles.Length - 20).ToList();
             double maxHigh = last20.Max(c => c.High);
             double minLow = last20.Min(c => c.Low);
             if (maxHigh > minLow) {
@@ -282,9 +284,9 @@ public class MarketAnalysisOrchestrator(
             
             int streak = 0;
             bool? upTrend = null;
-            for (int i = candles.Length - 1; i >= 1; i--) {
-                bool isUp = candles[i].Close > candles[i-1].Close;
-                bool isDown = candles[i].Close < candles[i-1].Close;
+            for (int i = closedCandles.Length - 1; i >= 1; i--) {
+                bool isUp = closedCandles[i].Close > closedCandles[i-1].Close;
+                bool isDown = closedCandles[i].Close < closedCandles[i-1].Close;
                 if (upTrend == null) {
                     if (isUp) upTrend = true;
                     else if (isDown) upTrend = false;
@@ -322,7 +324,7 @@ public class MarketAnalysisOrchestrator(
             : (state.VelocityRegime ?? ExtractMlRegime(mlPrediction?.ModelVersion));
 
         var mlFeatures = new {
-            Candles = candles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+            Candles = closedCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
             MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
             Smc = smcResult,
             Ta = taDetail,

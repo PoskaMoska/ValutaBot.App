@@ -34,10 +34,6 @@ def _fetch_local_sqlite(symbol: str, interval: str, limit: int) -> List[Dict]:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 df = pd.read_sql_query(query, conn, params=(primary_asset, db_interval, limit))
-                if len(df) < 150 and primary_asset != clean_sym:
-                    df_fallback = pd.read_sql_query(query, conn, params=(clean_sym, db_interval, limit))
-                    if len(df_fallback) > len(df):
-                        df = df_fallback
             conn.close()
             if not df.empty:
                 return df.iloc[::-1].to_dict(orient='records')
@@ -65,17 +61,12 @@ def _query_historical_candles_db(symbol: str, norm_interval: str, limit: int) ->
             clean_sym = symbol.replace("_PO", "").replace("_OTC", "").replace("_otc", "").replace("/", "").strip().upper()
             use_po = os.getenv("PRICE_SOURCE", "pocket_option").strip().lower() not in ("tiingo", "forex")
             primary_asset = f"{clean_sym}_PO" if use_po else clean_sym
-            min_required = min(limit, 1500)
 
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', UserWarning)
                 df = pd.read_sql_query(query, conn, params=(primary_asset, norm_interval, limit))
-                # Only fall back to pure base symbol if *_PO does not yet have enough rows for training;
-                # never stitch *_PO and Tiingo rows into the same DataFrame.
-                if len(df) < min_required and primary_asset != clean_sym:
-                    df_fallback = pd.read_sql_query(query, conn, params=(clean_sym, norm_interval, limit))
-                    if len(df_fallback) > len(df):
-                        df = df_fallback
+                # Never fall back to Tiingo (clean_sym) when PRICE_SOURCE is pocket_option,
+                # as real Forex candles have completely different price levels and dynamics from PO OTC.
             conn.close()
             if not df.empty:
                 return df
