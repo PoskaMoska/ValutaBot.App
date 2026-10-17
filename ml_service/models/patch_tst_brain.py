@@ -57,7 +57,7 @@ class DualStreamPatchBrain(nn.Module):
         nhead: int = 4,
         num_layers: int = 2,
         num_classes: int = 3,
-        dropout: float = 0.2
+        dropout: float = 0.05
     ):
         super().__init__()
         self.d_model = d_model

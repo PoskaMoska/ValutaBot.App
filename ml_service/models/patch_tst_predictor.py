@@ -64,12 +64,12 @@ def normalize_candles_live(candles: List[Dict], seq_len: int = 160, n_channels: 
         if op <= 0:
             op = 1e-5
 
-        arr[idx, 0] = (cl - op) / op
-        arr[idx, 1] = (hi - op) / op
-        arr[idx, 2] = (lo - op) / op
+        arr[idx, 0] = ((cl - op) / op) * 10000.0
+        arr[idx, 1] = ((hi - op) / op) * 10000.0
+        arr[idx, 2] = ((lo - op) / op) * 10000.0
 
         if prev_close is not None and prev_close > 0:
-            arr[idx, 3] = (cl - prev_close) / prev_close
+            arr[idx, 3] = ((cl - prev_close) / prev_close) * 10000.0
         else:
             arr[idx, 3] = 0.0
 
@@ -347,10 +347,9 @@ class PatchTSTPredictor:
                 raw_dir_prob = p_put_cond
 
             # Calibrated confidence:
-            # Because 3-class training datasets have ~78% HOLD class prior, p_hold hovers around ~0.75-0.80
-            # on normal bars. Multiplying by (1 - p_hold) unconditionally crushed all probabilities into 50-54%.
-            # Instead, use conditional directional probability and only dampen when p_hold exceeds the 0.80 chop threshold.
-            chop_penalty = 1.0 if p_hold <= 0.80 else max(0.25, (1.0 - p_hold) / 0.20)
+            # In binary options, raw_dir_prob (p_buy_cond or p_put_cond) directly reflects binary directional confidence.
+            # We gently dampen only if HOLD probability spikes into abnormal flat chop (>0.50).
+            chop_penalty = 1.0 if p_hold <= 0.50 else max(0.25, (1.0 - p_hold) / 0.50)
             calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * chop_penalty
 
             # Safety floor at 50% (never below chance), no ceiling — let the model speak

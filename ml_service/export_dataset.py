@@ -100,12 +100,12 @@ def normalize_candles(candles_list, seq_len=160, channels=5):
         if op <= 0:
             op = 1e-5
 
-        arr[i, 0] = (cl - op) / op
-        arr[i, 1] = (hi - op) / op
-        arr[i, 2] = (lo - op) / op
+        arr[i, 0] = ((cl - op) / op) * 10000.0
+        arr[i, 1] = ((hi - op) / op) * 10000.0
+        arr[i, 2] = ((lo - op) / op) * 10000.0
 
         if prev_close is not None and prev_close > 0:
-            arr[i, 3] = (cl - prev_close) / prev_close
+            arr[i, 3] = ((cl - prev_close) / prev_close) * 10000.0
         else:
             arr[i, 3] = 0.0
 
@@ -228,24 +228,24 @@ def extract_macro_vector(row_dict, feat_obj):
     return vec
 
 
-def determine_label(direction, was_win, pnl_bps, min_pnl_threshold=0.5):
+def determine_label(direction, was_win, pnl_bps, min_pnl_threshold=1e-4):
     """
-    Determines 3-class target:
-      0: HOLD (Flat market, chop, negligible movement |pnl_bps| < threshold)
-      1: BUY (Market went up decisively: pnl_bps >= threshold)
-      2: PUT (Market went down decisively: pnl_bps <= -threshold)
+    Determines 3-class target for binary options payouts:
+      0: HOLD (Exact tie / flat close / unverified outcome |pnl_bps| <= threshold)
+      1: BUY (Market went UP: pnl_bps > threshold -> BUY payout)
+      2: PUT (Market went DOWN: pnl_bps < -threshold -> PUT payout)
     Note: pnl_bps in the database is the exact underlying asset price return in basis points:
       (exit_price - entry_price) / entry_price * 10000.
     """
-    if direction in ("HOLD", "SHADOW_HOLD") or was_win is None:
+    if was_win is None or direction in ("HOLD", "SHADOW_HOLD", "NEUTRAL", "SHADOW_NEUTRAL"):
         return 0
 
-    if pnl_bps >= min_pnl_threshold:
+    if pnl_bps > min_pnl_threshold:
         return 1  # Ground-truth: price moved UP -> BUY was winning
-    elif pnl_bps <= -min_pnl_threshold:
+    elif pnl_bps < -min_pnl_threshold:
         return 2  # Ground-truth: price moved DOWN -> PUT was winning
     else:
-        return 0  # Market flat / chop / noise -> HOLD
+        return 0  # Market flat tie / doji -> HOLD
 
 
 import sys

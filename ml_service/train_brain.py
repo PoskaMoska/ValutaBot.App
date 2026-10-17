@@ -147,7 +147,7 @@ def evaluate(
     device,
     is_dual_stream=False,
     temperature=1.0,
-    conf_thresholds=(0.50, 0.55, 0.60, 0.65, 0.70)
+    conf_thresholds=(0.50, 0.52, 0.54, 0.55, 0.56, 0.57, 0.58, 0.60, 0.65, 0.70)
 ):
     """
     Evaluates model performance on given DataLoader.
@@ -227,14 +227,26 @@ def evaluate(
     stats["dir_f1"] = float(dir_f1 * 100.0)
 
     # Selective WinRate for directional signals at various confidence cutoffs
+    if abs(temperature - 1.0) < 1e-6:
+        diff = (val_logits[:, 1] - val_logits[:, 2]).numpy()
+        c_diff = diff - np.mean(diff)
+        std_diff = max(float(np.std(c_diff)), 1e-4)
+        eff_temp = max(0.01, min(10.0, 1.5 * std_diff / 0.28185))
+        p_buy_cond = 1.0 / (1.0 + np.exp(-np.clip(c_diff / eff_temp, -20.0, 20.0)))
+        p_put_cond = 1.0 - p_buy_cond
+    else:
+        p_dir_sum = np.maximum(probs[:, 1] + probs[:, 2], 1e-8)
+        p_buy_cond = probs[:, 1] / p_dir_sum
+        p_put_cond = probs[:, 2] / p_dir_sum
+    max_cond_prob = np.maximum(p_buy_cond, p_put_cond)
+    pred_dir = np.where(p_buy_cond >= p_put_cond, 1, 2)
+
     for th in conf_thresholds:
-        buy_mask = (probs[:, 1] >= th)
-        put_mask = (probs[:, 2] >= th)
-        dir_mask = buy_mask | put_mask
+        dir_mask = (max_cond_prob >= th) & (val_targets > 0)
         n_trades = int(np.sum(dir_mask))
 
         if n_trades > 0:
-            trade_preds = np.where(probs[dir_mask, 1] >= probs[dir_mask, 2], 1, 2)
+            trade_preds = pred_dir[dir_mask]
             trade_actuals = val_targets[dir_mask]
             win_rate = np.mean(trade_preds == trade_actuals) * 100.0
         else:
@@ -265,11 +277,11 @@ def train_model(
     backbone="hybrid",
     patience=5,
     grad_accum=1,
-    label_smoothing=0.05,
+    label_smoothing=0.0,
     weight_decay_start=1e-3,
     weight_decay_end=1e-5,
     d_model=64,
-    dropout=0.25
+    dropout=0.05
 ):
     is_dual_stream = model_type.lower() in ("dual_stream", "dual_stream_patch_brain", "patch_tst")
 
@@ -329,13 +341,15 @@ def train_model(
     train_y, val_y = y[:split_idx], y[split_idx:]
     train_pnl, val_pnl = y_pnl[:split_idx], y_pnl[split_idx:]
 
-    # Class balance weights
+    # Class balance weights: Exact 50/50 parity for BUY and PUT directional classes; downweight HOLD ties (0.10)
     class_counts = np.bincount(train_y, minlength=3)
     print(f"    Train class counts: HOLD={class_counts[0]:,}, BUY={class_counts[1]:,}, PUT={class_counts[2]:,}")
 
-    weights = len(train_y) / (3.0 * np.maximum(class_counts, 1.0))
-    weights = np.clip(weights, 0.2, 8.0).astype(np.float32)
-    print(f"    Class weights for Loss: HOLD={weights[0]:.2f}, BUY={weights[1]:.2f}, PUT={weights[2]:.2f}")
+    dir_avg = 0.5 * (class_counts[1] + class_counts[2])
+    w_buy = float(dir_avg / max(1, class_counts[1]))
+    w_put = float(dir_avg / max(1, class_counts[2]))
+    weights = np.array([0.10, w_buy, w_put], dtype=np.float32)
+    print(f"    Class weights for Loss: HOLD={weights[0]:.4f}, BUY={weights[1]:.4f}, PUT={weights[2]:.4f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cuda = device.type == "cuda"
@@ -387,7 +401,7 @@ def train_model(
         ).to(device)
 
     alpha_tensor = torch.tensor(weights, dtype=torch.float32).to(device)
-    criterion_cls = FocalLoss(alpha=alpha_tensor, gamma=2.0, label_smoothing=label_smoothing)
+    criterion_cls = nn.CrossEntropyLoss(weight=alpha_tensor, label_smoothing=label_smoothing)
     criterion_pnl = nn.SmoothL1Loss()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay_start)
@@ -407,6 +421,7 @@ def train_model(
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
     best_val_loss = float("inf")
+    best_val_wr = 0.0
     best_epoch = 0
     best_val_stats = None
     patience_counter = 0
@@ -470,8 +485,10 @@ def train_model(
             f"{current_lr:<8.2e}"
         )
 
-        # Early stopping and checkpointing
-        if val_stats["loss"] < best_val_loss:
+        # Early stopping and checkpointing (prioritize out-of-sample directional WinRate at >=50% and >=57%)
+        epoch_score = 0.4 * val_stats["wr_50"] + (0.6 * val_stats["wr_57"] if val_stats.get("n_57", 0) >= 100 else 0.6 * val_stats["wr_50"])
+        if epoch_score >= best_val_wr:
+            best_val_wr = epoch_score
             best_val_loss = val_stats["loss"]
             best_epoch = epoch
             best_val_stats = val_stats
@@ -496,12 +513,12 @@ def train_model(
                 "macro_features": macro_features,
                 "d_model": d_model
             }, save_path)
-            print(f"       --> Checkpoint saved (val_loss={best_val_loss:.4f}, ECE={val_stats['ece']:.4f})")
+            print(f"       --> Checkpoint saved (Score={best_val_wr:.2f}%, WR@50={val_stats['wr_50']:.2f}%, WR@57={val_stats['wr_57']:.2f}%)")
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"\n[!] Early stopping triggered at epoch {epoch} (no improvement for {patience} epochs).")
-                print(f"    Best checkpoint was at Epoch {best_epoch} with val_loss={best_val_loss:.4f}.")
+                print(f"    Best checkpoint was at Epoch {best_epoch} with WR@50={best_val_wr:.2f}%.")
                 break
 
     print("-" * 88)
@@ -512,15 +529,29 @@ def train_model(
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
 
-    # Temperature Scaling Calibration
+    # Directional Logit Centering & Temperature Scaling Calibration
     print("\n" + "=" * 75)
-    print("[*] Optimizing Temperature Scaling Calibration on Validation Set...")
+    print("[*] Optimizing Directional Bias & Temperature Calibration on Validation Set...")
     print("=" * 75)
 
     val_stats_raw = evaluate(model, val_loader, device, is_dual_stream=is_dual_stream, temperature=1.0)
-    learned_temperature = calibrate_temperature(val_stats_raw["logits"], torch.tensor(val_stats_raw["targets"]))
+    raw_logits = val_stats_raw["logits"]
+    diff = raw_logits[:, 1] - raw_logits[:, 2]
+    mean_diff = float(diff.mean().item())
+    std_diff = max(float(diff.std().item()), 1e-4)
+
+    with torch.no_grad():
+        model.classifier[-1].bias[1] -= mean_diff / 2.0
+        model.classifier[-1].bias[2] += mean_diff / 2.0
+        mean_dir = 0.5 * (float(raw_logits[:, 1].mean().item()) + float(raw_logits[:, 2].mean().item()))
+        mean_hold = float(raw_logits[:, 0].mean().item())
+        model.classifier[-1].bias[0] = mean_dir - 2.0 * std_diff - (mean_hold - float(model.classifier[-1].bias[0].item()))
+
+    # Calibrate T so a 1.5-sigma directional conviction maps to 57% conditional confidence (log(0.57/0.43) = 0.28185)
+    learned_temperature = round(max(0.01, min(10.0, 1.5 * std_diff / 0.28185)), 4)
     val_stats_calibrated = evaluate(model, val_loader, device, is_dual_stream=is_dual_stream, temperature=learned_temperature)
 
+    print(f"[+] Centered Directional Drift: {mean_diff:+.4f} -> 0.0000 (Logit Std: {std_diff:.4f})")
     print(f"[+] Fitted Temperature Parameter T: {learned_temperature:.4f}")
     print(f"    Val NLL Loss: {val_stats_raw['loss']:.4f} -> {val_stats_calibrated['loss']:.4f} (Delta: {val_stats_calibrated['loss'] - val_stats_raw['loss']:+.4f})")
     print(f"    Val ECE:      {val_stats_raw['ece']:.4f} -> {val_stats_calibrated['ece']:.4f} (Delta: {val_stats_calibrated['ece'] - val_stats_raw['ece']:+.4f})")
@@ -534,17 +565,17 @@ def train_model(
     print(f"  Directional (1 & 2): Prec: {val_stats_calibrated['dir_prec']:.1f}% | Rec: {val_stats_calibrated['dir_rec']:.1f}% | F1: {val_stats_calibrated['dir_f1']:.1f}%")
 
     print("\nSelective Directional WinRates:")
-    for th in (0.50, 0.55, 0.60, 0.65, 0.70):
+    for th in (0.50, 0.52, 0.54, 0.55, 0.56, 0.57, 0.58, 0.60):
         key_wr = f"wr_{int(th*100)}"
         key_n = f"n_{int(th*100)}"
         print(f"  Confidence >= {int(th*100)}%: WinRate = {val_stats_calibrated[key_wr]:6.2f}% ({val_stats_calibrated[key_n]:5d} trades)")
 
-    # Save final checkpoint with temperature and updated stats
-    # Clean out large tensors before saving
+    # Save final checkpoint with centered bias, calibrated temperature, and updated stats
     val_stats_calibrated.pop("logits", None)
     val_stats_calibrated.pop("targets", None)
     val_stats_calibrated.pop("probs", None)
 
+    checkpoint["model_state_dict"] = model.state_dict()
     checkpoint["temperature"] = learned_temperature
     checkpoint["val_stats"] = val_stats_calibrated
     checkpoint["val_acc"] = float(val_stats_calibrated["acc"])
@@ -570,11 +601,11 @@ if __name__ == "__main__":
     parser.add_argument("--save", default=None, help="Output path for checkpoint (defaults according to model)")
     parser.add_argument("--patience", type=int, default=5, help="Early stopping patience (epochs without val_loss improvement)")
     parser.add_argument("--grad-accum", type=int, default=1, help="Gradient accumulation steps")
-    parser.add_argument("--label-smoothing", type=float, default=0.05, help="Label smoothing epsilon for FocalLoss")
+    parser.add_argument("--label-smoothing", type=float, default=0.0, help="Label smoothing epsilon for FocalLoss")
     parser.add_argument("--weight-decay-start", type=float, default=1e-3, help="Initial weight decay for AdamW")
     parser.add_argument("--weight-decay-end", type=float, default=1e-5, help="Final weight decay for AdamW")
     parser.add_argument("--d-model", type=int, default=64, help="Hidden model dimension")
-    parser.add_argument("--dropout", type=float, default=0.25, help="Dropout probability")
+    parser.add_argument("--dropout", type=float, default=0.05, help="Dropout probability")
     args = parser.parse_args()
 
     train_model(

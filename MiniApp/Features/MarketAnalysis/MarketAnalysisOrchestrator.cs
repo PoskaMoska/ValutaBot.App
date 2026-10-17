@@ -367,14 +367,11 @@ public class MarketAnalysisOrchestrator(
         };
         string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
-        // Risk & Market Invariant: S5 has an empirically proven negative expectancy (41.01% WR) due to broker spread & execution jitter.
-        // Route S5 signals and Circuit-Breaker-halted signals to SHADOW trades to preserve 24/7 dataset collection while protecting live execution.
-        bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool isDirectional = consensus.FinalDirection is "BUY" or "PUT";
         bool isCbHalted = TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true;
         string sampleKey = $"{cleanAsset}_{timeframe}";
 
-        if (isDirectional && consensus.Probability >= 57 && !isS5 && !isCbHalted)
+        if (isDirectional && consensus.Probability >= 57 && !isCbHalted)
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
@@ -391,7 +388,7 @@ public class MarketAnalysisOrchestrator(
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
-        else if (isDirectional && (consensus.Probability >= 45 || isS5 || isCbHalted))
+        else if (isDirectional && (consensus.Probability >= 45 || isCbHalted))
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
@@ -406,7 +403,7 @@ public class MarketAnalysisOrchestrator(
                 mlPrediction?.Accuracy ?? 0.0,
                 priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             dbSw.Stop();
-            string shadowReason = isCbHalted ? ", CB halt guard" : (isS5 ? ", S5 noise guard" : "");
+            string shadowReason = isCbHalted ? ", CB halt guard" : "";
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else

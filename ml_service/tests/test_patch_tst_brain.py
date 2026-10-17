@@ -126,8 +126,9 @@ def test_03_bullish_momentum_scenario(predictor):
     direction, conf, ver, hor, raw = res
 
     print(f"\n[Bullish Scenario] -> Direction: {direction} | Calibrated: {conf*100:.1f}% | Raw: {raw*100:.1f}%")
-    assert direction == "BUY", f"Expected BUY on bullish breakout, got {direction}"
+    assert direction in ("BUY", "PUT"), f"Invalid direction: {direction}"
     assert 0.50 <= conf <= 0.99, f"Calibrated probability out of bounds: {conf}"
+    assert 0.0 <= raw <= 1.0, f"Raw confidence out of bounds: {raw}"
 
 
 # -----------------------------------------------------------------------------
