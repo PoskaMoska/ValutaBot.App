@@ -25,6 +25,7 @@ public class MarketAnalysisOrchestrator(
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastSampleTimeByAssetTf = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastRealTradeTimeByAsset = new();
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     
     private readonly MarketDataFetcher _fetcher = fetcher;
@@ -367,19 +368,45 @@ public class MarketAnalysisOrchestrator(
         };
         string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
+        bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool isDirectional = consensus.FinalDirection is "BUY" or "PUT";
         bool isCbHalted = TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true;
         string sampleKey = $"{cleanAsset}_{timeframe}";
 
-        if (isDirectional && consensus.Probability >= 57 && !isCbHalted)
+        int requiredProb = isS5 ? 59 : 57;
+        bool htfAligned = mtfResult.DominantDirection == consensus.FinalDirection && isDirectional;
+
+        bool isCooldownActive = false;
+        if (isS5 && _lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var lastRealTime))
         {
+            isCooldownActive = (DateTime.UtcNow - lastRealTime).TotalSeconds < 20.0;
+        }
+
+        bool isExhaustedOnS5 = false;
+        if (isS5 && closedCandles != null && closedCandles.Length >= 3)
+        {
+            var last3 = closedCandles.TakeLast(3).ToArray();
+            if (consensus.FinalDirection == "BUY" && last3.All(c => c.Close > c.Open) && taResult.rsiVal >= 64.0)
+                isExhaustedOnS5 = true;
+            else if (consensus.FinalDirection == "PUT" && last3.All(c => c.Close < c.Open) && taResult.rsiVal <= 36.0)
+                isExhaustedOnS5 = true;
+        }
+
+        bool canExecuteReal = isDirectional 
+            && consensus.Probability >= requiredProb 
+            && !isCbHalted
+            && (!isS5 || (htfAligned && !isCooldownActive && !isExhaustedOnS5));
+
+        if (canExecuteReal)
+        {
+            _lastRealTradeTimeByAsset[cleanAsset] = DateTime.UtcNow;
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 effectiveMarketRegime,
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
-                mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",
+                htfAligned,
                 minutesToNews ?? -1,
                 consensus.CombinedReasoningText ?? "",
                 mlPrediction?.ModelVersion ?? "",
@@ -388,7 +415,7 @@ public class MarketAnalysisOrchestrator(
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
-        else if (isDirectional && (consensus.Probability >= 45 || isCbHalted))
+        else if (isDirectional && (consensus.Probability >= 45 || isCbHalted || isS5))
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
@@ -396,14 +423,18 @@ public class MarketAnalysisOrchestrator(
                 effectiveMarketRegime,
                 state.VelocityRegime ?? "UNKNOWN",
                 mainAtr, mainAdx, taResult.rsiVal,
-                mtfResult.DominantDirection == consensus.FinalDirection && consensus.FinalDirection is "BUY" or "PUT",
+                htfAligned,
                 minutesToNews ?? -1,
                 consensus.CombinedReasoningText ?? "",
                 mlPrediction?.ModelVersion ?? "",
                 mlPrediction?.Accuracy ?? 0.0,
                 priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             dbSw.Stop();
-            string shadowReason = isCbHalted ? ", CB halt guard" : "";
+            string shadowReason = isCbHalted ? ", CB halt guard" 
+                : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard" 
+                : (isS5 && !htfAligned ? ", S5 HTF divergence guard" 
+                : (isS5 && isCooldownActive ? ", S5 cooldown guard" 
+                : (isS5 && consensus.Probability < 59 ? ", S5 prob threshold guard" : ""))));
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else

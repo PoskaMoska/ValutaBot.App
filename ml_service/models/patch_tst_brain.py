@@ -145,10 +145,10 @@ class DualStreamPatchBrain(nn.Module):
         attn_out, _ = self.cross_attn(query=h_micro, key=h_mtf, value=h_mtf)
         h_cross = self.cross_norm(h_micro + attn_out)
 
-        # Mean pooling across tokens
-        pool_micro = h_micro.mean(dim=1)    # [B, d_model]
-        pool_mtf = h_mtf.mean(dim=1)        # [B, d_model]
-        pool_cross = h_cross.mean(dim=1)    # [B, d_model]
+        # Last-Patch Focus: 50% global temporal context + 50% acute tip of the market (last patch right before entry)
+        pool_micro = 0.5 * h_micro.mean(dim=1) + 0.5 * h_micro[:, -1, :]
+        pool_mtf = h_mtf.mean(dim=1)
+        pool_cross = 0.5 * h_cross.mean(dim=1) + 0.5 * h_cross[:, -1, :]
 
         # --- Stream C: Macro context vector ---
         pool_macro = self.macro_encoder(x_macro)  # [B, 64]
