@@ -16,11 +16,12 @@ namespace ValutaBot.App.MiniApp.Data
             var envVar = Environment.GetEnvironmentVariable("DATABASE_URL") ?? "";
             if (string.IsNullOrEmpty(envVar)) return "";
 
+            NpgsqlConnectionStringBuilder builder;
             if (envVar.StartsWith("postgres://") || envVar.StartsWith("postgresql://"))
             {
                 var uri = new Uri(envVar);
                 var userInfo = uri.UserInfo.Split(':');
-                var builder = new NpgsqlConnectionStringBuilder
+                builder = new NpgsqlConnectionStringBuilder
                 {
                     Host = uri.Host,
                     Port = uri.Port > 0 ? uri.Port : 5432,
@@ -28,10 +29,21 @@ namespace ValutaBot.App.MiniApp.Data
                     Password = userInfo.Length > 1 ? userInfo[1] : "",
                     Database = uri.LocalPath.TrimStart('/')
                 };
-                return builder.ToString();
+            }
+            else
+            {
+                builder = new NpgsqlConnectionStringBuilder(envVar);
             }
 
-            return envVar;
+            // TCP Keepalive sends probe packets every 30s to keep cloud proxy sockets (e.g. Railway) alive
+            builder.KeepAlive = 30;
+            // Retire pooled connections after 5m to avoid stale socket reuse after cloud proxy resets
+            builder.ConnectionLifetime = 300;
+            builder.ConnectionIdleLifetime = 60;
+            builder.Timeout = 15;
+            builder.CommandTimeout = 30;
+
+            return builder.ToString();
         }
 
         public static NpgsqlConnection GetConnection() 

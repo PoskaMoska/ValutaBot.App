@@ -103,22 +103,45 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             await conn.ExecuteAsync("INSERT INTO all_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") });
         }
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, (UserSettings settings, DateTime cachedAt)> _settingsCache = new();
+        private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
+
         public static async Task<UserSettings> GetSettingsAsync(long chatId)
         {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new UserSettings();
-            using var conn = DbConnectionFactory.GetConnection();
-            var settings = await conn.QueryFirstOrDefaultAsync<UserSettings>(
-                "SELECT enable_ml as EnableMl, enable_smc as EnableSmc, enable_of as EnableOf FROM user_settings WHERE chat_id = @chatId", 
-                new { chatId });
-            
-            if (settings == null)
+            if (_settingsCache.TryGetValue(chatId, out var cached) && (DateTime.UtcNow - cached.cachedAt) < CacheTtl)
             {
-                settings = new UserSettings();
-                await conn.ExecuteAsync(
-                    "INSERT INTO user_settings (chat_id, enable_ml, enable_smc, enable_of) VALUES (@chatId, @EnableMl, @EnableSmc, @EnableOf)",
-                    new { chatId, settings.EnableMl, settings.EnableSmc, settings.EnableOf });
+                return cached.settings;
             }
-            return settings;
+
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new UserSettings();
+
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                var settings = await conn.QueryFirstOrDefaultAsync<UserSettings>(
+                    "SELECT enable_ml as EnableMl, enable_smc as EnableSmc, enable_of as EnableOf FROM user_settings WHERE chat_id = @chatId", 
+                    new { chatId });
+                
+                if (settings == null)
+                {
+                    settings = new UserSettings();
+                    await conn.ExecuteAsync(
+                        "INSERT INTO user_settings (chat_id, enable_ml, enable_smc, enable_of) VALUES (@chatId, @EnableMl, @EnableSmc, @EnableOf)",
+                        new { chatId, settings.EnableMl, settings.EnableSmc, settings.EnableOf });
+                }
+
+                _settingsCache[chatId] = (settings, DateTime.UtcNow);
+                return settings;
+            }
+            catch (Exception)
+            {
+                // Fallback to last known cached settings or default on transient DB network glitches
+                if (_settingsCache.TryGetValue(chatId, out var fallback))
+                {
+                    return fallback.settings;
+                }
+                return new UserSettings();
+            }
         }
 
         public static async Task ToggleSettingAsync(long chatId, string settingType)
@@ -144,6 +167,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             };
 
             await conn.ExecuteAsync($"UPDATE user_settings SET {column} = @newVal WHERE chat_id = @chatId", new { newVal, chatId });
+            _settingsCache.TryRemove(chatId, out _);
         }
     }
 

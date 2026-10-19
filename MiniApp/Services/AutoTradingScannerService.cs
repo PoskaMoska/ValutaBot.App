@@ -152,7 +152,18 @@ public class AutoTradingScannerService : BackgroundService
         }
         catch (Exception ex)
         {
-            if (ex.Message.Contains("���������")) _logger.LogWarning($"[AutoScanner-Fast] Blocked: {ex.Message}"); else _logger.LogError($"[AutoScanner-Fast] Exception: {ex.Message}");
+            if (ex is Npgsql.NpgsqlException || ex is System.IO.IOException || ex is System.Net.Sockets.SocketException || ex is TimeoutException || ex.Message.Contains("reading from stream", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning($"[AutoScanner-Fast] Transient DB/network jitter: {ex.Message}");
+            }
+            else if (ex.Message.Contains("Заблокировано", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("Blocked", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning($"[AutoScanner-Fast] Blocked: {ex.Message}");
+            }
+            else
+            {
+                _logger.LogError(ex, $"[AutoScanner-Fast] Exception: {ex.Message}");
+            }
         }
     }
 
@@ -202,7 +213,14 @@ public class AutoTradingScannerService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError($"[AutoScanner-Slow] Exception: {ex.Message}");
+                if (ex is Npgsql.NpgsqlException || ex is System.IO.IOException || ex is System.Net.Sockets.SocketException || ex is TimeoutException || ex.Message.Contains("reading from stream", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning($"[AutoScanner-Slow] Transient DB/network jitter: {ex.Message}");
+                }
+                else
+                {
+                    _logger.LogError(ex, $"[AutoScanner-Slow] Exception: {ex.Message}");
+                }
             }
 
             // Slow loop: 4 minutes between REST API calls. 
@@ -238,4 +256,4 @@ public class AutoTradingScannerService : BackgroundService
                (dayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
                (dayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
     }
-}
+}
