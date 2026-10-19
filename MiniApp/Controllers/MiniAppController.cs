@@ -252,6 +252,23 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
             await next();
         });
 
+        // SECURITY: Metrics endpoint authentication challenge for Grafana Cloud
+        app.Use(async (context, next) =>
+        {
+            if (context.Request.Path == "/metrics")
+            {
+                string? auth = context.Request.Headers.Authorization;
+                if (string.IsNullOrWhiteSpace(auth))
+                {
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    context.Response.Headers.Append("WWW-Authenticate", "Basic realm=\"Metrics\", Bearer realm=\"Metrics\"");
+                    await context.Response.WriteAsync("Unauthorized: Metrics endpoint requires Basic or Bearer authentication.");
+                    return;
+                }
+            }
+            await next();
+        });
+
         app.UseHttpMetrics();
         app.UseRateLimiter();
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
