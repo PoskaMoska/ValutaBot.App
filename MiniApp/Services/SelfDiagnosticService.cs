@@ -22,7 +22,10 @@ public class SelfDiagnosticService : BackgroundService
     
     // State tracking to prevent notification spam
     private bool _dbWasHealthy = true;
+    private int _consecutiveDbFailures = 0;
     private bool _mlWasHealthy = true;
+    private int _consecutiveMlFailures = 0;
+    private const int MaxConsecutiveFailures = 2; // Require 2 consecutive failures before alerting Telegram
     private bool _patchTstWasHealthy = true;
     private bool _feedWasHealthy = true;
     private bool _memWasHealthy = true;
@@ -89,6 +92,7 @@ public class SelfDiagnosticService : BackgroundService
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await Dapper.SqlMapper.QueryFirstOrDefaultAsync<int>(conn, "SELECT 1");
             currentDbHealthy = true;
+            _consecutiveDbFailures = 0;
             
             if (!_dbWasHealthy)
             {
@@ -98,7 +102,9 @@ public class SelfDiagnosticService : BackgroundService
         }
         catch (Exception ex)
         {
-            if (_dbWasHealthy)
+            _consecutiveDbFailures++;
+            BotLogger.Warn($"[Diagnostics] DB check failed ({_consecutiveDbFailures}/{MaxConsecutiveFailures}): {ex.Message}");
+            if (_consecutiveDbFailures >= MaxConsecutiveFailures && _dbWasHealthy)
             {
                 _dbWasHealthy = false;
                 await TelegramBotService.SendMessageToAdmins($"🚨 <b>Database Connection Lost</b>\nBackend self-scan failed to reach DB:\n<code>{ex.Message}</code>");
@@ -112,12 +118,13 @@ public class SelfDiagnosticService : BackgroundService
             if (httpFactory != null)
             {
                 var hc = httpFactory.CreateClient();
-                hc.Timeout = TimeSpan.FromSeconds(3);
+                hc.Timeout = TimeSpan.FromSeconds(7);
                 var mlResponse = await hc.GetAsync(new Uri($"{mlUrl.TrimEnd('/')}/health"), stoppingToken);
                 
                 if (mlResponse.IsSuccessStatusCode)
                 {
                     currentMlHealthy = true;
+                    _consecutiveMlFailures = 0;
                     if (!_mlWasHealthy)
                     {
                         _mlWasHealthy = true;
@@ -156,7 +163,9 @@ public class SelfDiagnosticService : BackgroundService
         }
         catch (Exception ex)
         {
-            if (_mlWasHealthy)
+            _consecutiveMlFailures++;
+            BotLogger.Warn($"[Diagnostics] ML check failed ({_consecutiveMlFailures}/{MaxConsecutiveFailures}): {ex.Message}");
+            if (_consecutiveMlFailures >= MaxConsecutiveFailures && _mlWasHealthy)
             {
                 _mlWasHealthy = false;
                 try { System.IO.File.WriteAllText(_mlStateFilePath, "false"); } catch { }
