@@ -63,6 +63,22 @@ public static partial class MiniAppController
                 options.Environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "production";
                 options.TracesSampleRate = 0.2;
                 options.AutoSessionTracking = true;
+
+                // Filter out Polly resilience pipeline events (timeouts, retries) from triggering Sentry alarms.
+                // These are normal resilience operations gracefully handled by fallback indicators (TA+SMC).
+                options.AddExceptionFilterForType<Polly.Timeout.TimeoutRejectedException>();
+                options.SetBeforeSend((sentryEvent, hint) =>
+                {
+                    if (sentryEvent.Logger != null && (sentryEvent.Logger.StartsWith("Polly") || sentryEvent.Logger.StartsWith("Microsoft.Extensions.Http.Resilience")))
+                    {
+                        return null; // Drop internal resilience logs
+                    }
+                    if (sentryEvent.Exception is Polly.Timeout.TimeoutRejectedException)
+                    {
+                        return null;
+                    }
+                    return sentryEvent;
+                });
             });
             Console.WriteLine("[Sentry] Production monitoring initialized.");
         }
@@ -70,6 +86,8 @@ public static partial class MiniAppController
         // Security: HttpClient logs full request URLs at Information level. The Telegram API URL
         // contains the bot token, so keep these categories at Warning to avoid leaking it into logs.
         builder.Logging.AddFilter("System.Net.Http.HttpClient", Microsoft.Extensions.Logging.LogLevel.Warning);
+        builder.Logging.AddFilter("Polly", Microsoft.Extensions.Logging.LogLevel.Warning);
+        builder.Logging.AddFilter("Microsoft.Extensions.Http.Resilience", Microsoft.Extensions.Logging.LogLevel.Warning);
         
         var botSettings = builder.Configuration.GetSection("TradingBotSettings").Get<TradingBotSettings>() ?? new TradingBotSettings();
         builder.Services.Configure<TradingBotSettings>(builder.Configuration.GetSection("TradingBotSettings"));
