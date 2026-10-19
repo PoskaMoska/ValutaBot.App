@@ -174,6 +174,15 @@ async def lifespan(app: FastAPI):
         prune_models_disk()
     except Exception as e:
         log.warning(f"[Startup] Disk prune error: {e}")
+
+    # Warm up PatchTST Neural Brain so weights are in memory immediately
+    try:
+        from models.patch_tst_predictor import PatchTSTPredictor
+        patch_pred = PatchTSTPredictor.get_instance()
+        log.info(f"[Startup] PatchTST Neural Brain warmed up (available: {patch_pred.is_available()})")
+    except Exception as e:
+        log.warning(f"[Startup] PatchTST warm-up: {e}")
+
     _process_pool = ProcessPoolExecutor(max_workers=2)
     log.info("[Startup] Launching background pre-training for all timeframes...")
     asyncio.create_task(_train_all())
@@ -625,16 +634,16 @@ def _candles_to_dicts(items: list[CandleItem]) -> list[dict]:
 # └────────────────────────────────────────────────────────────────────────┘
 
 @app.get("/")
-def root():
+async def root():
     return {"status": "ok", "service": "ml_service"}
 
 @app.get("/health")
-def health():
+async def health(full: bool = False):
     uptime = round(time.time() - START_TIME)
     with _registry_lock:
-        models = [p.get_status() for p in _predictors.values()]
+        models_count = len(_predictors)
 
-    # SOTA Neural Brain (PatchTST) availability check
+    # SOTA Neural Brain (PatchTST) availability check (non-blocking singleton reference check)
     patch_tst_ok = False
     patch_tst_ver = None
     try:
@@ -646,14 +655,18 @@ def health():
     except Exception as e:
         log.warning(f"[Health] PatchTST status check failed: {e}")
 
-    return {
+    result = {
         "status": "ok",
         "uptime_seconds": uptime,
-        "models_loaded": len(models),
+        "models_loaded": models_count,
         "patch_tst_available": patch_tst_ok,
         "patch_tst_version": patch_tst_ver,
-        "models": models,
+        "models": [],
     }
+    if full:
+        with _registry_lock:
+            result["models"] = [p.get_status() for p in _predictors.values()]
+    return result
 
 
 @app.get("/models")
