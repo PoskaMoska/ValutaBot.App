@@ -23,6 +23,54 @@ public static class ValutaMetrics
             Buckets = new[] { 0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 1.5, 3.0, 6.0 }
         });
 
+    public static readonly Histogram MlDuration = Metrics.CreateHistogram(
+        "valutabot_ml_duration_seconds",
+        "Duration of the Python ML inference call in seconds",
+        new HistogramConfiguration
+        {
+            Buckets = new[] { 0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 1.5, 3.0 }
+        });
+
+    public static readonly Counter TradeOutcomesTotal = Metrics.CreateCounter(
+        "valutabot_trade_outcomes_total",
+        "Total verified trades by outcome (WIN, LOSS, TIE)",
+        new CounterConfiguration
+        {
+            LabelNames = new[] { "asset", "timeframe", "result" }
+        });
+
+    public static readonly Gauge WinRateRatio = Metrics.CreateGauge(
+        "valutabot_winrate_ratio",
+        "Current rolling EMA win rate ratio (0.0 - 1.0)",
+        new GaugeConfiguration
+        {
+            LabelNames = new[] { "asset", "timeframe" }
+        });
+
+    public static readonly Gauge ConsecutiveLosses = Metrics.CreateGauge(
+        "valutabot_consecutive_losses",
+        "Current consecutive losses count",
+        new GaugeConfiguration
+        {
+            LabelNames = new[] { "asset", "timeframe" }
+        });
+
+    public static readonly Counter GatekeeperBlocksTotal = Metrics.CreateCounter(
+        "valutabot_gatekeeper_blocks_total",
+        "Total trades blocked by the risk gatekeeper filter",
+        new CounterConfiguration
+        {
+            LabelNames = new[] { "asset", "timeframe", "reason" }
+        });
+
+    public static readonly Counter NewsBlocksTotal = Metrics.CreateCounter(
+        "valutabot_news_blocks_total",
+        "Total trades blocked or neutralized due to high-impact news",
+        new CounterConfiguration
+        {
+            LabelNames = new[] { "asset" }
+        });
+
     public static readonly Counter HealthCheckFailures = Metrics.CreateCounter(
         "valutabot_healthcheck_failures_total",
         "Total number of failed health checks",

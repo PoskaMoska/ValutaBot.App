@@ -194,6 +194,8 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 {
                     // A tie breaks the loss streak!
                     _consecutiveLosses[lossKey] = 0;
+                    ValutaMetrics.TradeOutcomesTotal.WithLabels(record.Asset, record.Timeframe, "TIE").Inc();
+                    ValutaMetrics.ConsecutiveLosses.WithLabels(record.Asset, record.Timeframe).Set(0);
                 }
                 BotLogger.Warn($"[TradeOutcomeTracker] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
                 return;
@@ -207,10 +209,14 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 if (wasCorrect)
                 {
                     _consecutiveLosses[lossKey] = 0;
+                    ValutaMetrics.TradeOutcomesTotal.WithLabels(record.Asset, record.Timeframe, "WIN").Inc();
+                    ValutaMetrics.ConsecutiveLosses.WithLabels(record.Asset, record.Timeframe).Set(0);
                 }
                 else
                 {
-                    _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
+                    int losses = _consecutiveLosses.AddOrUpdate(lossKey, 1, (_, count) => count + 1);
+                    ValutaMetrics.TradeOutcomesTotal.WithLabels(record.Asset, record.Timeframe, "LOSS").Inc();
+                    ValutaMetrics.ConsecutiveLosses.WithLabels(record.Asset, record.Timeframe).Set(losses);
 
                     // DUMP POST-MORTEM SNAPSHOT ON LIVE LOSS
                     try

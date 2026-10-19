@@ -117,6 +117,7 @@ public class MarketAnalysisOrchestrator(
         bool isRiskBlocked = !gatekeeper.IsTradeable;
         if (isRiskBlocked)
         {
+            ValutaMetrics.GatekeeperBlocksTotal.WithLabels(cleanAsset, timeframe, string.IsNullOrEmpty(gatekeeper.Reason) ? "UNKNOWN" : gatekeeper.Reason).Inc();
             _logger.LogWarning("[TRACE {TraceId}] Risk Gatekeeper blocked trade: {Reason}", traceId, gatekeeper.Reason);
             // DO NOT THROW. We need to compute features to save negative (HOLD) samples!
         }
@@ -228,6 +229,7 @@ public class MarketAnalysisOrchestrator(
             lgbmConf = mlPrediction.Confidence;
         }
         mlSw.Stop();
+        ValutaMetrics.MlDuration.Observe(mlSw.Elapsed.TotalSeconds);
         // Fix #4: Diagnose MetaLearner status and ML contribution clearly in logs
         bool hasMetaLearner = TradeOutcomeTracker.MetaLearner != null;
         double mlRawProb = mlPrediction?.RawConfidence ?? 0.5;
@@ -268,6 +270,7 @@ public class MarketAnalysisOrchestrator(
         // --- NEWS CALENDAR INTEGRATION ---
         if (minutesToNews.HasValue && minutesToNews.Value >= 0 && minutesToNews.Value <= 15)
         {
+            ValutaMetrics.NewsBlocksTotal.WithLabels(cleanAsset).Inc();
             var nextNews = _newsCalendar?.GetNextHighImpactNews(cleanAsset);
             string newsWarning = $"?? ВНИМАНИЕ: Через {minutesToNews.Value} мин выходит важная новость ({nextNews?.Title}). Рынок нестабилен!";
             consensus = consensus with {
