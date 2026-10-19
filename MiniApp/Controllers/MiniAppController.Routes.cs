@@ -56,34 +56,51 @@ public static partial class MiniAppController
             return Results.Ok(new { status = "Event emitted to Sentry", eventId = eventId.ToString() });
         });
 
-        // SELF-HEALING: Endpoint Здоровья для Railway
+        // SELF-HEALING: Endpoint Здоровья для Railway и BetterStack
         app.MapGet("/api/health", async (HttpContext context) =>
         {
+            string dbStatus = "Unknown";
+            string mlStatus = "Unknown";
+
+            // 1. Проверяем БД
             try
             {
-                // 1. Проверяем БД
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 await Dapper.SqlMapper.QueryFirstOrDefaultAsync<int>(conn, "SELECT 1");
+                dbStatus = "Ok";
+            }
+            catch (Exception ex)
+            {
+                dbStatus = "Error: " + ex.Message;
+                ValutaMetrics.HealthCheckFailures.WithLabels("db").Inc();
+                return Results.Json(new { status = "Unhealthy", db = dbStatus, ml = mlStatus, error = ex.Message }, statusCode: 500);
+            }
 
-                // 2. Проверяем ML сервис (просто пинг /health)
+            // 2. Проверяем ML сервис (просто пинг /health)
+            try
+            {
                 var mlUrl = app.Configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
                 var hc = HttpFactory?.CreateClient();
                 if (hc != null)
                 {
-                    hc.Timeout = TimeSpan.FromSeconds(3);
+                    hc.Timeout = TimeSpan.FromSeconds(5);
                     var mlHealthUrl = $"{mlUrl.TrimEnd('/')}/health";
-                    var mlResponse = await hc.GetAsync(mlHealthUrl);
-                    bool mlIsOk = mlResponse.IsSuccessStatusCode;
-                    if (!mlIsOk) ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
-                    return Results.Ok(new { status = "Healthy", db = "Ok", ml = mlIsOk ? "Ok" : "Down" });
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    var mlResponse = await hc.GetAsync(mlHealthUrl, cts.Token);
+                    mlStatus = mlResponse.IsSuccessStatusCode ? "Ok" : $"Down ({(int)mlResponse.StatusCode})";
+                    if (!mlResponse.IsSuccessStatusCode)
+                    {
+                        ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
+                    }
                 }
-                return Results.Ok(new { status = "Healthy", db = "Ok", ml = "Unknown" });
             }
             catch (Exception ex)
             {
-                ValutaMetrics.HealthCheckFailures.WithLabels("db").Inc();
-                return Results.Json(new { status = "Unhealthy", error = ex.Message }, statusCode: 500);
+                mlStatus = "Slow/Down: " + ex.Message;
+                ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
             }
+
+            return Results.Ok(new { status = "Healthy", db = dbStatus, ml = mlStatus });
         });
 
         app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe) =>
