@@ -25,7 +25,7 @@ public class SelfDiagnosticService : BackgroundService
     private int _consecutiveDbFailures = 0;
     private bool _mlWasHealthy = true;
     private int _consecutiveMlFailures = 0;
-    private const int MaxConsecutiveFailures = 2; // Require 2 consecutive failures before alerting Telegram
+    private const int MaxConsecutiveFailures = 3; // Require 3 consecutive failures before alerting Telegram
     private bool _patchTstWasHealthy = true;
     private bool _feedWasHealthy = true;
     private bool _memWasHealthy = true;
@@ -118,7 +118,7 @@ public class SelfDiagnosticService : BackgroundService
             if (httpFactory != null)
             {
                 var hc = httpFactory.CreateClient();
-                hc.Timeout = TimeSpan.FromSeconds(7);
+                hc.Timeout = TimeSpan.FromSeconds(15);
                 var mlResponse = await hc.GetAsync(new Uri($"{mlUrl.TrimEnd('/')}/health"), stoppingToken);
                 
                 if (mlResponse.IsSuccessStatusCode)

@@ -62,7 +62,7 @@ _DEFAULT_INTERVALS = os.getenv("PRETRAIN_INTERVALS", "s5,s10,s15,s30,1m").split(
 
 
 async def _train_all():
-    await asyncio.sleep(5)   # give FastAPI time to finish startup
+    await asyncio.sleep(30)   # give FastAPI time to finish startup and settle health checks
     for sym in _DEFAULT_SYMBOLS:
         sym = sym.strip().upper()
         if not sym:
@@ -183,8 +183,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"[Startup] PatchTST warm-up: {e}")
 
-    _process_pool = ProcessPoolExecutor(max_workers=2)
-    log.info("[Startup] Launching background pre-training for all timeframes...")
+    _process_pool = ProcessPoolExecutor(max_workers=1)
+    log.info("[Startup] Launching background pre-training for all timeframes (max_workers=1)...")
     asyncio.create_task(_train_all())
     # asyncio.create_task(_auto_crawler_loop()) # DISABLING: TwelveData uses too many credits; Tiingo WS fills DB now
     asyncio.create_task(_weekly_global_retrain_loop())
