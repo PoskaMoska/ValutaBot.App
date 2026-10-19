@@ -215,7 +215,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         TelegramNotifier.Init(builder.Configuration["TelegramBotToken"] ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));
 
         // Init LightGBM Python ML microservice URL
-        MLPythonService.Init(builder.Configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765");
+        MLPythonService.Init(Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? builder.Configuration["MLService:BaseUrl"] ?? "http://localhost:8765");
 
         builder.Environment.WebRootPath = System.IO.Path.Combine(AppContext.BaseDirectory, "MiniApp", "wwwroot");
         var app = builder.Build();
@@ -276,7 +276,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                     var client = HttpFactory?.CreateClient();
                     if (client != null) {
                         client.Timeout = TimeSpan.FromSeconds(5);
-                        var mlBaseUrl = builder.Configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
+                        var mlBaseUrl = Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? builder.Configuration["MLService:BaseUrl"] ?? "http://localhost:8765";
                         string url = $"{mlBaseUrl.TrimEnd('/')}/health";
                         
                         for (int i = 0; i < 20; i++)

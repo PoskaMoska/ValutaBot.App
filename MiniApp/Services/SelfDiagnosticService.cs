@@ -114,7 +114,7 @@ public class SelfDiagnosticService : BackgroundService
         // 2. Check ML Python Service Health
         try
         {
-            var mlUrl = _configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
+            var mlUrl = Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? _configuration["MLService:BaseUrl"] ?? "http://localhost:8765";
             if (httpFactory != null)
             {
                 var hc = httpFactory.CreateClient();

@@ -79,7 +79,7 @@ public static partial class MiniAppController
             // 2. Проверяем ML сервис (просто пинг /health)
             try
             {
-                var mlUrl = app.Configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
+                var mlUrl = Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? app.Configuration["MLService:BaseUrl"] ?? "http://localhost:8765";
                 var hc = HttpFactory?.CreateClient();
                 if (hc != null)
                 {
