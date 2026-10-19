@@ -68,8 +68,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "editorMode": "code",
-          "expr": "(sum(increase(valutabot_trade_outcomes_total{result=\"WIN\"}[24h])) / clamp_min(sum(increase(valutabot_trade_outcomes_total{result=~\"WIN|LOSS\"}[24h])), 1)) * 100",
-          "legendFormat": "WinRate (24h)",
+          "expr": "((sum(increase(valutabot_trade_outcomes_total{result=\"WIN\"}[24h])) > 0 or sum(valutabot_trade_outcomes_total{result=\"WIN\"}) or vector(0)) / clamp_min((sum(increase(valutabot_trade_outcomes_total{result=~\"WIN|LOSS\"}[24h])) > 0 or sum(valutabot_trade_outcomes_total{result=~\"WIN|LOSS\"}) or vector(1)), 1)) * 100",
+          "legendFormat": "WinRate",
           "range": true,
           "refId": "A"
         }
@@ -110,13 +110,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "editorMode": "code",
-          "expr": "sum(increase(valutabot_trade_outcomes_total{result=\"WIN\"}[24h]))",
-          "legendFormat": "Побед (24h)",
+          "expr": "sum(increase(valutabot_trade_outcomes_total{result=\"WIN\"}[24h])) > 0 or sum(valutabot_trade_outcomes_total{result=\"WIN\"}) or vector(0)",
+          "legendFormat": "Побед",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Успешных Сделок (WIN 24h)",
+      "title": "Успешных Сделок (WIN)",
       "type": "stat"
     },
     {
@@ -152,13 +152,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "editorMode": "code",
-          "expr": "sum(increase(valutabot_trade_outcomes_total{result=\"LOSS\"}[24h]))",
-          "legendFormat": "Убытков (24h)",
+          "expr": "sum(increase(valutabot_trade_outcomes_total{result=\"LOSS\"}[24h])) > 0 or sum(valutabot_trade_outcomes_total{result=\"LOSS\"}) or vector(0)",
+          "legendFormat": "Убытков",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Убыточных Сделок (LOSS 24h)",
+      "title": "Убыточных Сделок (LOSS)",
       "type": "stat"
     },
     {
@@ -198,7 +198,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(valutabot_ml_duration_seconds_bucket[15m]))) * 1000",
+          "expr": "(histogram_quantile(0.95, sum by (le) (rate(valutabot_ml_duration_seconds_bucket[15m]))) * 1000) or (sum(valutabot_ml_duration_seconds_sum) / clamp_min(sum(valutabot_ml_duration_seconds_count), 1) * 1000)",
           "legendFormat": "ML Latency (p95)",
           "range": true,
           "refId": "A"
@@ -508,7 +508,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "editorMode": "code",
-          "expr": "sum by (symbol) (rate(valutabot_websocket_ticks_total[1m]))",
+          "expr": "sum by (symbol) (rate(valutabot_websocket_ticks_total[5m]))",
           "legendFormat": "{{symbol}}",
           "range": true,
           "refId": "A"
@@ -553,8 +553,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "editorMode": "code",
-          "expr": "sum(increase(valutabot_healthcheck_failures_total[1h]))",
-          "legendFormat": "Ошибки (1h)",
+          "expr": "sum(increase(valutabot_healthcheck_failures_total[1h])) or sum(valutabot_healthcheck_failures_total) or vector(0)",
+          "legendFormat": "Ошибки",
           "range": true,
           "refId": "A"
         }

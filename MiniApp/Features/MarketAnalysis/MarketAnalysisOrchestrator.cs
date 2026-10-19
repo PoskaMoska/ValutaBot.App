@@ -1,4 +1,5 @@
 using ValutaBot.Core;
+using Prometheus;
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
@@ -63,6 +64,7 @@ public class MarketAnalysisOrchestrator(
 
     public async Task<AnalysisResponseDto> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null)
     {
+        using var timer = ValutaMetrics.PipelineDuration.NewTimer();
         var sw = Stopwatch.StartNew();
         string traceId = Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
         var traceLines = new List<string>();
@@ -597,6 +599,13 @@ public class MarketAnalysisOrchestrator(
                 QualityScore = (int)Math.Clamp(consensus.Probability + 25, 75, 92)
             };
         }
+
+        ValutaMetrics.PredictionsTotal.WithLabels(
+            cleanAsset,
+            timeframe,
+            consensus.FinalDirection ?? "UNKNOWN",
+            mlPrediction?.ModelVersion ?? "NONE"
+        ).Inc();
 
         return new AnalysisResponseDto
         {

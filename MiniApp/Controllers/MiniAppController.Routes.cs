@@ -124,10 +124,8 @@ public static partial class MiniAppController
 
             try
             {
-                using var timer = ValutaMetrics.PipelineDuration.NewTimer();
                 var orchestrator = context.RequestServices.GetRequiredService<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator>();
                 var result = await orchestrator.ExecuteAnalysisAsync(assetTrimmed, tf, userSettings);
-                ValutaMetrics.PredictionsTotal.WithLabels(assetTrimmed, tf, result.direction ?? "UNKNOWN", result.lgbmModelVersion ?? "NONE").Inc();
                 // result is now a strongly-typed AnalysisResponseDto — read fields directly, no JSON parsing needed
                 double confidence = Math.Clamp(result.lgbmConfidence / 100.0, 0.0, 1.0);
                 double variance   = 0.0; // not currently in DTO; reserved for future
