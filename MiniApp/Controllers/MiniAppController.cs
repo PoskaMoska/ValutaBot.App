@@ -257,11 +257,11 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                     string mlStatus = "\u274C Ошибка (Таймаут)";
                     var client = HttpFactory?.CreateClient();
                     if (client != null) {
-                        client.Timeout = TimeSpan.FromSeconds(2);
+                        client.Timeout = TimeSpan.FromSeconds(5);
                         var mlBaseUrl = builder.Configuration["MLService:BaseUrl"] ?? Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
                         string url = $"{mlBaseUrl.TrimEnd('/')}/health";
                         
-                        for (int i = 0; i < 15; i++)
+                        for (int i = 0; i < 20; i++)
                         {
                             try {
                                 var mlResp = await client.GetAsync(url);
