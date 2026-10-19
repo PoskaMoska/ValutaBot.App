@@ -236,9 +236,13 @@ namespace ValutaBot.App.MiniApp.Data
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf ON trade_outcomes(asset, timeframe);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_dir ON trade_outcomes(created_at DESC, direction);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
-                CREATE INDEX IF NOT EXISTS idx_hist_candles_asset
-                    ON historical_candles(asset, interval, open_time);
+                CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at);
+                DROP INDEX IF EXISTS idx_hist_candles_asset;
+                DROP TABLE IF EXISTS neutral_signals;
+                DROP TABLE IF EXISTS module_diagnostics;
 
                 -- FIX 1: Persist CircuitBreaker halt state across restarts.
                 -- Without this, _haltedUntil resets to null on every process restart,

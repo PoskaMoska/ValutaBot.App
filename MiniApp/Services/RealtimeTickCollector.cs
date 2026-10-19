@@ -90,7 +90,8 @@ namespace ValutaBot.MiniApp
             {
                 if (buffer.Count == 0)
                 {
-                    while (buffer.Count < 1000 && _tickChannel.Reader.TryRead(out var tick))
+                    await Task.Delay(3000);
+                    while (buffer.Count < 8000 && _tickChannel.Reader.TryRead(out var tick))
                     {
                         buffer.Add(tick);
                     }

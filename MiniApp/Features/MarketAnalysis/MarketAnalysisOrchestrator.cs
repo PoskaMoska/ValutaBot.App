@@ -313,15 +313,9 @@ public class MarketAnalysisOrchestrator(
         
         double[] metaWeights = TradeOutcomeTracker.MetaLearner?.GetWeights(cleanAsset, timeframe) ?? [];
 
-        string taTelemetry = System.Text.Json.JsonSerializer.Serialize(taDetail);
-        string? mlTelemetry = mlPrediction != null ? System.Text.Json.JsonSerializer.Serialize(mlPrediction) : null;
-        string smcTelemetry = System.Text.Json.JsonSerializer.Serialize(new {
-            BosDirection = smcResult.BosDirection,
-            SweepDirection = smcResult.SweepDirection,
-            OrderBlockType = smcResult.OrderBlockType,
-            FvgType = smcResult.FvgType,
-            SmcScore = consensus.SmcScore
-        });
+        string? taTelemetry = null;
+        string? mlTelemetry = null;
+        string? smcTelemetry = null;
 
         string effectiveMarketRegime = !string.IsNullOrEmpty(taDetail.Regime) && taDetail.Regime != "UNKNOWN"
             ? taDetail.Regime

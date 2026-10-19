@@ -257,72 +257,44 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                     if (kv.Value != "NEUTRAL")
                     {
                         bool wasSourceCorrect = (kv.Value == winDirection);
-                        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.RecordSignalVoteAsync(kv.Key, wasSourceCorrect);
-                        // Feed result back into AutoCalibrationEngine so it keeps win-rate EMA and failed direction per source
                         AutoCalib?.RecordSourceOutcome(kv.Key, record.Asset, record.Timeframe, wasSourceCorrect, kv.Value);
                     }
                 }
             }
-            else
-            {
-                // Старая сделка без source_directions. Только глобальный исход.
-            }
-            
-            // Record ensemble outcome
-
-            // L2-FIX: Сохраняем актуальное EMA-состояние в БД (асинхронно, чтобы не блокировать основной поток)
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    if (AutoCalib != null)
-                    {
-                        foreach (var stat in AutoCalib.GetAllStats())
-                        {
-                            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveCalibrationStateAsync(
-                                stat.key.Source, stat.key.Asset, stat.key.Timeframe,
-                                stat.totalTrades, stat.emaWinRate);
-                        }
-                    }
-                }
-                catch (Exception persistEx)
-                {
-                    BotLogger.Warn($"[TradeOutcomeTracker] Calibration persist notice: {persistEx.Message}");
-                }
-            });
 
             string cleanDirection = record.Direction.StartsWith("SHADOW_") 
                 ? record.Direction["SHADOW_".Length..] 
                 : record.Direction;
 
-            _ = Task.Run(async () =>
+            if (isLiveDirectional)
             {
-                try
+                _ = Task.Run(async () =>
                 {
-                    bool isWin = wasCorrect;
-                    await MLPythonService.SendFeedbackAsync(
-                        record.Asset,
-                        record.Timeframe,
-                        isWin,
-                        record.EntryPrice,
-                        exitPriceVal,
-                        cleanDirection,
-                        record.CreatedAt,
-                        record.IsForex
-                    );
-                }
-                catch (Exception mlEx)
-                {
-                    BotLogger.Warn($"[TradeOutcomeTracker] Online ML update notice: {mlEx.Message}");
-                }
-            });
+                    try
+                    {
+                        bool isWin = wasCorrect;
+                        await MLPythonService.SendFeedbackAsync(
+                            record.Asset,
+                            record.Timeframe,
+                            isWin,
+                            record.EntryPrice,
+                            exitPriceVal,
+                            cleanDirection,
+                            record.CreatedAt,
+                            record.IsForex
+                        );
+                    }
+                    catch (Exception mlEx)
+                    {
+                        BotLogger.Warn($"[TradeOutcomeTracker] Online ML update notice: {mlEx.Message}");
+                    }
+                });
+            }
 
-            MetaLearner?.PartialFit(record.Asset, record.Timeframe, record.TaScore, record.OfScore, record.SmcScore, record.MlScore, wasCorrect, cleanDirection);
-
-            BotLogger.Info($"[TradeOutcomeTracker] Verified trade {record.Id} ({record.Asset} {record.Timeframe}) -> {(wasCorrect ? "WIN" : "LOSS")}. Online RL weights & Walk-Forward state updated.");
+            BotLogger.Info($"[TradeOutcomeTracker] Verified trade {record.Id} ({record.Asset} {record.Timeframe}) -> {(wasCorrect ? "WIN" : "LOSS")}.");
 
             // ── ML Telemetry: Continuous Calibration ──
-            if (record.Asset == "EUR/USD OTC")
+            if (isLiveDirectional && record.Asset == "EUR/USD OTC")
             {
                 int currentCount = Interlocked.Increment(ref _eurusdTradeCounter);
                 if (currentCount % 20 == 0)
@@ -331,9 +303,9 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                     {
                         try
                         {
-var globalStats = "No Global Stats";
-var ofStats = "No OF Stats";
-var taStats = "No TA Stats";
+                            var globalStats = "No Global Stats";
+                            var ofStats = "No OF Stats";
+                            var taStats = "No TA Stats";
                             
                             string report = $"[📊 ML Self-Learning]\nAsset: {record.Asset} | Trades: {currentCount}\n\n" +
                                             $"🔹 GLOBAL: {globalStats}\n" +
@@ -365,48 +337,47 @@ var taStats = "No TA Stats";
                         }
                     });
                 }
-            } // Close EUR/USD OTC block here
+            }
 
-            // 🛑 EVOLUTION DUMP: Dynamic trigger by timeframe 🛑
-            int currentTfCount = _tfVerifiedCounters.AddOrUpdate(record.Timeframe, 1, (_, count) => count + 1);
-        int threshold = 5; // Default for m15, h1, etc.
-        string tfLow = record.Timeframe.ToLower().Trim();
-        if (tfLow.StartsWith("s")) threshold = 30;
-        else if (tfLow == "m1") threshold = 25;
-        else if (tfLow == "m5") threshold = 10;
-
-        if (currentTfCount % threshold == 0)
-        {
-            _ = Task.Run(async () =>
+            // 🛑 EVOLUTION DUMP: Dynamic trigger by timeframe (only on live directional trades) 🛑
+            if (isLiveDirectional)
             {
-                try
+                int currentTfCount = _tfVerifiedCounters.AddOrUpdate(record.Timeframe, 1, (_, count) => count + 1);
+                int threshold = 5; // Default for m15, h1, etc.
+                string tfLow = record.Timeframe.ToLower().Trim();
+                if (tfLow.StartsWith("s")) threshold = 30;
+                else if (tfLow == "m1") threshold = 25;
+                else if (tfLow == "m5") threshold = 10;
+
+                if (currentTfCount % threshold == 0)
                 {
-                    var dump = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetEvolutionDumpAsync();
-                    if (dump != null && dump.TotalTrades > 0)
+                    _ = Task.Run(async () =>
                     {
-                        var sbTrace = new System.Text.StringBuilder();
-                        sbTrace.AppendLine("=================================================");
-                        sbTrace.AppendLine("[🧠 EVOLUTION DUMP] Анализ развития интеллекта (За последние 48 часов)");
-                        sbTrace.AppendLine($"[Вывод] Система стабильно умнеет. Адаптация к рынку успешна.");
-                        
-                        double diff = dump.NewMlWinRate - dump.OldMlWinRate;
-                        string diffStr = diff > 0 ? $"+{diff:F1}" : $"{diff:F1}";
-                        sbTrace.AppendLine($"[Вывод] Система стабильно умнеет. Адаптация к рынку успешна.");
-                        sbTrace.AppendLine($"              (До этого: {dump.OldMlWinRate:F1}% -> Интеллект {(diff >= 0 ? "вырос на" : "изменился на")} {diffStr}%).");
-                        
-                        sbTrace.AppendLine($"[Превосходство] За эти 48ч Нейросеть {dump.MlSavedTrades} раз пошла против классических");
-                        sbTrace.AppendLine($"                индикаторов (TA) и оказалась права.");
-                        sbTrace.AppendLine($"[Вывод] Система стабильно умнеет. Адаптация к рынку успешна.");
-                        sbTrace.AppendLine("=================================================");
-                        BotLogger.Info($"\n{sbTrace}");
-                    }
+                        try
+                        {
+                            var dump = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetEvolutionDumpAsync();
+                            if (dump != null && dump.TotalTrades > 0)
+                            {
+                                var sbTrace = new System.Text.StringBuilder();
+                                sbTrace.AppendLine("=================================================");
+                                sbTrace.AppendLine("[🧠 EVOLUTION DUMP] Анализ развития интеллекта (За последние 48 часов)");
+                                double diff = dump.NewMlWinRate - dump.OldMlWinRate;
+                                string diffStr = diff > 0 ? $"+{diff:F1}" : $"{diff:F1}";
+                                sbTrace.AppendLine($"[Вывод] Система стабильно умнеет. Адаптация к рынку успешна.");
+                                sbTrace.AppendLine($"              (До этого: {dump.OldMlWinRate:F1}% -> Интеллект {(diff >= 0 ? "вырос на" : "изменился на")} {diffStr}%).");
+                                sbTrace.AppendLine($"[Превосходство] За эти 48ч Нейросеть {dump.MlSavedTrades} раз пошла против классических");
+                                sbTrace.AppendLine($"                индикаторов (TA) и оказалась права.");
+                                sbTrace.AppendLine("=================================================");
+                                BotLogger.Info($"\n{sbTrace}");
+                            }
+                        }
+                        catch (Exception evEx)
+                        {
+                            BotLogger.Warn($"[TradeOutcomeTracker] Evolution dump error: {evEx.Message}");
+                        }
+                    });
                 }
-                catch (Exception evEx)
-                {
-                    BotLogger.Warn($"[TradeOutcomeTracker] Evolution dump error: {evEx.Message}");
-                }
-            });
-        }
+            }
 
         }
         catch (Exception ex)
