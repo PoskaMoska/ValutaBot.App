@@ -1056,7 +1056,7 @@ def challenger_status(symbol: str, interval: str, regime: str = "ALL"):
 def diagnostics_audit(notify: bool = False):
     """On-demand Autonomous Dataset & Pipeline Sanity Audit."""
     from diagnostics import run_dataset_sanity_audit
-    return run_dataset_sanity_audit(sample_limit=2500, notify_telegram=notify)
+    return run_dataset_sanity_audit(sample_limit=500, notify_telegram=notify)
 
 
 @app.post("/feedback")

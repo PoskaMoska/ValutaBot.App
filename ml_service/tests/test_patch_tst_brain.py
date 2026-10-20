@@ -255,3 +255,69 @@ def test_07_fastapi_e2e_predict_endpoint(api_client):
     assert data["direction"] in ("BUY", "PUT")
     assert 0.50 <= data["confidence"] <= 0.99
     assert any(f in data.get("top_features", []) for f in ("PatchTST_MicroCrossAttn", "NeuralBrain_SequenceEncoder"))
+
+
+# -----------------------------------------------------------------------------
+# 8. Train/Serve Feature Parity Test (export_dataset.py vs patch_tst_predictor.py)
+# -----------------------------------------------------------------------------
+def test_08_train_serve_feature_parity():
+    from export_dataset import normalize_candles, extract_macro_vector
+
+    # A. Short sequence (60 candles padded to 160) must be identically zero-padded on the left
+    short_candles = _generate_synthetic_candles(60, trend="bullish")
+    live_tensor = normalize_candles_live(short_candles, seq_len=160, n_channels=5)
+    train_tensor = normalize_candles(short_candles, seq_len=160, channels=5, tf_sec=5)
+    assert np.allclose(live_tensor, train_tensor, atol=1e-4), "Train/Serve skew detected in normalize_candles!"
+    assert np.all(train_tensor[:100] == 0.0), "Left padding must be strictly 0.0!"
+
+    # B. Macro vector parity with MinutesToNews = -1 and HourUtc = 0 (midnight)
+    macro_ctx = {
+        "DayRangePositionPct": 0.62,
+        "DistToDayHighBps": 15.0,
+        "DistToDayLowBps": 45.0,
+        "DxyMomentum1mBps": -1.2,
+        "DxyMomentum5mBps": -2.4,
+        "BasketSyncScore": 0.6,
+        "SpreadBps": 0.5,
+        "DistToAsianHighBps": 10.0,
+        "DistToAsianLowBps": 30.0,
+        "PriceEntropy": 0.42,
+        "Adx": 28.0,
+        "Rsi": 56.0,
+        "MinutesToNews": -1,
+        "HourUtc": 0,
+        "DayOfWeek": 3,
+    }
+    smc_ctx = {
+        "OrderBlockType": "BULLISH_OB",
+        "HasOrderBlock": True,
+        "FvgType": "NONE",
+        "HasFvg": False,
+        "SweepDirection": "NONE",
+        "HasLiquiditySweep": False,
+        "BosDirection": "BULLISH_BOS",
+        "HasBos": True,
+    }
+    row_dict = {
+        "asset": "EURUSD_OTC",
+        "timeframe": "s10",
+        "price_entropy": 0.42,
+        "adx_at_signal": 28.0,
+        "rsi_at_signal": 56.0,
+        "minutes_to_news": -1,
+        "hour_utc": 0,
+        "day_of_week": 3,
+        "smc_has_ob": True,
+        "smc_has_fvg": False,
+        "smc_bos_dir": "BULLISH_BOS",
+    }
+    feat_obj = {"MacroContext": macro_ctx, "Smc": smc_ctx}
+
+    live_macro = build_macro_vector_live("EURUSD_OTC", "s10", short_candles, macro_data=macro_ctx, smc_data=smc_ctx)
+    train_macro = extract_macro_vector(row_dict, feat_obj)
+
+    assert np.allclose(live_macro, train_macro, atol=1e-5), f"Macro vector mismatch:\nLive:  {live_macro}\nTrain: {train_macro}"
+    # Feature 12 is news_norm -> must be 1.0 when MinutesToNews == -1
+    assert math.isclose(float(train_macro[12]), 1.0, abs_tol=1e-5), f"MinutesToNews=-1 should map to 1.0, got {train_macro[12]}"
+    # Feature 13 & 14 are sin(0)=0.0 and cos(0)=1.0 for HourUtc == 0
+    assert math.isclose(float(train_macro[13]), 0.0, abs_tol=1e-5) and math.isclose(float(train_macro[14]), 1.0, abs_tol=1e-5)

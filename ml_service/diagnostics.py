@@ -137,17 +137,39 @@ def analyze_module(df: pd.DataFrame, module_name: str, score_col: str, telemetry
     else:
         log.info(f"[{module_name}] No glaring statistical weaknesses found in recent trades.")
 
-def run_dataset_sanity_audit(sample_limit: int = 2500, notify_telegram: bool = True) -> dict:
+def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = True) -> dict:
     """
     Autonomous Dataset & Pipeline Sanity Auditor.
-    Scans recent trade_outcomes (and their 160-candle features_json + MacroContext) for silent
-    data corruption, candle time gaps, stuck/zero-variance features, directional skew, and zero-MFE entries.
+    1. Runs a fast aggregate SQL scan across 100% of live BUY/PUT trades in the PO era
+       for directional skew and Zero-MFE (instant adverse entry) metrics.
+    2. Scans the latest `sample_limit` full features_json snapshots (160-candle sequences + MacroContext)
+       for silent data corruption, candle time gaps, stuck/zero-variance features, and flat windows.
     Persists results to module_diagnostics and optionally sends a digest to Telegram admins.
     """
     init_db()
     conn = get_db_connection()
     cur = conn.cursor()
 
+    # Part A: Fast 100%-coverage SQL scan over all live BUY/PUT trades in PO era
+    cur.execute("""
+        SELECT
+            REPLACE(REPLACE(REPLACE(UPPER(asset), '_OTC', ''), ' OTC', ''), '/', '') AS clean_asset,
+            COUNT(*) FILTER (WHERE direction = 'BUY') AS buy_cnt,
+            COUNT(*) FILTER (WHERE direction = 'PUT') AS put_cnt,
+            COUNT(*) FILTER (WHERE was_win = false) AS loss_cnt,
+            COUNT(*) FILTER (WHERE was_win = false AND COALESCE(max_favorable_bps, 0) <= 1e-4) AS zero_mfe_loss_cnt,
+            COUNT(*) FILTER (WHERE pnl_bps > 1e-4) AS gt_up_cnt,
+            COUNT(*) FILTER (WHERE pnl_bps < -1e-4) AS gt_down_cnt
+        FROM trade_outcomes
+        WHERE created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz
+          AND direction IN ('BUY', 'PUT')
+          AND was_win IS NOT NULL
+        GROUP BY clean_asset
+        ORDER BY clean_asset
+    """)
+    agg_rows = cur.fetchall()
+
+    # Part B: Deep JSON sequence & sensor inspection on recent snapshots
     cur.execute("""
         SELECT
             id, asset, timeframe, direction, was_win, pnl_bps,
@@ -177,8 +199,29 @@ def run_dataset_sanity_audit(sample_limit: int = 2500, notify_telegram: bool = T
     flat_frozen_windows = 0
     zero_vol_candles_total = 0
     total_candles_checked = 0
+
     zero_mfe_live_losses = 0
     live_losses_total = 0
+    skewed_pairs = []
+    pair_summary = {}
+
+    for clean_asset, buy_cnt, put_cnt, loss_cnt, zero_mfe_cnt, gt_up, gt_down in agg_rows:
+        live_tot = int(buy_cnt or 0) + int(put_cnt or 0)
+        live_losses_total += int(loss_cnt or 0)
+        zero_mfe_live_losses += int(zero_mfe_cnt or 0)
+        if live_tot > 0:
+            buy_pct = int(buy_cnt or 0) / live_tot * 100.0
+            gt_tot = max(1, int(gt_up or 0) + int(gt_down or 0))
+            gt_up_pct = int(gt_up or 0) / gt_tot * 100.0
+            pair_summary[clean_asset] = {
+                "live_trades": live_tot,
+                "buy_pct": round(buy_pct, 1),
+                "gt_up_pct": round(gt_up_pct, 1),
+            }
+            if live_tot >= 20 and (buy_pct >= 75.0 or buy_pct <= 25.0):
+                dominant = "BUY" if buy_pct >= 50 else "PUT"
+                dom_pct = buy_pct if buy_pct >= 50 else (100.0 - buy_pct)
+                skewed_pairs.append(f"{clean_asset}: {dom_pct:.0f}% {dominant} ({live_tot} сделок, рынок UP {gt_up_pct:.0f}%)")
 
     macro_vals = {
         "DayRangePositionPct": [],
@@ -189,32 +232,10 @@ def run_dataset_sanity_audit(sample_limit: int = 2500, notify_telegram: bool = T
         "Rsi": [],
     }
 
-    pair_dirs = {}  # asset -> {"BUY": int, "PUT": int, "gt_up": int, "gt_down": int}
-
     for r in rows:
         rd = dict(zip(cols, r))
-        asset = str(rd.get("asset") or "UNKNOWN").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
         tf = str(rd.get("timeframe") or "s5").lower().strip()
         tf_sec = tf_sec_map.get(tf, 5)
-        direction = str(rd.get("direction") or "")
-        was_win = rd.get("was_win")
-        pnl = float(rd.get("pnl_bps") or 0.0)
-        mfe = float(rd.get("max_favorable_bps") or 0.0)
-
-        if asset not in pair_dirs:
-            pair_dirs[asset] = {"BUY": 0, "PUT": 0, "gt_up": 0, "gt_down": 0}
-
-        if direction in ("BUY", "PUT"):
-            pair_dirs[asset][direction] += 1
-            if was_win is False:
-                live_losses_total += 1
-                if mfe <= 1e-4:
-                    zero_mfe_live_losses += 1
-
-        if pnl > 1e-4:
-            pair_dirs[asset]["gt_up"] += 1
-        elif pnl < -1e-4:
-            pair_dirs[asset]["gt_down"] += 1
 
         try:
             feat = json.loads(rd["features_json"])
@@ -274,16 +295,6 @@ def run_dataset_sanity_audit(sample_limit: int = 2500, notify_telegram: bool = T
         if len(arr) >= 20 and float(np.std(arr)) < 1e-6:
             dead_sensors.append(k)
 
-    skewed_pairs = []
-    for sym, counts in sorted(pair_dirs.items()):
-        live_tot = counts["BUY"] + counts["PUT"]
-        if live_tot >= 20:
-            buy_pct = counts["BUY"] / live_tot * 100.0
-            if buy_pct >= 78.0 or buy_pct <= 22.0:
-                dominant = "BUY" if buy_pct >= 50 else "PUT"
-                dom_pct = buy_pct if buy_pct >= 50 else (100.0 - buy_pct)
-                skewed_pairs.append(f"{sym}: {dom_pct:.0f}% {dominant} ({live_tot} сделок)")
-
     zero_vol_pct = (zero_vol_candles_total / max(1, total_candles_checked)) * 100.0
     zero_mfe_pct = (zero_mfe_live_losses / max(1, live_losses_total)) * 100.0
 
@@ -298,6 +309,7 @@ def run_dataset_sanity_audit(sample_limit: int = 2500, notify_telegram: bool = T
         "zero_mfe_loss_pct": round(zero_mfe_pct, 1),
         "dead_sensors": dead_sensors,
         "skewed_pairs": skewed_pairs,
+        "pair_summary": pair_summary,
     }
 
     insight_summary = (
@@ -355,7 +367,7 @@ def run_dataset_sanity_audit(sample_limit: int = 2500, notify_telegram: bool = T
 def run_diagnostics():
     init_db()
     try:
-        run_dataset_sanity_audit(sample_limit=2500, notify_telegram=True)
+        run_dataset_sanity_audit(sample_limit=500, notify_telegram=True)
     except Exception as audit_err:
         log.error(f"[DatasetAudit] Error in sanity audit: {audit_err}")
     
