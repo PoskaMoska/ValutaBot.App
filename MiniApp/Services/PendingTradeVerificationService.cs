@@ -28,7 +28,8 @@ public class PendingTradeVerificationService : BackgroundService
     private static async Task SweepExpiredTradesAsync(CancellationToken ct)
     {
         List<SignalTracker.PredictionRecord> expired;
-        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(DateTime.UtcNow); }
+        // Wait 4s after VerifyAt so RealtimeTickCollector's 3s batch buffer has guaranteed flushed the expiry s5 candle to PostgreSQL.
+        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(DateTime.UtcNow.AddSeconds(-4)); }
         catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Could not load pending trades: {ex.Message}"); return; }
 
         if (expired.Count == 0) return;
@@ -67,27 +68,36 @@ public class PendingTradeVerificationService : BackgroundService
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
             
-            // First try to find a subminute candle (s5, s10, etc.) for high precision
-            // To avoid horizon skew, we must get the exact price at VerifyAt.
-            // If the candle's open_time == VerifyAt, the exact price is its open_price.
-            // If the returned candle is the preceding one, the exact price is its close_price.
-            // Require open_time >= VerifyAt - 20s to prevent matching stale candles from hours ago during feed outages.
-            DateTime minAllowedSub = record.VerifyAt.AddSeconds(-20);
+            // Snap VerifyAt to the nearest 5s grid boundary so `open_time = @TargetGrid` matches the exact boundary candle's open_price,
+            // or falls back to the preceding 5s candle's close_price (never leaking 5s into the next candle's close_price).
+            long s5Ticks = TimeSpan.FromSeconds(5).Ticks;
+            DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();
+            DateTime verifyUtc = record.VerifyAt.Kind == DateTimeKind.Utc ? record.VerifyAt : record.VerifyAt.ToUniversalTime();
+            DateTime createdBucket = new DateTime(createdUtc.Ticks - (createdUtc.Ticks % s5Ticks), DateTimeKind.Utc);
+            DateTime targetGrid = new DateTime(((verifyUtc.Ticks + (s5Ticks / 2)) / s5Ticks) * s5Ticks, DateTimeKind.Utc);
+            if (targetGrid <= createdBucket)
+                targetGrid = createdBucket.AddSeconds(5);
+
+            // Never match a candle from before the trade was opened.
+            DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20)
+                ? createdBucket
+                : targetGrid.AddSeconds(-20);
+
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                 SELECT 
                     CASE 
-                        WHEN open_time = @VerifyAt THEN open_price 
+                        WHEN open_time = @TargetGrid THEN open_price 
                         ELSE close_price 
                     END
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
-                  AND open_time <= @VerifyAt
+                  AND open_time <= @TargetGrid
                   AND open_time >= @MinAllowedTime
                 ORDER BY open_time DESC LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
-                VerifyAt = record.VerifyAt.ToString("O"),
+                TargetGrid = targetGrid.ToString("O"),
                 MinAllowedTime = minAllowedSub.ToString("O")
             });
 
@@ -95,7 +105,7 @@ public class PendingTradeVerificationService : BackgroundService
             // Not in PO mode: historical_candles holds Tiingo prices, which must never settle an OTC trade.
             if (!PriceFeed.UsePocketOption && (!exitPrice.HasValue || exitPrice.Value <= 0))
             {
-                DateTime minAllowedHist = record.VerifyAt.AddSeconds(-120);
+                DateTime minAllowedHist = verifyUtc.AddSeconds(-120);
                 exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                     SELECT 
                         CASE 
@@ -109,12 +119,12 @@ public class PendingTradeVerificationService : BackgroundService
                     ORDER BY open_time DESC LIMIT 1
                 ", new { 
                     Asset = cleanAsset, 
-                    VerifyAt = record.VerifyAt.ToString("O"),
+                    VerifyAt = verifyUtc.ToString("O"),
                     MinAllowedTime = minAllowedHist.ToString("O")
                 });
             }
 
-            // Calculate excursion (MFE / MAE) during trade lifetime [CreatedAt, VerifyAt]
+            // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid) using indexed s5 candles
             if (exitPrice.HasValue && exitPrice.Value > 0)
             {
                 try
@@ -123,12 +133,14 @@ public class PendingTradeVerificationService : BackgroundService
                         SELECT MAX(high_price) as max_high, MIN(low_price) as min_low
                         FROM subminute_candles
                         WHERE asset = @Asset
-                          AND open_time >= @CreatedAt
-                          AND open_time <= @VerifyAt
+                          AND interval = @Interval
+                          AND open_time >= @CreatedBucket
+                          AND open_time <  @TargetGrid
                     ", new { 
                         Asset = cleanAsset, 
-                        CreatedAt = record.CreatedAt.ToString("O"), 
-                        VerifyAt = record.VerifyAt.ToString("O") 
+                        Interval = verifyInterval,
+                        CreatedBucket = createdBucket.ToString("O"), 
+                        TargetGrid = targetGrid.ToString("O") 
                     });
 
                     double exitVal = exitPrice.Value;

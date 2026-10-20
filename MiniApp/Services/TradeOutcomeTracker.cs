@@ -292,30 +292,8 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 ? record.Direction["SHADOW_".Length..] 
                 : record.Direction;
 
-            if (isLiveDirectional)
-            {
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        bool isWin = wasCorrect;
-                        await MLPythonService.SendFeedbackAsync(
-                            record.Asset,
-                            record.Timeframe,
-                            isWin,
-                            record.EntryPrice,
-                            exitPriceVal,
-                            cleanDirection,
-                            record.CreatedAt,
-                            record.IsForex
-                        );
-                    }
-                    catch (Exception mlEx)
-                    {
-                        BotLogger.Warn($"[TradeOutcomeTracker] Online ML update notice: {mlEx.Message}");
-                    }
-                });
-            }
+            // V3 DualStreamPatchBrain / SequenceBrain learns from PostgreSQL trade_outcomes via export_dataset.py;
+            // OnlineMetaLearner above handles real-time ensemble adaptation in C# without dead HTTP /feedback calls.
 
             BotLogger.Info($"[TradeOutcomeTracker] Verified trade {record.Id} ({record.Asset} {record.Timeframe}) -> {(wasCorrect ? "WIN" : "LOSS")}.");
 

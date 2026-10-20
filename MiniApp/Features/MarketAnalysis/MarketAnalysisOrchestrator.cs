@@ -87,10 +87,11 @@ public class MarketAnalysisOrchestrator(
         
         string tfLower = timeframe.ToLower().Trim();
         int limit = (tfLower.StartsWith("s") || tfLower.StartsWith("m1") || tfLower.StartsWith("m5")) ? 160 : 200;
+        int fetchLimit = limit + 1; // +1 so stripping the unclosed live candle leaves a full 160 closed-candle window
 
         // 2. Fetch Data (Locals only, no class fields)
         var fetchSw = Stopwatch.StartNew();
-        var candles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, cleanAsset, limit);
+        var candles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, cleanAsset, fetchLimit);
         fetchSw.Stop();
 
         if (candles == null || candles.Length == 0)
@@ -104,10 +105,12 @@ public class MarketAnalysisOrchestrator(
         string dataHash = ComputeHash(candles);
         traceLines.Add($"[1. Источник Данных] {candles.Length} свечей. Live Цена: {currentLivePrice} | Массив Hash: [{dataHash}] -> {fetchSw.ElapsedMilliseconds}ms");
 
-        // Prepare closed candles
+        // Prepare closed candles (cap at `limit` after dropping forming candle)
         int intervalSecs = _fetcher.TimeframeSeconds(timeframe);
         bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
         var closedCandles = isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
+        if (closedCandles.Length > limit)
+            closedCandles = closedCandles.TakeLast(limit).ToArray();
         double[] closedPrices = closedCandles.Select(c => c.Close).ToArray();
         double[] closedVolumes = closedCandles.Select(c => c.Volume).ToArray();
 
@@ -142,10 +145,11 @@ public class MarketAnalysisOrchestrator(
         var engSw = Stopwatch.StartNew();
         var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
         
-        // TA Scoring
+        // TA Scoring (align ADX/ATR period with sub-minute vs minute timeframe: 7 for s5-s30, 14 for m1+)
         var taSw = Stopwatch.StartNew();
-        var (mainAdx, mainPdi, mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(cleanAsset, timeframe, closedCandles) : (20.0, 0.0, 0.0);
-        double mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(cleanAsset, timeframe, closedCandles) : 0;
+        int adxAtrPeriod = tfLower.StartsWith("s") ? 7 : 14;
+        var (mainAdx, mainPdi, mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(cleanAsset, timeframe, closedCandles, adxAtrPeriod) : (20.0, 0.0, 0.0);
+        double mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(cleanAsset, timeframe, closedCandles, adxAtrPeriod) : 0;
         var taDetail = _marketAnalyzer.ScoreTimeframeDetailed(cleanAsset, timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: mainAdx, atrOverride: mainAtr, isForex: isForex, pdiOverride: mainPdi, mdiOverride: mainMdi);
         var taResult = (score: taDetail.Score, confidence: taDetail.Confidence, rsiVal: taDetail.RsiVal, hmaVal: taDetail.HmaVal, volStrengthVal: taDetail.VolStrengthVal, atrVal: taDetail.AtrVal);
         taSw.Stop();

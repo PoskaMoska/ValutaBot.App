@@ -119,10 +119,10 @@ public class MarketDataFetcher
 
             if (!(tfKey.StartsWith("s") || tfKey == "m1"))
             {
-                // Higher-TF context (m5, m15, ...) is aggregated from PO 1m candles. May be short right after start.
+                // Higher-TF context (m5, m15, ...) is aggregated from PO 1m candles aligned to true calendar boundaries.
                 int group = Math.Max(1, tfSecs / 60);
-                var m1 = await RealtimeTickCollector.GetRecentCandles(poKey, "m1", Math.Min(limit * group, 3000));
-                return m1.Length >= group ? AggregateCandles(m1, group).TakeLast(limit).ToArray() : Array.Empty<MiniAppController.OhlcCandle>();
+                var m1 = await RealtimeTickCollector.GetRecentCandles(poKey, "m1", Math.Min((limit + 2) * group, 3000));
+                return m1.Length >= group ? AggregateCalendarCandles(m1, tfSecs).TakeLast(limit).ToArray() : Array.Empty<MiniAppController.OhlcCandle>();
             }
 
             var poCandles = await RealtimeTickCollector.GetRecentCandles(poKey, tfKey, limit);
@@ -368,6 +368,48 @@ public class MarketDataFetcher
         var prices = candles.Select(c => c.Close).ToArray();
         var volumes = candles.Select(c => c.Volume).ToArray();
         return (prices, volumes);
+    }
+
+    private static MiniAppController.OhlcCandle[] AggregateCalendarCandles(MiniAppController.OhlcCandle[] candles, int tfSecs)
+    {
+        if (candles.Length == 0 || tfSecs <= 60) return candles;
+        long bucketTicks = TimeSpan.FromSeconds(tfSecs).Ticks;
+        var result = new List<MiniAppController.OhlcCandle>(candles.Length / Math.Max(1, tfSecs / 60) + 2);
+
+        DateTime currentBucket = default;
+        double open = 0, high = 0, low = 0, close = 0, volume = 0;
+        bool hasBucket = false;
+
+        for (int i = 0; i < candles.Length; i++)
+        {
+            var c = candles[i];
+            DateTime tsUtc = c.Timestamp.Kind == DateTimeKind.Utc ? c.Timestamp : DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc);
+            DateTime bucket = new DateTime(tsUtc.Ticks - (tsUtc.Ticks % bucketTicks), DateTimeKind.Utc);
+
+            if (!hasBucket || bucket != currentBucket)
+            {
+                if (hasBucket)
+                    result.Add(new MiniAppController.OhlcCandle(open, high, low, close, volume, currentBucket));
+                currentBucket = bucket;
+                open = c.Open;
+                high = c.High;
+                low = c.Low;
+                close = c.Close;
+                volume = c.Volume;
+                hasBucket = true;
+            }
+            else
+            {
+                if (c.High > high) high = c.High;
+                if (c.Low < low) low = c.Low;
+                close = c.Close;
+                volume += c.Volume;
+            }
+        }
+        if (hasBucket)
+            result.Add(new MiniAppController.OhlcCandle(open, high, low, close, volume, currentBucket));
+
+        return result.ToArray();
     }
 
     private static MiniAppController.OhlcCandle[] AggregateCandles(MiniAppController.OhlcCandle[] candles, int groupSize)

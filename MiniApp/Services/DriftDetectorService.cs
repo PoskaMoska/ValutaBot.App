@@ -33,31 +33,11 @@ namespace ValutaBot.MiniApp
 
                 if (winRate < MIN_WIN_RATE)
                 {
-                    BotLogger.Warn($"[DriftDetector] {asset}/{timeframe} Win Rate dropped to {winRate:P0}. Triggering Auto-Retrain.");
+                    BotLogger.Warn($"[DriftDetector] {asset}/{timeframe} Win Rate dropped to {winRate:P0}. Resetting MetaLearner weights to empirical priors.");
                     _lastRetrainTime[key] = DateTime.UtcNow;
 
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            string cleanAsset = AssetSanitizer.Sanitize(asset);
-                            bool isForex = AssetSanitizer.IsForexAsset(cleanAsset);
-                            bool success = await MLPythonService.ForceTrainGlobalAsync(asset, timeframe, isForex);
-                            if (success)
-                            {
-                                TradeOutcomeTracker.MetaLearner?.ResetWeights(asset, timeframe);
-                                BotLogger.Info($"[DriftDetector] Retrain succeeded for {asset}/{timeframe}. MetaLearner weights restored to empirical priors (ML dominant 1.35).");
-                            }
-                            else
-                            {
-                                BotLogger.Warn($"[DriftDetector] Failed to Auto-Retrain {asset}/{timeframe}. Cooldown active.");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            BotLogger.Warn($"[DriftDetector] Error during Auto-Retrain task: {ex.Message}");
-                        }
-                    });
+                    TradeOutcomeTracker.MetaLearner?.ResetWeights(asset, timeframe);
+                    BotLogger.Info($"[DriftDetector] MetaLearner weights restored to empirical priors (ML dominant 1.35) for {asset}/{timeframe}.");
                 }
             }
             catch (Exception ex)

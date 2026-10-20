@@ -79,6 +79,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
                         MIN(CASE WHEN open_time < @AsianEnd THEN low_price ELSE NULL END) as asian_low
                     FROM subminute_candles 
                     WHERE asset = @Asset 
+                      AND interval = '1min'
                       AND open_time >= @DayStart;
                 ", new { Asset = candleKey, DayStart = dayStart, AsianEnd = asianEnd });
 

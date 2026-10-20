@@ -61,9 +61,10 @@ public static class SignalTracker
         // Using gridTime truncated trades placed mid-candle (e.g. 5s trades verified after 2s, 1m trades after 30s).
         // Adding durationSecs + 1s buffer guarantees the trade has fully expired before verification.
         int durationSecs = Math.Max(1, expiryCandles) * timeframeSecs;
-        DateTime verifyAt = now.AddSeconds(durationSecs + 1);
+        DateTime verifyAt = now.AddSeconds(durationSecs);
 
-        string cooldownKey = $"{asset}_{timeframe}";
+        bool isRealTrade = direction is "BUY" or "PUT";
+        string cooldownKey = isRealTrade ? $"REAL_{asset}_{timeframe}" : $"SHADOW_{asset}_{timeframe}";
         
         bool isOnCooldown = _cooldownCache.TryGetValue(cooldownKey, out _);
         if (isOnCooldown)
@@ -72,9 +73,11 @@ public static class SignalTracker
             return;
         }
 
-        // FIX PRIORITY-6: Cooldown ???????? ?? 10 ??????
-        // MemoryCache ????????????? ?????? ???? ????? 10 ?????? ??? ??????? O(N) ??????? ???????? ??????.
-        int cooldownCandles = Math.Max(expiryCandles, 3); _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(cooldownCandles * timeframeSecs));
+        // Separate REAL vs SHADOW cooldowns so background SHADOW/HOLD samples never block real live trades.
+        double cooldownSecs = isRealTrade
+            ? Math.Max(durationSecs, timeframeSecs)
+            : Math.Max(1.0, timeframeSecs - 1.0);
+        _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(cooldownSecs));
 
         var record = new PredictionRecord
         {
