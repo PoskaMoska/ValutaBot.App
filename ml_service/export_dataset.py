@@ -70,49 +70,73 @@ MACRO_FEATURE_NAMES = [
 ]
 
 
-def normalize_candles(candles_list, seq_len=160, channels=5):
+def normalize_candles(candles_list, seq_len=160, channels=5, tf_sec=5):
     """
     Normalizes a sequence of OHLCV candles into a stationary [seq_len, channels] array.
+    Uses zero-padding on the left when len(candles_list) < seq_len to strictly match
+    normalize_candles_live() in patch_tst_predictor.py (eliminating Train/Serve skew).
+    Also neutralizes single-step return spikes caused by WebSocket reconnect time gaps.
     Features per candle:
-      0: (Close - Open) / Open
-      1: (High - Open) / Open
-      2: (Low - Open) / Open
-      3: (Close - PrevClose) / PrevClose (or 0 for first)
+      0: (Close - Open) / Open * 10000
+      1: (High - Open) / Open * 10000
+      2: (Low - Open) / Open * 10000
+      3: (Close - PrevClose) / PrevClose * 10000 (0 for first candle or after a >10x time gap)
       4: log1p(Volume) / 10.0 (included when channels == 5)
     """
-    if len(candles_list) < seq_len:
-        # Pad with first candle
-        padding = [candles_list[0]] * (seq_len - len(candles_list))
-        candles_list = padding + candles_list
-    elif len(candles_list) > seq_len:
-        # Take the most recent seq_len candles
-        candles_list = candles_list[-seq_len:]
-
     arr = np.zeros((seq_len, channels), dtype=np.float32)
-    prev_close = None
+    if not candles_list:
+        return arr
 
-    for i, c in enumerate(candles_list):
-        op = float(c.get("Open", 1.0))
-        hi = float(c.get("High", op))
-        lo = float(c.get("Low", op))
-        cl = float(c.get("Close", op))
+    tail = candles_list[-seq_len:] if len(candles_list) >= seq_len else candles_list
+    offset = seq_len - len(tail)
+
+    prev_close = None
+    prev_ts = None
+    max_allowed_gap_sec = max(60, tf_sec * 12)
+
+    for i, c in enumerate(tail):
+        idx = offset + i
+        op = float(c.get("Open", c.get("open", 1.0)))
+        hi = float(c.get("High", c.get("high", op)))
+        lo = float(c.get("Low", c.get("low", op)))
+        cl = float(c.get("Close", c.get("close", op)))
 
         if op <= 0:
             op = 1e-5
 
-        arr[i, 0] = ((cl - op) / op) * 10000.0
-        arr[i, 1] = ((hi - op) / op) * 10000.0
-        arr[i, 2] = ((lo - op) / op) * 10000.0
+        arr[idx, 0] = ((cl - op) / op) * 10000.0
+        arr[idx, 1] = ((hi - op) / op) * 10000.0
+        arr[idx, 2] = ((lo - op) / op) * 10000.0
 
-        if prev_close is not None and prev_close > 0:
-            arr[i, 3] = ((cl - prev_close) / prev_close) * 10000.0
+        # Check timestamp continuity if Timestamp is present
+        cur_ts = None
+        ts_raw = c.get("Timestamp") or c.get("timestamp") or c.get("openTime")
+        if isinstance(ts_raw, (int, float)) and ts_raw > 0:
+            cur_ts = float(ts_raw)
+        elif isinstance(ts_raw, str) and len(ts_raw) >= 19:
+            try:
+                cur_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                cur_ts = None
+
+        is_time_gap = (
+            prev_ts is not None
+            and cur_ts is not None
+            and (cur_ts - prev_ts) > max_allowed_gap_sec
+        )
+
+        if prev_close is not None and prev_close > 0 and not is_time_gap:
+            arr[idx, 3] = ((cl - prev_close) / prev_close) * 10000.0
         else:
-            arr[i, 3] = 0.0
+            arr[idx, 3] = 0.0
 
         if channels >= 5:
-            vol = float(c.get("Volume", 0.0))
-            arr[i, 4] = math.log1p(max(0.0, vol)) / 10.0
+            vol = float(c.get("Volume", c.get("volume", 0.0)) or 0.0)
+            arr[idx, 4] = math.log1p(max(0.0, vol)) / 10.0
+
         prev_close = cl
+        if cur_ts is not None:
+            prev_ts = cur_ts
 
     return arr
 
@@ -150,21 +174,31 @@ def extract_macro_vector(row_dict, feat_obj):
     asian_low = float(macro.get("DistToAsianLowBps", 0.0)) / 100.0
     
     # 10. Price Entropy (0..1)
-    pe = float(row_dict.get("price_entropy") or 0.5)
+    pe_raw = row_dict.get("price_entropy")
+    pe = float(pe_raw if pe_raw is not None else macro.get("PriceEntropy", 0.5))
     
     # 11. ADX (0..1)
-    adx = float(row_dict.get("adx_at_signal") or 25.0) / 100.0
+    adx_raw = row_dict.get("adx_at_signal")
+    adx = float(adx_raw if (adx_raw is not None and adx_raw > 0) else macro.get("Adx", 25.0)) / 100.0
     
     # 12. RSI (-1..1 normalized around 50)
-    rsi = (float(row_dict.get("rsi_at_signal") or 50.0) - 50.0) / 50.0
+    rsi_raw = row_dict.get("rsi_at_signal")
+    rsi = (float(rsi_raw if (rsi_raw is not None and rsi_raw > 0) else macro.get("Rsi", 50.0)) - 50.0) / 50.0
     
-    # 13. News proximity (0..1, where 1 = news far away >= 120m, 0 = imminent news)
-    news_m = float(row_dict.get("minutes_to_news") if row_dict.get("minutes_to_news") is not None else 120.0)
+    # 13. News proximity (0..1, where 1 = news far away >= 120m or -1 no news, 0 = imminent news)
+    news_raw = row_dict.get("minutes_to_news")
+    if news_raw is None:
+        news_raw = macro.get("MinutesToNews", 120.0)
+    news_m = float(news_raw)
+    if news_m < 0:
+        news_m = 120.0  # -1 means no upcoming high-impact news -> treat as far away (1.0)
     news_norm = min(120.0, max(0.0, news_m)) / 120.0
     
-    # 14-17. Cyclical time encoding
-    hr = float(row_dict.get("hour_utc") or 12.0)
-    dow = float(row_dict.get("day_of_week") or 2.0)
+    # 14-17. Cyclical time encoding (preserve hour_utc == 0 midnight!)
+    hr_raw = row_dict.get("hour_utc")
+    hr = float(hr_raw if hr_raw is not None else macro.get("HourUtc", 12.0))
+    dow_raw = row_dict.get("day_of_week")
+    dow = float(dow_raw if (dow_raw is not None and dow_raw > 0) else macro.get("DayOfWeek", 2.0))
     hr_sin = math.sin(2 * math.pi * hr / 24.0)
     hr_cos = math.cos(2 * math.pi * hr / 24.0)
     dow_sin = math.sin(2 * math.pi * dow / 7.0)
@@ -383,14 +417,16 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
             continue
             
         # 1. Normalize Candles Sequence
-        candle_tensor = normalize_candles(candles, seq_len=seq_len, channels=channels)
+        tf_str_row = str(row_dict.get("timeframe") or "s5").lower()
+        tf_sec_row = TF_SECONDS.get(tf_str_row, 5)
+        candle_tensor = normalize_candles(candles, seq_len=seq_len, channels=channels, tf_sec=tf_sec_row)
         if np.isnan(candle_tensor).any() or np.isinf(candle_tensor).any():
             skipped_count += 1
             continue
 
         # 2. Normalize MTF Candles Sequence
         mtf_candles = feat_obj.get("MtfCandles") or feat_obj.get("mtf_candles") or []
-        mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf, channels=channels) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, channels), dtype=np.float32)
+        mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf, channels=channels, tf_sec=max(60, tf_sec_row * 4)) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, channels), dtype=np.float32)
         if np.isnan(mtf_tensor).any() or np.isinf(mtf_tensor).any():
             mtf_tensor = np.zeros((seq_len_mtf, channels), dtype=np.float32)
             

@@ -1052,6 +1052,13 @@ def challenger_status(symbol: str, interval: str, regime: str = "ALL"):
 # └────────────────────────────────────────────────────────────────────────┘
 
 
+@app.get("/diagnostics/audit")
+def diagnostics_audit(notify: bool = False):
+    """On-demand Autonomous Dataset & Pipeline Sanity Audit."""
+    from diagnostics import run_dataset_sanity_audit
+    return run_dataset_sanity_audit(sample_limit=2500, notify_telegram=notify)
+
+
 @app.post("/feedback")
 def feedback(req: TrainFeedback, background_tasks: BackgroundTasks):
     log.info(f"[Online RL] Received feedback for {req.asset} ({req.timeframe}): {'WIN' if req.was_win else 'LOSS'} "

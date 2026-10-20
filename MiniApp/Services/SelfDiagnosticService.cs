@@ -30,6 +30,8 @@ public class SelfDiagnosticService : BackgroundService
     private bool _feedWasHealthy = true;
     private bool _memWasHealthy = true;
     private DateTime _lastV3CheckTime = DateTime.MinValue;
+    private DateTime _lastDatasetAuditTime = DateTime.MinValue;
+    private DateTime _lastDatasetTelegramDigestDate = DateTime.MinValue;
 
     private readonly string _mlStateFilePath = "ml_service/data/ml_health_state.txt";
 
@@ -286,6 +288,58 @@ public class SelfDiagnosticService : BackgroundService
             catch (Exception exV3)
             {
                 BotLogger.Warn($"[Diagnostics] V3 count check warning: {exV3.Message}");
+            }
+        }
+
+        // 7. Autonomous Dataset & Pipeline Sanity Audit (every 6 hours, plus daily Telegram digest)
+        if (currentMlHealthy && httpFactory != null && (DateTime.UtcNow - _lastDatasetAuditTime >= TimeSpan.FromHours(6)))
+        {
+            _lastDatasetAuditTime = DateTime.UtcNow;
+            try
+            {
+                var mlUrl = Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? _configuration["MLService:BaseUrl"] ?? "http://localhost:8765";
+                var hc = httpFactory.CreateClient();
+                hc.Timeout = TimeSpan.FromSeconds(30);
+                var auditResp = await hc.GetAsync(new Uri($"{mlUrl.TrimEnd('/')}/diagnostics/audit?notify=false"), stoppingToken);
+                if (auditResp.IsSuccessStatusCode)
+                {
+                    var auditJson = await auditResp.Content.ReadAsStringAsync(stoppingToken);
+                    using var doc = System.Text.Json.JsonDocument.Parse(auditJson);
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("status", out var st) && st.GetString() == "ok")
+                    {
+                        int totalChecked = root.GetProperty("total_checked").GetInt32();
+                        int corrupted = root.GetProperty("corrupted_json").GetInt32();
+                        int shortWin = root.GetProperty("short_candle_windows").GetInt32();
+                        int gappedWin = root.GetProperty("gapped_candle_windows").GetInt32();
+                        int flatWin = root.GetProperty("flat_frozen_windows").GetInt32();
+                        double zeroVolPct = root.GetProperty("zero_vol_candle_pct").GetDouble();
+                        double zeroMfePct = root.GetProperty("zero_mfe_loss_pct").GetDouble();
+
+                        int deadSensorsCount = root.TryGetProperty("dead_sensors", out var dsArr) && dsArr.ValueKind == System.Text.Json.JsonValueKind.Array ? dsArr.GetArrayLength() : 0;
+                        bool hasCriticalAnomaly = corrupted > 0 || deadSensorsCount > 0 || flatWin > 20;
+                        bool isDailyDigestDue = DateTime.UtcNow.Date > _lastDatasetTelegramDigestDate && DateTime.UtcNow.Hour >= 9;
+
+                        if (hasCriticalAnomaly || isDailyDigestDue)
+                        {
+                            _lastDatasetTelegramDigestDate = DateTime.UtcNow.Date;
+                            string icon = hasCriticalAnomaly ? "🟡" : "🟢";
+                            string msg = $"{icon} <b>Авто-Аудит чистоты датасета (V3 Sanity Check)</b>\n" +
+                                         $"Проверено последних слепков: <b>{totalChecked}</b>\n" +
+                                         $"• Битый JSON / Короткие окна: <b>{corrupted} / {shortWin}</b>\n" +
+                                         $"• Разрывы внутри 160 свечей: <b>{gappedWin}</b> ({(totalChecked > 0 ? gappedWin * 100.0 / totalChecked : 0):F1}%)\n" +
+                                         $"• Замороженные свечи (>50% flat): <b>{flatWin}</b>\n" +
+                                         $"• Нулевой тиковый объём: <b>{zeroVolPct:F2}%</b>\n" +
+                                         $"• Убытки с MFE=0 (сразу против входа): <b>{zeroMfePct:F1}%</b>\n" +
+                                         $"• Залипшие датчики MacroContext: <b>{(deadSensorsCount == 0 ? "Нет (все активны)" : deadSensorsCount.ToString())}</b>";
+                            await TelegramBotService.SendMessageToAdmins(msg);
+                        }
+                    }
+                }
+            }
+            catch (Exception exAudit)
+            {
+                BotLogger.Warn($"[Diagnostics] Autonomous dataset audit notice: {exAudit.Message}");
             }
         }
         

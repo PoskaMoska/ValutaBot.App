@@ -137,8 +137,227 @@ def analyze_module(df: pd.DataFrame, module_name: str, score_col: str, telemetry
     else:
         log.info(f"[{module_name}] No glaring statistical weaknesses found in recent trades.")
 
+def run_dataset_sanity_audit(sample_limit: int = 2500, notify_telegram: bool = True) -> dict:
+    """
+    Autonomous Dataset & Pipeline Sanity Auditor.
+    Scans recent trade_outcomes (and their 160-candle features_json + MacroContext) for silent
+    data corruption, candle time gaps, stuck/zero-variance features, directional skew, and zero-MFE entries.
+    Persists results to module_diagnostics and optionally sends a digest to Telegram admins.
+    """
+    init_db()
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            id, asset, timeframe, direction, was_win, pnl_bps,
+            max_favorable_bps, max_adverse_bps,
+            price_entropy, adx_at_signal, rsi_at_signal, minutes_to_news,
+            created_at, features_json
+        FROM trade_outcomes
+        WHERE created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz
+          AND features_json IS NOT NULL
+        ORDER BY created_at::timestamptz DESC
+        LIMIT %s
+    """, (sample_limit,))
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    cur.close()
+    conn.close()
+
+    total = len(rows)
+    if total == 0:
+        return {"status": "empty", "total_checked": 0}
+
+    tf_sec_map = {"s5": 5, "s10": 10, "s15": 15, "s30": 30, "m1": 60, "1m": 60, "m5": 300, "5m": 300}
+
+    corrupted_json = 0
+    short_candle_windows = 0
+    gapped_candle_windows = 0
+    flat_frozen_windows = 0
+    zero_vol_candles_total = 0
+    total_candles_checked = 0
+    zero_mfe_live_losses = 0
+    live_losses_total = 0
+
+    macro_vals = {
+        "DayRangePositionPct": [],
+        "DxyMomentum1mBps": [],
+        "BasketSyncScore": [],
+        "PriceEntropy": [],
+        "Adx": [],
+        "Rsi": [],
+    }
+
+    pair_dirs = {}  # asset -> {"BUY": int, "PUT": int, "gt_up": int, "gt_down": int}
+
+    for r in rows:
+        rd = dict(zip(cols, r))
+        asset = str(rd.get("asset") or "UNKNOWN").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
+        tf = str(rd.get("timeframe") or "s5").lower().strip()
+        tf_sec = tf_sec_map.get(tf, 5)
+        direction = str(rd.get("direction") or "")
+        was_win = rd.get("was_win")
+        pnl = float(rd.get("pnl_bps") or 0.0)
+        mfe = float(rd.get("max_favorable_bps") or 0.0)
+
+        if asset not in pair_dirs:
+            pair_dirs[asset] = {"BUY": 0, "PUT": 0, "gt_up": 0, "gt_down": 0}
+
+        if direction in ("BUY", "PUT"):
+            pair_dirs[asset][direction] += 1
+            if was_win is False:
+                live_losses_total += 1
+                if mfe <= 1e-4:
+                    zero_mfe_live_losses += 1
+
+        if pnl > 1e-4:
+            pair_dirs[asset]["gt_up"] += 1
+        elif pnl < -1e-4:
+            pair_dirs[asset]["gt_down"] += 1
+
+        try:
+            feat = json.loads(rd["features_json"])
+        except Exception:
+            corrupted_json += 1
+            continue
+
+        candles = feat.get("Candles") or feat.get("candles") or []
+        if len(candles) < 40:
+            short_candle_windows += 1
+            continue
+
+        total_candles_checked += len(candles)
+        flat_bars = 0
+        has_time_gap = False
+        prev_ts = None
+        max_gap = max(60, tf_sec * 12)
+
+        for c in candles:
+            op = float(c.get("Open", c.get("open", 0.0)) or 0.0)
+            hi = float(c.get("High", c.get("high", op)) or op)
+            lo = float(c.get("Low", c.get("low", op)) or op)
+            cl = float(c.get("Close", c.get("close", op)) or op)
+            vol = float(c.get("Volume", c.get("volume", 0.0)) or 0.0)
+
+            if abs(hi - lo) <= 1e-9 and abs(cl - op) <= 1e-9:
+                flat_bars += 1
+            if vol <= 0.0:
+                zero_vol_candles_total += 1
+
+            ts_raw = c.get("Timestamp") or c.get("timestamp")
+            if isinstance(ts_raw, str) and len(ts_raw) >= 19:
+                try:
+                    cur_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+                    if prev_ts is not None and (cur_ts - prev_ts) > max_gap:
+                        has_time_gap = True
+                    prev_ts = cur_ts
+                except Exception:
+                    pass
+
+        if has_time_gap:
+            gapped_candle_windows += 1
+        if flat_bars > len(candles) * 0.5:
+            flat_frozen_windows += 1
+
+        macro = feat.get("MacroContext") or {}
+        for k in macro_vals:
+            v = macro.get(k)
+            if v is not None:
+                try:
+                    macro_vals[k].append(float(v))
+                except Exception:
+                    pass
+
+    dead_sensors = []
+    for k, arr in macro_vals.items():
+        if len(arr) >= 20 and float(np.std(arr)) < 1e-6:
+            dead_sensors.append(k)
+
+    skewed_pairs = []
+    for sym, counts in sorted(pair_dirs.items()):
+        live_tot = counts["BUY"] + counts["PUT"]
+        if live_tot >= 20:
+            buy_pct = counts["BUY"] / live_tot * 100.0
+            if buy_pct >= 78.0 or buy_pct <= 22.0:
+                dominant = "BUY" if buy_pct >= 50 else "PUT"
+                dom_pct = buy_pct if buy_pct >= 50 else (100.0 - buy_pct)
+                skewed_pairs.append(f"{sym}: {dom_pct:.0f}% {dominant} ({live_tot} сделок)")
+
+    zero_vol_pct = (zero_vol_candles_total / max(1, total_candles_checked)) * 100.0
+    zero_mfe_pct = (zero_mfe_live_losses / max(1, live_losses_total)) * 100.0
+
+    report = {
+        "status": "ok",
+        "total_checked": total,
+        "corrupted_json": corrupted_json,
+        "short_candle_windows": short_candle_windows,
+        "gapped_candle_windows": gapped_candle_windows,
+        "flat_frozen_windows": flat_frozen_windows,
+        "zero_vol_candle_pct": round(zero_vol_pct, 2),
+        "zero_mfe_loss_pct": round(zero_mfe_pct, 1),
+        "dead_sensors": dead_sensors,
+        "skewed_pairs": skewed_pairs,
+    }
+
+    insight_summary = (
+        f"Checked {total} V3 samples: gaps={gapped_candle_windows}, flat={flat_frozen_windows}, "
+        f"short={short_candle_windows}, zero_vol={zero_vol_pct:.2f}%, zero_mfe_losses={zero_mfe_pct:.1f}%, "
+        f"dead_sensors={dead_sensors}, skewed_pairs={skewed_pairs}"
+    )
+    log.info(f"[DatasetAudit] {insight_summary}")
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO module_diagnostics (module_name, timeframe, failed_trades_count, insight_text, suggested_filter)
+            VALUES (%s, %s, %s, %s, %s)
+        """, ("DATASET_AUDIT", "ALL", gapped_candle_windows + flat_frozen_windows, insight_summary, json.dumps(report)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as db_err:
+        log.warning(f"[DatasetAudit] Failed to persist audit row: {db_err}")
+
+    if notify_telegram:
+        bot_url = os.getenv("BOT_BASE_URL", "http://localhost:5000").rstrip("/")
+        api_secret = os.getenv("INTERNAL_API_SECRET", "")
+        if api_secret:
+            try:
+                import requests as req_lib
+                health_icon = "🟢" if (corrupted_json == 0 and len(dead_sensors) == 0 and flat_frozen_windows == 0) else "🟡"
+                lines = [
+                    f"{health_icon} <b>Авто-Аудит чистоты датасета (За 24ч)</b>",
+                    f"Проверено слепков: <b>{total}</b>",
+                    f"• Битый JSON / Короткие окна: <b>{corrupted_json} / {short_candle_windows}</b>",
+                    f"• Разрывы времени внутри 160 свечей: <b>{gapped_candle_windows}</b> ({gapped_candle_windows/max(1,total)*100:.1f}%)",
+                    f"• Замороженные свечи (>50% flat): <b>{flat_frozen_windows}</b>",
+                    f"• Нулевой тиковый объём: <b>{zero_vol_pct:.2f}%</b>",
+                    f"• Убытки с мгновенным уходом (MFE=0): <b>{zero_mfe_pct:.1f}%</b>",
+                ]
+                if dead_sensors:
+                    lines.append(f"⚠️ Залипшие датчики (std=0): <code>{', '.join(dead_sensors)}</code>")
+                if skewed_pairs:
+                    lines.append(f"⚖️ Перекос направления: <code>{'; '.join(skewed_pairs[:4])}</code>")
+                req_lib.post(
+                    f"{bot_url}/internal/notify-admins",
+                    json={"message": "\n".join(lines), "parse_mode": "HTML"},
+                    headers={"X-Internal-Secret": api_secret},
+                    timeout=10,
+                )
+            except Exception as notify_err:
+                log.warning(f"[DatasetAudit] Telegram notify skipped: {notify_err}")
+
+    return report
+
+
 def run_diagnostics():
     init_db()
+    try:
+        run_dataset_sanity_audit(sample_limit=2500, notify_telegram=True)
+    except Exception as audit_err:
+        log.error(f"[DatasetAudit] Error in sanity audit: {audit_err}")
     
     conn = get_db_connection()
     # Fetch trades from the last 7 days that have telemetry

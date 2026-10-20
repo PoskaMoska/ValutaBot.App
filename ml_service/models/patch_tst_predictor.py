@@ -110,10 +110,14 @@ def build_macro_vector_live(
     adx = float(macro.get("Adx", 25.0)) / 100.0
     rsi = (float(macro.get("Rsi", 50.0)) - 50.0) / 50.0
     news_m = float(macro.get("MinutesToNews", 120.0))
+    if news_m < 0:
+        news_m = 120.0  # -1 means no upcoming high-impact news -> treat as far away (1.0)
     news_norm = min(120.0, max(0.0, news_m)) / 120.0
 
-    hr = float(macro.get("HourUtc", 12.0))
-    dow = float(macro.get("DayOfWeek", 2.0))
+    hr_raw = macro.get("HourUtc")
+    hr = float(hr_raw if hr_raw is not None else 12.0)
+    dow_raw = macro.get("DayOfWeek")
+    dow = float(dow_raw if dow_raw is not None else 2.0)
     hr_sin = math.sin(2 * math.pi * hr / 24.0)
     hr_cos = math.cos(2 * math.pi * hr / 24.0)
     dow_sin = math.sin(2 * math.pi * dow / 7.0)

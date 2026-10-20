@@ -304,6 +304,29 @@ public static partial class MiniAppController
         });
 
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
+        app.MapGet("/api/stats/dataset-audit", async (HttpContext context) =>
+        {
+            try
+            {
+                var mlUrl = Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
+                if (HttpFactory != null)
+                {
+                    var hc = HttpFactory.CreateClient();
+                    hc.Timeout = TimeSpan.FromSeconds(30);
+                    var resp = await hc.GetAsync($"{mlUrl.TrimEnd('/')}/diagnostics/audit?notify=false");
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        var json = await resp.Content.ReadAsStringAsync();
+                        return Results.Content(json, "application/json");
+                    }
+                }
+                return Results.Json(new { status = "unavailable" }, statusCode: 503);
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: 500);
+            }
+        });
 
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
 
