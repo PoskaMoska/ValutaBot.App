@@ -109,7 +109,7 @@ public partial class TelegramBotService : BackgroundService
 
         Console.WriteLine($"[TG Bot] Service started. WebApp URL: {_webAppUrl}");
 
-        await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync();
+        try { await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync(); } catch (Exception dbEx) { BotLogger.Warn($"[TG Bot] Startup DB init warning: {dbEx.Message}"); }
 
         // Auto-seed admin IDs from env ADMIN_CHAT_ID / ADMIN_IDS
 
@@ -118,7 +118,7 @@ public partial class TelegramBotService : BackgroundService
         {
             if (long.TryParse(part, out long parsedEnvAdmin))
             {
-                await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAdminAsync(parsedEnvAdmin);
+                try { await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAdminAsync(parsedEnvAdmin); } catch { }
             }
         }
 
@@ -217,7 +217,10 @@ public partial class TelegramBotService : BackgroundService
             }
             catch (Exception ex)
             {
-                BotLogger.Error($"[TG Bot] Error in polling loop: {ex.Message}", ex);
+                if (ex is System.Net.Http.HttpRequestException || ex is System.IO.IOException || ex is TaskCanceledException)
+                    BotLogger.Warn($"[TG Bot] Transient polling jitter: {ex.Message}");
+                else
+                    BotLogger.Error($"[TG Bot] Error in polling loop: {ex.Message}", ex);
                 await Task.Delay(5000, stoppingToken);
             }
         }

@@ -27,6 +27,7 @@ public static class PocketOptionWebSocketStream
     private static ClientWebSocket? _webSocket;
     private static CancellationTokenSource _cts = new CancellationTokenSource();
     private static DateTime _lastMessageTime = DateTime.UtcNow;
+    private static DateTime _lastTickTime = DateTime.UtcNow;
     private static int _loopRunning = 0;
     private static CancellationTokenSource? _connectionCts;
     private static long _totalTicksIngested = 0;
@@ -85,8 +86,18 @@ public static class PocketOptionWebSocketStream
     public static bool IsConnected => _webSocket?.State == WebSocketState.Open;
     public static long TotalTicksIngested => Interlocked.Read(ref _totalTicksIngested);
     public static string Status { get; private set; } = "IDLE";
-    public static DateTime LastTickUtc => _lastMessageTime;
+    public static DateTime LastTickUtc => _lastTickTime;
     public static int ConsecutiveAuthFailures => Volatile.Read(ref _consecutiveAuthFailures);
+
+    /// <summary>
+    /// Actively forces a WebSocket reconnection (called by Watchdog or SelfDiagnosticService when feed stalls).
+    /// </summary>
+    public static void ForceReconnect(string reason)
+    {
+        BotLogger.Warn($"[PO WS] ForceReconnect triggered: {reason}");
+        _lastTickTime = DateTime.UtcNow;
+        try { _connectionCts?.Cancel(); } catch { }
+    }
 
     private static async Task SendTextAsync(ClientWebSocket ws, string payload, CancellationToken token)
     {
@@ -354,8 +365,9 @@ public static class PocketOptionWebSocketStream
                 if (ws == null || ws.State != WebSocketState.Open) continue;
 
                 var now = DateTime.UtcNow;
-                var idleSeconds = (now - _lastMessageTime).TotalSeconds;
-                if (idleSeconds > 15)
+                var frameIdleSeconds = (now - _lastMessageTime).TotalSeconds;
+                var tickIdleSeconds = (now - _lastTickTime).TotalSeconds;
+                if (frameIdleSeconds > 15)
                 {
                     try { await SendTextAsync(ws, "2", token); } catch { }
                 }
@@ -372,10 +384,12 @@ public static class PocketOptionWebSocketStream
                     catch { }
                 }
 
-                bool isDead = idleSeconds > 40;
+                // Reconnect if raw socket is silent >40s OR if no market ticks arrived for >60s despite open socket (zombie subscription)
+                bool isDead = frameIdleSeconds > 40 || tickIdleSeconds > 60;
                 if (isDead && ws.State == WebSocketState.Open)
                 {
-                    BotLogger.Warn("[PO WS] Watchdog detected silent drop (>40s no ticks). Dropping connection to reconnect...");
+                    BotLogger.Warn($"[PO WS] Watchdog detected silent drop (frameIdle={frameIdleSeconds:F0}s, tickIdle={tickIdleSeconds:F0}s). Dropping connection to reconnect...");
+                    _lastTickTime = now;
                     try { _connectionCts?.Cancel(); } catch { }
                 }
             }
@@ -442,6 +456,7 @@ public static class PocketOptionWebSocketStream
                     wasConnected = true;
                     Status = "ONLINE";
                     _lastMessageTime = DateTime.UtcNow;
+                    _lastTickTime = DateTime.UtcNow;
                     _lastPsHeartbeat = DateTime.UtcNow;
 
                     await ReceiveLoopAsync(ws, connCts.Token);
@@ -748,6 +763,7 @@ public static class PocketOptionWebSocketStream
         {
             _livePrices[baseAsset] = price;
             _lastMessageTime = DateTime.UtcNow;
+            _lastTickTime = DateTime.UtcNow;
             ValutaMetrics.WebSocketTicksTotal.WithLabels(candleKey).Inc();
             // Macro context gets PO prices only when PO is the active feed (Tiingo then stays out of it).
             if (PriceFeed.UsePocketOption)

@@ -369,7 +369,10 @@ public class MarketAnalysisOrchestrator(
 
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool isDirectional = consensus.FinalDirection is "BUY" or "PUT";
-        bool isCbHalted = TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true;
+        bool isGlobalCbHalted = TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true;
+        bool isSymbolQuarantined = TradeOutcomeTracker.CircuitBreaker != null
+            && TradeOutcomeTracker.CircuitBreaker.IsSymbolQuarantined(cleanAsset, timeframe, out _);
+        bool isCbHalted = isGlobalCbHalted || isSymbolQuarantined;
         string sampleKey = $"{cleanAsset}_{timeframe}";
 
         int requiredProb = isS5 ? 59 : 57;
@@ -429,11 +432,11 @@ public class MarketAnalysisOrchestrator(
                 mlPrediction?.Accuracy ?? 0.0,
                 priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
             dbSw.Stop();
-            string shadowReason = isCbHalted ? ", CB halt guard" 
+            string shadowReason = isGlobalCbHalted ? ", Global CB halt guard" : (isSymbolQuarantined ? ", Per-symbol quarantine guard" 
                 : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard" 
                 : (isS5 && !htfAligned ? ", S5 HTF divergence guard" 
                 : (isS5 && isCooldownActive ? ", S5 cooldown guard" 
-                : (isS5 && consensus.Probability < 59 ? ", S5 prob threshold guard" : ""))));
+                : (isS5 && consensus.Probability < 59 ? ", S5 prob threshold guard" : "")))));
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else

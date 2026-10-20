@@ -254,7 +254,16 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at);
                 DROP INDEX IF EXISTS idx_hist_candles_asset;
                 DROP TABLE IF EXISTS neutral_signals;
-                DROP TABLE IF EXISTS module_diagnostics;
+                -- Preserve module_diagnostics across C# restarts (populated nightly by Python _daily_diagnostics_loop)
+                CREATE TABLE IF NOT EXISTS module_diagnostics (
+                    id SERIAL PRIMARY KEY,
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    module_name VARCHAR(50) NOT NULL,
+                    timeframe VARCHAR(20) NOT NULL,
+                    failed_trades_count INTEGER NOT NULL,
+                    insight_text TEXT NOT NULL,
+                    suggested_filter JSONB
+                );
 
                 -- FIX 1: Persist CircuitBreaker halt state across restarts.
                 -- Without this, _haltedUntil resets to null on every process restart,

@@ -145,7 +145,7 @@ def run_diagnostics():
     query = """
         SELECT asset, timeframe, was_win, ta_score, ml_score, ta_telemetry, ml_telemetry
         FROM trade_outcomes
-        WHERE created_at > NOW() - INTERVAL '7 days'
+        WHERE created_at::timestamptz > NOW() - INTERVAL '7 days'
           AND was_win IS NOT NULL
           AND ta_telemetry IS NOT NULL
     """

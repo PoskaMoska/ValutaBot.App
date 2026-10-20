@@ -173,12 +173,18 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             }
 
             bool isLiveDirectional = record.Direction is "BUY" or "PUT";
+            bool isShadowDirectional = record.Direction is "SHADOW_BUY" or "SHADOW_PUT";
+            if (isShadowDirectional && CircuitBreaker != null && record.Probability >= 57)
+            {
+                _ = CircuitBreaker.CheckSymbolStateAsync(record.Asset, record.Timeframe, record.WasCorrect, isShadow: true);
+            }
 
             if (isLiveDirectional)
             {
                 if (CircuitBreaker != null)
                 {
                     _ = CircuitBreaker.CheckStateAsync(); // Fire and forget so it doesn't block verification
+                    _ = CircuitBreaker.CheckSymbolStateAsync(record.Asset, record.Timeframe, record.WasCorrect, isShadow: false);
                 }
 
                 // 🔥 DRIFT DETECTION 🔥
@@ -266,6 +272,20 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                         AutoCalib?.RecordSourceOutcome(kv.Key, record.Asset, record.Timeframe, wasSourceCorrect, kv.Value);
                     }
                 }
+            }
+
+            // Online Bayesian SGD MetaLearner weight update & PostgreSQL persistence
+            if (isLiveDirectional || (isShadowDirectional && record.Probability >= 57))
+            {
+                MetaLearner?.PartialFit(
+                    record.Asset,
+                    record.Timeframe,
+                    record.TaScore,
+                    record.OfScore,
+                    record.SmcScore,
+                    record.MlScore,
+                    wasCorrect,
+                    record.Direction);
             }
 
             string cleanDirection = record.Direction.StartsWith("SHADOW_") 

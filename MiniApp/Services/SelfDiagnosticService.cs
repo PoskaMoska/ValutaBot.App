@@ -248,10 +248,15 @@ public class SelfDiagnosticService : BackgroundService
                     var stallDuration = DateTime.UtcNow - latestCandleUtc;
                     if (stallDuration > TimeSpan.FromMinutes(2))
                     {
+                        if (PriceFeed.UsePocketOption)
+                        {
+                            PocketOptionWebSocketStream.ForceReconnect($"subminute_candles stalled for {(int)stallDuration.TotalSeconds}s");
+                        }
+
                         if (_feedWasHealthy)
                         {
                             _feedWasHealthy = false;
-                            await TelegramBotService.SendMessageToAdmins($"⚠️ <b>Задержка котировок рынка</b>\nСвежие свечи в subminute_candles отстают на {(int)stallDuration.TotalSeconds}с. Проверьте поток Pocket Option OTC WebSocket.");
+                            await TelegramBotService.SendMessageToAdmins($"⚠️ <b>Задержка котировок рынка</b>\nСвежие свечи в subminute_candles отстают на {(int)stallDuration.TotalSeconds}с. Автоматически запущен принудительный реконнект Pocket Option OTC WebSocket.");
                         }
                     }
                     else if (!_feedWasHealthy)

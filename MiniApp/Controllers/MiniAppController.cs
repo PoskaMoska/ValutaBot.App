@@ -91,6 +91,8 @@ public static partial class MiniAppController
         
         var botSettings = builder.Configuration.GetSection("TradingBotSettings").Get<TradingBotSettings>() ?? new TradingBotSettings();
         builder.Services.Configure<TradingBotSettings>(builder.Configuration.GetSection("TradingBotSettings"));
+        builder.Services.Configure<Microsoft.Extensions.Hosting.HostOptions>(options =>
+            options.BackgroundServiceExceptionBehavior = Microsoft.Extensions.Hosting.BackgroundServiceExceptionBehavior.Ignore);
 
         // Register Engines and Services in DI
         builder.Services.AddSingleton<MarketDataFetcher>();
@@ -209,7 +211,10 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         // FIX: Removed 'isWeekend' check so the stream always starts. If booted on a weekend, 
         // it simply idles until Monday morning when ticks resume.
         string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
-        TiingoWebSocketStream.StartStream(topStreamSymbols);
+        if (!PriceFeed.UsePocketOption)
+        {
+            TiingoWebSocketStream.StartStream(topStreamSymbols);
+        }
 
         // Init Telegram notifier from config or env (set in Railway dashboard)
         TelegramNotifier.Init(builder.Configuration["TelegramBotToken"] ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));

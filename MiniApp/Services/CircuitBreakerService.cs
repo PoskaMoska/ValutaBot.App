@@ -18,6 +18,8 @@ namespace ValutaBot.MiniApp.Services
         string? GetHaltedReason();
         Task CheckStateAsync(CancellationToken ct = default);
         Task ActivateHaltAsync(string reason, CancellationToken ct = default);
+        bool IsSymbolQuarantined(string asset, string timeframe, out string? reason);
+        Task CheckSymbolStateAsync(string asset, string timeframe, bool? latestWasWin = null, bool isShadow = false, CancellationToken ct = default);
     }
 
     public sealed class CircuitBreakerService : ICircuitBreakerService
@@ -40,6 +42,15 @@ namespace ValutaBot.MiniApp.Services
         private DateTime? _lastCooldownExpiredUtc;
         private string _haltReason = string.Empty;
         private DateTime _cacheLoadedAt = DateTime.MinValue;
+
+        // Per-Symbol/Timeframe Shadow Quarantine (isolates toxic pairs without halting profitable pairs)
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime QuarantinedUntil, string Reason)> _symbolQuarantine =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _shadowRecoveryStreak =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        private static string GetSymbolKey(string asset, string timeframe)
+            => $"{AssetSanitizer.Sanitize(asset)}_{timeframe.Trim().ToLowerInvariant()}";
 
         public CircuitBreakerService(IOptions<TradingBotSettings> options, Func<NpgsqlConnection> connectionFactory)
         {
@@ -141,6 +152,100 @@ namespace ValutaBot.MiniApp.Services
                     return $"CIRCUIT_BREAKER_ACTIVE (Resumes in {remain:F0}m — {_haltReason})";
                 }
                 return null;
+            }
+        }
+
+        public bool IsSymbolQuarantined(string asset, string timeframe, out string? reason)
+        {
+            reason = null;
+            string key = GetSymbolKey(asset, timeframe);
+            if (_symbolQuarantine.TryGetValue(key, out var q))
+            {
+                if (DateTime.UtcNow < q.QuarantinedUntil)
+                {
+                    var remain = (q.QuarantinedUntil - DateTime.UtcNow).TotalMinutes;
+                    reason = $"SYMBOL_QUARANTINE ({key}: resumes in {remain:F0}m — {q.Reason})";
+                    return true;
+                }
+
+                _symbolQuarantine.TryRemove(key, out _);
+                _shadowRecoveryStreak.TryRemove(key, out _);
+                BotLogger.Info($"[CircuitBreaker] Per-symbol quarantine expired for {key}. Resuming live trading.");
+            }
+            return false;
+        }
+
+        public async Task CheckSymbolStateAsync(string asset, string timeframe, bool? latestWasWin = null, bool isShadow = false, CancellationToken ct = default)
+        {
+            if (latestWasWin == null) return;
+            string key = GetSymbolKey(asset, timeframe);
+
+            if (isShadow)
+            {
+                if (_symbolQuarantine.TryGetValue(key, out var activeQ) && DateTime.UtcNow < activeQ.QuarantinedUntil)
+                {
+                    if (latestWasWin == true)
+                    {
+                        int streak = _shadowRecoveryStreak.AddOrUpdate(key, 1, (_, c) => c + 1);
+                        if (streak >= 2)
+                        {
+                            _symbolQuarantine.TryRemove(key, out _);
+                            _shadowRecoveryStreak.TryRemove(key, out _);
+                            BotLogger.Info($"[CircuitBreaker] Early self-healing recovery for {key}: 2 consecutive SHADOW wins! Lifting quarantine.");
+                        }
+                    }
+                    else
+                    {
+                        _shadowRecoveryStreak[key] = 0;
+                    }
+                }
+                return;
+            }
+
+            if (IsSymbolQuarantined(asset, timeframe, out _)) return;
+
+            try
+            {
+                var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(asset, timeframe, 12);
+                if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 4) return;
+
+                int consecutiveLosses = 0;
+                foreach (bool win in recentAssetOutcomes)
+                {
+                    if (!win) consecutiveLosses++;
+                    else break;
+                }
+
+                bool shouldQuarantine = false;
+                string qReason = string.Empty;
+
+                if (consecutiveLosses >= 4)
+                {
+                    shouldQuarantine = true;
+                    qReason = $"{consecutiveLosses} consecutive losses on {key}";
+                }
+                else if (recentAssetOutcomes.Count >= 10)
+                {
+                    int wins = recentAssetOutcomes.Count(w => w);
+                    double winRate = (double)wins / recentAssetOutcomes.Count;
+                    if (winRate < 0.42)
+                    {
+                        shouldQuarantine = true;
+                        qReason = $"Symbol WinRate {winRate:P0} ({wins}/{recentAssetOutcomes.Count}) < 42%";
+                    }
+                }
+
+                if (shouldQuarantine)
+                {
+                    var until = DateTime.UtcNow.AddMinutes(30);
+                    _symbolQuarantine[key] = (until, qReason);
+                    _shadowRecoveryStreak[key] = 0;
+                    BotLogger.Warn($"[CircuitBreaker] PER-SYMBOL QUARANTINE activated for {key} (30m or 2 shadow wins). Reason: {qReason}");
+                }
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[CircuitBreaker] CheckSymbolStateAsync failed for {key}: {ex.Message}");
             }
         }
 

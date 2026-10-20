@@ -85,7 +85,7 @@ public static class LatencyProbe
     /// </summary>
     public static async Task MeasureAsync(IHttpClientFactory? factory)
     {
-        const string PingTarget = "https://api.tiingo.com"; // root — lightweight, no auth needed
+        string PingTarget = PriceFeed.UsePocketOption ? "https://pocketoption.com" : "https://api.tiingo.com"; // root — lightweight, no auth needed
         const int    Attempts   = 3;
         const int    TimeoutMs  = 2000;
 
@@ -117,7 +117,7 @@ public static class LatencyProbe
         {
             double measured = totalMs / succeeded;
             AddSample(measured);
-            BotLogger.Info($"[LatencyProbe] RTT to Tiingo: {measured:F0}ms (avg of {succeeded}/{Attempts} probes). SendAtOffset: {SendAtOffsetMs}ms");
+            BotLogger.Info($"[LatencyProbe] RTT to {(PriceFeed.UsePocketOption ? "PocketOption" : "Tiingo")}: {measured:F0}ms (avg of {succeeded}/{Attempts} probes). SendAtOffset: {SendAtOffsetMs}ms");
         }
         else
         {
