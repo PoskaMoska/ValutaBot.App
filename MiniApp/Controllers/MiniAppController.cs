@@ -157,12 +157,14 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("MLPythonService", client => 
         {
-            client.Timeout = TimeSpan.FromSeconds(15);
+            client.Timeout = TimeSpan.FromSeconds(10);
         }).AddStandardResilienceHandler(options =>
         {
+            // Never retry timed-out live scalping predictions (retrying an s5 candle after 4-6s is stale and causes a retry storm)
             options.Retry.MaxRetryAttempts = 1;
-            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(Math.Max(6, botSettings.FastFailTimeoutSeconds));
-            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(Math.Max(12, botSettings.FastFailTimeoutSeconds * 2));
+            options.Retry.ShouldHandle = _ => ValueTask.FromResult(false);
+            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(Math.Min(4, Math.Max(3, botSettings.FastFailTimeoutSeconds)));
+            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(5);
             options.CircuitBreaker.SamplingDuration          = TimeSpan.FromSeconds(30);
             options.CircuitBreaker.MinimumThroughput         = 5;
             options.CircuitBreaker.FailureRatio              = 0.7;

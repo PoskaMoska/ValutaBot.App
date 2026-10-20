@@ -17,6 +17,11 @@ import time
 import threading
 from typing import Any
 
+# Prevent OpenMP / MKL / OpenBLAS thread contention on fractional container vCPUs (Railway/Docker)
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import orjson
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -780,9 +785,14 @@ async def upload_model(
         return {"status": "error", "key": key, "error": str(e)}
 
 
+_inference_lock = asyncio.Lock()
+
+
 @app.post("/predict")
 async def predict(request: Request):
     raw_body = await request.body()
+    if await request.is_disconnected():
+        return Response(status_code=499)
     data = orjson.loads(raw_body)
     
     symbol = data.get("symbol") or data.get("asset")
@@ -859,10 +869,14 @@ async def predict(request: Request):
                 "smc_swp_dir": smc_swp_dir,
             }
             macro_ctx = data.get("macro_context")
-            neural_res = patch_predictor.predict(
-                symbol, interval, candle_dicts, mtf_candle_dicts,
-                macro_context=macro_ctx, smc_context=smc_ctx
-            )
+            async with _inference_lock:
+                if await request.is_disconnected():
+                    return Response(status_code=499)
+                neural_res = await asyncio.to_thread(
+                    patch_predictor.predict,
+                    symbol, interval, candle_dicts, mtf_candle_dicts,
+                    macro_ctx, smc_ctx
+                )
             if neural_res is not None:
                 n_dir, n_conf, n_ver, n_hor, n_raw = neural_res
                 m = patch_predictor.metrics or {}

@@ -84,13 +84,22 @@ public class AutoTradingScannerService : BackgroundService
 
     private async Task RunSubminuteScannerAsync(CancellationToken stoppingToken)
     {
-        var channel = Channel.CreateUnbounded<(string pair, string tf)>();
+        var channel = Channel.CreateUnbounded<(string pair, string tf, DateTime queuedAtUtc)>();
+        var queuedKeys = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        var inFlightKeys = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
 
         RealtimeTickCollector.OnCandleClosed += (pair, tf) =>
         {
             if (_targetPairs.Contains(pair, StringComparer.OrdinalIgnoreCase) && _subminuteTfs.Contains(tf, StringComparer.OrdinalIgnoreCase))
             {
-                channel.Writer.TryWrite((pair, tf));
+                string key = $"{pair}:{tf}";
+                if (queuedKeys.TryAdd(key, 1))
+                {
+                    if (!channel.Writer.TryWrite((pair, tf, DateTime.UtcNow)))
+                    {
+                        queuedKeys.TryRemove(key, out _);
+                    }
+                }
             }
         };
 
@@ -101,8 +110,30 @@ public class AutoTradingScannerService : BackgroundService
             {
                 await foreach (var item in channel.Reader.ReadAllAsync(stoppingToken))
                 {
+                    string key = $"{item.pair}:{item.tf}";
+                    queuedKeys.TryRemove(key, out _);
+
                     if (stoppingToken.IsCancellationRequested) break;
-                    await ProcessSubminuteScanAsync(item.pair, item.tf, stoppingToken);
+
+                    // Drop stale events that waited in queue > 3.5s (prevents congestion collapse after deploy/jitter)
+                    if ((DateTime.UtcNow - item.queuedAtUtc).TotalSeconds > 3.5)
+                    {
+                        continue;
+                    }
+
+                    if (!inFlightKeys.TryAdd(key, 1))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        await ProcessSubminuteScanAsync(item.pair, item.tf, stoppingToken);
+                    }
+                    finally
+                    {
+                        inFlightKeys.TryRemove(key, out _);
+                    }
                 }
             }, stoppingToken));
         }

@@ -206,6 +206,11 @@ class PatchTSTPredictor:
     def _load_model(self):
         try:
             import torch
+            try:
+                torch.set_num_threads(1)
+                torch.set_num_interop_threads(1)
+            except Exception:
+                pass
             from models.sequence_brain import SequenceBrain
             from models.patch_tst_brain import DualStreamPatchBrain
 
