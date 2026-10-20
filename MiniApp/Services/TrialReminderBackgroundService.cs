@@ -186,14 +186,14 @@ namespace ValutaBot.MiniApp.Services
                 string since = DateTime.UtcNow.AddHours(-24).ToString("o");
 
                 var rows = (await conn.QueryAsync<(string Asset, bool? WasWin)>(
-                    "SELECT asset, was_win FROM trade_outcomes WHERE created_at >= @since AND was_win IS NOT NULL",
+                    "SELECT asset, was_win FROM trade_outcomes WHERE created_at >= @since AND direction IN ('BUY', 'PUT') AND was_win IS NOT NULL",
                     new { since })).ToList();
 
                 if (rows.Count < 20)
                 {
-                    // Fallback to recent 200 trades if 24h has few trades (e.g. weekend or quiet period)
+                    // Fallback to recent 200 real trades if 24h has few trades (e.g. weekend or quiet period)
                     rows = (await conn.QueryAsync<(string Asset, bool? WasWin)>(
-                        "SELECT asset, was_win FROM trade_outcomes WHERE was_win IS NOT NULL ORDER BY created_at DESC LIMIT 200")).ToList();
+                        "SELECT asset, was_win FROM trade_outcomes WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL ORDER BY created_at DESC LIMIT 200")).ToList();
                 }
 
                 if (rows.Count == 0)
@@ -241,7 +241,7 @@ namespace ValutaBot.MiniApp.Services
                 string startStr = start.Value.ToString("o");
                 string endStr = (end ?? DateTime.UtcNow).ToString("o");
                 return (int)await conn.ExecuteScalarAsync<long>(
-                    "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= @startStr AND created_at <= @endStr",
+                    "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= @startStr AND created_at <= @endStr AND direction IN ('BUY', 'PUT')",
                     new { startStr, endStr });
             }
             catch

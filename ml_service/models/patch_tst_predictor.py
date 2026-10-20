@@ -368,7 +368,7 @@ class PatchTSTPredictor:
                 f"HOLD: {p_hold*100:.1f}% | Temp: {temp:.2f} | Arch: {self._model_name}"
             )
 
-            return direction, calibrated_prob, arch_tag, 3, raw_prob
+            return direction, calibrated_prob, arch_tag, 1, raw_prob
 
         except Exception as e:
             log.error(f"[Neural Brain] Inference error: {e}", exc_info=True)

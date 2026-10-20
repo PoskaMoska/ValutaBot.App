@@ -176,18 +176,24 @@ async def lifespan(app: FastAPI):
         log.warning(f"[Startup] Disk prune error: {e}")
 
     # Warm up PatchTST Neural Brain so weights are in memory immediately
+    patch_active = False
     try:
         from models.patch_tst_predictor import PatchTSTPredictor
         patch_pred = PatchTSTPredictor.get_instance()
-        log.info(f"[Startup] PatchTST Neural Brain warmed up (available: {patch_pred.is_available()})")
+        patch_active = patch_pred.is_available()
+        log.info(f"[Startup] PatchTST Neural Brain warmed up (available: {patch_active})")
     except Exception as e:
         log.warning(f"[Startup] PatchTST warm-up: {e}")
 
-    _process_pool = ProcessPoolExecutor(max_workers=1)
-    log.info("[Startup] Launching background pre-training for all timeframes (max_workers=1)...")
-    asyncio.create_task(_train_all())
-    # asyncio.create_task(_auto_crawler_loop()) # DISABLING: TwelveData uses too many credits; Tiingo WS fills DB now
-    asyncio.create_task(_weekly_global_retrain_loop())
+    enable_legacy_pretrain = os.getenv("ENABLE_LEGACY_LGBM_PRETRAIN", "false").lower() == "true"
+    if not patch_active or enable_legacy_pretrain:
+        _process_pool = ProcessPoolExecutor(max_workers=1)
+        log.info("[Startup] Launching background LightGBM pre-training (max_workers=1)...")
+        asyncio.create_task(_train_all())
+        asyncio.create_task(_weekly_global_retrain_loop())
+    else:
+        log.info("[Startup] PatchTST V3 Neural Brain is active ? skipping legacy LightGBM background pre-training loops to conserve CPU/RAM.")
+
     asyncio.create_task(_daily_diagnostics_loop())
     yield
     if _process_pool is not None:
@@ -675,7 +681,7 @@ def list_models():
         return [p.get_status() for p in _predictors.values()]
 
 
-@app.post("/debug/clear_models")
+@app.post("/debug/clear_models", dependencies=[Depends(verify_secret)])
 async def clear_models():
     """Wipes all .pkl files from the persistent volume to start fresh."""
     try:
@@ -689,7 +695,7 @@ async def clear_models():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.post("/debug/clear_sgd")
+@app.post("/debug/clear_sgd", dependencies=[Depends(verify_secret)])
 async def clear_sgd():
     """Wipes ONLY the SGD .pkl files to reset poisoned online learning."""
     from model import SGD_MODEL_DIR
@@ -704,7 +710,7 @@ async def clear_sgd():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.get("/debug/ls")
+@app.get("/debug/ls", dependencies=[Depends(verify_secret)])
 def debug_ls():
     """List actual .pkl files on disk in MODEL_DIR. Useful to diagnose persistent volume."""
     from model import MODEL_DIR
@@ -721,13 +727,13 @@ def debug_ls():
     return {"model_dir": str(MODEL_DIR), "count": len(result), "files": result}
 
 
-@app.post("/debug/prune_disk")
+@app.post("/debug/prune_disk", dependencies=[Depends(verify_secret)])
 def debug_prune_disk():
     """Removes orphaned DBs, duplicate _v2 models, and temp files to free persistent volume disk space."""
     return prune_models_disk()
 
 
-@app.post("/upload_model")
+@app.post("/upload_model", dependencies=[Depends(verify_secret)])
 async def upload_model(
     symbol: str = Form(...),
     interval: str = Form(...),
@@ -773,10 +779,6 @@ async def upload_model(
         log.error(f"[UploadModel] Failed for {key}: {e}")
         return {"status": "error", "key": key, "error": str(e)}
 
-
-# Cache to hold the latest live candles per symbol/interval for truthful SGD feedback
-_live_candles_cache = {}
-_cache_lock = threading.Lock()
 
 @app.post("/predict")
 async def predict(request: Request):
@@ -837,10 +839,6 @@ async def predict(request: Request):
         return Response(content=orjson.dumps(resp), media_type="application/json")
 
     interval = _normalize_interval(interval_raw)
-    
-    # Store truthful live candles for SGD feedback
-    with _cache_lock:
-        _live_candles_cache[(symbol, interval)] = candles
 
     candle_dicts = candles
     mtf_candle_dicts = mtf_candles

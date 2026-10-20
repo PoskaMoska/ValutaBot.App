@@ -12,7 +12,12 @@ public static class AuthService
     public static async Task<(bool isAuthorized, string? errorMessage)> IsRequestAuthorized(HttpContext context)
     {
         var remoteIp = context.Connection.RemoteIpAddress;
-        if ((remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp)) || context.Request.Headers.ContainsKey("X-Test-Bypass"))
+        bool isProxiedExternal = context.Request.Headers.ContainsKey("X-Forwarded-For");
+        bool isLocalOrTestServer = !isProxiedExternal && (
+            (remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp)) ||
+            (remoteIp == null && context.Request.Headers.ContainsKey("X-Test-Bypass"))
+        );
+        if (isLocalOrTestServer)
         {
             context.Items["userId"] = 123456789L; // Mock user ID for DB settings
             return (true, null);

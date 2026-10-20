@@ -241,8 +241,8 @@ public class SelfDiagnosticService : BackgroundService
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 string feedQuery = PriceFeed.UsePocketOption
-                    ? "SELECT MAX(open_time) FROM subminute_candles WHERE asset LIKE '%_PO'"
-                    : "SELECT MAX(open_time) FROM subminute_candles";
+                    ? "SELECT MAX(open_time) FROM subminute_candles WHERE asset IN ('EURUSD_PO', 'GBPUSD_PO', 'AUDUSD_PO', 'USDCAD_PO', 'USDJPY_PO', 'USDCHF_PO') AND interval = 's5'"
+                    : "SELECT MAX(open_time) FROM subminute_candles WHERE interval = 's5'";
                 var latestCandleStr = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<string>(conn, feedQuery);
                 
                 if (DateTime.TryParse(latestCandleStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var latestCandleUtc))

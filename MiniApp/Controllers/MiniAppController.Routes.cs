@@ -127,19 +127,21 @@ public static partial class MiniAppController
                 var orchestrator = context.RequestServices.GetRequiredService<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator>();
                 var result = await orchestrator.ExecuteAnalysisAsync(assetTrimmed, tf, userSettings);
                 // result is now a strongly-typed AnalysisResponseDto — read fields directly, no JSON parsing needed
-                double confidence = Math.Clamp(result.lgbmConfidence / 100.0, 0.0, 1.0);
+                bool isNeutralSignal = string.IsNullOrEmpty(result.direction)
+                    || string.Equals(result.direction, "NEUTRAL", StringComparison.OrdinalIgnoreCase);
+                double effectiveProbPct = result.probability > 0 ? result.probability : result.lgbmConfidence;
+                double confidence = isNeutralSignal ? 0.5 : Math.Clamp(effectiveProbPct / 100.0, 0.0, 1.0);
                 double variance   = 0.0; // not currently in DTO; reserved for future
                 double volatility = result.atr > 0 ? result.atr : 1.0;
-                bool isMlOverruled = !string.IsNullOrEmpty(result.direction)
-                    && result.direction != "NEUTRAL"
+                bool isMlOverruled = !isNeutralSignal
                     && !string.IsNullOrEmpty(result.lgbmDirection)
                     && result.lgbmDirection != "NEUTRAL"
                     && !string.Equals(result.direction, result.lgbmDirection, StringComparison.OrdinalIgnoreCase);
 
-                // BO Kelly Criterion
+                // BO Kelly Criterion (always 0 when signal is NEUTRAL)
                 double payout = 0.82;
                 double q = 1.0 - confidence;
-                double kellyPct = confidence - (q / payout);
+                double kellyPct = isNeutralSignal ? 0.0 : confidence - (q / payout);
                 double fractionalKelly = kellyPct > 0 ? kellyPct * 0.5 : 0.0;
                 double adjustedKelly = Math.Max(0, fractionalKelly * (1.0 - Math.Min(variance, 1.0)));
 
@@ -219,13 +221,41 @@ public static partial class MiniAppController
         }).RequireRateLimiting("Global");
 
         
-                        // Endpoint for Tampermonkey PO Data Vacuum
+                        // Endpoint for Tampermonkey PO Data Vacuum (loopback or internal secret only)
         app.MapPost("/api/collector/tick", async (HttpContext context) =>
         {
+            var remoteIp = context.Connection.RemoteIpAddress;
+            bool isLoopback = !context.Request.Headers.ContainsKey("X-Forwarded-For")
+                && remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp);
+            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
+            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
+            bool hasValidSecret = !string.IsNullOrEmpty(providedSecret) &&
+                System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(providedSecret),
+                    Encoding.UTF8.GetBytes(expectedSecret));
+
+            if (!isLoopback && !hasValidSecret)
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+            if (context.Request.ContentLength > 65536)
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+
             using var reader = new System.IO.StreamReader(context.Request.Body);
             var body = await reader.ReadToEndAsync();
-            // Log to a dedicated file so it doesn't spam the main console too much
-            System.IO.File.AppendAllText("po_vacuum_ticks.log", $"{DateTime.UtcNow:O} | {body}\n");
+            if (body.Length > 65536)
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+
+            const string logPath = "po_vacuum_ticks.log";
+            try
+            {
+                var fi = new System.IO.FileInfo(logPath);
+                if (fi.Exists && fi.Length > 10 * 1024 * 1024)
+                {
+                    System.IO.File.Move(logPath, logPath + ".old", overwrite: true);
+                }
+                System.IO.File.AppendAllText(logPath, $"{DateTime.UtcNow:O} | {body}\n");
+            }
+            catch { }
             BotLogger.Info($"[PO Vacuum] Captured raw tick: {body}");
             return Results.Ok();
         });
