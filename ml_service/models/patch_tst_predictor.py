@@ -266,15 +266,17 @@ class PatchTSTPredictor:
             self._temperature = float(checkpoint.get("temperature", 1.5)) if checkpoint.get("temperature") is not None else 1.5
 
             self.model = model
-            val_acc = checkpoint.get("val_acc", 0.0)
+            val_acc = checkpoint.get("val_acc") or 0.0
             vs = checkpoint.get("val_stats") or {}
+            dir_wr = vs.get("wr_57") or vs.get("wr_50") or val_acc or 0.0
+            n_samples = vs.get("total") or vs.get("n_val")
             self._arch_tag = "patch_tst_v3" if self._is_dual_stream else "seq_brain_v3"
             self.metrics = {
-                "accuracy": round(float(val_acc) / 100.0, 4),
+                "accuracy": round(float(dir_wr) / 100.0, 4),
                 "val_loss": checkpoint.get("val_loss"),
                 "ece": checkpoint.get("ece"),
                 "wr_60": vs.get("wr_60"),
-                "n_val": vs.get("n_val"),
+                "n_val": n_samples,
                 "epoch": checkpoint.get("epoch"),
             }
             arch_label = "DualStreamPatchBrain" if self._is_dual_stream else f"SequenceBrain({backbone})"
