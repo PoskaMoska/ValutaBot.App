@@ -337,6 +337,11 @@ def train_model(
 
     train_xc, val_xc = X_candles[:split_idx], X_candles[split_idx:]
     train_mtf, val_mtf = X_mtf[:split_idx], X_mtf[split_idx:]
+    val_asset_ids = X_macro[split_idx:, 22].copy() if X_macro.shape[1] > 22 else np.zeros(val_count)
+    X_macro = X_macro.copy()
+    if X_macro.shape[1] > 22:
+        # Neutralize ordinal asset_id (0..5) to prevent linear directional slope across pairs
+        X_macro[:, 22] = 0.0
     train_xm, val_xm = X_macro[:split_idx], X_macro[split_idx:]
     train_y, val_y = y[:split_idx], y[split_idx:]
     train_pnl, val_pnl = y_pnl[:split_idx], y_pnl[split_idx:]
@@ -353,7 +358,12 @@ def train_model(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cuda = device.type == "cuda"
-    print(f"[+] Training Device: {device} (Mixed Precision AMP: {'Enabled' if use_cuda else 'Disabled (CPU)'})")
+    if not use_cuda:
+        try:
+            torch.set_num_threads(max(1, os.cpu_count() or 8))
+        except Exception:
+            pass
+    print(f"[+] Training Device: {device} (Threads: {torch.get_num_threads()}, Mixed Precision AMP: {'Enabled' if use_cuda else 'Disabled (CPU)'})")
 
     # PyTorch Datasets & DataLoaders
     train_dataset = TensorDataset(
@@ -399,6 +409,10 @@ def train_model(
             dropout=dropout,
             backbone=backbone
         ).to(device)
+
+    with torch.no_grad():
+        if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
+            model.macro_encoder[0].weight.data[:, 22] = 0.0
 
     alpha_tensor = torch.tensor(weights, dtype=torch.float32).to(device)
     criterion_cls = nn.CrossEntropyLoss(weight=alpha_tensor, label_smoothing=label_smoothing)
@@ -541,6 +555,8 @@ def train_model(
     std_diff = max(float(diff.std().item()), 1e-4)
 
     with torch.no_grad():
+        if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
+            model.macro_encoder[0].weight.data[:, 22] = 0.0
         model.classifier[-1].bias[1] -= mean_diff / 2.0
         model.classifier[-1].bias[2] += mean_diff / 2.0
         mean_dir = 0.5 * (float(raw_logits[:, 1].mean().item()) + float(raw_logits[:, 2].mean().item()))
@@ -569,6 +585,17 @@ def train_model(
         key_wr = f"wr_{int(th*100)}"
         key_n = f"n_{int(th*100)}"
         print(f"  Confidence >= {int(th*100)}%: WinRate = {val_stats_calibrated[key_wr]:6.2f}% ({val_stats_calibrated[key_n]:5d} trades)")
+
+    asset_names = {0: "EURUSD", 1: "GBPUSD", 2: "AUDUSD", 3: "USDJPY", 4: "USDCAD", 5: "USDCHF"}
+    cal_probs = val_stats_calibrated["probs"]
+    cal_buy_mask = cal_probs[:, 1] >= cal_probs[:, 2]
+    print("\nPer-Asset Directional Balance (Validation Set):")
+    for aid, aname in asset_names.items():
+        amask = (val_asset_ids == aid)
+        if np.any(amask):
+            abuy_pct = float(np.mean(cal_buy_mask[amask]) * 100.0)
+            awr = float(np.mean(np.where(cal_buy_mask[amask], 1, 2) == val_y[amask]) * 100.0)
+            print(f"  {aname} (id={aid}): BUY% = {abuy_pct:5.1f}% | PUT% = {100.0 - abuy_pct:5.1f}% | Overall Acc = {awr:5.2f}% (N={int(np.sum(amask))})")
 
     # Save final checkpoint with centered bias, calibrated temperature, and updated stats
     val_stats_calibrated.pop("logits", None)

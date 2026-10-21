@@ -23,6 +23,12 @@ import numpy as np
 import psycopg2
 from datetime import datetime
 
+try:
+    import orjson
+    _loads = orjson.loads
+except ImportError:
+    _loads = json.loads
+
 DEFAULT_DB_URL = "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway"
 
 ASSET_MAP = {
@@ -287,9 +293,9 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-PO_CUTOFF_UTC = "2026-10-15 21:55:00+00"
+PO_CUTOFF_UTC = "2026-10-20 21:26:50+00"
 
-def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=5, include_tiingo=False, min_date=PO_CUTOFF_UTC):
+def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=5, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True):
     print("=" * 60)
     print("[*] Neural Brain Dataset Exporter (V3 Architecture)")
     print(f"Connecting to database...")
@@ -325,8 +331,20 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
         """
         params = ()
     else:
-        print(f"[*] Filtering strictly Pocket Option OTC era (created_at >= {min_date}, no Tiingo archive)")
-        query = """
+        hf_filter = ""
+        if stride_hf:
+            hf_filter = """
+              AND (
+                  (LOWER(timeframe) = 's5' AND MOD(ABS(hashtext(id)), 5) = 0)
+                  OR (LOWER(timeframe) = 's10' AND MOD(ABS(hashtext(id)), 3) = 0)
+                  OR (LOWER(timeframe) = 's15' AND MOD(ABS(hashtext(id)), 2) = 0)
+                  OR LOWER(timeframe) NOT IN ('s5', 's10', 's15')
+              )
+            """
+            print(f"[*] Filtering Golden PO OTC V3 era (created_at >= {min_date}) with harmonized cadence striding (s5: 1/5, s10: 1/3, s15: 1/2, s30/m1: 100%)")
+        else:
+            print(f"[*] Filtering strictly Pocket Option OTC era (created_at >= {min_date}, no Tiingo archive)")
+        query = f"""
             SELECT 
                 id, asset, timeframe, direction, 
                 entry_price, exit_price, pnl_bps, was_win,
@@ -337,7 +355,9 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
                 max_favorable_bps, max_adverse_bps
             FROM trade_outcomes
             WHERE features_json IS NOT NULL
+              AND entry_price > 0 AND exit_price > 0
               AND created_at >= %s::timestamptz
+              {hf_filter}
             ORDER BY created_at ASC
         """
         params = (min_date,)
@@ -395,7 +415,7 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
             continue
             
         try:
-            feat_obj = json.loads(feat_str)
+            feat_obj = _loads(feat_str)
         except Exception:
             skipped_count += 1
             continue
@@ -563,6 +583,7 @@ if __name__ == "__main__":
     parser.add_argument("--channels", type=int, choices=[4, 5], default=5, help="Candle feature channels: 4 (OHLC) or 5 (OHLCV)")
     parser.add_argument("--include-tiingo", action="store_true", help="Include legacy Tiingo era rows (not recommended for PO OTC)")
     parser.add_argument("--min-date", default=PO_CUTOFF_UTC, help="Minimum created_at UTC timestamp for PO era")
+    parser.add_argument("--no-stride-hf", action="store_true", help="Disable SQL striding of high-frequency s5/s10 rows")
     args = parser.parse_args()
     
     export_dataset(
@@ -573,5 +594,6 @@ if __name__ == "__main__":
         seq_len_mtf=args.seq_len_mtf,
         channels=args.channels,
         include_tiingo=args.include_tiingo,
-        min_date=args.min_date
+        min_date=args.min_date,
+        stride_hf=not args.no_stride_hf
     )
