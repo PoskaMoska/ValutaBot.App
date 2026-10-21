@@ -11,15 +11,15 @@ namespace ValutaBot.MiniApp.Services;
 public class DataRetentionService : BackgroundService
 {
     private readonly TimeSpan _historicalRetention = TimeSpan.FromDays(30);
-    private readonly TimeSpan _poSubminuteRetention = TimeSpan.FromDays(10); // 10 дней для subminute_candles *_PO (~500 МБ)
+    private readonly TimeSpan _poSubminuteRetention = TimeSpan.FromDays(7);  // 7 дней для subminute_candles *_PO (~250 МБ)
     private readonly TimeSpan _poTicksRetention = TimeSpan.FromDays(2);      // 48 часов для сырых po_ticks (~280 МБ)
-    private readonly TimeSpan _shadowOutcomesRetention = TimeSpan.FromDays(8); // 8 дней для фоновых SHADOW/HOLD в trade_outcomes (REAL хранятся бессрочно)
+    private readonly TimeSpan _shadowOutcomesRetention = TimeSpan.FromDays(2); // 48 часов для фоновых SHADOW/HOLD в trade_outcomes (REAL хранятся бессрочно)
     private readonly TimeSpan _legacySubminuteRetention = TimeSpan.FromDays(1);
     private readonly TimeSpan _cleanupInterval = TimeSpan.FromHours(1);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        BotLogger.Info("[DataRetention] Service started. Will clean po_ticks (48h), SHADOW/HOLD outcomes (8d), PO subminute (10d), and historical data (30d) every hour.");
+        BotLogger.Info("[DataRetention] Service started. Will clean po_ticks (48h), SHADOW/HOLD outcomes (48h), clear heavy features_json (>12h), PO subminute (7d), and historical data (30d) every hour.");
         
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -60,6 +60,9 @@ public class DataRetentionService : BackgroundService
         int shadowDeleted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (SHADOW/HOLD)",
             "DELETE FROM trade_outcomes WHERE direction NOT IN ('BUY', 'PUT') AND created_at::timestamptz < @cutoff",
             new { cutoff = shadowCutoff });
+        int featuresCleared = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (features_json clear)",
+            "UPDATE trade_outcomes SET features_json = NULL WHERE features_json IS NOT NULL AND direction NOT IN ('BUY', 'PUT') AND created_at < NOW() - INTERVAL '12 hours'",
+            new { });
         int stalePendingDeleted = await ExecuteSafeDeleteAsync(conn, "pending_trades",
             "DELETE FROM pending_trades WHERE verify_at < @cutoff",
             new { cutoff = stalePendingCutoff });
@@ -67,9 +70,9 @@ public class DataRetentionService : BackgroundService
             "DELETE FROM po_ticks WHERE ts < @cutoff",
             new { cutoff = tickCutoffEpoch });
         
-        if (histDeleted > 0 || subDeleted > 0 || tickDeleted > 0 || shadowDeleted > 0 || stalePendingDeleted > 0)
+        if (histDeleted > 0 || subDeleted > 0 || tickDeleted > 0 || shadowDeleted > 0 || stalePendingDeleted > 0 || featuresCleared > 0)
         {
-            BotLogger.Info($"[DataRetention] Pruned old data: {histDeleted} historical (>30d), {subPoDeleted} PO subminute (>10d), {shadowDeleted} SHADOW/HOLD outcomes (>8d), {tickDeleted} po_ticks (>48h), {stalePendingDeleted} stale pending.");
+            BotLogger.Info($"[DataRetention] Pruned old data: {histDeleted} historical, {subPoDeleted} PO subminute, {shadowDeleted} SHADOW outcomes (>48h), {featuresCleared} features_json cleared (>12h), {tickDeleted} po_ticks (>48h).");
         }
     }
 
