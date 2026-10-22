@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime, timezone
 import pandas as pd
-from model import parse_candle_timestamp_ms
+from common import parse_candle_timestamp_ms
 
 def test_parse_candle_timestamp_integer():
     """Test parsing standard integer milliseconds (e.g., from Binance)."""
@@ -19,7 +19,6 @@ def test_parse_candle_timestamp_iso_string():
     """Test parsing ISO8601 string (e.g., from TwelveData PostgreSQL)."""
     iso_str = "2026-09-21T21:41:20.0000000Z"
     res = parse_candle_timestamp_ms(iso_str)
-    # 2026-09-21 21:41:20 UTC -> 1790026880.0 sec -> 1790026880000.0 ms
     dt = pd.to_datetime(iso_str, utc=True)
     expected_ms = dt.timestamp() * 1000.0
     assert res == expected_ms

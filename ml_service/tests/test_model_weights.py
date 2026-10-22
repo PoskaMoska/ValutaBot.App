@@ -5,22 +5,21 @@ import os
 # Add ml_service to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from model import ForexPredictor
+from models.patch_tst_predictor import PatchTSTPredictor
 
-def test_lightgbm_initialization():
+def test_neural_brain_initialization():
     """
-    Sanity Check for memory and model loading.
-    Ensures that LightGBM is correctly installed and that the ForexPredictor
-    can instantiate without SegFaulting or throwing missing dependency errors.
+    Sanity Check for Neural Brain initialization and PyTorch weights loading.
+    Ensures that PatchTSTPredictor is loaded and available for live inference.
     """
     try:
-        import lightgbm as lgb
+        import torch
     except ImportError:
-        pytest.fail("LightGBM is not installed. The deployment container is missing required dependencies!")
+        pytest.fail("PyTorch is not installed. Container missing required ML dependencies!")
 
-    # Instantiate the strategist
-    try:
-        strategist = ForexPredictor("EURUSD", "1m")
-        assert strategist._model is None or hasattr(strategist._model, 'predict')
-    except Exception as e:
-        pytest.fail(f"ForexPredictor failed to initialize during deploy: {str(e)}")
+    predictor = PatchTSTPredictor.get_instance()
+    assert predictor.is_available(), "PatchTSTPredictor must be loaded and available!"
+    assert predictor.model is not None, "Neural model state dict failed to load!"
+    assert predictor._candle_features in (4, 5)
+    assert predictor._seq_len == 160
+    assert predictor._seq_len_mtf == 30
