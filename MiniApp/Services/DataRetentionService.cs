@@ -35,10 +35,10 @@ public record StorageTelemetry(
 public class DataRetentionService : BackgroundService
 {
     private const double MaxVolumeCapacityMb = 5120.0; // Railway 5 GB starter volume (5 * 1024 MB)
-    private const double GreenThresholdMb    = 3000.0; // 58%: Full 30-day depth
-    private const double YellowThresholdMb   = 3900.0; // 76%: Importance sampling active
-    private const double RedThresholdMb      = 4500.0; // 88%: High-frequency cleanup every 15 min
-    private const double EmergencyThresholdMb= 4800.0; // 94%: Critical purge + aggressive eviction
+    private const double GreenThresholdMb    = 2000.0; // 39%: Safe operational zone (~2.7 GB physical disk)
+    private const double YellowThresholdMb   = 2800.0; // 55%: Importance sampling + 24h shadow window (~3.5 GB physical disk)
+    private const double RedThresholdMb      = 3400.0; // 66%: High-frequency cleanup every 15 min (~4.1 GB physical disk)
+    private const double EmergencyThresholdMb= 3800.0; // 74%: Critical purge before physical disk exceeds 90%
 
     private static StorageTelemetry? _latestTelemetry;
     private static bool _tableTuningApplied = false;
@@ -134,24 +134,24 @@ public class DataRetentionService : BackgroundService
         switch (telemetry.ActiveZone)
         {
             case StorageZone.Green:
-                subminuteRetention = TimeSpan.FromDays(30);
-                shadowRetention = TimeSpan.FromDays(30);
-                doImportanceSampling = false;
+                subminuteRetention = TimeSpan.FromDays(7);
+                shadowRetention = TimeSpan.FromDays(2);
+                doImportanceSampling = true;
                 doRedZonePruning = false;
                 break;
 
             case StorageZone.Yellow:
-                subminuteRetention = TimeSpan.FromDays(21);
-                shadowRetention = TimeSpan.FromDays(14);
+                subminuteRetention = TimeSpan.FromDays(4);
+                shadowRetention = TimeSpan.FromHours(24);
                 doImportanceSampling = true;
-                doRedZonePruning = false;
+                doRedZonePruning = true;
                 break;
 
             case StorageZone.Red:
             default:
                 // Red includes both RedThreshold and Emergency — Emergency already handled above
-                subminuteRetention = TimeSpan.FromDays(5);
-                shadowRetention = TimeSpan.FromDays(2);
+                subminuteRetention = TimeSpan.FromDays(2);
+                shadowRetention = TimeSpan.FromHours(12);
                 doImportanceSampling = true;
                 doRedZonePruning = true;
                 break;
@@ -173,20 +173,17 @@ public class DataRetentionService : BackgroundService
         int pendingDeleted = await ExecuteSafeDeleteAsync(conn, "pending_trades",
             "DELETE FROM pending_trades WHERE verify_at < @cutoff", new { cutoff = stalePendingCutoff });
 
-        // 6. Importance Sampling for trade_outcomes
+        // 6. Importance Sampling and Pruning for trade_outcomes
         int shadowDeleted = 0;
         int chopStrided = 0;
         int jsonCompacted = 0;
 
         if (doRedZonePruning)
         {
-            shadowDeleted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Red Zone Chop Pruning)",
+            shadowDeleted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Shadow Pruning)",
                 @"DELETE FROM trade_outcomes
                   WHERE direction NOT IN ('BUY', 'PUT')
-                    AND created_at::timestamptz < @cutoff
-                    AND smc_bos_dir = 'NONE'
-                    AND smc_has_ob = false
-                    AND COALESCE(ABS(pnl_bps), 0) <= 1e-4",
+                    AND created_at::timestamptz < @cutoff",
                 new { cutoff = shadowCutoff });
         }
 
@@ -195,7 +192,7 @@ public class DataRetentionService : BackgroundService
             chopStrided = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Importance Sampling Stride)",
                 @"DELETE FROM trade_outcomes
                   WHERE direction NOT IN ('BUY', 'PUT')
-                    AND created_at::timestamptz < NOW() - INTERVAL '48 hours'
+                    AND created_at::timestamptz < NOW() - INTERVAL '24 hours'
                     AND smc_bos_dir = 'NONE'
                     AND smc_has_ob = false
                     AND COALESCE(ABS(pnl_bps), 0) <= 1e-4
@@ -205,8 +202,7 @@ public class DataRetentionService : BackgroundService
             jsonCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Features JSON Compaction)",
                 @"UPDATE trade_outcomes
                   SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
-                  WHERE created_at::timestamptz < NOW() - INTERVAL '24 hours'
-                    AND features_json IS NOT NULL
+                  WHERE features_json IS NOT NULL
                     AND features_json LIKE '%""Candles""%'",
                 new { });
         }
