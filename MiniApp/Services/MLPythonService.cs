@@ -23,6 +23,60 @@ public static class MLPythonService
     private static IHttpClientFactory? _httpFactory;
 
     public static void SetFactory(IHttpClientFactory factory) => _httpFactory = factory;
+
+    /// <summary>Raw outcome of a contract probe against /predict (status code is preserved, unlike PredictAsync which swallows it).</summary>
+    public record MlContractProbe(bool ServiceConfigured, int? StatusCode, MLPythonPrediction? Prediction, string? Error, long ElapsedMs);
+
+    /// <summary>
+    /// Chaos-audit probe: sends the same payload shape the live pipeline sends, but returns the HTTP status
+    /// so contract violations (e.g. 422 for too few candles) are visible instead of being silently turned into null.
+    /// Never throws; never touches bot state.
+    /// </summary>
+    public static async Task<MlContractProbe> ProbeContractAsync(
+        string symbol, string interval,
+        MiniAppController.OhlcCandle[] candles,
+        MiniAppController.OhlcCandle[]? mtfCandles,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(_baseUrl) || _httpFactory == null)
+            return new MlContractProbe(false, null, null, "ML service not configured", 0);
+
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            object Map(MiniAppController.OhlcCandle[] src) => src.Select(c => new {
+                openTime = new DateTimeOffset(DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc)).ToUnixTimeSeconds(),
+                open = c.Open, high = c.High, low = c.Low, close = c.Close, volume = c.Volume
+            }).ToArray();
+
+            object payload = new
+            {
+                symbol = MapSymbol(symbol, true), interval, candles = Map(candles), is_forex = true,
+                mtf_candles = (mtfCandles != null && mtfCandles.Length > 0) ? Map(mtfCandles) : null,
+                smc_bos_dir = "NONE", smc_has_ob = false, smc_ob_type = "NONE",
+                smc_has_fvg = false, smc_fvg_type = "NONE", smc_has_swp = false, smc_swp_dir = "NONE",
+                of_delta_ratio = 1.0, of_state = "NEUTRAL", macro_context = (object?)null
+            };
+
+            using var content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(payload));
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            var client = _httpFactory.CreateClient("MLPythonService");
+            var response = await client.PostAsync(new Uri($"{_baseUrl}/predict"), content, ct);
+            sw.Stop();
+
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+                return new MlContractProbe(true, (int)response.StatusCode, null, body.Length > 200 ? body[..200] : body, sw.ElapsedMilliseconds);
+
+            var pred = JsonSerializer.Deserialize<MLPythonPrediction>(body, _jsonOptions);
+            return new MlContractProbe(true, (int)response.StatusCode, pred, null, sw.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return new MlContractProbe(true, null, null, $"{ex.GetType().Name}: {ex.Message}", sw.ElapsedMilliseconds);
+        }
+    }
     private static Process? _mlProcess; // Track to prevent zombie leaks
 
 

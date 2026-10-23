@@ -36,6 +36,7 @@ public class ChaosAuditService : IChaosAuditService
         _scenarios.Add(new ExtremeCandleFuzzingScenario());
         _scenarios.Add(new ProbabilityBoundsInvariantScenario());
         _scenarios.Add(new TradeTimeoutInvariantScenario());
+        _scenarios.Add(new ModelContractGridScenario());
 
         // 2. Data & Database Fault Injection
         _scenarios.Add(new StaleDataAndGapFaultScenario());
