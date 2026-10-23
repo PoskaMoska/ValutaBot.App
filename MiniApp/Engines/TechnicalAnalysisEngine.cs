@@ -290,6 +290,29 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
     {
         if (prices.Length < 15) return new GatekeeperResult(false, "Недостаточно данных цены для проверки Gatekeeper", 0, 0);
 
+        // Data Integrity Guard: reject corrupted candles (Low > High, price <= 0, NaN/Inf)
+        for (int i = 0; i < prices.Length; i++)
+        {
+            if (prices[i] <= 0 || double.IsNaN(prices[i]) || double.IsInfinity(prices[i]))
+            {
+                BotLogger.Warn($"[Gatekeeper] Corrupted price detected at index {i}: {prices[i]}. Analysis aborted.");
+                return new GatekeeperResult(false, "Corrupted price data (<= 0 or NaN).", 0, 0);
+            }
+        }
+
+        if (candles.Length > 0)
+        {
+            for (int i = 0; i < candles.Length; i++)
+            {
+                var c = candles[i];
+                if (c.Low > c.High || c.Close <= 0 || c.Open <= 0 || double.IsNaN(c.Close) || double.IsInfinity(c.Close))
+                {
+                    BotLogger.Warn($"[Gatekeeper] Corrupted candle detected at index {i}: O={c.Open}, H={c.High}, L={c.Low}, C={c.Close}. Low > High or invalid values.");
+                    return new GatekeeperResult(false, "Corrupted candle data (Low > High or invalid price).", 0, 0);
+                }
+            }
+        }
+
         // FIX ROOT CAUSE: Shared Cache Poisoning. 
         // Gatekeeper used to pass `candles` (which included the live forming candle) to ComputeAtr.
         // This caused the IndicatorCache to advance its permanent state up to the last closed candle.

@@ -8,5 +8,7 @@ public interface IChaosAuditService
 {
     Task<ChaosAuditReport> RunFullAuditAsync(CancellationToken ct = default);
     Task<ChaosAuditReport> RunCategoryAuditAsync(ChaosCategory category, CancellationToken ct = default);
+    Task<ChaosScenarioResult?> RunSingleSabotageRoundAsync(CancellationToken ct = default);
+    SabotageStatsDto GetSaboteurStats();
     ChaosAuditReport? GetLatestReport();
 }

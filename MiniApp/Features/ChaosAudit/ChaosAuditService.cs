@@ -18,6 +18,14 @@ using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.StressAndOutages;
 
 namespace ValutaBot.MiniApp.Features.ChaosAudit;
 
+/// <summary>
+/// Continuous In-Process Saboteur (Chaos Monkey & Adversarial Fault Injector):
+///  - Attacks the bot's runtime, pipeline, and Neural Brain continuously from the inside.
+///  - Operates on isolated sandboxes (CHAOS_*) to guarantee 0% interference with live trading.
+///  - Absolutely silent when attacks are safely repelled (no spam reports).
+///  - Instantly alerts Telegram when a defense is breached or unhandled crash occurs,
+///    acting as an AI Explainer with root cause, danger diagnosis, and code fix location.
+/// </summary>
 public class ChaosAuditService : IChaosAuditService
 {
     private readonly IServiceProvider _serviceProvider;
@@ -26,21 +34,36 @@ public class ChaosAuditService : IChaosAuditService
     private readonly SemaphoreSlim _runLock = new(1, 1);
     private ChaosAuditReport? _latestReport;
 
+    // Saboteur execution state & telemetry
+    private int _currentScenarioIndex = 0;
+    private int _totalAttacksLaunched = 0;
+    private int _attacksRepelled = 0;
+    private int _attacksBreached = 0;
+    private readonly DateTime _saboteurStartedUtc = DateTime.UtcNow;
+    private DateTime? _lastAttackUtc;
+    private string? _lastAttackScenario;
+    private ChaosScenarioResult? _lastBreachResult;
+
+    // Deduplication tracking to prevent spamming the exact same unchanged breach within 24h
+    private static readonly ConcurrentDictionary<string, (string Fingerprint, DateTime AlertedUtc)> _alertedFindings = new();
+
     public ChaosAuditService(IServiceProvider serviceProvider, ILogger<ChaosAuditService>? logger = null)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
 
         // Register scenarios in order:
-        // 1. Invariants & Property-Tests (cheapest, catches fundamental bugs)
+        // 1. Invariants & Neural Brain Fuzzing
         _scenarios.Add(new SymmetryMirrorInvariantScenario());
         _scenarios.Add(new ExtremeCandleFuzzingScenario());
         _scenarios.Add(new ProbabilityBoundsInvariantScenario());
         _scenarios.Add(new TradeTimeoutInvariantScenario());
         _scenarios.Add(new TradeVerificationInvariantScenario());
         _scenarios.Add(new ModelContractGridScenario());
+        _scenarios.Add(new NeuralAdversarialFuzzingScenario());
 
-        // 2. Data & Database Fault Injection
+        // 2. Data & Database Fault Injection & Pipeline Poisoning
+        _scenarios.Add(new PipelinePoisoningScenario());
         _scenarios.Add(new StaleDataAndGapFaultScenario());
         _scenarios.Add(new CircuitBreakerQuarantineFaultScenario());
         _scenarios.Add(new DatabaseResilienceFaultScenario());
@@ -52,6 +75,83 @@ public class ChaosAuditService : IChaosAuditService
     }
 
     public ChaosAuditReport? GetLatestReport() => _latestReport;
+
+    public SabotageStatsDto GetSaboteurStats() => new()
+    {
+        TotalAttacksLaunched = _totalAttacksLaunched,
+        AttacksRepelled = _attacksRepelled,
+        AttacksBreached = _attacksBreached,
+        SaboteurStartedUtc = _saboteurStartedUtc,
+        LastAttackUtc = _lastAttackUtc,
+        LastAttackScenario = _lastAttackScenario,
+        LastBreach = _lastBreachResult
+    };
+
+    /// <summary>
+    /// Executes a single micro-sabotage assault chosen sequentially/shuffled across registered scenarios.
+    /// Runs low-priority in the background. If repelled -> complete silence. If breached -> immediate Telegram alert.
+    /// </summary>
+    public async Task<ChaosScenarioResult?> RunSingleSabotageRoundAsync(CancellationToken ct = default)
+    {
+        if (_scenarios.Count == 0) return null;
+
+        await _runLock.WaitAsync(ct);
+        try
+        {
+            int idx = (int)((uint)Interlocked.Increment(ref _currentScenarioIndex) % (uint)_scenarios.Count);
+            var scenario = _scenarios[idx];
+            _lastAttackScenario = scenario.Name;
+            _lastAttackUtc = DateTime.UtcNow;
+            Interlocked.Increment(ref _totalAttacksLaunched);
+
+            BotLogger.Info($"[SABOTEUR] Micro-assault #{_totalAttacksLaunched} launched: {scenario.Name} ({scenario.Category})...");
+
+            using var scope = _serviceProvider.CreateScope();
+            ChaosScenarioResult result;
+            try
+            {
+                result = await scenario.ExecuteAsync(scope.ServiceProvider, ct);
+            }
+            catch (Exception ex)
+            {
+                result = ChaosScenarioResult.Failure(
+                    scenario.Name,
+                    scenario.Category,
+                    0,
+                    $"Unhandled exception during execution: {ex.Message}",
+                    "Internal Saboteur micro-probe",
+                    ex.Message,
+                    "Scenario handles errors gracefully",
+                    ex.StackTrace ?? "",
+                    "Add exception guards in the scenario runner.",
+                    ChaosSeverity.Critical,
+                    "Неконтролируемое падение рабочего потока бота"
+                );
+            }
+
+            if (result.Passed)
+            {
+                Interlocked.Increment(ref _attacksRepelled);
+                BotLogger.Info($"[SABOTEUR] Attack #{_totalAttacksLaunched} REPELLED by guards: {scenario.Name} ({result.DurationMs}ms)");
+                // SILENCE: When the bot withstands the attack, send ZERO messages to Telegram.
+            }
+            else
+            {
+                Interlocked.Increment(ref _attacksBreached);
+                _lastBreachResult = result;
+                BotLogger.Warn($"[SABOTEUR] Attack #{_totalAttacksLaunched} BREACHED guards: {scenario.Name} - {result.Description}");
+
+                // Immediate Alert with AI Explainer persona
+                await NotifyAdminsOfBreachAsync(result);
+            }
+
+            return result;
+        }
+        finally
+        {
+            _runLock.Release();
+        }
+    }
 
     public async Task<ChaosAuditReport> RunCategoryAuditAsync(ChaosCategory category, CancellationToken ct = default)
     {
@@ -88,6 +188,10 @@ public class ChaosAuditService : IChaosAuditService
 
                 try
                 {
+                    _lastAttackScenario = scenario.Name;
+                    _lastAttackUtc = DateTime.UtcNow;
+                    Interlocked.Increment(ref _totalAttacksLaunched);
+
                     BotLogger.Info($"[CHAOS-AUDIT] Running scenario: {scenario.Name} ({scenario.Category})...");
                     var result = await scenario.ExecuteAsync(scope.ServiceProvider, ct);
                     report.Results.Add(result);
@@ -95,22 +199,28 @@ public class ChaosAuditService : IChaosAuditService
                     if (result.Passed)
                     {
                         report.PassedCount++;
+                        Interlocked.Increment(ref _attacksRepelled);
                         BotLogger.Info($"[CHAOS-AUDIT] PASS: {scenario.Name} ({result.DurationMs}ms)");
                     }
                     else if (result.Severity == ChaosSeverity.Warning)
                     {
                         report.WarningCount++;
+                        Interlocked.Increment(ref _attacksBreached);
+                        _lastBreachResult = result;
                         BotLogger.Warn($"[CHAOS-AUDIT] WARN: {scenario.Name} ({result.DurationMs}ms) - {result.Description}");
                     }
                     else
                     {
                         report.FailedCount++;
+                        Interlocked.Increment(ref _attacksBreached);
+                        _lastBreachResult = result;
                         BotLogger.Error($"[CHAOS-AUDIT] FAIL: {scenario.Name} ({result.DurationMs}ms) - {result.Description}", null);
                     }
                 }
                 catch (Exception ex)
                 {
                     report.FailedCount++;
+                    Interlocked.Increment(ref _attacksBreached);
                     var errorResult = ChaosScenarioResult.Failure(
                         scenario.Name,
                         scenario.Category,
@@ -120,9 +230,11 @@ public class ChaosAuditService : IChaosAuditService
                         ex.Message,
                         "Scenario handles errors gracefully",
                         ex.StackTrace ?? "",
-                        "Audit scenario runner.",
-                        ChaosSeverity.Critical
+                        "Fix unhandled exception in scenario runner.",
+                        ChaosSeverity.Critical,
+                        "Неконтролируемое падение рабочего потока бота"
                     );
+                    _lastBreachResult = errorResult;
                     report.Results.Add(errorResult);
                     BotLogger.Error($"[CHAOS-AUDIT] CRITICAL: {scenario.Name} threw exception: {ex.Message}", ex);
                 }
@@ -144,7 +256,8 @@ public class ChaosAuditService : IChaosAuditService
 
             _latestReport = report;
 
-            // Dispatch Telegram notification (with deduplication and auto-recovery notice)
+            // Dispatch Telegram notification ONLY if there are actionable breaches (deduplicated)
+            // If all passed: COMPLETE SILENCE. No recovery messages!
             await NotifyAdminsOfChaosFindingsAsync(report);
 
             return report;
@@ -155,8 +268,67 @@ public class ChaosAuditService : IChaosAuditService
         }
     }
 
-    private static readonly ConcurrentDictionary<string, (string Fingerprint, DateTime AlertedUtc)> _alertedFindings = new();
-    private static bool _wasDegradedOrFailed = false;
+    /// <summary>
+    /// Formats a single scenario breach into the AI Saboteur Explainer message.
+    /// </summary>
+    private static string FormatBreachMessage(ChaosScenarioResult r)
+    {
+        string icon = r.Severity == ChaosSeverity.Critical ? "🚨" : "🟡";
+        string statusText = r.Severity == ChaosSeverity.Critical ? "КРИТИЧЕСКИЙ СБОЙ" : "ЗАМЕЧАНИЕ / ДЕГРАДАЦИЯ";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"👾 <b>[ВНУТРЕННИЙ ДИВЕРСАНТ] ОБНАРУЖЕНА УЯЗВИМОСТЬ В СИСТЕМЕ!</b>");
+        sb.AppendLine($"Статус: <b>{icon} {statusText}</b>");
+        sb.AppendLine();
+        sb.AppendLine($"💥 <b>Сценарий атаки:</b> {r.ScenarioName} (<i>{r.Category}</i>)");
+        if (!string.IsNullOrEmpty(r.TriggerDetails))
+            sb.AppendLine($"🧪 <b>Внедренный яд / Мутация:</b>\n<code>{r.TriggerDetails}</code>\n");
+
+        sb.AppendLine($"⚠️ <b>Симптом сбоя:</b> {r.Description}");
+        if (!string.IsNullOrEmpty(r.ObservedOutput))
+            sb.AppendLine($"📥 <b>Фактический результат:</b> <code>{r.ObservedOutput}</code>");
+        if (!string.IsNullOrEmpty(r.ExpectedOutput))
+            sb.AppendLine($"🎯 <b>Ожидаемое поведение:</b> <code>{r.ExpectedOutput}</code>");
+
+        sb.AppendLine();
+        if (!string.IsNullOrEmpty(r.FinancialRisk))
+            sb.AppendLine($"💸 <b>Опасность для депозита:</b>\n<i>{r.FinancialRisk}</i>\n");
+
+        sb.AppendLine($"🔍 <b>AI-Диагноз и локация в коде:</b>");
+        if (!string.IsNullOrEmpty(r.RootCause))
+            sb.AppendLine($"• <b>Причина:</b> {r.RootCause}");
+        if (!string.IsNullOrEmpty(r.FixRecommendation))
+            sb.AppendLine($"• <b>Где и как чинить:</b> <code>{r.FixRecommendation}</code>");
+
+        return sb.ToString();
+    }
+
+    private static async Task NotifyAdminsOfBreachAsync(ChaosScenarioResult r)
+    {
+        try
+        {
+            string key = r.ScenarioName;
+            string fingerprint = $"{r.Severity}:{r.Description}:{r.TriggerDetails}";
+            var now = DateTime.UtcNow;
+
+            if (_alertedFindings.TryGetValue(key, out var existing))
+            {
+                if (existing.Fingerprint == fingerprint && (now - existing.AlertedUtc) < TimeSpan.FromHours(24))
+                {
+                    BotLogger.Info($"[SABOTEUR] Breach '{key}' unchanged within 24h — suppressing repeat Telegram alert.");
+                    return;
+                }
+            }
+
+            _alertedFindings[key] = (fingerprint, now);
+            string msg = FormatBreachMessage(r);
+            await TelegramBotService.SendMessageToAdmins(msg);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[SABOTEUR] Could not send Telegram alert: {ex.Message}");
+        }
+    }
 
     private static async Task NotifyAdminsOfChaosFindingsAsync(ChaosAuditReport report)
     {
@@ -165,20 +337,9 @@ public class ChaosAuditService : IChaosAuditService
             var unpassed = report.Results.Where(r => !r.Passed).ToList();
             if (unpassed.Count == 0)
             {
-                // Recovery notice: if system was previously degraded/failed, notify admins of full recovery
-                if (_wasDegradedOrFailed)
-                {
-                    _wasDegradedOrFailed = false;
-                    _alertedFindings.Clear();
-                    await TelegramBotService.SendMessageToAdmins(
-                        $"🟢 <b>Chaos Audit: Все замечания устранены</b>\n" +
-                        $"Статус: <b>PASS</b> (Пройдено: {report.PassedCount}/{report.TotalScenarios}, Замечаний: 0, Ошибок: 0)."
-                    );
-                }
+                // NO NOTIFICATION. Complete silence when all passed.
                 return;
             }
-
-            _wasDegradedOrFailed = true;
 
             // Deduplication: only alert on findings that are new or changed within 24h
             var now = DateTime.UtcNow;
@@ -207,31 +368,11 @@ public class ChaosAuditService : IChaosAuditService
                 return;
             }
 
-            string icon = report.FailedCount > 0 ? "🚨" : "🟡";
-            var sb = new StringBuilder();
-            sb.AppendLine($"{icon} <b>Chaos Audit: Обнаружены замечания системы</b>");
-            sb.AppendLine($"Статус: <b>{report.Status}</b> (Пройдено: {report.PassedCount}/{report.TotalScenarios}, Замечаний: {report.WarningCount}, Ошибок: {report.FailedCount})");
-            sb.AppendLine();
-
             foreach (var r in newOrChanged)
             {
-                string itemIcon = r.Severity == ChaosSeverity.Critical ? "❌" : "⚠️";
-                sb.AppendLine($"{itemIcon} <b>{r.ScenarioName}</b> ({r.Category})");
-                sb.AppendLine($"• <b>Аномалия:</b> {r.Description}");
-                if (!string.IsNullOrEmpty(r.TriggerDetails))
-                    sb.AppendLine($"• <b>Триггер:</b> <code>{r.TriggerDetails}</code>");
-                if (!string.IsNullOrEmpty(r.ObservedOutput))
-                    sb.AppendLine($"• <b>Получено:</b> <code>{r.ObservedOutput}</code>");
-                if (!string.IsNullOrEmpty(r.ExpectedOutput))
-                    sb.AppendLine($"• <b>Ожидалось:</b> <code>{r.ExpectedOutput}</code>");
-                if (!string.IsNullOrEmpty(r.RootCause))
-                    sb.AppendLine($"• <b>Причина:</b> {r.RootCause}");
-                if (!string.IsNullOrEmpty(r.FixRecommendation))
-                    sb.AppendLine($"• <b>Рекомендация:</b> <i>{r.FixRecommendation}</i>");
-                sb.AppendLine();
+                string msg = FormatBreachMessage(r);
+                await TelegramBotService.SendMessageToAdmins(msg);
             }
-
-            await TelegramBotService.SendMessageToAdmins(sb.ToString());
         }
         catch (Exception ex)
         {

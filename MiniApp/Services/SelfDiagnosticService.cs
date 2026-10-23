@@ -344,8 +344,8 @@ public class SelfDiagnosticService : BackgroundService
             }
         }
         
-        // 8. Periodic Autonomous Chaos Audit (every 12 hours)
-        if (DateTime.UtcNow - _lastChaosAuditTime >= TimeSpan.FromHours(12))
+        // 8. Continuous Autonomous In-Process Saboteur (Micro-Assault every 3 minutes)
+        if (DateTime.UtcNow - _lastChaosAuditTime >= TimeSpan.FromMinutes(3))
         {
             _lastChaosAuditTime = DateTime.UtcNow;
             try
@@ -353,23 +353,22 @@ public class SelfDiagnosticService : BackgroundService
                 var chaosService = scope.ServiceProvider.GetService<ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService>();
                 if (chaosService != null)
                 {
-                    BotLogger.Info("[Diagnostics] Triggering scheduled periodic Chaos Audit...");
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            await chaosService.RunFullAuditAsync(stoppingToken);
+                            await chaosService.RunSingleSabotageRoundAsync(stoppingToken);
                         }
                         catch (Exception exChaos)
                         {
-                            BotLogger.Warn($"[Diagnostics] Periodic Chaos Audit background error: {exChaos.Message}");
+                            BotLogger.Warn($"[Saboteur] Background assault error: {exChaos.Message}");
                         }
                     }, stoppingToken);
                 }
             }
             catch (Exception exChaos)
             {
-                BotLogger.Warn($"[Diagnostics] Chaos Audit trigger notice: {exChaos.Message}");
+                BotLogger.Warn($"[Saboteur] Micro-assault trigger notice: {exChaos.Message}");
             }
         }
 

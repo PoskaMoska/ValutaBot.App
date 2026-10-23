@@ -36,7 +36,8 @@ public static class MLPythonService
         string symbol, string interval,
         MiniAppController.OhlcCandle[] candles,
         MiniAppController.OhlcCandle[]? mtfCandles,
-        CancellationToken ct)
+        CancellationToken ct,
+        object? macroContext = null)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl) || _httpFactory == null)
             return new MlContractProbe(false, null, null, "ML service not configured", 0);
@@ -55,7 +56,7 @@ public static class MLPythonService
                 mtf_candles = (mtfCandles != null && mtfCandles.Length > 0) ? Map(mtfCandles) : null,
                 smc_bos_dir = "NONE", smc_has_ob = false, smc_ob_type = "NONE",
                 smc_has_fvg = false, smc_fvg_type = "NONE", smc_has_swp = false, smc_swp_dir = "NONE",
-                of_delta_ratio = 1.0, of_state = "NEUTRAL", macro_context = (object?)null
+                of_delta_ratio = 1.0, of_state = "NEUTRAL", macro_context = macroContext
             };
 
             using var content = new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(payload));

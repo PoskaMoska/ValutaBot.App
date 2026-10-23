@@ -7,6 +7,7 @@ using ValutaBot.Core;
 using ValutaBot.MiniApp;
 using ValutaBot.MiniApp.Features.ChaosAudit;
 using ValutaBot.MiniApp.Features.ChaosAudit.Models;
+using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.DataFaults;
 using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.Invariants;
 using ValutaBot.MiniApp.Services;
 using Xunit;
@@ -123,5 +124,41 @@ public class ChaosAuditServiceTests
 
         Assert.NotNull(result);
         Assert.True(result.Passed, $"Trade verification invariant failed: {result.Description} ({result.RootCause})");
+    }
+
+    [Fact]
+    public async Task PipelinePoisoning_RejectsInvertedAndCorruptedCandles()
+    {
+        var scenario = new PipelinePoisoningScenario();
+        var result = await scenario.ExecuteAsync(_serviceProvider);
+
+        Assert.NotNull(result);
+        Assert.True(result.Passed, $"Pipeline poisoning test failed: {result.Description} ({result.RootCause})");
+    }
+
+    [Fact]
+    public async Task NeuralAdversarialFuzzing_ExecutesGracefully()
+    {
+        var scenario = new NeuralAdversarialFuzzingScenario();
+        var result = await scenario.ExecuteAsync(_serviceProvider);
+
+        Assert.NotNull(result);
+        Assert.True(result.Passed, $"Neural fuzzing failed: {result.Description} ({result.RootCause})");
+    }
+
+    [Fact]
+    public async Task RunSingleSabotageRoundAsync_ExecutesAndTracksTelemetry()
+    {
+        var chaosService = _serviceProvider.GetRequiredService<IChaosAuditService>();
+
+        var result = await chaosService.RunSingleSabotageRoundAsync();
+        Assert.NotNull(result);
+
+        var stats = chaosService.GetSaboteurStats();
+        Assert.NotNull(stats);
+        Assert.True(stats.TotalAttacksLaunched >= 1);
+        Assert.True(stats.AttacksRepelled >= 1);
+        Assert.NotNull(stats.LastAttackScenario);
+        Assert.NotNull(stats.LastAttackUtc);
     }
 }

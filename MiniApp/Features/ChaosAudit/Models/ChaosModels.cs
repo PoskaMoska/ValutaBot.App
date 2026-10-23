@@ -33,6 +33,7 @@ public class ChaosScenarioResult
     public string ExpectedOutput { get; set; } = string.Empty;
     public string RootCause { get; set; } = string.Empty;
     public string FixRecommendation { get; set; } = string.Empty;
+    public string FinancialRisk { get; set; } = string.Empty;
 
     public static ChaosScenarioResult Success(
         string name,
@@ -61,7 +62,8 @@ public class ChaosScenarioResult
         string expected,
         string rootCause,
         string fixRecommendation,
-        ChaosSeverity severity = ChaosSeverity.Critical) => new()
+        ChaosSeverity severity = ChaosSeverity.Critical,
+        string financialRisk = "") => new()
     {
         ScenarioName = name,
         Category = category,
@@ -73,8 +75,25 @@ public class ChaosScenarioResult
         ObservedOutput = observed,
         ExpectedOutput = expected,
         RootCause = rootCause,
-        FixRecommendation = fixRecommendation
+        FixRecommendation = fixRecommendation,
+        FinancialRisk = string.IsNullOrWhiteSpace(financialRisk)
+            ? (severity == ChaosSeverity.Critical
+                ? "Высокий риск искажения торговых решений или слива депозита на боевом счёте."
+                : "Риск снижения точности прогнозов или пропуска валидных входов.")
+            : financialRisk
     };
+}
+
+public class SabotageStatsDto
+{
+    public int TotalAttacksLaunched { get; set; }
+    public int AttacksRepelled { get; set; }
+    public int AttacksBreached { get; set; }
+    public double RepelRatePct => TotalAttacksLaunched > 0 ? (AttacksRepelled * 100.0 / TotalAttacksLaunched) : 100.0;
+    public DateTime SaboteurStartedUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? LastAttackUtc { get; set; }
+    public string? LastAttackScenario { get; set; }
+    public ChaosScenarioResult? LastBreach { get; set; }
 }
 
 public class ChaosAuditReport
