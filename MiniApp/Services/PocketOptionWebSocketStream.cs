@@ -152,6 +152,7 @@ public static class PocketOptionWebSocketStream
             _ = ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", CancellationToken.None);
         }
         Status = "STOPPED";
+        Interlocked.Exchange(ref _loopRunning, 0);
     }
 
     private static async Task<(string? authPayloadJson, string? tradingUrl)> LoadSessionFromDbAsync()

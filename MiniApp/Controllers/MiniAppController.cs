@@ -282,7 +282,22 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
 
         RegisterRoutes(app);
-                app.Lifetime.ApplicationStarted.Register(() =>
+
+        // Gracefully flush all in-memory ticks before Kestrel and hosted services stop
+        app.Lifetime.ApplicationStopping.Register(() =>
+        {
+            try
+            {
+                Console.WriteLine("[TickCollector] Application stopping: performing final tick flush to DB...");
+                RealtimeTickCollector.FlushAsync(CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TickCollector] Application stopping flush error: {ex.Message}");
+            }
+        });
+
+        app.Lifetime.ApplicationStarted.Register(() =>
         {
             _ = Task.Run(async () =>
             {

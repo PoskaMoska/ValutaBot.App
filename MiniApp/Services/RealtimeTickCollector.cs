@@ -68,13 +68,25 @@ namespace ValutaBot.MiniApp
         private static DateTime _lastDropWarningAt = DateTime.MinValue;
 
         private static int _isInitialized = 0;
+        private static readonly SemaphoreSlim _dbWriteLock = new(1, 1);
+        private static readonly CancellationTokenSource _collectorCts = new();
 
         public static async Task InitializeAsync()
         {
             if (Interlocked.Exchange(ref _isInitialized, 1) == 0)
             {
+                // Hook process exit to flush in-flight ticks on graceful shutdown or container stop
+                AppDomain.CurrentDomain.ProcessExit += (s, e) =>
+                {
+                    try
+                    {
+                        FlushAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    }
+                    catch { }
+                };
+
                 _ = Task.Run(ProcessTickQueueAsync);
-                BotLogger.Info("[TickCollector] Initialized continuous real-time subminute candle accumulation (Batched).");
+                BotLogger.Info("[TickCollector] Initialized continuous real-time subminute candle accumulation (Batched & Flush-Protected).");
             }
         }
 
@@ -83,89 +95,179 @@ namespace ValutaBot.MiniApp
             InitializeAsync().GetAwaiter().GetResult();
         }
 
+        /// <summary>
+        /// Actively flushes all buffered ticks in memory and in the Channel to PostgreSQL.
+        /// Called on graceful host shutdown, ProcessExit, before emergency self-recycle, or during in-process restart.
+        /// </summary>
+        public static async Task<int> FlushAsync(CancellationToken ct = default)
+        {
+            var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutToken.Token);
+
+            try
+            {
+                await _dbWriteLock.WaitAsync(linkedCts.Token);
+            }
+            catch
+            {
+                return 0; // Lock timeout or canceled
+            }
+
+            try
+            {
+                var drainList = new List<TickEvent>(2000);
+                while (_tickChannel.Reader.TryRead(out var tick))
+                {
+                    drainList.Add(tick);
+                }
+
+                if (drainList.Count == 0) return 0;
+
+                bool ok = await WriteBatchInternalAsync(drainList, linkedCts.Token);
+                if (ok)
+                {
+                    BotLogger.Info($"[TickCollector] Flushed {drainList.Count} buffered ticks to PostgreSQL.");
+                    return drainList.Count;
+                }
+                return 0;
+            }
+            finally
+            {
+                try { _dbWriteLock.Release(); } catch { }
+            }
+        }
+
+        private static async Task<bool> WriteBatchInternalAsync(List<TickEvent> buffer, CancellationToken ct = default)
+        {
+            if (buffer.Count == 0) return true;
+
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.OpenAsync(ct);
+                using var tx = conn.BeginTransaction();
+                
+                // D1-1 FIX: Materialise each group into a List before First/Last.
+                // Channel.CreateBounded with DropOldest evicts the oldest entries when full,
+                // but the items already consumed into 'buffer' retain their insertion (FIFO) order.
+                // Since Channel is SingleReader, buffer preserves the order ticks arrived from WS.
+                // Calling g.ToList() locks in that FIFO order so First()=oldest=Open, Last()=newest=Close.
+                var grouped = buffer
+                    .GroupBy(t => new { t.Asset, t.Interval, t.OpenTime })
+                    .Select(g =>
+                    {
+                        var ordered = g.ToList(); // FIFO insertion order = chronological
+                        return new {
+                            Asset    = g.Key.Asset,
+                            Interval = g.Key.Interval,
+                            OpenTime = g.Key.OpenTime.ToString("o"),
+                            Open     = ordered.First().Price,  // chronologically first tick
+                            High     = ordered.Max(t => t.Price),
+                            Low      = ordered.Min(t => t.Price),
+                            Close    = ordered.Last().Price,   // chronologically last tick
+                            Volume   = ordered.Count
+                        };
+                    });
+
+                // D1-3 FIX: commandTimeout=8s prevents the consumer loop from blocking
+                // for Npgsql's default 30s ConnectTimeout when PostgreSQL is flapping.
+                // With 8s cap: retry cycle is 8s + 0.5s delay = ~8.5s max blocked per attempt.
+                const int DbCommandTimeoutSecs = 8;
+
+                foreach (var batchItem in grouped)
+                {
+                    await conn.ExecuteAsync(@"
+                        INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
+                        VALUES (@Asset, @Interval, @OpenTime, @Open, @High, @Low, @Close, @Volume)
+                        ON CONFLICT (asset, interval, open_time) DO UPDATE SET
+                            high_price  = GREATEST(subminute_candles.high_price,  EXCLUDED.high_price),
+                            low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
+                            close_price = EXCLUDED.close_price,
+                            volume      = subminute_candles.volume + EXCLUDED.volume;
+                    ", batchItem, tx, commandTimeout: DbCommandTimeoutSecs);
+                }
+                
+                tx.Commit();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TickSync] Failed to batch save ticks: {ex.Message}. Retrying...");
+                return false;
+            }
+        }
+
         private static async Task ProcessTickQueueAsync()
         {
             var buffer = new List<TickEvent>(1000);
-            while (await _tickChannel.Reader.WaitToReadAsync())
+            var token = _collectorCts.Token;
+
+            try
             {
-                if (buffer.Count == 0)
+                while (!token.IsCancellationRequested && await _tickChannel.Reader.WaitToReadAsync(token))
                 {
-                    await Task.Delay(3000);
-                    while (buffer.Count < 8000 && _tickChannel.Reader.TryRead(out var tick))
+                    if (buffer.Count == 0)
                     {
-                        buffer.Add(tick);
-                    }
-                }
-
-                if (buffer.Count > 0)
-                {
-                    bool success = false;
-                    try
-                    {
-                        using var conn = DbConnectionFactory.GetConnection();
-                        await conn.OpenAsync();
-                        using var tx = conn.BeginTransaction();
-                        
-                        // D1-1 FIX: Materialise each group into a List before First/Last.
-                        // Channel.CreateBounded with DropOldest evicts the oldest entries when full,
-                        // but the items already consumed into 'buffer' retain their insertion (FIFO) order.
-                        // Since Channel is SingleReader, buffer preserves the order ticks arrived from WS.
-                        // Calling g.ToList() locks in that FIFO order so First()=oldest=Open, Last()=newest=Close.
-                        var grouped = buffer
-                            .GroupBy(t => new { t.Asset, t.Interval, t.OpenTime })
-                            .Select(g =>
-                            {
-                                var ordered = g.ToList(); // FIFO insertion order = chronological
-                                return new {
-                                    Asset    = g.Key.Asset,
-                                    Interval = g.Key.Interval,
-                                    OpenTime = g.Key.OpenTime.ToString("o"),
-                                    Open     = ordered.First().Price,  // chronologically first tick
-                                    High     = ordered.Max(t => t.Price),
-                                    Low      = ordered.Min(t => t.Price),
-                                    Close    = ordered.Last().Price,   // chronologically last tick
-                                    Volume   = ordered.Count
-                                };
-                            });
-
-                        // D1-3 FIX: commandTimeout=8s prevents the consumer loop from blocking
-                        // for Npgsql's default 30s ConnectTimeout when PostgreSQL is flapping.
-                        // With 8s cap: retry cycle is 8s + 0.5s delay = ~8.5s max blocked per attempt.
-                        const int DbCommandTimeoutSecs = 8;
-
-                        foreach (var batchItem in grouped)
+                        // Adaptive Micro-Batching:
+                        // Read any immediately available ticks from the channel
+                        while (buffer.Count < 500 && _tickChannel.Reader.TryRead(out var tick))
                         {
-                            await conn.ExecuteAsync(@"
-                                INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
-                                VALUES (@Asset, @Interval, @OpenTime, @Open, @High, @Low, @Close, @Volume)
-                                ON CONFLICT (asset, interval, open_time) DO UPDATE SET
-                                    high_price  = GREATEST(subminute_candles.high_price,  EXCLUDED.high_price),
-                                    low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
-                                    close_price = EXCLUDED.close_price,
-                                    volume      = subminute_candles.volume + EXCLUDED.volume;
-                            ", batchItem, tx, commandTimeout: DbCommandTimeoutSecs);
+                            buffer.Add(tick);
                         }
-                        
-                        tx.Commit();
-                        success = true;
-                    }
-                    catch (Exception ex)
-                    {
-                        BotLogger.Warn($"[TickSync] Failed to batch save ticks: {ex.Message}. Retrying...");
+
+                        // If fewer than 200 ticks, wait up to 1000ms (reduced from 3000ms for 3x less crash/SIGKILL exposure)
+                        if (buffer.Count < 200)
+                        {
+                            try { await Task.Delay(1000, token); } catch (OperationCanceledException) { }
+                            while (buffer.Count < 8000 && _tickChannel.Reader.TryRead(out var tick))
+                            {
+                                buffer.Add(tick);
+                            }
+                        }
                     }
 
-                    if (success)
+                    if (buffer.Count > 0)
                     {
-                        buffer.Clear(); // Only clear on success to prevent tick loss
+                        bool success = false;
+                        await _dbWriteLock.WaitAsync(token);
+                        try
+                        {
+                            success = await WriteBatchInternalAsync(buffer, token);
+                        }
+                        finally
+                        {
+                            _dbWriteLock.Release();
+                        }
+
+                        if (success)
+                        {
+                            buffer.Clear(); // Only clear on success to prevent tick loss
+                        }
+                    }
+                    
+                    // Throttle conditionally: if buffer has items (error retry), wait 300ms.
+                    // If channel is empty, wait 300ms to allow batching.
+                    if (buffer.Count > 0 || _tickChannel.Reader.Count == 0)
+                    {
+                        try { await Task.Delay(300, token); } catch (OperationCanceledException) { }
                     }
                 }
-                
-                // Throttle conditionally: if buffer has items (error retry), wait 500ms.
-                // If channel is empty, wait 500ms to allow batching.
-                if (buffer.Count > 0 || _tickChannel.Reader.Count == 0)
+            }
+            catch (OperationCanceledException) { }
+            finally
+            {
+                // Ensure remaining ticks in buffer or channel are committed before task terminates
+                try
                 {
-                    await Task.Delay(500);
+                    if (buffer.Count > 0)
+                    {
+                        await _dbWriteLock.WaitAsync(TimeSpan.FromSeconds(3));
+                        try { await WriteBatchInternalAsync(buffer, CancellationToken.None); }
+                        finally { _dbWriteLock.Release(); }
+                    }
+                    await FlushAsync(CancellationToken.None);
                 }
+                catch { }
             }
         }
 

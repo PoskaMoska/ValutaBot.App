@@ -44,14 +44,93 @@ internal static class Program
 
         var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5000;
 
-        try
+        // ── Fast In-Process Resuscitation Supervisor ────────────────────────
+        // Replaces blunt process abort with an autonomous crash recovery loop.
+        // Instead of a 15-30s container cold reboot on Railway, transient crashes
+        // are caught, flushed, and resuscitated within 2-3s in the same container.
+        int consecutiveCrashes = 0;
+        const int maxInProcessRestarts = 5;
+
+        AppDomain.CurrentDomain.UnhandledException += (sender, eventArgs) =>
         {
-            await MiniAppController.StartAsync(args, port);
-        }
-        catch (Exception ex)
+            var ex = eventArgs.ExceptionObject as Exception;
+            Console.WriteLine($"[CRITICAL] AppDomain UnhandledException (IsTerminating={eventArgs.IsTerminating}): {ex?.Message}\n{ex?.StackTrace}");
+            try { RealtimeTickCollector.FlushAsync().GetAwaiter().GetResult(); } catch { }
+        };
+
+        TaskScheduler.UnobservedTaskException += (sender, eventArgs) =>
         {
-            Console.WriteLine($"[!] Fatal Crash: {ex.Message}");
-            throw; // Let the container orchestrator (Railway) handle the restart
+            Console.WriteLine($"[WARN] UnobservedTaskException suppressed: {eventArgs.Exception?.Message}");
+            eventArgs.SetObserved();
+        };
+
+        while (true)
+        {
+            var runStartTime = DateTime.UtcNow;
+            try
+            {
+                await MiniAppController.StartAsync(args, port);
+
+                // If StartAsync returned cleanly without exception:
+                // could be a clean shutdown or an emergency self-recycle (Tier 3 RAM Guard).
+                var runDuration = DateTime.UtcNow - runStartTime;
+                Console.WriteLine($"[Host Supervisor] Application host stopped cleanly after {runDuration.TotalMinutes:F1}m.");
+
+                // If the application was cleanly requested to stop, check if we should recycle in-process
+                // If it was running for >= 30 seconds, recycle cleanly in-process (e.g. RAM purge self-recycle)
+                if (runDuration.TotalSeconds >= 30)
+                {
+                    consecutiveCrashes = 0;
+                    Console.WriteLine("[Host Supervisor] Initiating clean in-process application recycling in 2s...");
+                    await Task.Delay(2000);
+                    continue;
+                }
+
+                // If it exited almost immediately without error, treat as intentional shutdown
+                break;
+            }
+            catch (Exception ex)
+            {
+                var runDuration = DateTime.UtcNow - runStartTime;
+                if (runDuration.TotalMinutes >= 3)
+                {
+                    // Ran stably for at least 3 minutes -> reset consecutive crash counter
+                    consecutiveCrashes = 0;
+                }
+
+                consecutiveCrashes++;
+                Console.WriteLine($"[Host Supervisor] Crash #{consecutiveCrashes}/{maxInProcessRestarts} (Uptime: {runDuration.TotalSeconds:F0}s): {ex.Message}\n{ex.StackTrace}");
+
+                // 1. Emergency tick flush to prevent data loss
+                try { await RealtimeTickCollector.FlushAsync(); } catch { }
+
+                // 2. Stop any dangling background stream loops before restart
+                try { PocketOptionWebSocketStream.StopStream(); } catch { }
+
+                if (consecutiveCrashes >= maxInProcessRestarts)
+                {
+                    Console.WriteLine($"[Host Supervisor] Threshold reached ({consecutiveCrashes} consecutive crashes). Escalating to Railway container cold restart.");
+                    try
+                    {
+                        await TelegramBotService.SendMessageToAdmins(
+                            $"🚨 <b>[Host Supervisor] Превышен лимит внутрипроцессных перезапусков ({consecutiveCrashes}/{maxInProcessRestarts})</b>\nОшибка: <code>{ex.Message}</code>\nВыполняется холодный перезапуск контейнера Railway.");
+                    }
+                    catch { }
+
+                    throw; // Delegate to Docker / Railway orchestrator
+                }
+
+                int backoffSec = Math.Min(consecutiveCrashes * 2, 8);
+                try
+                {
+                    await TelegramBotService.SendMessageToAdmins(
+                        $"⚠️ <b>[Host Supervisor] Сбой хоста C#</b>\nПерехвачено: <code>{ex.Message}</code>\nМгновенная внутрипроцессная реанимация в том же контейнере через {backoffSec}с (попытка {consecutiveCrashes}/{maxInProcessRestarts}).");
+                }
+                catch { }
+
+                Console.WriteLine($"[Host Supervisor] Resuscitating host in-process in {backoffSec}s...");
+                await Task.Delay(TimeSpan.FromSeconds(backoffSec));
+            }
         }
     }
 }

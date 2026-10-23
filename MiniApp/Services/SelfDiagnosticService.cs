@@ -203,30 +203,95 @@ public class SelfDiagnosticService : BackgroundService
             BotLogger.Warn($"[Diagnostics] Synthetic UI check failed (might be normal depending on port config): {ex.Message}");
         }
 
-        // 4. Resource Scanning (RAM)
+        // 4. Resource Scanning & Autonomous RAM Guard (3-Tier Auto-Purge Ladder)
         try
         {
             using var process = Process.GetCurrentProcess();
-            // Memory in MB
             long memoryUsedMb = process.PrivateMemorySize64 / (1024 * 1024);
-            
-            // If memory exceeds 750MB, flag it
-            bool currentMemHealthy = memoryUsedMb < 750;
-            
-            if (!currentMemHealthy && _memWasHealthy)
+
+            if (memoryUsedMb >= 700 && memoryUsedMb < 850)
             {
-                _memWasHealthy = false;
-                await TelegramBotService.SendMessageToAdmins($"⚠️ <b>High Memory Usage Detected</b>\nValutaBot backend is consuming {memoryUsedMb} MB of RAM. Consider restarting if it grows past 1GB.");
+                // ── Tier 1: Soft Purge (700 - 850 MB) ──
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, blocking: false);
+                BotLogger.Info($"[RAM Guard Tier 1] Soft GC compaction triggered at {memoryUsedMb} MB.");
             }
-            else if (currentMemHealthy && !_memWasHealthy && memoryUsedMb < 500)
+            else if (memoryUsedMb >= 850 && memoryUsedMb < 950)
             {
-                // Reset flag when memory drops back down below a safer threshold
-                _memWasHealthy = true;
+                // ── Tier 2: Aggressive Purge & Cache Trimming (850 - 950 MB) ──
+                BotLogger.Warn($"[RAM Guard Tier 2] High RAM detected ({memoryUsedMb} MB). Executing aggressive memory compaction...");
+
+                // 1. Flush in-memory ticks to DB first so nothing is lost
+                await RealtimeTickCollector.FlushAsync(stoppingToken);
+
+                // 2. Synchronous compacting Gen-2 Garbage Collection + Finalizer drain
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+
+                process.Refresh();
+                long memAfter = process.PrivateMemorySize64 / (1024 * 1024);
+                long freedMb = memoryUsedMb - memAfter;
+
+                if (freedMb > 30)
+                {
+                    BotLogger.Info($"[RAM Guard Tier 2] Aggressive GC reclaimed {freedMb} MB (was: {memoryUsedMb} MB, now: {memAfter} MB).");
+                }
+
+                if (memAfter >= 850 && _memWasHealthy)
+                {
+                    _memWasHealthy = false;
+                    await TelegramBotService.SendMessageToAdmins(
+                        $"⚠️ <b>[RAM Guard] Высокое потребление памяти</b>\nПроцесс потребляет {memAfter} МБ (было {memoryUsedMb} МБ). Сборщик мусора освободил {freedMb} МБ. При приближении к 950 МБ будет выполнен мягкий автоперезапуск во избежание OOMKilled.");
+                }
+                else if (memAfter < 700 && !_memWasHealthy)
+                {
+                    _memWasHealthy = true;
+                    await TelegramBotService.SendMessageToAdmins(
+                        $"✅ <b>[RAM Guard] Память стабилизирована</b>\nПотребление снижено до {memAfter} МБ. Нормальный режим восстановлен.");
+                }
+            }
+            else if (memoryUsedMb >= 950)
+            {
+                // ── Tier 3: Emergency Self-Recycle Safeguard (>= 950 MB) ──
+                // Railway container limit is typically 1024 MB. At >=950 MB, Linux OOMKilled (SIGKILL 137) is imminent.
+                // Prevent brutal SIGKILL and container freeze by performing an orderly in-process soft restart!
+                BotLogger.Error($"[RAM Guard Tier 3] Critical memory ceiling exceeded ({memoryUsedMb} MB / 1024 MB). Initiating emergency graceful self-recycle...");
+
+                // 1. Flush tick buffers to prevent any tick data loss
+                await RealtimeTickCollector.FlushAsync(stoppingToken);
+
+                // 2. Alert Telegram before exit
+                try
+                {
+                    await TelegramBotService.SendMessageToAdmins(
+                        $"🚨 <b>[RAM Guard Tier 3 Emergency]</b> Предотвращение OOMKilled: Потребление RAM достигло {memoryUsedMb} МБ / 1024 МБ. Выполнен экстренный сброс тиков в базу данных и запущен мягкий перезапуск приложения.");
+                }
+                catch { }
+
+                // 3. Gracefully stop application lifetime so HostSupervisor can re-launch cleanly
+                var appLifetime = _serviceProvider.GetService<Microsoft.Extensions.Hosting.IHostApplicationLifetime>();
+                if (appLifetime != null)
+                {
+                    appLifetime.StopApplication();
+                }
+                else
+                {
+                    Environment.Exit(0);
+                }
+            }
+            else
+            {
+                if (!_memWasHealthy && memoryUsedMb < 500)
+                {
+                    _memWasHealthy = true;
+                }
             }
         }
-        catch
+        catch (Exception exRam)
         {
-            // Ignore if OS doesn't support reading memory counters gracefully
+            BotLogger.Warn($"[RAM Guard] Resource monitor notice: {exRam.Message}");
         }
         
         // 5. Market Feed Liveness Check (subminute_candles not stalled)
