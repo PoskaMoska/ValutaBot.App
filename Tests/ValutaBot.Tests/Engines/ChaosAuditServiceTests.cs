@@ -114,4 +114,14 @@ public class ChaosAuditServiceTests
         Assert.NotNull(result);
         Assert.True(result.Passed, $"Probability bounds invariant failed: {result.Description} ({result.RootCause})");
     }
+
+    [Fact]
+    public async Task TradeVerificationInvariant_VerifiesGridAndOutcomeConsistency()
+    {
+        var scenario = new TradeVerificationInvariantScenario();
+        var result = await scenario.ExecuteAsync(_serviceProvider);
+
+        Assert.NotNull(result);
+        Assert.True(result.Passed, $"Trade verification invariant failed: {result.Description} ({result.RootCause})");
+    }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -36,6 +37,7 @@ public class ChaosAuditService : IChaosAuditService
         _scenarios.Add(new ExtremeCandleFuzzingScenario());
         _scenarios.Add(new ProbabilityBoundsInvariantScenario());
         _scenarios.Add(new TradeTimeoutInvariantScenario());
+        _scenarios.Add(new TradeVerificationInvariantScenario());
         _scenarios.Add(new ModelContractGridScenario());
 
         // 2. Data & Database Fault Injection
@@ -142,11 +144,8 @@ public class ChaosAuditService : IChaosAuditService
 
             _latestReport = report;
 
-            // Dispatch Telegram notification if any issues detected
-            if (report.FailedCount > 0 || report.WarningCount > 0)
-            {
-                await NotifyAdminsOfChaosFindingsAsync(report);
-            }
+            // Dispatch Telegram notification (with deduplication and auto-recovery notice)
+            await NotifyAdminsOfChaosFindingsAsync(report);
 
             return report;
         }
@@ -156,17 +155,65 @@ public class ChaosAuditService : IChaosAuditService
         }
     }
 
+    private static readonly ConcurrentDictionary<string, (string Fingerprint, DateTime AlertedUtc)> _alertedFindings = new();
+    private static bool _wasDegradedOrFailed = false;
+
     private static async Task NotifyAdminsOfChaosFindingsAsync(ChaosAuditReport report)
     {
         try
         {
+            var unpassed = report.Results.Where(r => !r.Passed).ToList();
+            if (unpassed.Count == 0)
+            {
+                // Recovery notice: if system was previously degraded/failed, notify admins of full recovery
+                if (_wasDegradedOrFailed)
+                {
+                    _wasDegradedOrFailed = false;
+                    _alertedFindings.Clear();
+                    await TelegramBotService.SendMessageToAdmins(
+                        $"🟢 <b>Chaos Audit: Все замечания устранены</b>\n" +
+                        $"Статус: <b>PASS</b> (Пройдено: {report.PassedCount}/{report.TotalScenarios}, Замечаний: 0, Ошибок: 0)."
+                    );
+                }
+                return;
+            }
+
+            _wasDegradedOrFailed = true;
+
+            // Deduplication: only alert on findings that are new or changed within 24h
+            var now = DateTime.UtcNow;
+            var newOrChanged = new List<ChaosScenarioResult>();
+
+            foreach (var r in unpassed)
+            {
+                string key = r.ScenarioName;
+                string fingerprint = $"{r.Severity}:{r.Description}:{r.TriggerDetails}";
+
+                if (_alertedFindings.TryGetValue(key, out var existing))
+                {
+                    if (existing.Fingerprint == fingerprint && (now - existing.AlertedUtc) < TimeSpan.FromHours(24))
+                    {
+                        continue; // Duplicate within 24 hours, suppress repeat alert
+                    }
+                }
+
+                _alertedFindings[key] = (fingerprint, now);
+                newOrChanged.Add(r);
+            }
+
+            if (newOrChanged.Count == 0)
+            {
+                BotLogger.Info("[CHAOS-AUDIT] Active findings unchanged within 24h — suppressing repeat Telegram alert.");
+                return;
+            }
+
             string icon = report.FailedCount > 0 ? "🚨" : "🟡";
             var sb = new StringBuilder();
             sb.AppendLine($"{icon} <b>Chaos Audit: Обнаружены замечания системы</b>");
             sb.AppendLine($"Статус: <b>{report.Status}</b> (Пройдено: {report.PassedCount}/{report.TotalScenarios}, Замечаний: {report.WarningCount}, Ошибок: {report.FailedCount})");
             sb.AppendLine();
 
-            foreach (var r in report.Results.Where(r => !r.Passed))
+            foreach (var r in newOrChanged)
             {
                 string itemIcon = r.Severity == ChaosSeverity.Critical ? "❌" : "⚠️";
                 sb.AppendLine($"{itemIcon} <b>{r.ScenarioName}</b> ({r.Category})");
