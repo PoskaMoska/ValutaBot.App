@@ -753,6 +753,13 @@ public static class PocketOptionWebSocketStream
 
     private static bool HandleTick(string asset, double srvTs, double price, bool isBackfill = false)
     {
+        // Data Integrity Guard: reject poisoned broker ticks (NaN, Infinity, non-positive price, or out-of-range epoch timestamp)
+        if (double.IsNaN(price) || double.IsInfinity(price) || price <= 0 ||
+            double.IsNaN(srvTs) || double.IsInfinity(srvTs) || srvTs <= 0 || srvTs > 3_000_000_000)
+        {
+            return false;
+        }
+
         double utcSec = srvTs - ServerTimeOffsetSec;
         long tickTimeUtc = DateTimeOffset.FromUnixTimeMilliseconds((long)(utcSec * 1000)).UtcTicks;
 

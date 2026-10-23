@@ -298,6 +298,12 @@ namespace ValutaBot.MiniApp
 
         public static Task OnPriceUpdateAsync(string asset, double price, long tickTimeUtc, bool isBackfill = false)
         {
+            // Data Integrity Guard: reject poisoned ticks (NaN, Infinity, non-positive price or invalid time)
+            if (double.IsNaN(price) || double.IsInfinity(price) || price <= 0 || tickTimeUtc <= 0)
+            {
+                return Task.CompletedTask;
+            }
+
             string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
             long nowTicks = tickTimeUtc;
 
@@ -314,6 +320,25 @@ namespace ValutaBot.MiniApp
             UpdateAccumulator(_m1, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(60).Ticks, isBackfill);
             
             return Task.CompletedTask;
+        }
+
+        public static bool IsAccumulatorCorrupted(string asset)
+        {
+            string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+            foreach (var dict in new[] { _s5, _s10, _s15, _s30, _m1 })
+            {
+                if (dict.TryGetValue(cleanAsset, out var acc))
+                {
+                    lock (acc)
+                    {
+                        if (acc.Open.HasValue && (double.IsNaN(acc.Open.Value) || double.IsInfinity(acc.Open.Value) || acc.Open.Value <= 0))
+                            return true;
+                        if (acc.Open.HasValue && (double.IsNaN(acc.Close) || double.IsInfinity(acc.Close) || acc.Close <= 0))
+                            return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private static void QueueTick(string asset, string interval, double price, long nowTicks, long intervalTicks)

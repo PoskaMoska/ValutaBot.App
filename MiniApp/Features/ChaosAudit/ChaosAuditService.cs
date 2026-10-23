@@ -61,9 +61,12 @@ public class ChaosAuditService : IChaosAuditService
         _scenarios.Add(new TradeVerificationInvariantScenario());
         _scenarios.Add(new ModelContractGridScenario());
         _scenarios.Add(new NeuralAdversarialFuzzingScenario());
+        _scenarios.Add(new ClockDriftAndSkewScenario());
 
         // 2. Data & Database Fault Injection & Pipeline Poisoning
         _scenarios.Add(new PipelinePoisoningScenario());
+        _scenarios.Add(new SpreadExplosionAndLiquidityShockScenario());
+        _scenarios.Add(new MalformedWebSocketPayloadScenario());
         _scenarios.Add(new StaleDataAndGapFaultScenario());
         _scenarios.Add(new CircuitBreakerQuarantineFaultScenario());
         _scenarios.Add(new DatabaseResilienceFaultScenario());

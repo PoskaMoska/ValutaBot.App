@@ -147,6 +147,36 @@ public class ChaosAuditServiceTests
     }
 
     [Fact]
+    public async Task ClockDriftAndSkew_SafelyResistsTemporalDistortions()
+    {
+        var scenario = new ClockDriftAndSkewScenario();
+        var result = await scenario.ExecuteAsync(_serviceProvider);
+
+        Assert.NotNull(result);
+        Assert.True(result.Passed, $"Clock drift test failed: {result.Description} ({result.RootCause})");
+    }
+
+    [Fact]
+    public async Task SpreadExplosionAndLiquidityShock_BlocksExcessiveSqueezes()
+    {
+        var scenario = new SpreadExplosionAndLiquidityShockScenario();
+        var result = await scenario.ExecuteAsync(_serviceProvider);
+
+        Assert.NotNull(result);
+        Assert.True(result.Passed, $"Spread explosion test failed: {result.Description} ({result.RootCause})");
+    }
+
+    [Fact]
+    public async Task MalformedWebSocketPayload_RejectsPoisonTicksWithoutCorruptingAccumulators()
+    {
+        var scenario = new MalformedWebSocketPayloadScenario();
+        var result = await scenario.ExecuteAsync(_serviceProvider);
+
+        Assert.NotNull(result);
+        Assert.True(result.Passed, $"Malformed WS payload test failed: {result.Description} ({result.RootCause})");
+    }
+
+    [Fact]
     public async Task RunSingleSabotageRoundAsync_ExecutesAndTracksTelemetry()
     {
         var chaosService = _serviceProvider.GetRequiredService<IChaosAuditService>();
