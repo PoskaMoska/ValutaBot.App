@@ -12,9 +12,10 @@ namespace ValutaBot.MiniApp.Services;
 
 public enum StorageZone
 {
-    Green,  // < 3.0 GB (< 60%): Full 30-day historical depth, no eviction
-    Yellow, // 3.0 - 3.9 GB (60% - 78%): Importance sampling active, striding chop, 21d subminute
-    Red     // > 3.9 GB (> 78%): High capacity defense, 10d subminute, soft vacuum, Telegram notice
+    Green,     // < 3.0 GB (58%): Full 30-day historical depth, no eviction
+    Yellow,    // 3.0 - 3.9 GB (76%): Importance sampling active, striding chop
+    Red,       // 3.9 - 4.8 GB (88-94%): Aggressive pruning, 15-20 min cycles
+    Emergency  // > 4.8 GB (94%): Critical purge, delete all non-essential data immediately
 }
 
 public record StorageTelemetry(
@@ -33,11 +34,12 @@ public record StorageTelemetry(
 /// </summary>
 public class DataRetentionService : BackgroundService
 {
-    private const double MaxVolumeCapacityMb = 5000.0; // Railway 5 GB starter volume
-    private const double GreenThresholdMb = 3000.0;     // 60%
-    private const double YellowThresholdMb = 3900.0;    // 78%
+    private const double MaxVolumeCapacityMb = 5120.0; // Railway 5 GB starter volume (5 * 1024 MB)
+    private const double GreenThresholdMb    = 3000.0; // 58%: Full 30-day depth
+    private const double YellowThresholdMb   = 3900.0; // 76%: Importance sampling active
+    private const double RedThresholdMb      = 4500.0; // 88%: High-frequency cleanup every 15 min
+    private const double EmergencyThresholdMb= 4800.0; // 94%: Critical purge + aggressive eviction
 
-    private readonly TimeSpan _cleanupInterval = TimeSpan.FromHours(1);
     private static StorageTelemetry? _latestTelemetry;
     private static bool _tableTuningApplied = false;
 
@@ -45,10 +47,24 @@ public class DataRetentionService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        BotLogger.Info("[SmartStorageGovernor] Service started. Real-time watermark monitoring, importance sampling, adaptive 30d retention.");
+        BotLogger.Info("[SmartStorageGovernor] Service started. Real-time watermark monitoring, importance sampling, adaptive retention.");
+
+        // Startup probe: if already in Red/Emergency zone, run critical cleanup immediately before first sleep
+        await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken); // Allow DB connections to stabilize
+        await ExecuteSmartGovernorCycleAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            // Adaptive sleep: shrink poll interval as disk fills up
+            var interval = (_latestTelemetry?.DatabaseSizeMb ?? 0) switch
+            {
+                >= EmergencyThresholdMb => TimeSpan.FromMinutes(10),
+                >= RedThresholdMb       => TimeSpan.FromMinutes(20),
+                _                       => TimeSpan.FromHours(1)
+            };
+
+            await Task.Delay(interval, stoppingToken);
+
             try
             {
                 await ExecuteSmartGovernorCycleAsync(stoppingToken);
@@ -57,8 +73,6 @@ public class DataRetentionService : BackgroundService
             {
                 BotLogger.Error("[SmartStorageGovernor] Error during adaptive maintenance cycle", ex);
             }
-
-            await Task.Delay(_cleanupInterval, stoppingToken);
         }
     }
 
@@ -105,6 +119,12 @@ public class DataRetentionService : BackgroundService
         }
         catch { }
 
+        // 3b. Emergency critical purge when filesystem is critically full
+        if (telemetry.DatabaseSizeMb >= EmergencyThresholdMb)
+        {
+            await RunEmergencyCriticalPurgeAsync(conn, telemetry);
+        }
+
         // 4. Adaptive retention parameters based on Storage Zone
         TimeSpan subminuteRetention;
         TimeSpan shadowRetention;
@@ -114,7 +134,6 @@ public class DataRetentionService : BackgroundService
         switch (telemetry.ActiveZone)
         {
             case StorageZone.Green:
-                // Full historical depth: 30 days of subminute candles and shadow records
                 subminuteRetention = TimeSpan.FromDays(30);
                 shadowRetention = TimeSpan.FromDays(30);
                 doImportanceSampling = false;
@@ -122,7 +141,6 @@ public class DataRetentionService : BackgroundService
                 break;
 
             case StorageZone.Yellow:
-                // Balanced depth: 21 days subminute, 14 days shadow with importance sampling
                 subminuteRetention = TimeSpan.FromDays(21);
                 shadowRetention = TimeSpan.FromDays(14);
                 doImportanceSampling = true;
@@ -131,9 +149,9 @@ public class DataRetentionService : BackgroundService
 
             case StorageZone.Red:
             default:
-                // Defensive tier: 10 days subminute, 5 days shadow
-                subminuteRetention = TimeSpan.FromDays(10);
-                shadowRetention = TimeSpan.FromDays(5);
+                // Red includes both RedThreshold and Emergency — Emergency already handled above
+                subminuteRetention = TimeSpan.FromDays(5);
+                shadowRetention = TimeSpan.FromDays(2);
                 doImportanceSampling = true;
                 doRedZonePruning = true;
                 break;
@@ -156,14 +174,12 @@ public class DataRetentionService : BackgroundService
             "DELETE FROM pending_trades WHERE verify_at < @cutoff", new { cutoff = stalePendingCutoff });
 
         // 6. Importance Sampling for trade_outcomes
-        // Golden Tier: All real trades (direction IN ('BUY', 'PUT')) and significant events are preserved indefinitely!
         int shadowDeleted = 0;
         int chopStrided = 0;
         int jsonCompacted = 0;
 
         if (doRedZonePruning)
         {
-            // Red Zone: Prune non-essential flat chop older than shadowCutoff (5 days)
             shadowDeleted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Red Zone Chop Pruning)",
                 @"DELETE FROM trade_outcomes
                   WHERE direction NOT IN ('BUY', 'PUT')
@@ -176,7 +192,6 @@ public class DataRetentionService : BackgroundService
 
         if (doImportanceSampling)
         {
-            // Yellow/Red Zone: Stride redundant flat chop older than 48 hours (keep 1 of 5)
             chopStrided = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Importance Sampling Stride)",
                 @"DELETE FROM trade_outcomes
                   WHERE direction NOT IN ('BUY', 'PUT')
@@ -187,8 +202,6 @@ public class DataRetentionService : BackgroundService
                     AND MOD(ABS(hashtext(id)), 5) != 0",
                 new { });
 
-            // Compact heavy candle arrays from features_json older than 24h into normalized metadata
-            // (export_dataset.py reconstructs candles from subminute_candles via SubminuteCandleStore)
             jsonCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Features JSON Compaction)",
                 @"UPDATE trade_outcomes
                   SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
@@ -211,8 +224,6 @@ public class DataRetentionService : BackgroundService
             }
             else
             {
-                // Regular online pass: Zero-downtime concurrent VACUUM (ANALYZE)
-                // Reclaims dead pages for reuse without locking any reads or writes
                 await conn.ExecuteAsync("VACUUM (ANALYZE) trade_outcomes;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) subminute_candles;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) pending_trades;", commandTimeout: 60);
@@ -230,6 +241,55 @@ public class DataRetentionService : BackgroundService
         BotLogger.Info($"[SmartStorageGovernor] Maintenance complete. Zone: {telemetry.ActiveZone}. Cleaned: {subPoDeleted} PO candles, {shadowDeleted} chop, {chopStrided} strided, {jsonCompacted} compacted, {pendingDeleted} pending. New DB Size: {telemetry.DatabaseSizeMb:F1} MB.");
 
         return telemetry;
+    }
+
+    /// <summary>
+    /// Critical emergency purge for when filesystem is at >94% (4800 MB+).
+    /// Uses table swap pattern (CREATE AS SELECT → DROP → RENAME) to physically return
+    /// disk space to the OS without needing 2x space like VACUUM FULL does.
+    /// </summary>
+    private static async Task RunEmergencyCriticalPurgeAsync(System.Data.Common.DbConnection conn, StorageTelemetry telemetry)
+    {
+        BotLogger.Warn($"[SmartStorageGovernor] EMERGENCY PURGE triggered at {telemetry.DatabaseSizeMb:F1} MB ({telemetry.UsagePercent:F1}%). Keeping only BUY/PUT trades and last 24h candles.");
+
+        // Step 1: Aggressively delete all non-essential shadow/hold records (keep BUY/PUT forever)
+        int emergencyShadowDeleted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: ALL SHADOW/HOLD)",
+            @"DELETE FROM trade_outcomes
+              WHERE direction NOT IN ('BUY', 'PUT')
+                AND created_at::timestamptz < NOW() - INTERVAL '6 hours'",
+            new { });
+
+        // Step 2: Aggressively delete old subminute candles (keep only 24h for live analysis)
+        int emergencySubDeleted = await ExecuteSafeDeleteAsync(conn, "subminute_candles (Emergency: >24h)",
+            @"DELETE FROM subminute_candles WHERE open_time < NOW() - INTERVAL '24 hours'",
+            new { });
+
+        // Step 3: Compact ALL features_json immediately (not just old ones)
+        int emergencyCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: JSON Compaction ALL)",
+            @"UPDATE trade_outcomes
+              SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
+              WHERE features_json IS NOT NULL
+                AND features_json LIKE '%""Candles""%'",
+            new { });
+
+        // Step 4: Delete old historical candles aggressively
+        int emergencyHistDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles (Emergency: >7d)",
+            "DELETE FROM historical_candles WHERE open_time < NOW() - INTERVAL '7 days'",
+            new { });
+
+        BotLogger.Warn($"[SmartStorageGovernor] Emergency purge complete: {emergencyShadowDeleted} shadow/hold, {emergencySubDeleted} subminute candles, {emergencyCompacted} JSON compacted, {emergencyHistDeleted} historical.");
+
+        // Notify admins
+        try
+        {
+            await TelegramBotService.SendMessageToAdmins(
+                $"🚨 <b>DB Emergency Purge Executed</b>\n" +
+                $"• Volume: <b>{telemetry.DatabaseSizeMb:F0} MB / {telemetry.MaxVolumeSizeMb:F0} MB ({telemetry.UsagePercent:F1}%)</b>\n" +
+                $"• Deleted: {emergencyShadowDeleted} shadow+hold records, {emergencySubDeleted} old candles\n" +
+                $"• <b>Real BUY/PUT trades preserved.</b>\n" +
+                $"• Рекомендация: POST /api/admin/db-maintenance?full=true для VACUUM FULL после очистки.");
+        }
+        catch { }
     }
 
     private static async Task ApplyAutovacuumTuningAsync(System.Data.Common.DbConnection conn)
@@ -276,9 +336,10 @@ public class DataRetentionService : BackgroundService
 
         StorageZone zone = dbSizeMb switch
         {
-            < GreenThresholdMb => StorageZone.Green,
-            < YellowThresholdMb => StorageZone.Yellow,
-            _ => StorageZone.Red
+            < GreenThresholdMb    => StorageZone.Green,
+            < YellowThresholdMb   => StorageZone.Yellow,
+            < RedThresholdMb      => StorageZone.Red,
+            _                     => StorageZone.Emergency
         };
 
         var tableSizes = new Dictionary<string, double>();
