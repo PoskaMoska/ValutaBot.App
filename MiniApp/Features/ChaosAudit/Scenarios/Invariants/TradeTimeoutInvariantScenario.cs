@@ -29,7 +29,7 @@ public class TradeTimeoutInvariantScenario : IChaosScenario
             {
                 foreach (var atr in atrs)
                 {
-                    var res = timeoutEngine.CalculateTimeout("EURUSD", tf, atr, 1.0, dummySmc, 1.0500, dummyState, isForex: true);
+                    var res = timeoutEngine.CalculateTimeout("CHAOS_TIMEOUT", tf, atr, 1.0, dummySmc, 1.0500, dummyState, isForex: true);
 
                     if (res.TimeoutCandles < 1)
                     {

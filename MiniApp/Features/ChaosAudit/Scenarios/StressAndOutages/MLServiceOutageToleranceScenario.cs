@@ -38,7 +38,7 @@ public class MLServiceOutageToleranceScenario : IChaosScenario
                 DominantDirection: "BUY"
             );
 
-            var fallbackDecision = await cmEngine.EvaluateMatrixAsync("EURUSD", "s5", isSubMinute: true, conflictPenalty: 1.0,
+            var fallbackDecision = await cmEngine.EvaluateMatrixAsync("CHAOS_ML", "s5", isSubMinute: true, conflictPenalty: 1.0,
                 taSignal, smcSignal, offlineMlSignal, state, mtfDummy);
 
             if (fallbackDecision == null)
@@ -64,7 +64,7 @@ public class MLServiceOutageToleranceScenario : IChaosScenario
             // Even if an external call fails, PredictAsync must return null rather than crashing caller
             var testCandles = ChaosTestHelper.GenerateTrendingCandles(50);
             // Calling PredictAsync directly: if base URL is not set or service unreachable, it catches and returns null
-            var directPred = await MLPythonService.PredictAsync("EURUSD", "s5", testCandles, isForex: true);
+            var directPred = await MLPythonService.PredictAsync("CHAOS_ML", "s5", testCandles, isForex: true);
             // directPred is either null (if offline) or non-null (if local Python running).
             // The invariant is that it did NOT throw an unhandled exception.
 

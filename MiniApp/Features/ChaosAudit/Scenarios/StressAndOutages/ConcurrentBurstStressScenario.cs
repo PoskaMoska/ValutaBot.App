@@ -25,7 +25,8 @@ public class ConcurrentBurstStressScenario : IChaosScenario
             var cmEngine = sp.GetRequiredService<IConfluenceMatrixEngine>();
 
             const int concurrencyLevel = 40;
-            var assets = new[] { "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD", "USDCHF" };
+            // Isolated sandbox tickers: synthetic candles must never touch live IndicatorCache keys
+            var assets = new[] { "CHAOS_BURST_1", "CHAOS_BURST_2", "CHAOS_BURST_3", "CHAOS_BURST_4", "CHAOS_BURST_5", "CHAOS_BURST_6" };
             var tfs = new[] { "s5", "s10", "s15", "s30", "m1" };
 
             var tasks = new List<Task<(bool success, string error)>>();

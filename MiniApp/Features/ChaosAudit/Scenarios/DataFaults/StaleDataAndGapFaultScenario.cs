@@ -47,10 +47,10 @@ public class StaleDataAndGapFaultScenario : IChaosScenario
             // Evaluate 4D matrix with completely empty higher timeframe candles
             var emptyHigher = Array.Empty<MiniAppController.OhlcCandle>();
             var mtfResult = await cmEngine.Evaluate4DMatrixAsync(
-                "EURUSD",
+                "CHAOS_STALE",
                 "s5",
                 isForex: true,
-                binanceSymbol: "EURUSD",
+                binanceSymbol: "CHAOS_STALE",
                 currentCandles: primaryCandles,
                 currentPrices: primaryPrices,
                 currentVolumes: primaryVolumes,
@@ -71,7 +71,7 @@ public class StaleDataAndGapFaultScenario : IChaosScenario
 
             // ── Test 3: Insufficient Candlesticks (< 35) Resilience ──
             var shortCandles = ChaosTestHelper.GenerateTrendingCandles(10, startPrice: 1.0500);
-            var smcShort = SmcEngine.AnalyzeSmcStructure("EURUSD", "s5", shortCandles, shortCandles[^1].Close);
+            var smcShort = SmcEngine.AnalyzeSmcStructure("CHAOS_STALE", "s5", shortCandles, shortCandles[^1].Close);
 
             sw.Stop();
             return ChaosScenarioResult.Success(
