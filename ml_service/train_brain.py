@@ -665,7 +665,7 @@ if __name__ == "__main__":
     default_data = "ml_service/data/dataset_v3.npz" if os.path.exists("ml_service") else "data/dataset_v3.npz"
     parser = argparse.ArgumentParser(description="Train Neural Temporal Brains (SequenceBrain or DualStreamPatchBrain)")
     parser.add_argument("--data", default=default_data, help="Path to exported .npz dataset")
-    parser.add_argument("--model", choices=["sequence", "dual_stream", "sequence_brain", "dual_stream_patch_brain", "patch_tst"], default="sequence", help="Model architecture")
+    parser.add_argument("--model", choices=["sequence", "dual_stream", "sequence_brain", "dual_stream_patch_brain", "patch_tst"], default="patch_tst", help="Model architecture")
     parser.add_argument("--backbone", choices=["hybrid", "transformer"], default="hybrid", help="Backbone for SequenceBrain (hybrid: BiGRU+Conv, transformer: TransformerEncoder)")
     parser.add_argument("--epochs", type=int, default=25, help="Maximum training epochs")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size per training step")

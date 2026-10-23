@@ -174,13 +174,9 @@ class SequenceBrain(nn.Module):
         logits_neg, pnl_neg = self._forward_single(DualStreamPatchBrain._flip_candles(x_candles), xm_neg)
 
         deep_dir_raw = 0.5 * ((logits_pos[:, 1] - logits_pos[:, 2]) - (logits_neg[:, 1] - logits_neg[:, 2]))
-        deep_dir = 0.002 * torch.tanh(deep_dir_raw)
+        deep_dir = torch.tanh(deep_dir_raw)
 
-        # Fallback dummy MTF tensor from last 30 micro candles for single-stream SequenceBrain
-        x_mtf_proxy = x_candles[:, -30:, :]
-        alpha_dir, _ = DualStreamPatchBrain._compute_orthogonal_alpha(x_candles, x_mtf_proxy, x_macro)
-
-        total_dir = alpha_dir + deep_dir
+        total_dir = deep_dir
         hold_logit = 0.5 * (logits_pos[:, 0] + logits_neg[:, 0]) - 2.5
         buy_logit = 0.5 * total_dir
         put_logit = -0.5 * total_dir
