@@ -78,3 +78,14 @@ def test_health_endpoint_patch_tst_status():
     assert "patch_tst_available" in data
     assert data["patch_tst_available"] is True, "PatchTST brain weights must be loaded and available in production!"
     assert data["patch_tst_version"] == "patch_tst_v3"
+
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Requires DATABASE_URL to run against database")
+def test_diagnostics_audit_endpoint():
+    resp = client.get("/diagnostics/audit?notify=false")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "short_candle_windows" in data
+    assert "total_checked" in data
+    assert data["short_candle_windows"] == 0

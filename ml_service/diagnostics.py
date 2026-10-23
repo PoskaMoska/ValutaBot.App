@@ -1,9 +1,10 @@
 import os
 import json
 import logging
+import bisect
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sklearn.tree import DecisionTreeClassifier
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -137,6 +138,15 @@ def analyze_module(df: pd.DataFrame, module_name: str, score_col: str, telemetry
     else:
         log.info(f"[{module_name}] No glaring statistical weaknesses found in recent trades.")
 
+def _normalize_interval(iv_raw: str) -> str:
+    s = str(iv_raw or "s5").lower().strip()
+    if s in ("1m", "1min", "m1"): return "m1"
+    if s in ("5m", "5min", "m5"): return "m5"
+    return s
+
+def _clean_asset_name(asset: str) -> str:
+    return str(asset or "").upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
+
 def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = True) -> dict:
     """
     Autonomous Dataset & Pipeline Sanity Auditor.
@@ -184,12 +194,71 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
     """, (sample_limit,))
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
-    cur.close()
-    conn.close()
 
     total = len(rows)
     if total == 0:
+        cur.close()
+        conn.close()
         return {"status": "empty", "total_checked": 0}
+
+    # Pre-parse features to detect if candle sequence reconstruction is required (compacted rows)
+    parsed_items = []
+    needs_candles = False
+    for r in rows:
+        rd = dict(zip(cols, r))
+        feat = None
+        if rd.get("features_json"):
+            try:
+                feat = json.loads(rd["features_json"])
+            except Exception:
+                feat = None
+        parsed_items.append((rd, feat))
+        if feat is not None:
+            c_arr = feat.get("Candles") or feat.get("candles") or []
+            if len(c_arr) < 40:
+                needs_candles = True
+
+    # Pre-load candle store from subminute/historical tables in a single fast indexed query
+    candle_store = {}
+    if needs_candles:
+        created_ats = [rd["created_at"] for rd, feat in parsed_items if rd.get("created_at") is not None]
+        if created_ats:
+            min_created_at = min(created_ats)
+            # 160 candles of m5 = ~13.3 hours; buffer 14h back
+            start_cutoff = min_created_at - timedelta(hours=14)
+            start_iso = start_cutoff.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+            for tbl, o_col, h_col, l_col, c_col in [
+                ("subminute_candles", "open_price", "high_price", "low_price", "close_price"),
+                ("historical_candles", "open", "high", "low", "close"),
+            ]:
+                try:
+                    cur.execute(f"""
+                        SELECT asset, interval, open_time, {o_col}, {h_col}, {l_col}, {c_col}, volume
+                        FROM {tbl}
+                        WHERE open_time >= %s
+                        ORDER BY asset, interval, open_time ASC
+                    """, (start_iso,))
+                    for a_raw, iv_raw, ot, op, hi, lo, cl, vol in cur.fetchall():
+                        ca = _clean_asset_name(a_raw)
+                        iv = _normalize_interval(iv_raw)
+                        bucket = candle_store.setdefault((ca, iv), ([], []))
+                        ts_str = str(ot)[:19]
+                        if not bucket[0] or bucket[0][-1] != ts_str:
+                            bucket[0].append(ts_str)
+                            bucket[1].append({
+                                "Timestamp": ot,
+                                "Open": float(op),
+                                "High": float(hi),
+                                "Low": float(lo),
+                                "Close": float(cl),
+                                "Volume": float(vol or 0.0)
+                            })
+                except Exception as tbl_err:
+                    log.warning(f"[DatasetAudit] Failed to load candles from {tbl}: {tbl_err}")
+
+    cur.close()
+    conn.close()
 
     tf_sec_map = {"s5": 5, "s10": 10, "s15": 15, "s30": 30, "m1": 60, "1m": 60, "m5": 300, "5m": 300}
 
@@ -229,21 +298,49 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
         "BasketSyncScore": [],
         "PriceEntropy": [],
         "Adx": [],
+        "Atr": [],
         "Rsi": [],
     }
 
-    for r in rows:
-        rd = dict(zip(cols, r))
-        tf = str(rd.get("timeframe") or "s5").lower().strip()
-        tf_sec = tf_sec_map.get(tf, 5)
-
-        try:
-            feat = json.loads(rd["features_json"])
-        except Exception:
+    for rd, feat in parsed_items:
+        if feat is None:
             corrupted_json += 1
             continue
 
+        tf = _normalize_interval(rd.get("timeframe") or "s5")
+        tf_sec = tf_sec_map.get(tf, 5)
+
+        # 1. MacroContext and TA Sensors (evaluated across 100% of parsed snapshots)
+        macro = feat.get("MacroContext") or {}
+        ta = feat.get("Ta") or {}
+        for k in ("DayRangePositionPct", "DxyMomentum1mBps", "BasketSyncScore", "PriceEntropy", "Adx", "Atr"):
+            v = macro.get(k)
+            if v is not None:
+                try:
+                    macro_vals[k].append(float(v))
+                except Exception:
+                    pass
+        rsi_val = ta.get("RsiVal") if isinstance(ta, dict) else None
+        if rsi_val is None:
+            rsi_val = rd.get("rsi_at_signal")
+        if rsi_val is not None:
+            try:
+                macro_vals["Rsi"].append(float(rsi_val))
+            except Exception:
+                pass
+
+        # 2. Extract or reconstruct candles
         candles = feat.get("Candles") or feat.get("candles") or []
+        if len(candles) < 40 and candle_store:
+            clean_a = _clean_asset_name(rd.get("asset"))
+            bucket = candle_store.get((clean_a, tf))
+            if bucket and bucket[0]:
+                c_at = rd.get("created_at")
+                iso_cut = c_at.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(c_at, "strftime") else str(c_at)[:19].replace(" ", "T")
+                idx = bisect.bisect_right(bucket[0], iso_cut)
+                start_idx = max(0, idx - 160)
+                candles = bucket[1][start_idx:idx]
+
         if len(candles) < 40:
             short_candle_windows += 1
             continue
@@ -280,15 +377,6 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
             gapped_candle_windows += 1
         if flat_bars > len(candles) * 0.5:
             flat_frozen_windows += 1
-
-        macro = feat.get("MacroContext") or {}
-        for k in macro_vals:
-            v = macro.get(k)
-            if v is not None:
-                try:
-                    macro_vals[k].append(float(v))
-                except Exception:
-                    pass
 
     dead_sensors = []
     for k, arr in macro_vals.items():
@@ -338,7 +426,7 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
         if api_secret:
             try:
                 import requests as req_lib
-                health_icon = "🟢" if (corrupted_json == 0 and len(dead_sensors) == 0 and flat_frozen_windows == 0) else "🟡"
+                health_icon = "🟢" if (corrupted_json == 0 and len(dead_sensors) == 0 and flat_frozen_windows == 0 and short_candle_windows <= 10) else "🟡"
                 lines = [
                     f"{health_icon} <b>Авто-Аудит чистоты датасета (За 24ч)</b>",
                     f"Проверено слепков: <b>{total}</b>",

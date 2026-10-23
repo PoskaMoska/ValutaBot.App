@@ -318,7 +318,7 @@ public class SelfDiagnosticService : BackgroundService
                         double zeroMfePct = root.GetProperty("zero_mfe_loss_pct").GetDouble();
 
                         int deadSensorsCount = root.TryGetProperty("dead_sensors", out var dsArr) && dsArr.ValueKind == System.Text.Json.JsonValueKind.Array ? dsArr.GetArrayLength() : 0;
-                        bool hasCriticalAnomaly = corrupted > 0 || deadSensorsCount > 0 || flatWin > 20;
+                        bool hasCriticalAnomaly = corrupted > 0 || deadSensorsCount > 0 || flatWin > 20 || shortWin > 10;
                         bool isDailyDigestDue = DateTime.UtcNow.Date > _lastDatasetTelegramDigestDate && DateTime.UtcNow.Hour >= 9;
 
                         if (hasCriticalAnomaly || isDailyDigestDue)
