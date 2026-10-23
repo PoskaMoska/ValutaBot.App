@@ -284,10 +284,16 @@ def train_model(
     is_dual_stream = model_type.lower() in ("dual_stream", "dual_stream_patch_brain", "patch_tst")
 
     if save_path is None:
+        base_models_dir = "ml_service/models" if os.path.exists("ml_service") else "models"
         if is_dual_stream:
-            save_path = "ml_service/models/patch_tst_brain_v3.pt"
+            save_path = f"{base_models_dir}/patch_tst_brain_v3.pt"
         else:
-            save_path = "ml_service/models/sequence_brain_v3.pt"
+            save_path = f"{base_models_dir}/sequence_brain_v3.pt"
+
+    if not os.path.exists(data_path):
+        alt = data_path.replace("ml_service/", "") if data_path.startswith("ml_service/") else f"ml_service/{data_path}"
+        if os.path.exists(alt):
+            data_path = alt
 
     print("=" * 75)
     model_display_name = "DualStreamPatchBrain (PatchTST-Lite)" if is_dual_stream else f"SequenceBrain ({backbone})"
@@ -647,6 +653,7 @@ def train_model(
     checkpoint["test_acc"] = float(test_stats["acc"])
     checkpoint["ece"] = float(val_stats_calibrated["ece"])
 
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     torch.save(checkpoint, save_path)
     file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
     print("=" * 75)
@@ -655,8 +662,9 @@ def train_model(
 
 
 if __name__ == "__main__":
+    default_data = "ml_service/data/dataset_v3.npz" if os.path.exists("ml_service") else "data/dataset_v3.npz"
     parser = argparse.ArgumentParser(description="Train Neural Temporal Brains (SequenceBrain or DualStreamPatchBrain)")
-    parser.add_argument("--data", default="ml_service/data/dataset_v3.npz", help="Path to exported .npz dataset")
+    parser.add_argument("--data", default=default_data, help="Path to exported .npz dataset")
     parser.add_argument("--model", choices=["sequence", "dual_stream", "sequence_brain", "dual_stream_patch_brain", "patch_tst"], default="sequence", help="Model architecture")
     parser.add_argument("--backbone", choices=["hybrid", "transformer"], default="hybrid", help="Backbone for SequenceBrain (hybrid: BiGRU+Conv, transformer: TransformerEncoder)")
     parser.add_argument("--epochs", type=int, default=25, help="Maximum training epochs")

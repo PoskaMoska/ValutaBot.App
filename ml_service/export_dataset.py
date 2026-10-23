@@ -657,6 +657,7 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     print(f"\nSaving dataset to: {output_path} ...")
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     np.savez_compressed(
         output_path,
         X_candles=X_candles,
@@ -679,9 +680,10 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
 
 
 if __name__ == "__main__":
+    default_out = "ml_service/data/dataset_v3.npz" if os.path.exists("ml_service") else "data/dataset_v3.npz"
     parser = argparse.ArgumentParser(description="Export V3 dataset from PostgreSQL")
     parser.add_argument("--db-url", default=os.getenv("DATABASE_URL", DEFAULT_DB_URL))
-    parser.add_argument("--out", default="ml_service/data/dataset_v3.npz")
+    parser.add_argument("--out", default=default_out)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=160)
     parser.add_argument("--seq-len-mtf", type=int, default=30)
