@@ -381,6 +381,9 @@ public static partial class MiniAppController
             return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages" });
         });
 
+        app.MapGet("/api/admin/clock-skew", () =>
+            Results.Json(new { snapshot = ValutaBot.MiniApp.Services.ClockSkewMonitor.GetLatest(), utcNow = DateTime.UtcNow }));
+
         app.MapGet("/api/admin/db-stats", async () =>
         {
             try

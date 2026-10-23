@@ -764,6 +764,7 @@ public static class PocketOptionWebSocketStream
             _livePrices[baseAsset] = price;
             _lastMessageTime = DateTime.UtcNow;
             _lastTickTime = DateTime.UtcNow;
+            ValutaBot.MiniApp.Services.ClockSkewMonitor.Record(tickTimeUtc);
             ValutaMetrics.WebSocketTicksTotal.WithLabels(candleKey).Inc();
             // Macro context gets PO prices only when PO is the active feed (Tiingo then stays out of it).
             if (PriceFeed.UsePocketOption)
