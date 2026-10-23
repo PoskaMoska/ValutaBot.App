@@ -85,13 +85,13 @@ public class MarketAnalysisOrchestrator(
         string? symbol = AssetSanitizer.MapSymbolByDayOfWeek(cleanAsset, day);
         bool isForex = AssetSanitizer.IsForexAsset(cleanAsset);
         
-        string tfLower = timeframe.ToLower().Trim();
+        string tfLower = TimeframeNormalizer.Normalize(timeframe);
         int limit = (tfLower.StartsWith("s") || tfLower.StartsWith("m1") || tfLower.StartsWith("m5")) ? 160 : 200;
         int fetchLimit = limit + 1; // +1 so stripping the unclosed live candle leaves a full 160 closed-candle window
 
         // 2. Fetch Data (Locals only, no class fields)
         var fetchSw = Stopwatch.StartNew();
-        var candles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, cleanAsset, fetchLimit);
+        var candles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, tfLower, cleanAsset, fetchLimit);
         fetchSw.Stop();
 
         if (candles == null || candles.Length == 0)
@@ -143,7 +143,10 @@ public class MarketAnalysisOrchestrator(
 
         // 6. Engines (Parallel)
         var engSw = Stopwatch.StartNew();
-        var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
+        bool isSubminute = tfLower.StartsWith("s");
+        var smcTask = isSubminute
+            ? Task.FromResult(new SmcEngine.SmcAnalysisResult(false, "NONE", false, "NONE", 0, 0, 0, false, "NONE", 0, false, false, "NONE"))
+            : Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
         
         // TA Scoring (align ADX/ATR period with sub-minute vs minute timeframe: 7 for s5-s30, 14 for m1+)
         var taSw = Stopwatch.StartNew();
@@ -198,8 +201,12 @@ public class MarketAnalysisOrchestrator(
         }
 
         int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
-        var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
-        var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
+        var dayAnchors = isSubminute
+            ? new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.DayLevelAnchors(currentLivePrice, currentLivePrice, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            : await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
+        var dxyMetrics = isSubminute
+            ? new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.DollarBasketMetrics(0.0, 0.0, 1.0)
+            : ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
         double liveSpreadBps = 0.0;
         if (!PriceFeed.UsePocketOption)
             TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out liveSpreadBps);
@@ -285,10 +292,8 @@ public class MarketAnalysisOrchestrator(
         {
             ValutaMetrics.NewsBlocksTotal.WithLabels(cleanAsset).Inc();
             var nextNews = _newsCalendar?.GetNextHighImpactNews(cleanAsset);
-            string newsWarning = $"?? ВНИМАНИЕ: Через {minutesToNews.Value} мин выходит важная новость ({nextNews?.Title}). Рынок нестабилен!";
+            string newsWarning = $"⚠️ ВНИМАНИЕ: Через {minutesToNews.Value} мин выходит важная новость ({nextNews?.Title}). Повышенная волатильность!";
             consensus = consensus with {
-                Probability = 50,
-                FinalDirection = "NEUTRAL",
                 CombinedReasoningText = consensus.CombinedReasoningText + "\n" + newsWarning
             };
             traceLines.Add($"[6.5 NEWS] {newsWarning}");
@@ -324,7 +329,11 @@ public class MarketAnalysisOrchestrator(
         int targetHorizon = timeout.TimeoutCandles;
         if (isRiskBlocked)
         {
-             consensus = consensus with { Probability = 0, FinalDirection = "NEUTRAL" }; // Force into HOLD block
+             consensus = consensus with { 
+                 Probability = 0, 
+                 FinalDirection = "NEUTRAL",
+                 CombinedReasoningText = consensus.CombinedReasoningText + $"\n⚠️ Предупреждение риск-контроля: {gatekeeper.Reason}" 
+             };
         }
         
         double[] metaWeights = TradeOutcomeTracker.MetaLearner?.GetWeights(cleanAsset, timeframe) ?? [];
@@ -605,12 +614,12 @@ public class MarketAnalysisOrchestrator(
         {
             copilotAdvice = new CopilotAdviceDto
             {
-                Status = "WAIT",
-                Title = "⏳ Рынок в стадии накопления",
-                Message = $"Четкий направленный импульс отсутствует ({uiMarketPhase}). Сигнал слабый ({consensus.Probability}%). Рекомендуется подождать формирования структуры.",
-                RecommendedAsset = "GBP/USD OTC",
-                RecommendedTf = "M1",
-                QualityScore = 60
+                Status = "CAUTION",
+                Title = $"⚡ Вход в консолидации ({consensus.FinalDirection})",
+                Message = $"Рынок в стадии накопления ({uiMarketPhase}). Ожидайте смену свечи для входа {consensus.FinalDirection} ({consensus.Probability}%).",
+                RecommendedAsset = cleanAsset,
+                RecommendedTf = timeframe.ToUpper(),
+                QualityScore = 65
             };
         }
         else
@@ -622,6 +631,18 @@ public class MarketAnalysisOrchestrator(
                 Message = $"Структура рынка устойчивая ({uiMarketPhase}). Математическое ожидание подтверждено нейросетью ({consensus.Probability}%).",
                 QualityScore = (int)Math.Clamp(consensus.Probability + 25, 75, 92)
             };
+        }
+
+        int tfSec = _fetcher.TimeframeSeconds(timeframe);
+        if (tfSec > 0 && isSubminute && copilotAdvice != null && isDirectional)
+        {
+            long nowUnixSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            long nextCandleBoundary = (nowUnixSec - (nowUnixSec % tfSec)) + tfSec;
+            double secRemaining = Math.Max(0.1, nextCandleBoundary - (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0));
+            string timingAlert = secRemaining > 1.2
+                ? $"⏱ ВХОД НА СМЕНЕ СВЕЧИ: через {secRemaining:F1} сек (в {DateTimeOffset.FromUnixTimeSeconds(nextCandleBoundary).UtcDateTime:HH:mm:ss} UTC). Приготовьтесь нажать {consensus.FinalDirection}!"
+                : $"⚡ ВХОД СЕЙЧАС: новая свеча открыта! Нажимайте {consensus.FinalDirection} немедленно!";
+            copilotAdvice = copilotAdvice with { Message = timingAlert + "\n\n" + copilotAdvice.Message };
         }
 
         ValutaMetrics.PredictionsTotal.WithLabels(
@@ -637,8 +658,8 @@ public class MarketAnalysisOrchestrator(
             uiMarketSession = uiMarketSession,
             uiMarketPhase = uiMarketPhase,
             uiMarketEntropy = uiMarketEntropy,
-            direction = consensus.FinalDirection,
-            probability = consensus.Probability,
+            direction = isRiskBlocked ? "NEUTRAL" : ((consensus.FinalDirection is "BUY" or "PUT") ? consensus.FinalDirection : ((state.VelocityBpsPerSec >= 0 || taResult.score >= 0) ? "BUY" : "PUT")),
+            probability = isRiskBlocked ? 0 : Math.Clamp(consensus.Probability, 50, 92),
             duration = timeout.TimeoutText,
             expiryCandles = timeout.TimeoutCandles,
             adaptiveReasoning = consensus.CombinedReasoningText ?? string.Empty,

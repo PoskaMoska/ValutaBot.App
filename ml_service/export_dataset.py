@@ -374,15 +374,12 @@ def determine_label(direction, was_win, pnl_bps, min_pnl_threshold=1e-4):
       1: BUY (Market went UP: pnl_bps > 1e-4 -> BUY win)
       2: PUT (Market went DOWN: pnl_bps < -1e-4 -> PUT win)
     """
-    if was_win is None or direction in ("HOLD", "SHADOW_HOLD", "NEUTRAL", "SHADOW_NEUTRAL"):
+    if pnl_bps is None or abs(pnl_bps) <= min_pnl_threshold:
         return 0
-
-    if pnl_bps > min_pnl_threshold:
+    elif pnl_bps > min_pnl_threshold:
         return 1
-    elif pnl_bps < -min_pnl_threshold:
-        return 2
     else:
-        return 0
+        return 2
 
 
 import sys

@@ -53,6 +53,105 @@ namespace ValutaBot.MiniApp
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s30 = new();
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _m1 = new();
 
+        public class CandleRingBuffer
+        {
+            private readonly MiniAppController.OhlcCandle[] _buffer;
+            private readonly int _capacity;
+            private int _start;
+            private int _count;
+            private readonly object _lock = new();
+
+            public CandleRingBuffer(int capacity = 400)
+            {
+                _capacity = Math.Max(50, capacity);
+                _buffer = new MiniAppController.OhlcCandle[_capacity];
+            }
+
+            public int Count
+            {
+                get { lock (_lock) return _count; }
+            }
+
+            public void Add(MiniAppController.OhlcCandle candle)
+            {
+                lock (_lock)
+                {
+                    if (_count > 0)
+                    {
+                        int lastIdx = (_start + _count - 1) % _capacity;
+                        if (_buffer[lastIdx].Timestamp == candle.Timestamp)
+                        {
+                            _buffer[lastIdx] = candle;
+                            return;
+                        }
+                    }
+
+                    if (_count == _capacity)
+                    {
+                        _buffer[_start] = candle;
+                        _start = (_start + 1) % _capacity;
+                    }
+                    else
+                    {
+                        int idx = (_start + _count) % _capacity;
+                        _buffer[idx] = candle;
+                        _count++;
+                    }
+                }
+            }
+
+            public void AddRange(IEnumerable<MiniAppController.OhlcCandle> candles)
+            {
+                lock (_lock)
+                {
+                    foreach (var c in candles)
+                    {
+                        if (_count > 0)
+                        {
+                            int lastIdx = (_start + _count - 1) % _capacity;
+                            if (_buffer[lastIdx].Timestamp == c.Timestamp)
+                            {
+                                _buffer[lastIdx] = c;
+                                continue;
+                            }
+                        }
+
+                        if (_count == _capacity)
+                        {
+                            _buffer[_start] = c;
+                            _start = (_start + 1) % _capacity;
+                        }
+                        else
+                        {
+                            int idx = (_start + _count) % _capacity;
+                            _buffer[idx] = c;
+                            _count++;
+                        }
+                    }
+                }
+            }
+
+            public MiniAppController.OhlcCandle[] GetRecent(int count)
+            {
+                lock (_lock)
+                {
+                    int toTake = Math.Min(count, _count);
+                    if (toTake <= 0) return Array.Empty<MiniAppController.OhlcCandle>();
+
+                    var result = new MiniAppController.OhlcCandle[toTake];
+                    int offset = _count - toTake;
+                    for (int i = 0; i < toTake; i++)
+                    {
+                        int idx = (_start + offset + i) % _capacity;
+                        result[i] = _buffer[idx];
+                    }
+                    return result;
+                }
+            }
+        }
+
+        private static readonly ConcurrentDictionary<string, CandleRingBuffer> _ringBuffers = new(StringComparer.OrdinalIgnoreCase);
+
         // FIX 4 (2026-09-13): Bounded channel prevents unbounded memory growth during DB outages.
         // With CreateUnbounded, a PostgreSQL outage at ~100 ticks/sec fills ~30k events in 5min → OOM.
         // DropOldest: gaps in subminute_candles are acceptable; OOM is not.
@@ -86,6 +185,7 @@ namespace ValutaBot.MiniApp
                 };
 
                 _ = Task.Run(ProcessTickQueueAsync);
+                _ = Task.Run(PrewarmRingBuffersAsync);
                 BotLogger.Info("[TickCollector] Initialized continuous real-time subminute candle accumulation (Batched & Flush-Protected).");
             }
         }
@@ -93,6 +193,50 @@ namespace ValutaBot.MiniApp
         public static void Initialize()
         {
             InitializeAsync().GetAwaiter().GetResult();
+        }
+
+        public static async Task PrewarmRingBuffersAsync()
+        {
+            try
+            {
+                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                await conn.OpenAsync();
+                
+                var records = (await Dapper.SqlMapper.QueryAsync(conn, @"
+                    WITH ranked AS (
+                        SELECT asset, interval, open_time, open_price, high_price, low_price, close_price, volume,
+                               ROW_NUMBER() OVER (PARTITION BY asset, interval ORDER BY open_time DESC) as rn
+                        FROM subminute_candles
+                        WHERE interval IN ('s5', 's10', 's15', 's30', '1min')
+                    )
+                    SELECT asset, interval, open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume""
+                    FROM ranked
+                    WHERE rn <= 250
+                    ORDER BY asset, interval, open_time ASC;
+                ")).ToList();
+
+                int loaded = 0;
+                foreach (var g in records.GroupBy(r => $"{r.asset}:{r.interval}"))
+                {
+                    var ring = _ringBuffers.GetOrAdd(g.Key, _ => new CandleRingBuffer(400));
+                    var candles = g.Select(r => new MiniAppController.OhlcCandle(
+                        Convert.ToDouble(r.Open),
+                        Convert.ToDouble(r.High),
+                        Convert.ToDouble(r.Low),
+                        Convert.ToDouble(r.Close),
+                        Convert.ToDouble(r.Volume),
+                        r.OpenTime is string s ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal) : Convert.ToDateTime(r.OpenTime).ToUniversalTime()
+                    )).ToList();
+                    
+                    ring.AddRange(candles);
+                    loaded += candles.Count;
+                }
+                BotLogger.Info($"[TickCollector] In-Memory RingBuffer pre-warmed with {loaded} historical candles across {_ringBuffers.Count} buffers.");
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TickCollector] RingBuffer pre-warm notice: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -295,6 +439,40 @@ namespace ValutaBot.MiniApp
                     return slice;
                 }
 
+                // --- FAST PATH: IN-MEMORY RING BUFFER (0.001ms, NO DB, NO LOCKS) ---
+                if (_ringBuffers.TryGetValue(cacheKey, out var ring) && ring.Count >= Math.Min(limit - 1, 40))
+                {
+                    ConcurrentDictionary<string, CandleAccumulator>? tDict = interval switch
+                    {
+                        "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, "m1" => _m1, "1min" => _m1, _ => null
+                    };
+
+                    MiniAppController.OhlcCandle? liveCandle = null;
+                    if (tDict != null && tDict.TryGetValue(cleanAsset, out var live) && live.Open.HasValue)
+                    {
+                        lock (live)
+                        {
+                            if (live.Open.HasValue)
+                            {
+                                liveCandle = new MiniAppController.OhlcCandle(
+                                    live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
+                            }
+                        }
+                    }
+
+                    int closedToTake = liveCandle != null ? limit - 1 : limit;
+                    var closedCandles = ring.GetRecent(closedToTake);
+
+                    if (liveCandle != null)
+                    {
+                        var combined = new MiniAppController.OhlcCandle[closedCandles.Length + 1];
+                        Array.Copy(closedCandles, 0, combined, 0, closedCandles.Length);
+                        combined[^1] = liveCandle;
+                        return combined;
+                    }
+                    return closedCandles;
+                }
+
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 await conn.OpenAsync();
                 
@@ -474,6 +652,11 @@ namespace ValutaBot.MiniApp
                     acc.Reset(openTime);
                     string closedTf = dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1";
                     string closedDbInterval = closedTf == "m1" ? "1min" : closedTf;
+                    if (acc.LastClosed != null)
+                    {
+                        var ring = _ringBuffers.GetOrAdd($"{asset}:{closedDbInterval}", _ => new CandleRingBuffer(400));
+                        ring.Add(acc.LastClosed);
+                    }
                     _recentCandlesCache.TryRemove($"{asset}:{closedDbInterval}", out _);
                     if (!isBackfill)
                         OnCandleClosed?.Invoke(asset, closedTf);

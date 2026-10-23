@@ -68,36 +68,32 @@ public class PendingTradeVerificationService : BackgroundService
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
             
-            // Snap CreatedAt to its 5s candle open boundary and advance by exact 5s-aligned durationSec
-            // so targetGrid never jumps an extra 5s candle ahead when CreatedAt falls in the second half of a 5s bucket.
+            // Physical duration expiry: verifyUtc is the exact moment the contract expires.
             long s5Ticks = TimeSpan.FromSeconds(5).Ticks;
             DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();
             DateTime verifyUtc = record.VerifyAt.Kind == DateTimeKind.Utc ? record.VerifyAt : record.VerifyAt.ToUniversalTime();
             DateTime createdBucket = new DateTime(createdUtc.Ticks - (createdUtc.Ticks % s5Ticks), DateTimeKind.Utc);
-            int durationSec = Math.Max(5, (int)Math.Round((verifyUtc - createdUtc).TotalSeconds / 5.0) * 5);
-            DateTime targetGrid = createdBucket.AddSeconds(durationSec);
-
-            // Never match a candle from before the trade was opened.
-            DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20)
-                ? createdBucket
-                : targetGrid.AddSeconds(-20);
+            DateTime expiryBucket = new DateTime(verifyUtc.Ticks - (verifyUtc.Ticks % s5Ticks), DateTimeKind.Utc);
+            DateTime targetGrid = expiryBucket;
+            DateTime minAllowedSub = createdBucket > expiryBucket.AddSeconds(-20) ? createdBucket : expiryBucket.AddSeconds(-20);
 
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                 SELECT 
                     CASE 
-                        WHEN open_time = @TargetGrid THEN open_price 
+                        WHEN open_time = @ExpiryBucket THEN open_price 
                         ELSE close_price 
                     END
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
-                  AND open_time <= @TargetGrid
-                  AND open_time >= @MinAllowedTime
-                ORDER BY open_time DESC LIMIT 1
+                  AND open_time <= @ExpiryBucket
+                  AND open_time >= @MinAllowed
+                ORDER BY open_time DESC
+                LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
-                TargetGrid = targetGrid.ToString("O"),
-                MinAllowedTime = minAllowedSub.ToString("O")
+                ExpiryBucket = expiryBucket.ToString("O"),
+                MinAllowed = minAllowedSub.ToString("O")
             });
 
             // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m).

@@ -10,19 +10,7 @@ public class TradeTimeoutEngine : ITradeTimeoutEngine
         string Reasoning
     );
 
-    private static int TimeframeToSeconds(string timeframe) => timeframe.ToLower() switch
-    {
-        "s5"  => 5,
-        "s10" => 10,
-        "s15" => 15,
-        "s30" => 30,
-        "m1"  => 60,
-        "m3"  => 180,
-        "m5"  => 300,
-        "m15" => 900,
-        "m30" => 1800,
-        _     => 60
-    };
+    private static int TimeframeToSeconds(string timeframe) => TimeframeNormalizer.ToSeconds(timeframe);
 
     private static string FormatSeconds(int totalSeconds)
     {

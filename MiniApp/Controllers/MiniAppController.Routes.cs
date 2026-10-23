@@ -118,7 +118,7 @@ public static partial class MiniAppController
 
             var userSettings = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.GetSettingsAsync(userId);
 
-            string tf = timeframe.ToLower().Trim();
+            string tf = TimeframeNormalizer.Normalize(timeframe);
             string assetTrimmed = asset.Trim();
             Console.WriteLine($"[ANALYZE] {assetTrimmed} | TF: {tf} | User: {userId}");
 

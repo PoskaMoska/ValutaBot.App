@@ -153,7 +153,7 @@ export async function executeAnalysis() {
         }
 
         const elapsed = Date.now() - startTime;
-        const remainingDelay = Math.max(0, 2000 - elapsed);
+        const remainingDelay = (currentTf && currentTf.toLowerCase().startsWith('s')) ? 0 : Math.max(0, 500 - elapsed);
 
         setTimeout(() => {
             hideAiChart();

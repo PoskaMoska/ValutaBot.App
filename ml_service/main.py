@@ -195,10 +195,10 @@ async def predict(request: Request):
         return Response(content=orjson.dumps(resp), media_type="application/json")
 
     n_candles = len(candles)
-    if n_candles < 35:
+    if n_candles < 15:
         raise HTTPException(
             status_code=422,
-            detail=f"Need at least 35 candles for reliable prediction, got {n_candles}",
+            detail=f"Need at least 15 candles for reliable prediction, got {n_candles}",
         )
 
     # Attach rich context for SMC

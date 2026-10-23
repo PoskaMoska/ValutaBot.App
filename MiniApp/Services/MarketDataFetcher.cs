@@ -51,23 +51,23 @@ public class MarketDataFetcher
     }
 
     // Caches mappings for standard intervals
-    public string IntervalMap(string tf) => tf.ToLower() switch
+    public string IntervalMap(string tf) => TimeframeNormalizer.Normalize(tf) switch
     {
-        "s5" => "1min", "s15" => "1min", "s30" => "1min",
-        "m1" => "1min", "m2" => "1min", "m3" => "3min", 
+        "s5" or "s10" or "s15" or "s30" or "m1" => "1min",
+        "m2" => "1min", "m3" => "3min", 
         "m5" => "5min", "m15" => "15min", "m30" => "30min",
         "h1" => "1h", "h4" => "4h", "d1" => "1day", _ => "1min"
     };
 
-    public string? HigherTf(string tf) => tf.ToLower() switch
+    public string? HigherTf(string tf) => TimeframeNormalizer.Normalize(tf) switch
     {
-        "s5" => "m1", "s10" => "m1", "s15" => "m1", "s30" => "m1",
+        "s5" or "s10" or "s15" or "s30" => "m1",
         "m1" => "m5", "m2" => "m15", "m3" => "m15",
         "m5" => "m15", "m15" => "h1", "m30" => "h1",
         "h1" => "h4", "h4" => "d1", _ => null
     };
 
-    public string? LowerTf(string tf) => tf.ToLower() switch
+    public string? LowerTf(string tf) => TimeframeNormalizer.Normalize(tf) switch
     {
         "s10" or "s15" or "s30" => "s5",
         "s5" => "s3",
@@ -89,15 +89,7 @@ public class MarketDataFetcher
                (dayOfWeek == DayOfWeek.Sunday && utcNow.Hour < 21);
     }
 
-    public int TimeframeSeconds(string rawInterval)
-    {
-        string t = rawInterval.ToLower();
-        if (t.StartsWith("s") && int.TryParse(t.Substring(1), out int s)) return s;
-        if (t.StartsWith("m") && int.TryParse(t.Substring(1), out int m)) return m * 60;
-        if (t.StartsWith("h") && int.TryParse(t.Substring(1), out int h)) return h * 3600;
-        if (t == "d1") return 86400;
-        return 60;
-    }
+    public int TimeframeSeconds(string rawInterval) => TimeframeNormalizer.ToSeconds(rawInterval);
 
     /// <summary>
     /// Single source of truth for "is the live feed stale": the last candle's open time is older than
@@ -121,7 +113,7 @@ public class MarketDataFetcher
         if (PriceFeed.UsePocketOption)
         {
             string poKey = PriceFeed.CandleKey(cleanAsset);
-            string tfKey = rawInterval.ToLower() == "1min" ? "m1" : rawInterval.ToLower();
+            string tfKey = TimeframeNormalizer.Normalize(rawInterval);
             int tfSecs = Math.Max(5, TimeframeSeconds(tfKey));
 
             if (!(tfKey.StartsWith("s") || tfKey == "m1"))
