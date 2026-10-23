@@ -381,6 +381,19 @@ public static partial class MiniAppController
             return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages" });
         });
 
+        app.MapPost("/api/admin/db-maintenance", async () =>
+        {
+            try
+            {
+                await ValutaBot.MiniApp.Services.DataRetentionService.RunEmergencyCleanupAsync();
+                return Results.Json(new { status = "ok", message = "DB maintenance and VACUUM FULL completed successfully." });
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: 500);
+            }
+        });
+
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
 
         // Internal endpoint for ML service -> Telegram admin notifications

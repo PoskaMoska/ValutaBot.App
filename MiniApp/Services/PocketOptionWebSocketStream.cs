@@ -778,55 +778,32 @@ public static class PocketOptionWebSocketStream
             _ = RealtimeTickCollector.OnPriceUpdateAsync(candleKey, price, tickTimeUtc, isBackfill);
         }
 
-        // Queue tick for DB persistence in po_ticks
-        long recvMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _tickDbQueue.TryAdd(new PoTickRow(asset, utcSec, price, recvMs));
+        // Raw ticks are aggregated directly in-memory into subminute_candles (RealtimeTickCollector).
+        // Avoid persisting millions of raw ticks into PostgreSQL to bound disk volume.
         return fedToCandles;
     }
 
     private static async Task DbBatchFlusherAsync(CancellationToken token)
     {
-        var batch = new List<PoTickRow>(2000);
-
         while (!token.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(3000, token);
+                await Task.Delay(15000, token);
 
-                while (batch.Count < 2000 && _tickDbQueue.TryTake(out var item))
-                {
-                    batch.Add(item);
-                }
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.OpenAsync(token);
 
-                if (batch.Count > 0)
-                {
-                    using var conn = DbConnectionFactory.GetConnection();
-                    await conn.OpenAsync(token);
-
-                    await conn.ExecuteAsync(@"
-                        INSERT INTO po_ticks (asset, ts, price, recv_ms)
-                        VALUES (@Asset, @Ts, @Price, @RecvMs)
-                        ON CONFLICT (asset, ts) DO NOTHING;
-                    ", batch);
-
-                    await conn.ExecuteAsync(@"
-                        INSERT INTO po_collector_state (id, last_tick_at, status)
-                        VALUES (1, now(), 'ONLINE')
-                        ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, status = EXCLUDED.status;
-                    ");
-
-                    batch.Clear();
-                }
+                await conn.ExecuteAsync(@"
+                    INSERT INTO po_collector_state (id, last_tick_at, status)
+                    VALUES (1, now(), 'ONLINE')
+                    ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, status = EXCLUDED.status;
+                ");
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                BotLogger.Warn($"[PO WS] DB flush error: {ex.Message}");
-                if (batch.Count >= 10_000)
-                {
-                    batch.Clear();
-                }
+                BotLogger.Warn($"[PO WS] Collector state heartbeat notice: {ex.Message}");
             }
         }
     }
