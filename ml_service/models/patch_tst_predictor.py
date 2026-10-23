@@ -19,6 +19,8 @@ from typing import Optional, List, Dict, Tuple
 from pathlib import Path
 import numpy as np
 
+from datetime import datetime
+
 log = logging.getLogger("patch-tst-predictor")
 
 _MODEL_PATH = Path(__file__).parent / "patch_tst_brain_v3.pt"
@@ -36,15 +38,24 @@ TF_SECONDS = {
 }
 
 
-def normalize_candles_live(candles: List[Dict], seq_len: int = 160, n_channels: int = 5) -> np.ndarray:
+def normalize_candles_live(
+    candles: List[Dict],
+    seq_len: int = 160,
+    n_channels: int = 8,
+    tf_sec: int = 5
+) -> np.ndarray:
     """
-    Normalizes raw OHLCV candles to relative returns matching training distribution.
+    Normalizes raw OHLCV candles to relative returns matching export_dataset.py training distribution (zero Train-Serve Skew).
 
-    5-channel mode (legacy):
-      [(close-open)/open, (high-open)/open, (low-open)/open, (close-prev)/prev, log1p(vol)/10]
-
-    4-channel mode (v3 — excludes zero-volume channel):
-      [(close-open)/open, (high-open)/open, (low-open)/open, (close-prev)/prev]
+    8-channel mode (v3):
+      0: (close-open)/open * 10000 (body bps)
+      1: (high-open)/open * 10000 (upper excursion bps)
+      2: (low-open)/open * 10000 (lower excursion bps)
+      3: (close-prev_close)/prev_close * 10000 (inter-candle return bps, zeroed across time gaps)
+      4: log1p(vol)/10.0 (tick volume density, defaults to 0.0 when missing)
+      5: (high - max(open, close))/open * 10000 (upper wick bps)
+      6: (min(open, close) - low)/open * 10000 (lower wick bps)
+      7: (high - low)/open * 10000 (full candle range bps)
     """
     arr = np.zeros((seq_len, n_channels), dtype=np.float32)
     if not candles:
@@ -54,12 +65,15 @@ def normalize_candles_live(candles: List[Dict], seq_len: int = 160, n_channels: 
     offset = seq_len - len(tail)
 
     prev_close = None
+    prev_ts = None
+    max_allowed_gap_sec = max(60, tf_sec * 12)
+
     for i, c in enumerate(tail):
         idx = offset + i
-        op = float(c.get("open", 1.0))
-        hi = float(c.get("high", op))
-        lo = float(c.get("low", op))
-        cl = float(c.get("close", op))
+        op = float(c.get("Open", c.get("open", 1.0)))
+        hi = float(c.get("High", c.get("high", op)))
+        lo = float(c.get("Low", c.get("low", op)))
+        cl = float(c.get("Close", c.get("close", op)))
 
         if op <= 0:
             op = 1e-5
@@ -68,16 +82,40 @@ def normalize_candles_live(candles: List[Dict], seq_len: int = 160, n_channels: 
         arr[idx, 1] = ((hi - op) / op) * 10000.0
         arr[idx, 2] = ((lo - op) / op) * 10000.0
 
-        if prev_close is not None and prev_close > 0:
+        cur_ts = None
+        ts_raw = c.get("Timestamp") or c.get("timestamp") or c.get("openTime")
+        if isinstance(ts_raw, (int, float)) and ts_raw > 0:
+            # Handle millisecond vs second epoch timestamps
+            cur_ts = float(ts_raw) / 1000.0 if float(ts_raw) > 1e11 else float(ts_raw)
+        elif isinstance(ts_raw, str) and len(ts_raw) >= 19:
+            try:
+                cur_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                cur_ts = None
+
+        is_time_gap = (
+            prev_ts is not None
+            and cur_ts is not None
+            and (cur_ts - prev_ts) > max_allowed_gap_sec
+        )
+
+        if prev_close is not None and prev_close > 0 and not is_time_gap:
             arr[idx, 3] = ((cl - prev_close) / prev_close) * 10000.0
         else:
             arr[idx, 3] = 0.0
 
         if n_channels >= 5:
-            vol = float(c.get("volume", 1.0))
+            vol = float(c.get("Volume", c.get("volume", 0.0)) or 0.0)
             arr[idx, 4] = math.log1p(max(0.0, vol)) / 10.0
 
+        if n_channels >= 8:
+            arr[idx, 5] = ((hi - max(op, cl)) / op) * 10000.0
+            arr[idx, 6] = ((min(op, cl) - lo) / op) * 10000.0
+            arr[idx, 7] = ((hi - lo) / op) * 10000.0
+
         prev_close = cl
+        if cur_ts is not None:
+            prev_ts = cur_ts
 
     return arr
 
@@ -87,13 +125,16 @@ def build_macro_vector_live(
     interval: str,
     candles: List[Dict],
     macro_data: Optional[Dict] = None,
-    smc_data: Optional[Dict] = None
+    smc_data: Optional[Dict] = None,
+    ta_data: Optional[Dict] = None,
+    n_features: int = 31
 ) -> np.ndarray:
     """
-    Builds the 23-element macro context vector matching training features.
+    Builds the macro context vector matching training features (23 or 31 elements).
     """
     macro = macro_data or {}
     smc = smc_data or {}
+    ta = ta_data or macro.get("Ta") or macro.get("ta") or {}
 
     day_pos = float(macro.get("DayRangePositionPct", 0.5))
     dist_high = float(macro.get("DistToDayHighBps", 0.0)) / 100.0
@@ -163,7 +204,7 @@ def build_macro_vector_live(
     )
     asset_id = float(ASSET_MAP.get(asset_clean, 6.0))
 
-    vec = np.array([
+    base_23 = [
         day_pos, dist_high, dist_low,
         dxy_1m, dxy_5m, basket_sync, spread,
         asian_high, asian_low,
@@ -172,9 +213,27 @@ def build_macro_vector_live(
         tf_sec,
         has_ob, has_fvg, has_swp, has_bos,
         asset_id
-    ], dtype=np.float32)
+    ]
 
-    return vec
+    if n_features <= 23:
+        return np.array(base_23, dtype=np.float32)
+
+    # Extended 31 features
+    ta_score = float(ta.get("Score", 0.0))
+    micro_vel = float(ta.get("MicroVel", 0.0)) / 20.0
+    hma_slope = float(ta.get("HmaSlope", 0.0)) / 10.0
+    vol_ratio = min(3.0, float(ta.get("VolRatio", 1.0))) / 3.0
+    bb_sq = float(1.0 if macro.get("BbSqueeze") else 0.0)
+    price_pos = float(macro.get("PricePositionPct", 0.5))
+    trend_mat = float(macro.get("TrendMaturity", 0.0)) / 100.0
+    last_ticks = float(macro.get("TickCountLastCandle", 1.0))
+    tick_density = math.log1p(max(0.0, last_ticks)) / 5.0
+
+    ext_31 = base_23 + [
+        ta_score, micro_vel, hma_slope, vol_ratio,
+        bb_sq, price_pos, trend_mat, tick_density
+    ]
+    return np.array(ext_31, dtype=np.float32)
 
 
 class PatchTSTPredictor:
@@ -227,7 +286,8 @@ class PatchTSTPredictor:
             self._candle_features = checkpoint.get("candle_features", 5)
             self._seq_len = checkpoint.get("seq_len", 160)
             self._seq_len_mtf = checkpoint.get("seq_len_mtf", 30)
-            macro_dim = checkpoint.get("macro_features", 23)
+            self._macro_features = checkpoint.get("macro_features", 23)
+            macro_dim = self._macro_features
             d_model = checkpoint.get("d_model", 64)
             backbone = checkpoint.get("backbone", "hybrid")
 
@@ -273,7 +333,7 @@ class PatchTSTPredictor:
             self.model = model
             val_acc = checkpoint.get("val_acc") or 0.0
             vs = checkpoint.get("val_stats") or {}
-            dir_wr = vs.get("wr_57") or vs.get("wr_50") or val_acc or 0.0
+            dir_wr = vs.get("wr_dir_60") or vs.get("wr_60") or vs.get("wr_58") or vs.get("wr_57") or vs.get("wr_50") or val_acc or 0.0
             n_samples = vs.get("total") or vs.get("n_val")
             self._arch_tag = "patch_tst_v3" if self._is_dual_stream else "seq_brain_v3"
             self.metrics = {
@@ -317,9 +377,12 @@ class PatchTSTPredictor:
             import torch
             import torch.nn.functional as F
 
-            # Use channel count from checkpoint (4 or 5)
-            x_micro_np = normalize_candles_live(candles, seq_len=self._seq_len, n_channels=self._candle_features)
-            x_macro_np = build_macro_vector_live(symbol, interval, candles, macro_context, smc_context)
+            tf_sec = TF_SECONDS.get(str(interval).lower(), 5)
+            mtf_tf_sec = 60 if tf_sec < 60 else 300
+
+            # Use channel count from checkpoint (4, 5, or 8)
+            x_micro_np = normalize_candles_live(candles, seq_len=self._seq_len, n_channels=self._candle_features, tf_sec=tf_sec)
+            x_macro_np = build_macro_vector_live(symbol, interval, candles, macro_context, smc_context, n_features=getattr(self, "_macro_features", 23))
 
             x_micro_t = torch.tensor(x_micro_np, dtype=torch.float32).unsqueeze(0).to(self.device)
             x_macro_t = torch.tensor(x_macro_np, dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -328,7 +391,7 @@ class PatchTSTPredictor:
                 if self._is_dual_stream:
                     # DualStreamPatchBrain expects (x_micro, x_mtf, x_macro)
                     x_mtf_np = normalize_candles_live(
-                        mtf_candles or [], seq_len=self._seq_len_mtf, n_channels=self._candle_features
+                        mtf_candles or [], seq_len=self._seq_len_mtf, n_channels=self._candle_features, tf_sec=mtf_tf_sec
                     )
                     x_mtf_t = torch.tensor(x_mtf_np, dtype=torch.float32).unsqueeze(0).to(self.device)
                     logits, _ = self.model(x_micro_t, x_mtf_t, x_macro_t)

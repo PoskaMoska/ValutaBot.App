@@ -68,15 +68,14 @@ public class PendingTradeVerificationService : BackgroundService
             using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync();
             
-            // Snap VerifyAt to the nearest 5s grid boundary so `open_time = @TargetGrid` matches the exact boundary candle's open_price,
-            // or falls back to the preceding 5s candle's close_price (never leaking 5s into the next candle's close_price).
+            // Snap CreatedAt to its 5s candle open boundary and advance by exact 5s-aligned durationSec
+            // so targetGrid never jumps an extra 5s candle ahead when CreatedAt falls in the second half of a 5s bucket.
             long s5Ticks = TimeSpan.FromSeconds(5).Ticks;
             DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();
             DateTime verifyUtc = record.VerifyAt.Kind == DateTimeKind.Utc ? record.VerifyAt : record.VerifyAt.ToUniversalTime();
             DateTime createdBucket = new DateTime(createdUtc.Ticks - (createdUtc.Ticks % s5Ticks), DateTimeKind.Utc);
-            DateTime targetGrid = new DateTime(((verifyUtc.Ticks + (s5Ticks / 2)) / s5Ticks) * s5Ticks, DateTimeKind.Utc);
-            if (targetGrid <= createdBucket)
-                targetGrid = createdBucket.AddSeconds(5);
+            int durationSec = Math.Max(5, (int)Math.Round((verifyUtc - createdUtc).TotalSeconds / 5.0) * 5);
+            DateTime targetGrid = createdBucket.AddSeconds(durationSec);
 
             // Never match a candle from before the trade was opened.
             DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20)

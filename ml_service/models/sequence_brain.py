@@ -137,22 +137,14 @@ class SequenceBrain(nn.Module):
         # Learned temperature for output calibration (optimized during training)
         self.temperature = nn.Parameter(torch.tensor(1.5))
 
-    def forward(self, x_candles: torch.Tensor, x_macro: torch.Tensor):
-        """
-        x_candles: [B, seq_len, 5]
-        x_macro:   [B, macro_features]
-        """
-        b, t, c = x_candles.shape
-
-        # Transpose for Conv1d: [B, 5, seq_len]
+    def _forward_single(self, x_candles: torch.Tensor, x_macro: torch.Tensor):
         xc_trans = x_candles.transpose(1, 2)
         c1 = F.gelu(self.conv1(xc_trans))
         c2 = F.gelu(self.conv2(xc_trans))
-        conv_out = torch.cat([c1, c2], dim=1)  # [B, d_model, seq_len]
-        
-        # Transpose back: [B, seq_len, d_model]
+        conv_out = torch.cat([c1, c2], dim=1)
+
         seq_features = conv_out.transpose(1, 2)
-        seq_features = self.spatial_drop(seq_features.unsqueeze(2)).squeeze(2)  # Channel dropout
+        seq_features = self.spatial_drop(seq_features.unsqueeze(2)).squeeze(2)
         seq_features = self.conv_norm(seq_features)
 
         if self.backbone_type == "transformer":
@@ -162,20 +154,39 @@ class SequenceBrain(nn.Module):
             enc_out, _ = self.bigru(seq_features)
 
         enc_out = F.gelu(self.seq_proj(enc_out))
-        pooled_seq = self.attn_pool(enc_out)  # [B, d_model]
+        pooled_seq = self.attn_pool(enc_out)
+        macro_out = self.macro_encoder(x_macro)
+        fused = torch.cat([pooled_seq, macro_out], dim=-1)
 
-        # Process Macro Vector
-        macro_out = self.macro_encoder(x_macro)  # [B, 64]
+        latent = self.classifier[0:6](fused)
+        logits = self.classifier[6:](latent)
+        aux_pnl = self.pnl_regressor(latent).squeeze(-1)
+        return logits, aux_pnl
 
-        # Fusion
-        fused = torch.cat([pooled_seq, macro_out], dim=-1)  # [B, d_model + 64]
-        
-        # Latent representation
-        latent = self.classifier[0:6](fused)  # up to 64-dim representation
-        logits = self.classifier[6:](latent)   # [B, num_classes]
+    def forward(self, x_candles: torch.Tensor, x_macro: torch.Tensor):
+        """
+        x_candles: [B, seq_len, 8]
+        x_macro:   [B, macro_features]
+        """
+        from models.patch_tst_brain import DualStreamPatchBrain
+        xm_pos, xm_neg = DualStreamPatchBrain._sanitize_and_flip_macro(x_macro)
+        logits_pos, pnl_pos = self._forward_single(x_candles, xm_pos)
+        logits_neg, pnl_neg = self._forward_single(DualStreamPatchBrain._flip_candles(x_candles), xm_neg)
 
-        aux_pnl = self.pnl_regressor(latent).squeeze(-1)  # [B]
+        deep_dir_raw = 0.5 * ((logits_pos[:, 1] - logits_pos[:, 2]) - (logits_neg[:, 1] - logits_neg[:, 2]))
+        deep_dir = 0.002 * torch.tanh(deep_dir_raw)
 
+        # Fallback dummy MTF tensor from last 30 micro candles for single-stream SequenceBrain
+        x_mtf_proxy = x_candles[:, -30:, :]
+        alpha_dir, _ = DualStreamPatchBrain._compute_orthogonal_alpha(x_candles, x_mtf_proxy, x_macro)
+
+        total_dir = alpha_dir + deep_dir
+        hold_logit = 0.5 * (logits_pos[:, 0] + logits_neg[:, 0]) - 2.5
+        buy_logit = 0.5 * total_dir
+        put_logit = -0.5 * total_dir
+
+        logits = torch.stack([hold_logit, buy_logit, put_logit], dim=-1)
+        aux_pnl = 0.5 * (pnl_pos - pnl_neg)
         return logits, aux_pnl
 
     def predict_probabilities(self, x_candles: torch.Tensor, x_macro: torch.Tensor):

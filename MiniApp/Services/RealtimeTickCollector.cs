@@ -169,12 +169,29 @@ namespace ValutaBot.MiniApp
             }
         }
 
+        private static readonly ConcurrentDictionary<string, (long TimestampTicks, int Limit, MiniAppController.OhlcCandle[] Candles)> _recentCandlesCache = new();
+
         public static async Task<MiniAppController.OhlcCandle[]> GetRecentCandles(string asset, string interval, int limit)
         {
             try
             {
                 string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
                 string dbInterval = interval == "m1" ? "1min" : interval;
+                string cacheKey = $"{cleanAsset}:{dbInterval}";
+                long nowTicks = DateTime.UtcNow.Ticks;
+
+                // Fast path: reuse recent SQL fetch within 1.5s if limit is satisfied (eliminates duplicate scanner -> orchestrator SQL queries)
+                if (_recentCandlesCache.TryGetValue(cacheKey, out var cached) &&
+                    (nowTicks - cached.TimestampTicks) <= TimeSpan.FromMilliseconds(1500).Ticks &&
+                    cached.Limit >= limit &&
+                    cached.Candles.Length > 0)
+                {
+                    if (cached.Candles.Length <= limit)
+                        return cached.Candles;
+                    var slice = new MiniAppController.OhlcCandle[limit];
+                    Array.Copy(cached.Candles, cached.Candles.Length - limit, slice, 0, limit);
+                    return slice;
+                }
 
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 await conn.OpenAsync();
@@ -269,6 +286,7 @@ namespace ValutaBot.MiniApp
                     Array.Resize(ref result, resultIdx);
                 }
 
+                _recentCandlesCache[cacheKey] = (DateTime.UtcNow.Ticks, limit, result);
                 return result;
             }
             catch (Exception ex)
@@ -327,8 +345,11 @@ namespace ValutaBot.MiniApp
                 if (acc.OpenTime != openTime && acc.OpenTime != default)
                 {
                     acc.Reset(openTime);
+                    string closedTf = dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1";
+                    string closedDbInterval = closedTf == "m1" ? "1min" : closedTf;
+                    _recentCandlesCache.TryRemove($"{asset}:{closedDbInterval}", out _);
                     if (!isBackfill)
-                        OnCandleClosed?.Invoke(asset, dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1");
+                        OnCandleClosed?.Invoke(asset, closedTf);
                 }
                 else if (acc.OpenTime == default)
                     acc.OpenTime = openTime;

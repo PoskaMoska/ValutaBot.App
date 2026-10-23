@@ -125,6 +125,7 @@ public static partial class MiniAppController
 
         // Register Orchestrator
         builder.Services.AddTransient<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator, ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator>();
+        builder.Services.AddSingleton<ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService, ValutaBot.MiniApp.Features.ChaosAudit.ChaosAuditService>();
 
         builder.Services.AddCors(options =>
         {

@@ -358,6 +358,29 @@ public static partial class MiniAppController
             }
         });
 
+        // Autonomous Chaos Engineering & Fuzzing Audit Endpoints
+        app.MapGet("/api/chaos/report", (ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
+        {
+            var rep = chaos.GetLatestReport();
+            return rep != null ? Results.Json(rep) : Results.Json(new { status = "NO_REPORT_YET", message = "Run POST /api/chaos/run to execute initial audit." });
+        });
+
+        app.MapPost("/api/chaos/run", async (ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
+        {
+            var report = await chaos.RunFullAuditAsync();
+            return Results.Json(report);
+        });
+
+        app.MapPost("/api/chaos/run/{category}", async (string category, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
+        {
+            if (Enum.TryParse<ValutaBot.MiniApp.Features.ChaosAudit.Models.ChaosCategory>(category, true, out var cat))
+            {
+                var report = await chaos.RunCategoryAuditAsync(cat);
+                return Results.Json(report);
+            }
+            return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages" });
+        });
+
         app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
 
         // Internal endpoint for ML service -> Telegram admin notifications

@@ -32,6 +32,7 @@ public class SelfDiagnosticService : BackgroundService
     private DateTime _lastV3CheckTime = DateTime.MinValue;
     private DateTime _lastDatasetAuditTime = DateTime.MinValue;
     private DateTime _lastDatasetTelegramDigestDate = DateTime.MinValue;
+    private DateTime _lastChaosAuditTime = DateTime.MinValue;
 
     private readonly string _mlStateFilePath = "ml_service/data/ml_health_state.txt";
 
@@ -144,7 +145,7 @@ public class SelfDiagnosticService : BackgroundService
                         if (!patchAvailable && _patchTstWasHealthy)
                         {
                             _patchTstWasHealthy = false;
-                            await TelegramBotService.SendMessageToAdmins("⚠️ <b>PatchTST Neural Brain не активен</b>\nМодель глубокого обучения недоступна, инференс переключен на резервный LightGBM.");
+                            await TelegramBotService.SendMessageToAdmins("⚠️ <b>PatchTST Neural Brain не активен</b>\nМодель глубокого обучения недоступна, инференс переключен на резервный контур C# Confluence Matrix.");
                         }
                         else if (patchAvailable && !_patchTstWasHealthy)
                         {
@@ -343,6 +344,35 @@ public class SelfDiagnosticService : BackgroundService
             }
         }
         
+        // 8. Periodic Autonomous Chaos Audit (every 12 hours)
+        if (DateTime.UtcNow - _lastChaosAuditTime >= TimeSpan.FromHours(12))
+        {
+            _lastChaosAuditTime = DateTime.UtcNow;
+            try
+            {
+                var chaosService = scope.ServiceProvider.GetService<ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService>();
+                if (chaosService != null)
+                {
+                    BotLogger.Info("[Diagnostics] Triggering scheduled periodic Chaos Audit...");
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await chaosService.RunFullAuditAsync(stoppingToken);
+                        }
+                        catch (Exception exChaos)
+                        {
+                            BotLogger.Warn($"[Diagnostics] Periodic Chaos Audit background error: {exChaos.Message}");
+                        }
+                    }, stoppingToken);
+                }
+            }
+            catch (Exception exChaos)
+            {
+                BotLogger.Warn($"[Diagnostics] Chaos Audit trigger notice: {exChaos.Message}");
+            }
+        }
+
         if (!currentDbHealthy || !currentMlHealthy)
         {
             BotLogger.Warn($"[Diagnostics] Health scan complete. DB: {currentDbHealthy}, ML: {currentMlHealthy}");

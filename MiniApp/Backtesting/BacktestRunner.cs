@@ -45,10 +45,6 @@ namespace ValutaBot.App.MiniApp.Backtesting
             var metricsOn  = new BacktestMetrics();
             var metricsOff = new BacktestMetrics();
 
-            // ── Глобальное переобучение ML перед тестом ──────────────────────
-            Console.WriteLine($"[BacktestRunner] Запуск глобального переобучения на {total} свечах...");
-            await MLPythonService.ForceTrainGlobalAsync(Asset, timeframe, isForex: true);
-
             // ── Walk-forward цикл ─────────────────────────────────────────────
             int processed = 0;
 
@@ -154,11 +150,6 @@ namespace ValutaBot.App.MiniApp.Backtesting
                 // ── Записываем исход в обе системы ───────────────────────────
                 if (!cooloffOn)
                 {
-                    // CalibON: реальное самообучение
-                                                                                    
-                    // ONLINE REINFORCEMENT LEARNING FOR ML (Скармливаем исход нейросети)
-                    await MLPythonService.SendFeedbackAsync(Asset, timeframe, isWin, currentPrice, exitPrice, direction, null, true);
-
                     wfOn.RecordTradeOutcome(Asset, timeframe, isWin);
 
                     metricsOn.Record(new BacktestMetrics.TradeRecord(

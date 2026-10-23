@@ -19,6 +19,7 @@ import sys
 import argparse
 import json
 import math
+import bisect
 import numpy as np
 import psycopg2
 from datetime import datetime
@@ -29,7 +30,7 @@ try:
 except ImportError:
     _loads = json.loads
 
-DEFAULT_DB_URL = "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway"
+DEFAULT_DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL", "")
 
 ASSET_MAP = {
     "EURUSD": 0, "EUR/USD": 0, "EURUSD_OTC": 0,
@@ -72,22 +73,31 @@ MACRO_FEATURE_NAMES = [
     "smc_has_fvg",
     "smc_has_sweep",
     "smc_has_bos",
-    "asset_id"
+    "asset_id",
+    "ta_score",
+    "micro_vel",
+    "hma_slope",
+    "vol_ratio",
+    "bb_squeeze",
+    "price_position_pct",
+    "trend_maturity",
+    "tick_count_norm"
 ]
 
 
-def normalize_candles(candles_list, seq_len=160, channels=5, tf_sec=5):
+def normalize_candles(candles_list, seq_len=160, channels=8, tf_sec=5):
     """
     Normalizes a sequence of OHLCV candles into a stationary [seq_len, channels] array.
-    Uses zero-padding on the left when len(candles_list) < seq_len to strictly match
-    normalize_candles_live() in patch_tst_predictor.py (eliminating Train/Serve skew).
-    Also neutralizes single-step return spikes caused by WebSocket reconnect time gaps.
-    Features per candle:
-      0: (Close - Open) / Open * 10000
-      1: (High - Open) / Open * 10000
-      2: (Low - Open) / Open * 10000
-      3: (Close - PrevClose) / PrevClose * 10000 (0 for first candle or after a >10x time gap)
-      4: log1p(Volume) / 10.0 (included when channels == 5)
+    Uses zero-padding on the left when len(candles_list) < seq_len.
+    Features per candle (channels=8):
+      0: (Close - Open) / Open * 10000 (candle body)
+      1: (High - Open) / Open * 10000 (upper excursion)
+      2: (Low - Open) / Open * 10000 (lower excursion)
+      3: (Close - PrevClose) / PrevClose * 10000 (inter-candle return)
+      4: log1p(Volume) / 10.0 (volume/tick density)
+      5: (High - max(Open, Close)) / Open * 10000 (upper wick / seller rejection)
+      6: (min(Open, Close) - Low) / Open * 10000 (lower wick / buyer rejection)
+      7: (High - Low) / Open * 10000 (full candle range / local volatility)
     """
     arr = np.zeros((seq_len, channels), dtype=np.float32)
     if not candles_list:
@@ -140,6 +150,11 @@ def normalize_candles(candles_list, seq_len=160, channels=5, tf_sec=5):
             vol = float(c.get("Volume", c.get("volume", 0.0)) or 0.0)
             arr[idx, 4] = math.log1p(max(0.0, vol)) / 10.0
 
+        if channels >= 8:
+            arr[idx, 5] = ((hi - max(op, cl)) / op) * 10000.0
+            arr[idx, 6] = ((min(op, cl) - lo) / op) * 10000.0
+            arr[idx, 7] = ((hi - lo) / op) * 10000.0
+
         prev_close = cl
         if cur_ts is not None:
             prev_ts = cur_ts
@@ -149,10 +164,11 @@ def normalize_candles(candles_list, seq_len=160, channels=5, tf_sec=5):
 
 def extract_macro_vector(row_dict, feat_obj):
     """
-    Extracts a fixed-size 1D vector of macro and market context features.
+    Extracts a fixed-size 31-element vector of enriched macro and market context features.
     """
     macro = feat_obj.get("MacroContext") or {}
     smc = feat_obj.get("Smc") or {}
+    ta = feat_obj.get("Ta") or {}
     
     # 1. Day Range Position (0..1)
     day_pos = float(macro.get("DayRangePositionPct", 0.5))
@@ -253,6 +269,17 @@ def extract_macro_vector(row_dict, feat_obj):
         .strip()
     )
     asset_id = float(ASSET_MAP.get(asset_str, 6.0))
+
+    # 24-31. Enriched TA and Micro-Dynamics
+    ta_score = float(ta.get("Score", 0.0))
+    micro_vel = float(ta.get("MicroVel", 0.0)) / 20.0
+    hma_slope = float(ta.get("HmaSlope", 0.0)) / 10.0
+    vol_ratio = min(3.0, float(ta.get("VolRatio", 1.0))) / 3.0
+    bb_sq = float(1.0 if (macro.get("BbSqueeze") or row_dict.get("bb_squeeze")) else 0.0)
+    price_pos = float(macro.get("PricePositionPct", row_dict.get("price_position_pct", 0.5) or 0.5))
+    trend_mat = float(macro.get("TrendMaturity", row_dict.get("trend_maturity", 0.0) or 0.0)) / 100.0
+    last_ticks = float(macro.get("TickCountLastCandle", 1.0))
+    tick_density = math.log1p(max(0.0, last_ticks)) / 5.0
     
     vec = np.array([
         day_pos, dist_high, dist_low,
@@ -262,30 +289,92 @@ def extract_macro_vector(row_dict, feat_obj):
         hr_sin, hr_cos, dow_sin, dow_cos,
         tf_sec,
         has_ob, has_fvg, has_swp, has_bos,
-        asset_id
+        asset_id,
+        ta_score, micro_vel, hma_slope, vol_ratio,
+        bb_sq, price_pos, trend_mat, tick_density
     ], dtype=np.float32)
     
     return vec
 
 
+class SubminuteCandleStore:
+    """
+    Lazily loads subminute_candles (*_PO) and historical_candles (*_PO) from PostgreSQL
+    to reconstruct 160 micro-candles and 30 MTF-candles in O(log N) for compacted trade_outcomes rows (>24h old).
+    """
+    def __init__(self, conn, min_date):
+        self.conn = conn
+        self.min_date = min_date
+        self.loaded = False
+        self.series = {}  # (clean_asset, interval_key) -> (timestamps_list, candles_dict_list)
+
+    def _ensure_loaded(self):
+        if self.loaded:
+            return
+        self.loaded = True
+        print("[*] Loading subminute_candles (*_PO) index for compacted >24h rows...")
+        cur = self.conn.cursor()
+        for tbl in ("subminute_candles", "historical_candles"):
+            cur.execute(f"""
+                SELECT asset, interval, open_time, open_price, high_price, low_price, close_price, volume
+                FROM {tbl}
+                WHERE asset LIKE '%%_PO'
+                ORDER BY asset, interval, open_time ASC
+            """)
+            for asset, interval, ot, op, hi, lo, cl, vol in cur.fetchall():
+                clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace("/", "").strip()
+                iv = interval.lower().strip()
+                if iv == "1min":
+                    iv = "m1"
+                elif iv == "5min":
+                    iv = "m5"
+                key = (clean_a, iv)
+                bucket = self.series.setdefault(key, ([], []))
+                bucket[0].append(str(ot)[:19])
+                bucket[1].append({
+                    "Timestamp": ot,
+                    "Open": float(op),
+                    "High": float(hi),
+                    "Low": float(lo),
+                    "Close": float(cl),
+                    "Volume": float(vol or 1.0)
+                })
+        cur.close()
+        print(f"[+] Indexed {len(self.series)} (asset, timeframe) series from subminute/historical tables.")
+
+    def get_candles_before(self, asset: str, timeframe: str, created_at_dt, count: int):
+        self._ensure_loaded()
+        clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
+        iv = timeframe.lower().strip()
+        if iv == "1min":
+            iv = "m1"
+        elif iv == "5min":
+            iv = "m5"
+        bucket = self.series.get((clean_a, iv))
+        if not bucket or not bucket[0]:
+            return []
+        iso_cut = created_at_dt.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(created_at_dt, "strftime") else str(created_at_dt)[:19].replace(" ", "T")
+        idx = bisect.bisect_right(bucket[0], iso_cut)
+        start = max(0, idx - count)
+        return bucket[1][start:idx]
+
+
 def determine_label(direction, was_win, pnl_bps, min_pnl_threshold=1e-4):
     """
-    Determines 3-class target for binary options payouts:
-      0: HOLD (Exact tie / flat close / unverified outcome |pnl_bps| <= threshold)
-      1: BUY (Market went UP: pnl_bps > threshold -> BUY payout)
-      2: PUT (Market went DOWN: pnl_bps < -threshold -> PUT payout)
-    Note: pnl_bps in the database is the exact underlying asset price return in basis points:
-      (exit_price - entry_price) / entry_price * 10000.
+    Determines 3-class target for true binary options payouts:
+      0: HOLD / Tie / Exact Flat (|pnl_bps| <= 1e-4, entry_price == exit_price)
+      1: BUY (Market went UP: pnl_bps > 1e-4 -> BUY win)
+      2: PUT (Market went DOWN: pnl_bps < -1e-4 -> PUT win)
     """
     if was_win is None or direction in ("HOLD", "SHADOW_HOLD", "NEUTRAL", "SHADOW_NEUTRAL"):
         return 0
 
     if pnl_bps > min_pnl_threshold:
-        return 1  # Ground-truth: price moved UP -> BUY was winning
+        return 1
     elif pnl_bps < -min_pnl_threshold:
-        return 2  # Ground-truth: price moved DOWN -> PUT was winning
+        return 2
     else:
-        return 0  # Market flat tie / doji -> HOLD
+        return 0
 
 
 import sys
@@ -295,7 +384,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 PO_CUTOFF_UTC = "2026-10-20 21:26:50+00"
 
-def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=5, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True):
+def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=8, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True):
     print("=" * 60)
     print("[*] Neural Brain Dataset Exporter (V3 Architecture)")
     print(f"Connecting to database...")
@@ -406,6 +495,8 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
     
     valid_count = 0
     skipped_count = 0
+    candle_store = SubminuteCandleStore(conn, min_date)
+    higher_tf_map = {"s5": "m1", "s10": "m1", "s15": "m1", "s30": "m1", "m1": "m5"}
     
     for r in rows:
         row_dict = dict(zip(cols, r))
@@ -420,7 +511,11 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
             skipped_count += 1
             continue
             
+        tf_str_row = str(row_dict.get("timeframe") or "s5").lower()
         candles = feat_obj.get("Candles") or feat_obj.get("candles") or []
+        if not candles:
+            candles = candle_store.get_candles_before(str(row_dict.get("asset") or ""), tf_str_row, row_dict.get("created_at"), seq_len)
+
         # Strip trailing unclosed 1-tick candle if present from legacy orchestrator serialization
         if len(candles) > 10:
             last_c = candles[-1]
@@ -437,7 +532,6 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
             continue
             
         # 1. Normalize Candles Sequence
-        tf_str_row = str(row_dict.get("timeframe") or "s5").lower()
         tf_sec_row = TF_SECONDS.get(tf_str_row, 5)
         candle_tensor = normalize_candles(candles, seq_len=seq_len, channels=channels, tf_sec=tf_sec_row)
         if np.isnan(candle_tensor).any() or np.isinf(candle_tensor).any():
@@ -446,6 +540,9 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
 
         # 2. Normalize MTF Candles Sequence
         mtf_candles = feat_obj.get("MtfCandles") or feat_obj.get("mtf_candles") or []
+        if not mtf_candles:
+            htf = higher_tf_map.get(tf_str_row, "m1")
+            mtf_candles = candle_store.get_candles_before(str(row_dict.get("asset") or ""), htf, row_dict.get("created_at"), seq_len_mtf)
         mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf, channels=channels, tf_sec=max(60, tf_sec_row * 4)) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, channels), dtype=np.float32)
         if np.isnan(mtf_tensor).any() or np.isinf(mtf_tensor).any():
             mtf_tensor = np.zeros((seq_len_mtf, channels), dtype=np.float32)
@@ -580,7 +677,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=160)
     parser.add_argument("--seq-len-mtf", type=int, default=30)
-    parser.add_argument("--channels", type=int, choices=[4, 5], default=5, help="Candle feature channels: 4 (OHLC) or 5 (OHLCV)")
+    parser.add_argument("--channels", type=int, choices=[4, 5, 8], default=8, help="Candle feature channels: 4 (OHLC), 5 (OHLCV) or 8 (OHLCV+Wicks+Range)")
     parser.add_argument("--include-tiingo", action="store_true", help="Include legacy Tiingo era rows (not recommended for PO OTC)")
     parser.add_argument("--min-date", default=PO_CUTOFF_UTC, help="Minimum created_at UTC timestamp for PO era")
     parser.add_argument("--no-stride-hf", action="store_true", help="Disable SQL striding of high-frequency s5/s10 rows")

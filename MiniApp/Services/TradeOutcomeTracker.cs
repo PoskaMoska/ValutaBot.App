@@ -241,18 +241,12 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 }
             }
 
-            // ── TRAINING DOJI FILTER (Dynamic Noise Threshold) ──
-            // Calculate absolute percentage move. 0.025% is ~3 pips on EUR/USD.
-            // Trades smaller than this are statistical noise (Brownian motion). 
-            // We record them for the user's DB and consecutive losses, but hide them from ML to prevent weight poisoning.
+            // ── TRAINING DOJI FILTER (Exact / Micro-Tie Threshold) ──
+            // In binary options, even a 1-pipette (0.1 bps = 0.001%) move determines a full payout or loss.
+            // Only skip exact/micro ties (< 0.0001% = 0.01 bps, matching export_dataset.py min_pnl_threshold)
+            // so AutoCalib and OnlineMetaLearner receive 97%+ of real directional outcomes.
             double pctDiff = record.EntryPrice > 1e-8 ? Math.Abs(exitPriceVal - record.EntryPrice) / record.EntryPrice * 100.0 : 0;
-            double dojiThreshold = record.Timeframe switch
-            {
-                "s5" => 0.005,
-                "s10" => 0.010,
-                "s15" => 0.015,
-                _ => 0.025
-            };
+            const double dojiThreshold = 0.0001;
             bool isTrainingDoji = pctDiff < dojiThreshold;
 
             if (isTrainingDoji)

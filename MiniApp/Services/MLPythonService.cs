@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 namespace ValutaBot.MiniApp;
 
 /// <summary>
-/// Calls the Python LightGBM ML microservice via HTTP.
+/// Calls the Python Neural Brain (PatchTST DualStream) ML microservice via HTTP.
 /// Static service using the shared HttpClient from MiniAppController.
 /// Falls back gracefully using Polly Resilience Pipeline if the service is unavailable.
 /// </summary>
@@ -133,7 +133,7 @@ public static class MLPythonService
                         var res = await testClient.GetAsync(new Uri($"{_baseUrl}/health"));
                         if (res.IsSuccessStatusCode)
                         {
-                            BotLogger.Info("[MLPython] Local LightGBM service is active.");
+                            BotLogger.Info("[MLPython] Local Neural Brain service is active.");
                             StartPythonWatchdog();
                             return;
                         }
@@ -178,7 +178,7 @@ public static class MLPythonService
 
             if (File.Exists(mainScript))
             {
-                BotLogger.Info("[MLPython] Auto-starting Python LightGBM microservice...");
+                BotLogger.Info("[MLPython] Auto-starting Python Neural Brain microservice...");
                 bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
                     System.Runtime.InteropServices.OSPlatform.Windows);
                 var psi = new ProcessStartInfo
@@ -440,105 +440,6 @@ public static class MLPythonService
         {
             BotLogger.Warn($"[MLPython] Pipeline execution failed: {ex.Message}");
             return null;
-        }
-    }
-
-    public static async Task SendFeedbackAsync(
-        string asset,
-        string timeframe,
-        bool wasWin,
-        double entryPrice,
-        double exitPrice,
-        string direction,
-        DateTime? entryTime = null,
-        bool isForex = false)
-    {
-        if (string.IsNullOrWhiteSpace(_baseUrl)) return;
-        
-        try
-        {
-            var binanceSymbol = MapSymbol(asset, isForex);
-            var payload = new
-            {
-                asset = binanceSymbol,
-                timeframe = timeframe,
-                entry_price = entryPrice,
-                exit_price = exitPrice,
-                direction = direction,
-                was_win = wasWin,
-                is_forex = isForex,
-                timestamp = (entryTime ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
-            };
-
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            
-            if (_httpFactory == null)
-            {
-                BotLogger.Warn("[MLPython] IHttpClientFactory not initialized yet. Skipping feedback.");
-                return;
-            }
-            var response = await _httpFactory.CreateClient("MLPythonService").PostAsync(new Uri($"{_baseUrl}/feedback"), content);
-            
-            if (response.IsSuccessStatusCode)
-            {
-                var responseBody = await response.Content.ReadAsStringAsync();
-                string winStr = wasWin ? "WIN" : "LOSS";
-                BotLogger.Info($"[AI Feedback Detector] Feedback sent for {asset}/{timeframe} -> {winStr}. Python Response: {responseBody}");
-            }
-            else
-            {
-                var errorBody = await response.Content.ReadAsStringAsync();
-                BotLogger.Warn($"[MLPython] Feedback rejected: {(int)response.StatusCode}. Details: {errorBody}");
-            }
-        }
-        catch (Polly.CircuitBreaker.BrokenCircuitException) { }
-        catch (Exception ex)
-        {
-            BotLogger.Warn($"[MLPython] Online RL feedback notice: {ex.Message}");
-        }
-    }
-
-    public static async Task<bool> ForceTrainGlobalAsync(string asset, string timeframe, bool isForex = false, int limit = 2000)
-    {
-        if (string.IsNullOrWhiteSpace(_baseUrl)) return false;
-        try
-        {
-            var binanceSymbol = MapSymbol(asset, isForex);
-            var payload = new
-            {
-                symbol = binanceSymbol,   // FIXED: was 'asset'
-                interval = timeframe,     // FIXED: was 'timeframe'
-                is_forex = isForex,
-                limit = limit
-            };
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            
-            if (_httpFactory == null)
-            {
-                BotLogger.Warn("[MLPython] IHttpClientFactory not initialized yet. Skipping force train.");
-                return false;
-            }
-            // Use long-running client bypassing Polly short timeouts
-            var response = await _httpFactory.CreateClient("MLPythonLongRunning")
-                                        .PostAsync(new Uri($"{_baseUrl}/train/sync"), content);
-
-            if (response.IsSuccessStatusCode)
-            {
-                BotLogger.Info($"[MLPython] Global Batch Retraining SUCCESS for {asset}/{timeframe}.");
-                return true;
-            }
-            else
-            {
-                BotLogger.Warn($"[MLPython] Global Batch Retraining failed: {(int)response.StatusCode}");
-                return false;
-            }
-        }
-        catch (Exception ex)
-        {
-            BotLogger.Warn($"[MLPython] Global Batch Retraining error: {ex.Message}");
-            return false;
         }
     }
 }

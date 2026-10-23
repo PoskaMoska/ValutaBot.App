@@ -222,7 +222,14 @@ public class MarketAnalysisOrchestrator(
             Adx = mainAdx,
             Rsi = taDetail.RsiVal,
             HourUtc = DateTime.UtcNow.Hour,
-            DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek
+            DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
+            TickCountLastCandle = closedCandles.Length > 0 ? closedCandles[^1].Volume : 0,
+            Ta = new {
+                Score = taDetail.Score,
+                MicroVel = taDetail.MicroVel,
+                HmaSlope = taDetail.HmaSlope,
+                VolRatio = taDetail.VolStrengthVal
+            }
         };
 
         // ML (Dual-Stream Neural Brain / LightGBM)

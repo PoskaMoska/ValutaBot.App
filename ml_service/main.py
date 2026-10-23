@@ -156,8 +156,6 @@ def list_models():
         }]
     return []
 
-_inference_lock = asyncio.Lock()
-
 @app.post("/predict")
 async def predict(request: Request):
     raw_body = await request.body()
@@ -186,10 +184,10 @@ async def predict(request: Request):
         return Response(content=orjson.dumps(resp), media_type="application/json")
 
     n_candles = len(candles)
-    if n_candles < 60:
+    if n_candles < 35:
         raise HTTPException(
             status_code=422,
-            detail=f"Need at least 60 candles for reliable prediction, got {n_candles}",
+            detail=f"Need at least 35 candles for reliable prediction, got {n_candles}",
         )
 
     # Attach rich context for SMC
@@ -209,14 +207,13 @@ async def predict(request: Request):
     if not patch_predictor.is_available():
         raise HTTPException(status_code=503, detail="Neural Brain model not available")
 
-    async with _inference_lock:
-        if await request.is_disconnected():
-            return Response(status_code=499)
-        neural_res = await asyncio.to_thread(
-            patch_predictor.predict,
-            symbol, interval, candles, mtf_candles,
-            macro_ctx, smc_ctx
-        )
+    if await request.is_disconnected():
+        return Response(status_code=499)
+    neural_res = await asyncio.to_thread(
+        patch_predictor.predict,
+        symbol, interval, candles, mtf_candles,
+        macro_ctx, smc_ctx
+    )
 
     if neural_res is None:
         raise HTTPException(status_code=500, detail="Inference returned null")

@@ -365,18 +365,79 @@ public class ConfluenceMatrixEngine(
         if (isNeuralBrain && (mlSignal.Direction == "BUY" || mlSignal.Direction == "PUT"))
         {
             string neuralDir = mlSignal.Direction;
-            int neuralProbPct = (int)Math.Clamp(Math.Round(directionalConf * 100.0), 50, 99);
+            int rawNeuralProbPct = (int)Math.Clamp(Math.Round(directionalConf * 100.0), 50, 99);
+            int adjDelta = 0;
+            var safetyNotes = new List<string>();
+
+            // 1. Online AutoCalib / Consecutive Losses Streak Guard (protects live capital during local regime breaks)
+            int mlLiveLosses = Math.Max(consecutiveLosses, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0);
+            if (mlLiveLosses >= 3)
+            {
+                adjDelta -= 4;
+                safetyNotes.Add($"⚠️ Защита серии: {mlLiveLosses} убытка подряд на {asset}/{timeframe} (-4%)");
+            }
+            else if (mlLiveLosses == 2)
+            {
+                adjDelta -= 2;
+                safetyNotes.Add($"⚠️ Осторожность: 2 убытка подряд на {asset}/{timeframe} (-2%)");
+            }
+
+            // 2. Strong Opposing SMC Structure Guard (BOS + OB/Sweep wall against trade)
+            if (neuralDir == "BUY" && smcScore <= -0.75)
+            {
+                adjDelta -= 2;
+                safetyNotes.Add("⚠️ SMC Wall Guard: Сильная медвежья структура SMC против BUY (-2%)");
+            }
+            else if (neuralDir == "PUT" && smcScore >= 0.75)
+            {
+                adjDelta -= 2;
+                safetyNotes.Add("⚠️ SMC Wall Guard: Сильная бычья структура SMC против PUT (-2%)");
+            }
+
+            // 3. 4D Multi-Timeframe Alignment & Higher-TF Conflict Check
+            if (mtfResult.IsGoldenSetup && mtfResult.DominantDirection == neuralDir)
+            {
+                adjDelta += 1;
+                safetyNotes.Add("✅ Golden MTF Sync: Полное совпадение со старшими ТФ (+1%)");
+            }
+            else if (conflictPenalty < 1.0 && mtfResult.DominantDirection != "NEUTRAL" && mtfResult.DominantDirection != neuralDir)
+            {
+                adjDelta -= 2;
+                safetyNotes.Add("⚠️ MTF Conflict Guard: Противоречие со старшим таймфреймом (-2%)");
+            }
+
+            // 4. Anti-Knife Extreme Velocity Protection
+            double velBps = stateSignal.VelocityBpsPerSec;
+            if (neuralDir == "BUY" && taSignal.Rsi < 20.0 && velBps < -2.0)
+            {
+                adjDelta -= 3;
+                safetyNotes.Add("⚠️ Anti-Knife Guard: Обвальный импульс вниз при RSI < 20 (-3%)");
+            }
+            else if (neuralDir == "PUT" && taSignal.Rsi > 80.0 && velBps > 2.0)
+            {
+                adjDelta -= 3;
+                safetyNotes.Add("⚠️ Anti-Knife Guard: Вертикальный импульс вверх при RSI > 80 (-3%)");
+            }
+
+            int neuralProbPct = Math.Clamp(rawNeuralProbPct + adjDelta, 50, 99);
 
             var coPilot = new System.Text.StringBuilder();
             coPilot.AppendLine($"--- Сигнальный анализ ({asset} {timeframe}) [NEURAL BRAIN] ---");
             coPilot.AppendLine($"[Нейромозг: {mlSignal.ModelVersion}]");
-            coPilot.AppendLine($" - Вердикт нейросети: {neuralDir} ({neuralProbPct}%)");
+            coPilot.AppendLine($" - Вердикт нейросети: {neuralDir} (Raw: {rawNeuralProbPct}%, Итог с защитой C#: {neuralProbPct}%)");
             coPilot.AppendLine();
             coPilot.AppendLine("[Показания математических датчиков C# (вход нейросети)]");
             coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
             coPilot.AppendLine($" - Датчик структуры SMC: {smcScore:F2} (BOS={smcSignal.BosDirection}, OB={smcSignal.OrderBlockType}, FVG={smcSignal.FvgType})");
-            coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult.DominantDirection}");
+            coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult.DominantDirection}{(mtfResult.IsGoldenSetup ? " [GOLDEN]" : "")}");
             coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal.VelocityBpsPerSec:F2} bps/s");
+            if (safetyNotes.Count > 0)
+            {
+                coPilot.AppendLine();
+                coPilot.AppendLine("[Онлайн-коррекция C# Co-Pilot]");
+                foreach (var note in safetyNotes)
+                    coPilot.AppendLine($" {note}");
+            }
             coPilot.AppendLine($"-> Итог Нейромозга: {neuralDir} {neuralProbPct}%");
 
             string neuralReasoning = coPilot.ToString();

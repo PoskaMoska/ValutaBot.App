@@ -115,8 +115,11 @@ public class AutoTradingScannerService : BackgroundService
 
                     if (stoppingToken.IsCancellationRequested) break;
 
-                    // Drop stale events that waited in queue > 3.5s (prevents congestion collapse after deploy/jitter)
-                    if ((DateTime.UtcNow - item.queuedAtUtc).TotalSeconds > 3.5)
+                    // Drop stale events that waited too long in queue relative to their timeframe (prevents s5/s10 entry skew)
+                    double maxQueueWaitSec = item.tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 1.5
+                        : item.tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 2.2
+                        : 3.5;
+                    if ((DateTime.UtcNow - item.queuedAtUtc).TotalSeconds > maxQueueWaitSec)
                     {
                         continue;
                     }
@@ -165,7 +168,7 @@ public class AutoTradingScannerService : BackgroundService
             var userSettings = await UserRepository.GetSettingsAsync(0);
 
             int minCandles = _minCandlesPerTf.TryGetValue(tf, out int mc) ? mc : 80;
-            var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 160);
+            var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 161);
             
             if (recentCandles.Length >= minCandles)
             {
