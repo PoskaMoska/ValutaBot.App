@@ -33,12 +33,14 @@ public class ProbabilityBoundsInvariantScenario : IChaosScenario
                 DominantDirection: "BUY"
             );
 
+            const string probAsset = "CHAOS_PROB_ASSET";
+
             // ── Test 1: All Bullish Invariant ──
             var taBull = new TaSignal(0.85, 0.90, 68.0, 1.052, 1.5, 0.0002, 35.0);
             var smcBull = new SmcSignal("BULLISH_BOS", "BULLISH_SWEEP", "BULLISH_OB", "BULLISH_FVG", "");
             var mlBull = new MlSignal("BUY", 0.85, 0.65, "patch_tst_v3", 1, 0.85);
 
-            var decBull = await cmEngine.EvaluateMatrixAsync("EURUSD", "s5", isSubMinute: true, conflictPenalty: 1.0,
+            var decBull = await cmEngine.EvaluateMatrixAsync(probAsset, "s5", isSubMinute: true, conflictPenalty: 1.0,
                 taBull, smcBull, mlBull, state, mtfDummy);
 
             if (decBull.FinalDirection != "BUY")
@@ -67,7 +69,7 @@ public class ProbabilityBoundsInvariantScenario : IChaosScenario
             var smcBear = new SmcSignal("BEARISH_BOS", "BEARISH_SWEEP", "BEARISH_OB", "BEARISH_FVG", "");
             var mlBear = new MlSignal("PUT", 0.85, 0.65, "patch_tst_v3", 1, 0.15);
 
-            var decBear = await cmEngine.EvaluateMatrixAsync("EURUSD", "s5", isSubMinute: true, conflictPenalty: 1.0,
+            var decBear = await cmEngine.EvaluateMatrixAsync(probAsset, "s5", isSubMinute: true, conflictPenalty: 1.0,
                 taBear, smcBear, mlBear, state, mtfBearDummy);
 
             if (decBear.FinalDirection != "PUT")
@@ -81,7 +83,7 @@ public class ProbabilityBoundsInvariantScenario : IChaosScenario
             }
 
             // ── Test 3: Conflict Penalty Monotonicity Invariant ──
-            var decBullPenalized = await cmEngine.EvaluateMatrixAsync("EURUSD", "s5", isSubMinute: true, conflictPenalty: 0.6,
+            var decBullPenalized = await cmEngine.EvaluateMatrixAsync(probAsset, "s5", isSubMinute: true, conflictPenalty: 0.6,
                 taBull, smcBull, mlBull, state, mtfDummy);
 
             if (decBullPenalized.Probability > decBull.Probability)

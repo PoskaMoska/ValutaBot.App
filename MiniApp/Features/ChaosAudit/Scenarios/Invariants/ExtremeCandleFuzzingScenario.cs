@@ -17,6 +17,7 @@ public class ExtremeCandleFuzzingScenario : IChaosScenario
     public async Task<ChaosScenarioResult> ExecuteAsync(IServiceProvider sp, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
+        const string fuzzAsset = "CHAOS_FUZZ";
         try
         {
             var taEngine = sp.GetRequiredService<IMarketAnalyzer>();
@@ -28,8 +29,8 @@ public class ExtremeCandleFuzzingScenario : IChaosScenario
             var flatPrices = flatCandles.Select(c => c.Close).ToArray();
             var flatVolumes = flatCandles.Select(c => c.Volume).ToArray();
 
-            var (flatAdx, flatPdi, flatMdi) = mathEngine.ComputeTrueAdx("EURUSD", "s5", flatCandles, 7);
-            double flatAtr = mathEngine.ComputeAtr("EURUSD", "s5", flatCandles, 7);
+            var (flatAdx, flatPdi, flatMdi) = mathEngine.ComputeTrueAdx(fuzzAsset, "s5", flatCandles, 7);
+            double flatAtr = mathEngine.ComputeAtr(fuzzAsset, "s5", flatCandles, 7);
 
             if (double.IsNaN(flatAtr) || double.IsInfinity(flatAtr))
             {
@@ -49,7 +50,7 @@ public class ExtremeCandleFuzzingScenario : IChaosScenario
                     "Add TrueRange > 1e-9 check in MathEngine.ComputeTrueAdx.");
             }
 
-            var flatTa = taEngine.ScoreTimeframeDetailed("EURUSD", "s5", flatPrices, flatVolumes, candles: flatCandles, adxOverride: flatAdx, atrOverride: flatAtr, isForex: true);
+            var flatTa = taEngine.ScoreTimeframeDetailed(fuzzAsset, "s5", flatPrices, flatVolumes, candles: flatCandles, adxOverride: flatAdx, atrOverride: flatAtr, isForex: true);
             if (double.IsNaN(flatTa.Score) || double.IsNaN(flatTa.RsiVal) || double.IsNaN(flatTa.Confidence))
             {
                 sw.Stop();
@@ -59,8 +60,8 @@ public class ExtremeCandleFuzzingScenario : IChaosScenario
                     "Division by zero in RSI/HMA/Score", "Check denominator in RSI calculation.");
             }
 
-            var flatSmc = SmcEngine.AnalyzeSmcStructure("EURUSD", "s5", flatCandles, flatPrices[^1]);
-            var flatGate = gatekeeper.ValidateMarketGatekeeper("EURUSD", "s5", flatPrices, flatCandles);
+            var flatSmc = SmcEngine.AnalyzeSmcStructure(fuzzAsset, "s5", flatCandles, flatPrices[^1]);
+            var flatGate = gatekeeper.ValidateMarketGatekeeper(fuzzAsset, "s5", flatPrices, flatCandles);
             // Gatekeeper MUST block flatline market
             if (flatGate.IsTradeable)
             {
@@ -77,10 +78,10 @@ public class ExtremeCandleFuzzingScenario : IChaosScenario
             var spikePrices = spikeCandles.Select(c => c.Close).ToArray();
             var spikeVolumes = spikeCandles.Select(c => c.Volume).ToArray();
 
-            var (spikeAdx, _, _) = mathEngine.ComputeTrueAdx("EURUSD", "s5", spikeCandles, 7);
-            double spikeAtr = mathEngine.ComputeAtr("EURUSD", "s5", spikeCandles, 7);
-            var spikeTa = taEngine.ScoreTimeframeDetailed("EURUSD", "s5", spikePrices, spikeVolumes, candles: spikeCandles, adxOverride: spikeAdx, atrOverride: spikeAtr, isForex: true);
-            var spikeSmc = SmcEngine.AnalyzeSmcStructure("EURUSD", "s5", spikeCandles, spikePrices[^1]);
+            var (spikeAdx, _, _) = mathEngine.ComputeTrueAdx(fuzzAsset, "s5", spikeCandles, 7);
+            double spikeAtr = mathEngine.ComputeAtr(fuzzAsset, "s5", spikeCandles, 7);
+            var spikeTa = taEngine.ScoreTimeframeDetailed(fuzzAsset, "s5", spikePrices, spikeVolumes, candles: spikeCandles, adxOverride: spikeAdx, atrOverride: spikeAtr, isForex: true);
+            var spikeSmc = SmcEngine.AnalyzeSmcStructure(fuzzAsset, "s5", spikeCandles, spikePrices[^1]);
 
             if (double.IsNaN(spikeTa.Score) || double.IsInfinity(spikeTa.Score))
             {
@@ -96,8 +97,8 @@ public class ExtremeCandleFuzzingScenario : IChaosScenario
             var zigPrices = zigCandles.Select(c => c.Close).ToArray();
             var zigVolumes = zigCandles.Select(c => c.Volume).ToArray();
 
-            var zigTa = taEngine.ScoreTimeframeDetailed("EURUSD", "s5", zigPrices, zigVolumes, candles: zigCandles, adxOverride: 20, atrOverride: 0.005, isForex: true);
-            var zigState = ContinuousStateEngine.EvaluateContinuousState(zigPrices, "EURUSD", "s5");
+            var zigTa = taEngine.ScoreTimeframeDetailed(fuzzAsset, "s5", zigPrices, zigVolumes, candles: zigCandles, adxOverride: 20, atrOverride: 0.005, isForex: true);
+            var zigState = ContinuousStateEngine.EvaluateContinuousState(zigPrices, fuzzAsset, "s5");
 
             if (double.IsNaN(zigTa.Score) || double.IsInfinity(zigState.VelocityBpsPerSec))
             {

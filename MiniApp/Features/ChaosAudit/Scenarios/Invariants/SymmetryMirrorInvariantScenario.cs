@@ -31,14 +31,18 @@ public class SymmetryMirrorInvariantScenario : IChaosScenario
             var downPrices = downCandles.Select(c => c.Close).ToArray();
             var downVolumes = downCandles.Select(c => c.Volume).ToArray();
 
-            // 2. Score both directions with TA Engine
-            var (upAdx, upPdi, upMdi) = mathEngine.ComputeTrueAdx("EURUSD", "s5", upCandles, 7);
-            double upAtr = mathEngine.ComputeAtr("EURUSD", "s5", upCandles, 7);
-            var taUp = taEngine.ScoreTimeframeDetailed("EURUSD", "s5", upPrices, upVolumes, candles: upCandles, adxOverride: upAdx, atrOverride: upAtr, isForex: true, pdiOverride: upPdi, mdiOverride: upMdi);
+            // Isolated sandbox tickers so synthetic candles never collide with live trading IndicatorCache
+            const string upAsset = "CHAOS_SYM_UP";
+            const string downAsset = "CHAOS_SYM_DOWN";
 
-            var (downAdx, downPdi, downMdi) = mathEngine.ComputeTrueAdx("EURUSD", "s5", downCandles, 7);
-            double downAtr = mathEngine.ComputeAtr("EURUSD", "s5", downCandles, 7);
-            var taDown = taEngine.ScoreTimeframeDetailed("EURUSD", "s5", downPrices, downVolumes, candles: downCandles, adxOverride: downAdx, atrOverride: downAtr, isForex: true, pdiOverride: downPdi, mdiOverride: downMdi);
+            // 2. Score both directions with TA Engine
+            var (upAdx, upPdi, upMdi) = mathEngine.ComputeTrueAdx(upAsset, "s5", upCandles, 7);
+            double upAtr = mathEngine.ComputeAtr(upAsset, "s5", upCandles, 7);
+            var taUp = taEngine.ScoreTimeframeDetailed(upAsset, "s5", upPrices, upVolumes, candles: upCandles, adxOverride: upAdx, atrOverride: upAtr, isForex: true, pdiOverride: upPdi, mdiOverride: upMdi);
+
+            var (downAdx, downPdi, downMdi) = mathEngine.ComputeTrueAdx(downAsset, "s5", downCandles, 7);
+            double downAtr = mathEngine.ComputeAtr(downAsset, "s5", downCandles, 7);
+            var taDown = taEngine.ScoreTimeframeDetailed(downAsset, "s5", downPrices, downVolumes, candles: downCandles, adxOverride: downAdx, atrOverride: downAtr, isForex: true, pdiOverride: downPdi, mdiOverride: downMdi);
 
             // Invariant 1: Scores must have opposing signs
             if (taUp.Score > 0.15 && taDown.Score > 0.15)
@@ -78,8 +82,8 @@ public class SymmetryMirrorInvariantScenario : IChaosScenario
             }
 
             // Invariant 3: SMC structure reflection
-            var smcUp = SmcEngine.AnalyzeSmcStructure("EURUSD", "s5", upCandles, upCandles[^1].Close);
-            var smcDown = SmcEngine.AnalyzeSmcStructure("EURUSD", "s5", downCandles, downCandles[^1].Close);
+            var smcUp = SmcEngine.AnalyzeSmcStructure(upAsset, "s5", upCandles, upCandles[^1].Close);
+            var smcDown = SmcEngine.AnalyzeSmcStructure(downAsset, "s5", downCandles, downCandles[^1].Close);
 
             bool smcUpHasBullish = (smcUp.BosDirection ?? "").Contains("BULLISH") || (smcUp.SweepDirection ?? "").Contains("BULLISH") || (smcUp.OrderBlockType ?? "").Contains("BULLISH");
             bool smcDownHasBullish = (smcDown.BosDirection ?? "").Contains("BULLISH") || (smcDown.SweepDirection ?? "").Contains("BULLISH") || (smcDown.OrderBlockType ?? "").Contains("BULLISH");
