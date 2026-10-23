@@ -314,31 +314,39 @@ class SubminuteCandleStore:
         self.loaded = True
         print("[*] Loading subminute_candles (*_PO) index for compacted >24h rows...")
         cur = self.conn.cursor()
-        for tbl in ("subminute_candles", "historical_candles"):
-            cur.execute(f"""
-                SELECT asset, interval, open_time, open_price, high_price, low_price, close_price, volume
-                FROM {tbl}
-                WHERE asset LIKE '%%_PO'
-                ORDER BY asset, interval, open_time ASC
-            """)
-            for asset, interval, ot, op, hi, lo, cl, vol in cur.fetchall():
-                clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace("/", "").strip()
-                iv = interval.lower().strip()
-                if iv == "1min":
-                    iv = "m1"
-                elif iv == "5min":
-                    iv = "m5"
-                key = (clean_a, iv)
-                bucket = self.series.setdefault(key, ([], []))
-                bucket[0].append(str(ot)[:19])
-                bucket[1].append({
-                    "Timestamp": ot,
-                    "Open": float(op),
-                    "High": float(hi),
-                    "Low": float(lo),
-                    "Close": float(cl),
-                    "Volume": float(vol or 1.0)
-                })
+        for tbl, o_col, h_col, l_col, c_col in [
+            ("subminute_candles", "open_price", "high_price", "low_price", "close_price"),
+            ("historical_candles", "open", "high", "low", "close"),
+        ]:
+            try:
+                cur.execute(f"""
+                    SELECT asset, interval, open_time, {o_col}, {h_col}, {l_col}, {c_col}, volume
+                    FROM {tbl}
+                    WHERE asset LIKE '%%_PO'
+                    ORDER BY asset, interval, open_time ASC
+                """)
+                for asset, interval, ot, op, hi, lo, cl, vol in cur.fetchall():
+                    clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
+                    iv = interval.lower().strip()
+                    if iv in ("1min", "1m", "m1"):
+                        iv = "m1"
+                    elif iv in ("5min", "5m", "m5"):
+                        iv = "m5"
+                    key = (clean_a, iv)
+                    bucket = self.series.setdefault(key, ([], []))
+                    ts_str = str(ot)[:19]
+                    if not bucket[0] or bucket[0][-1] != ts_str:
+                        bucket[0].append(ts_str)
+                        bucket[1].append({
+                            "Timestamp": ot,
+                            "Open": float(op),
+                            "High": float(hi),
+                            "Low": float(lo),
+                            "Close": float(cl),
+                            "Volume": float(vol or 1.0)
+                        })
+            except Exception as tbl_err:
+                print(f"[-] Warning: Failed to load candles from {tbl}: {tbl_err}")
         cur.close()
         print(f"[+] Indexed {len(self.series)} (asset, timeframe) series from subminute/historical tables.")
 
@@ -346,9 +354,9 @@ class SubminuteCandleStore:
         self._ensure_loaded()
         clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
         iv = timeframe.lower().strip()
-        if iv == "1min":
+        if iv in ("1min", "1m", "m1"):
             iv = "m1"
-        elif iv == "5min":
+        elif iv in ("5min", "5m", "m5"):
             iv = "m5"
         bucket = self.series.get((clean_a, iv))
         if not bucket or not bucket[0]:
