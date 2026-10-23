@@ -20,6 +20,7 @@ public class ChaosAuditServiceTests
 
     public ChaosAuditServiceTests()
     {
+        Environment.SetEnvironmentVariable("DATABASE_URL", "");
         var services = new ServiceCollection();
 
         services.AddLogging();

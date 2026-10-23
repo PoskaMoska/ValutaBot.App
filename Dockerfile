@@ -7,13 +7,13 @@ RUN sed -i 's/<TargetFramework>net10.0<\/TargetFramework>/<TargetFramework>net9.
 RUN sed -i 's/<TargetFramework>net10.0<\/TargetFramework>/<TargetFramework>net9.0<\/TargetFramework>/g' Tests/ValutaBot.Tests/ValutaBot.Tests.csproj
 
 # [CI/CD GATE] Run backend unit tests and E2E tests
-RUN dotnet test Tests/ValutaBot.Tests/ValutaBot.Tests.csproj -c Release
+RUN DATABASE_URL="" dotnet test Tests/ValutaBot.Tests/ValutaBot.Tests.csproj -c Release
 
 # [CI/CD GATE] Run frontend JS tests
 RUN apt-get update && apt-get install -y curl && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs
-RUN cd MiniApp/wwwroot/js/tests && npm install && node run-tests.js
+RUN cd MiniApp/wwwroot/js/tests && npm install && node run-tests.js && node test_frontend_integrity.js
 
 # If tests pass, publish the app
 RUN dotnet publish "ValutaBot.App.csproj" -c Release -o /app/out
