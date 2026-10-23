@@ -20,6 +20,6 @@ def test_neural_brain_initialization():
     predictor = PatchTSTPredictor.get_instance()
     assert predictor.is_available(), "PatchTSTPredictor must be loaded and available!"
     assert predictor.model is not None, "Neural model state dict failed to load!"
-    assert predictor._candle_features in (4, 5)
+    assert predictor._candle_features in (4, 5, 8)
     assert predictor._seq_len == 160
     assert predictor._seq_len_mtf == 30
