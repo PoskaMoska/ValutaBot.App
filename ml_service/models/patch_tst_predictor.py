@@ -26,6 +26,25 @@ log = logging.getLogger("patch-tst-predictor")
 _MODEL_PATH = Path(__file__).parent / "patch_tst_brain_v3.pt"
 _FALLBACK_MODEL_PATH = Path(__file__).parent / "sequence_brain_v3.pt"
 
+
+def _resolve_model_path() -> Optional[Path]:
+    candidate_paths = [
+        Path("data/models/patch_tst_brain_v3.pt"),
+        Path("/app/data/models/patch_tst_brain_v3.pt"),
+        _MODEL_PATH,
+        Path("models/patch_tst_brain_v3.pt"),
+        Path("/app/models/patch_tst_brain_v3.pt"),
+        Path("data/models/sequence_brain_v3.pt"),
+        Path("/app/data/models/sequence_brain_v3.pt"),
+        _FALLBACK_MODEL_PATH,
+        Path("models/sequence_brain_v3.pt"),
+        Path("/app/models/sequence_brain_v3.pt"),
+    ]
+    for p in candidate_paths:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
 ASSET_MAP = {
     "EURUSD": 0, "GBPUSD": 1, "AUDUSD": 2, "USDJPY": 3,
     "USDCAD": 4, "USDCHF": 5, "EURJPY": 6, "GBPJPY": 7,
@@ -274,9 +293,10 @@ class PatchTSTPredictor:
             from models.patch_tst_brain import DualStreamPatchBrain
 
             self.device = torch.device("cpu")
-            model_path = _MODEL_PATH if _MODEL_PATH.exists() else _FALLBACK_MODEL_PATH
-            if not model_path.exists():
-                log.warning(f"[PatchTSTPredictor] Model file not found at {model_path}. Neural brain offline.")
+            model_path = _resolve_model_path()
+            if not model_path or not model_path.exists():
+                log.warning(f"[PatchTSTPredictor] Model file not found in candidate paths. Neural brain offline.")
+                self.model = None
                 return
 
             checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
@@ -354,6 +374,8 @@ class PatchTSTPredictor:
             self.model = None
 
     def is_available(self) -> bool:
+        if self.model is None:
+            self._load_model()
         return self.model is not None
 
     def predict(
@@ -370,6 +392,8 @@ class PatchTSTPredictor:
         Returns (direction, calibrated_confidence, model_version, horizon_candles, raw_confidence)
         or None if model is unavailable.
         """
+        if self.model is None:
+            self._load_model()
         if self.model is None or not candles:
             return None
 

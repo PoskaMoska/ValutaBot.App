@@ -141,6 +141,17 @@ async def health(full: bool = False):
     }
     return result
 
+@app.api_route("/reload-models", methods=["GET", "POST"])
+def reload_models():
+    patch_pred = PatchTSTPredictor.get_instance()
+    patch_pred._load_model()
+    return {
+        "status": "ok",
+        "available": patch_pred.is_available(),
+        "architecture": patch_pred._model_name,
+        "metrics": patch_pred.metrics
+    }
+
 @app.get("/models")
 def list_models():
     patch_pred = PatchTSTPredictor.get_instance()

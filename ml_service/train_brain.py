@@ -676,6 +676,18 @@ def train_model(
     file_size_mb = os.path.getsize(save_path) / (1024 * 1024)
     print("=" * 75)
     print(f"[+] Final checkpoint with temperature saved to: {save_path} ({file_size_mb:.2f} MB)")
+
+    # Also persist to persistent volume data/models if available
+    vol_dir = "data/models" if os.path.exists("data") else ("ml_service/data/models" if os.path.exists("ml_service/data") else None)
+    if vol_dir:
+        try:
+            os.makedirs(vol_dir, exist_ok=True)
+            vol_path = os.path.join(vol_dir, os.path.basename(save_path))
+            if os.path.abspath(save_path) != os.path.abspath(vol_path):
+                torch.save(checkpoint, vol_path)
+                print(f"[+] Persisted checkpoint to volume: {vol_path}")
+        except Exception as e:
+            print(f"[-] Note: could not write to volume path: {e}")
     print("=" * 75)
 
 
