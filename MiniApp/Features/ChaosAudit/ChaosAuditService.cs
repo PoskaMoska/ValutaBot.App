@@ -42,6 +42,7 @@ public class ChaosAuditService : IChaosAuditService
         _scenarios.Add(new StaleDataAndGapFaultScenario());
         _scenarios.Add(new CircuitBreakerQuarantineFaultScenario());
         _scenarios.Add(new DatabaseResilienceFaultScenario());
+        _scenarios.Add(new DatabaseSchemaContractScenario());
 
         // 3. Service Outages & Load / Stress
         _scenarios.Add(new MLServiceOutageToleranceScenario());

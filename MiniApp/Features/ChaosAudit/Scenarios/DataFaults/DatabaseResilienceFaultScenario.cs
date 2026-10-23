@@ -29,43 +29,16 @@ public class DatabaseResilienceFaultScenario : IChaosScenario
                     "Missing null-coalescing fallback in repository", "Return new UserSettings() in catch/empty branch.");
             }
 
-            // ── Test 2: Transient Database Connection Catch Guard ──
-            // Attempt a query against an invalid or unreachable connection string safely
-            bool caughtCleanly = false;
-            try
-            {
-                using var dummyConn = new Npgsql.NpgsqlConnection("Host=127.0.0.1;Port=59999;Database=fake;Timeout=1;CommandTimeout=1;");
-                await dummyConn.OpenAsync(ct);
-            }
-            catch (Exception ex) when (ex is Npgsql.NpgsqlException || ex is System.Net.Sockets.SocketException || ex is TimeoutException)
-            {
-                caughtCleanly = true;
-            }
-            catch (Exception ex)
-            {
-                sw.Stop();
-                return ChaosScenarioResult.Failure(Name, Category, sw.ElapsedMilliseconds,
-                    "Unexpected exception type during simulated DB network failure.",
-                    "Connecting to unreachable port", ex.GetType().Name, "NpgsqlException or SocketException",
-                    "Unhandled exception wrapper", "Ensure scanner catches broad transient DB exceptions.");
-            }
-
-            if (!caughtCleanly)
-            {
-                sw.Stop();
-                return ChaosScenarioResult.Failure(Name, Category, sw.ElapsedMilliseconds,
-                    "Simulated DB network failure was not caught cleanly.",
-                    "Connecting to unreachable port", "Did not catch expected exception", "caughtCleanly == true",
-                    "Exception handler bypassed", "Check catch filter block.");
-            }
+            // NOTE: the former "dummy Npgsql connection to a dead port" test was removed: it only verified the Npgsql
+            // library, not bot code. Live connectivity/schema is covered by DatabaseSchemaContractScenario.
 
             sw.Stop();
             return ChaosScenarioResult.Success(
                 Name,
                 Category,
                 sw.ElapsedMilliseconds,
-                "Database resilience verified: Fallback settings returned cleanly and transient connection failures safely caught.",
-                $"FallbackSettingsNotNull=true, EnableMl={settings.EnableMl}, TransientDBCaught={caughtCleanly}"
+                "Database resilience verified: repository returns default settings for an unknown chat instead of null.",
+                $"FallbackSettingsNotNull=true, EnableMl={settings.EnableMl}"
             );
         }
         catch (Exception ex)

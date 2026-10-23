@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ValutaBot.MiniApp;
 using ValutaBot.MiniApp.Features.ChaosAudit.Models;
+using ValutaBot.MiniApp.Services;
 
 namespace ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.DataFaults;
 
@@ -22,22 +23,30 @@ public class StaleDataAndGapFaultScenario : IChaosScenario
         {
             var cmEngine = sp.GetRequiredService<IConfluenceMatrixEngine>();
 
-            // ── Test 1: Stale Candle Stream Guard ──
-            // Generate candles where the most recent candle timestamp is 120 seconds old
-            var staleCandles = ChaosTestHelper.GenerateTrendingCandles(160, startPrice: 1.0500, slopePerCandle: 0.00005);
-            var staleLastTime = DateTime.UtcNow.AddSeconds(-120);
-            staleCandles[^1] = staleCandles[^1] with { Timestamp = staleLastTime };
-
-            double ageSec = (DateTime.UtcNow - staleCandles[^1].Timestamp).TotalSeconds;
-            bool isDetectedStale = ageSec > 30.0;
-            if (!isDetectedStale)
+            // ── Test 1: Stale Candle Stream Guard (REAL production rule: MarketDataFetcher.IsFeedStale) ──
+            // Boundary grid per timeframe: threshold = max(25s, 3 x interval). Just under => fresh, just over => stale.
+            var now = DateTime.UtcNow;
+            foreach (var (tfName, tfSec) in new[] { ("s5", 5), ("s10", 10), ("s15", 15), ("s30", 30), ("m1", 60) })
             {
-                sw.Stop();
-                return ChaosScenarioResult.Failure(Name, Category, sw.ElapsedMilliseconds,
-                    "Stale candle timestamp guard failed: 120-second stale candle was not detected as > 30s.",
-                    $"Candle Age={ageSec:F1}s", "isDetectedStale = false", "isDetectedStale = true",
-                    "Timestamp comparison logic error", "Ensure scanner enforces (DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30.");
+                double threshold = Math.Max(25, tfSec * 3);
+                bool freshJustUnder = !MarketDataFetcher.IsFeedStale(now.AddSeconds(-(threshold - 1)), tfSec, now);
+                bool staleJustOver = MarketDataFetcher.IsFeedStale(now.AddSeconds(-(threshold + 1)), tfSec, now);
+                bool staleVeryOld = MarketDataFetcher.IsFeedStale(now.AddSeconds(-600), tfSec, now);
+                bool staleDefault = MarketDataFetcher.IsFeedStale(default, tfSec, now);
+
+                if (!freshJustUnder || !staleJustOver || !staleVeryOld || !staleDefault)
+                {
+                    sw.Stop();
+                    return ChaosScenarioResult.Failure(Name, Category, sw.ElapsedMilliseconds,
+                        $"Production stale-feed rule misclassified candle age on {tfName}.",
+                        $"tf={tfName}, threshold={threshold}s",
+                        $"freshJustUnder={freshJustUnder}, staleJustOver={staleJustOver}, staleVeryOld={staleVeryOld}, staleDefaultTimestamp={staleDefault}",
+                        "all four true",
+                        "MarketDataFetcher.IsFeedStale boundary or default-timestamp handling regressed",
+                        "Restore max(25s, 3*interval) semantics in MarketDataFetcher.IsFeedStale.");
+                }
             }
+            double ageSec = 120.0; // synthetic "very old" probe used in the boundary grid above
 
             // ── Test 2: Missing / Empty Higher Timeframe Resilience ──
             var primaryCandles = ChaosTestHelper.GenerateTrendingCandles(160, startPrice: 1.0500);
@@ -72,6 +81,18 @@ public class StaleDataAndGapFaultScenario : IChaosScenario
             // ── Test 3: Insufficient Candlesticks (< 35) Resilience ──
             var shortCandles = ChaosTestHelper.GenerateTrendingCandles(10, startPrice: 1.0500);
             var smcShort = SmcEngine.AnalyzeSmcStructure("CHAOS_STALE", "s5", shortCandles, shortCandles[^1].Close);
+
+            // 10 candles are not enough to define swing structure: a directional BOS here would be a fabricated signal.
+            string shortBos = (smcShort.BosDirection ?? "").ToUpperInvariant();
+            if (shortBos.Contains("BULLISH") || shortBos.Contains("BEARISH"))
+            {
+                sw.Stop();
+                return ChaosScenarioResult.Failure(Name, Category, sw.ElapsedMilliseconds,
+                    "SMC reported a directional structure break on only 10 candles.",
+                    "candles=10", $"BosDirection={smcShort.BosDirection}", "NONE/empty (insufficient data)",
+                    "Missing minimum-window guard in SmcEngine.AnalyzeSmcStructure",
+                    "Return no structure when candle count is below the swing lookback.", ChaosSeverity.Warning);
+            }
 
             sw.Stop();
             return ChaosScenarioResult.Success(

@@ -99,6 +99,13 @@ public class MarketDataFetcher
         return 60;
     }
 
+    /// <summary>
+    /// Single source of truth for "is the live feed stale": the last candle's open time is older than
+    /// max(25s, 3 candle intervals). Pure function so it can be exercised by the chaos audit.
+    /// </summary>
+    public static bool IsFeedStale(DateTime lastCandleOpenUtc, int timeframeSeconds, DateTime nowUtc)
+        => (nowUtc - lastCandleOpenUtc).TotalSeconds > Math.Max(25, timeframeSeconds * 3);
+
     public virtual async Task<MiniAppController.OhlcCandle[]> FetchOhlcWithFallbackAsync(string? symbol, string rawInterval, string? originalAsset = null, int limit = 50)
     {
         string assetToFetch = originalAsset ?? symbol ?? "EUR/USD";
@@ -130,7 +137,7 @@ public class MarketDataFetcher
                 throw new ExchangeUnavailableException("PO feed: no candles", $"Нет котировок Pocket Option для {poKey}. Поток PO не подключен.");
 
             double ageSecs = (DateTime.UtcNow - poCandles[^1].Timestamp).TotalSeconds;
-            if (ageSecs > Math.Max(25, tfSecs * 3))
+            if (IsFeedStale(poCandles[^1].Timestamp, tfSecs, DateTime.UtcNow))
                 throw new ExchangeUnavailableException("PO feed: stale", $"Котировки Pocket Option для {poKey} устарели ({ageSecs:F0}с).");
 
             RecordSuccess();
@@ -158,7 +165,7 @@ public class MarketDataFetcher
                 var liveCandlesLastTime = liveCandles[^1].Timestamp;
                 int intervalSecs = Math.Max(5, TimeframeSeconds(rawInterval));
                 int maxAllowedLagSecs = Math.Max(25, intervalSecs * 3);
-                if ((DateTime.UtcNow - liveCandlesLastTime).TotalSeconds <= maxAllowedLagSecs)
+                if (!IsFeedStale(liveCandlesLastTime, intervalSecs, DateTime.UtcNow))
                 {
                     BotLogger.Info($"[MarketDataFetcher] Using {liveCandles.Length} live {rawInterval} candles for {cleanKey}.");
                     RecordSuccess();
