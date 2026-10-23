@@ -22,14 +22,21 @@ import os
 import sys
 import math
 import argparse
+import functools
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 
+# Enforce immediate unbuffered output to stdout so progress appears in real time
+print = functools.partial(print, flush=True)
+
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+    except Exception:
+        sys.stdout.reconfigure(encoding="utf-8")
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
@@ -361,8 +368,10 @@ def train_model(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cuda = device.type == "cuda"
     if not use_cuda:
+        # Cap threads to min(4, cpu_count) to avoid thread contention & CFS quota throttling in Docker containers
+        num_threads = min(4, max(1, os.cpu_count() or 4))
         try:
-            torch.set_num_threads(max(1, os.cpu_count() or 8))
+            torch.set_num_threads(num_threads)
         except Exception:
             pass
     print(f"[+] Training Device: {device} (Threads: {torch.get_num_threads()}, Mixed Precision AMP: {'Enabled' if use_cuda else 'Disabled (CPU)'})")
@@ -424,6 +433,7 @@ def train_model(
         if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
             model.macro_encoder[0].weight.data[:, 22] = 0.0
         if is_dual_stream and hasattr(model, "calibrate_cell_experts"):
+            print("[*] Pre-calibrating 30 microstructure cell experts & sniper gates...")
             model.calibrate_cell_experts(
                 torch.tensor(X_candles, dtype=torch.float32),
                 torch.tensor(X_mtf, dtype=torch.float32),
@@ -432,6 +442,7 @@ def train_model(
                 idx_train,
                 idx_val
             )
+            print("[+] Microstructure cell calibration complete.")
 
     alpha_tensor = torch.tensor(weights, dtype=torch.float32).to(device)
     criterion_cls_none = nn.CrossEntropyLoss(weight=alpha_tensor, label_smoothing=label_smoothing, reduction="none")
@@ -506,12 +517,17 @@ def train_model(
                 optimizer.zero_grad()
                 scheduler.step()
 
+            if (step + 1) % 15 == 0 or (step + 1) == len(train_loader):
+                pct = (step + 1) / len(train_loader) * 100.0
+                print(f"\r  --> Epoch {epoch:2d}/{epochs} [{step+1:3d}/{len(train_loader):3d}] ({pct:5.1f}%) | Batch Loss: {total_loss.item() * grad_accum:.4f}", end="")
+
         train_loss = running_loss / len(train_dataset)
         val_stats_uncal = evaluate(model, val_loader, device, is_dual_stream=is_dual_stream, temperature=1.0)
         epoch_temp = round(calibrate_temperature(val_stats_uncal["logits"], torch.tensor(val_stats_uncal["targets"])), 4)
         val_stats = evaluate(model, val_loader, device, is_dual_stream=is_dual_stream, temperature=epoch_temp)
         current_lr = scheduler.get_last_lr()[0]
 
+        print("\r" + " " * 88 + "\r", end="")
         print(
             f"{epoch:<6d} | "
             f"{train_loss:<8.4f} | "
@@ -586,6 +602,7 @@ def train_model(
         if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
             model.macro_encoder[0].weight.data[:, 22] = 0.0
         if is_dual_stream and hasattr(model, "calibrate_cell_experts"):
+            print("[*] Re-calibrating microstructure cell experts on best checkpoint weights...")
             model.calibrate_cell_experts(
                 torch.tensor(X_candles, dtype=torch.float32),
                 torch.tensor(X_mtf, dtype=torch.float32),
@@ -594,6 +611,7 @@ def train_model(
                 idx_train,
                 idx_val
             )
+            print("[+] Microstructure cell calibration complete.")
         if not is_dual_stream:
             # Legacy SequenceBrain bias centering (DualStreamPatchBrain is already sign-symmetric by construction)
             model.classifier[-1].bias[1] -= mean_diff / 2.0

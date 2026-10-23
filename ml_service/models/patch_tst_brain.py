@@ -557,7 +557,11 @@ class DualStreamPatchBrain(nn.Module):
                         best_wr = 0.0
                         best_gw = torch.zeros(25, dtype=torch.float32)
                         best_hyper = [0.50, 0.35, 0.35, 0.25]
-                        best_final_s = None
+                        best_final_s_params = None
+
+                        mk_ev = (aids[s1:] == aid) & (tfs[s1:] == tsec) & (y[s1:] > 0)
+                        yc = (y[s1:][mk_ev] == 1).numpy()
+                        n_ev = int(mk_ev.sum().item())
 
                         for alpha in [0.0, 0.16, 0.50, 0.85, 1.0]:
                             dir_s = (1.0 - alpha) * base_tf_score + alpha * cd
@@ -574,25 +578,33 @@ class DualStreamPatchBrain(nn.Module):
                             if torch.norm(gw) > 1e-6:
                                 gw = gw / torch.norm(gw)
 
-                            for g_scale in [0.0, 0.35, 0.70]:
-                                gate_mult = torch.exp(torch.clamp(G_cell_n @ gw, -1.5, 1.5) * g_scale)
-                                for tau in [0.18, 0.25, 0.28, 0.35, 0.50, 2.0]:
-                                    sat_s = dir_s / (1.0 + (dir_s / tau) ** 4)
-                                    final_s = sat_s * gate_mult
-                                    mk_ev = (aids[s1:] == aid) & (tfs[s1:] == tsec) & (y[s1:] > 0)
-                                    sc = final_s[s1:][mk_ev].numpy()
-                                    yc = (y[s1:][mk_ev] == 1).numpy()
-                                    thr = np.percentile(np.abs(sc), 85)
-                                    sel = np.abs(sc) >= thr
-                                    wr = float(np.mean((sc[sel] > 0) == yc[sel]) * 100)
-                                    if wr > best_wr:
-                                        best_wr = wr
-                                        best_gw = gw
-                                        best_final_s = final_s
-                                        best_hyper = [alpha, g_scale, tau, 0.25]
+                            G_cell_n_ev = G_cell_n[s1:][mk_ev]
+                            dir_s_ev = dir_s[s1:][mk_ev]
 
-                        if best_final_s is not None:
-                            val_cell_abs = np.abs(best_final_s[:s2][cell_mask[:s2]].numpy())
+                            for g_scale in [0.0, 0.35, 0.70]:
+                                gate_mult_ev = torch.exp(torch.clamp(G_cell_n_ev @ gw, -1.5, 1.5) * g_scale)
+                                for tau in [0.18, 0.25, 0.28, 0.35, 0.50, 2.0]:
+                                    sat_s_ev = dir_s_ev / (1.0 + (dir_s_ev / tau) ** 4)
+                                    final_s_ev = sat_s_ev * gate_mult_ev
+                                    sc = final_s_ev.numpy()
+                                    if n_ev > 5:
+                                        thr = np.percentile(np.abs(sc), 85)
+                                        sel = np.abs(sc) >= thr
+                                        if np.any(sel):
+                                            wr = float(np.mean((sc[sel] > 0) == yc[sel]) * 100)
+                                            if wr > best_wr:
+                                                best_wr = wr
+                                                best_gw = gw
+                                                best_final_s_params = (alpha, g_scale, tau)
+                                                best_hyper = [alpha, g_scale, tau, 0.25]
+
+                        if best_final_s_params is not None:
+                            b_alpha, b_gscale, b_tau = best_final_s_params
+                            b_dir_s = (1.0 - b_alpha) * base_tf_score + b_alpha * cd
+                            b_G = self._extract_even_gates(x_micro, x_mtf, x_macro, b_dir_s) / even_std
+                            b_gmult = torch.exp(torch.clamp(b_G @ best_gw, -1.5, 1.5) * b_gscale)
+                            b_final_s = (b_dir_s / (1.0 + (b_dir_s / b_tau) ** 4)) * b_gmult
+                            val_cell_abs = np.abs(b_final_s[:s2][cell_mask[:s2]].numpy())
                             p85 = float(np.percentile(val_cell_abs, 85)) if len(val_cell_abs) > 10 else 0.25
                             best_hyper[3] = max(p85, 1e-4)
 
