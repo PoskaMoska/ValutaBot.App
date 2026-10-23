@@ -381,12 +381,27 @@ public static partial class MiniAppController
             return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages" });
         });
 
-        app.MapPost("/api/admin/db-maintenance", async () =>
+        app.MapGet("/api/admin/db-stats", async () =>
         {
             try
             {
-                await ValutaBot.MiniApp.Services.DataRetentionService.RunEmergencyCleanupAsync();
-                return Results.Json(new { status = "ok", message = "DB maintenance and VACUUM FULL completed successfully." });
+                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+                await conn.OpenAsync();
+                var telemetry = await ValutaBot.MiniApp.Services.DataRetentionService.MeasureStorageTelemetryAsync(conn);
+                return Results.Json(telemetry);
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: 500);
+            }
+        });
+
+        app.MapPost("/api/admin/db-maintenance", async (bool? full) =>
+        {
+            try
+            {
+                var result = await ValutaBot.MiniApp.Services.DataRetentionService.RunEmergencyCleanupAsync(allowVacuumFull: full == true);
+                return Results.Json(new { status = "ok", telemetry = result });
             }
             catch (Exception ex)
             {
