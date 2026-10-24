@@ -105,9 +105,6 @@ public static partial class MiniAppController
         builder.Services.AddSingleton<AutoCalibrationEngine>();
         builder.Services.AddSingleton<IAutoCalibrationEngine>(sp => sp.GetRequiredService<AutoCalibrationEngine>());
         
-        // Register OnlineMetaLearner (The Bayesian SGD Logic)
-        builder.Services.AddSingleton<ValutaBot.MiniApp.Features.MarketAnalysis.Engines.IOnlineMetaLearner, ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner>();
-        
         builder.Services.AddSingleton<IConfluenceMatrixEngine>(sp => new ConfluenceMatrixEngine(
             sp.GetRequiredService<MarketDataFetcher>(),
             sp.GetRequiredService<IMarketAnalyzer>(),
@@ -232,9 +229,6 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
 
         // Launch Autonomous Pocket Option OTC stream (24/7 direct socket feed)
         PocketOptionWebSocketStream.StartStream();
-
-        // FIX #1: MetaLearner was NULL in production because it was never assigned.
-        ValutaBot.MiniApp.TradeOutcomeTracker.MetaLearner = app.Services.GetRequiredService<ValutaBot.MiniApp.Features.MarketAnalysis.Engines.IOnlineMetaLearner>();
 
         HttpFactory = app.Services.GetRequiredService<System.Net.Http.IHttpClientFactory>();
         MLPythonService.SetFactory(HttpFactory);

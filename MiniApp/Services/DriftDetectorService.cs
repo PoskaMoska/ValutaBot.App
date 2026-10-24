@@ -33,11 +33,8 @@ namespace ValutaBot.MiniApp
 
                 if (winRate < MIN_WIN_RATE)
                 {
-                    BotLogger.Warn($"[DriftDetector] {asset}/{timeframe} Win Rate dropped to {winRate:P0}. Resetting MetaLearner weights to empirical priors.");
+                    BotLogger.Warn($"[DriftDetector] {asset}/{timeframe} Win Rate dropped to {winRate:P0}. Cooldown flag set.");
                     _lastRetrainTime[key] = DateTime.UtcNow;
-
-                    TradeOutcomeTracker.MetaLearner?.ResetWeights(asset, timeframe);
-                    BotLogger.Info($"[DriftDetector] MetaLearner weights restored to empirical priors (ML dominant 1.35) for {asset}/{timeframe}.");
                 }
             }
             catch (Exception ex)

@@ -300,9 +300,7 @@ public static partial class MiniAppController
 
         app.MapGet("/api/stats/weights", (HttpContext context) =>
         {
-            var ml = ValutaBot.MiniApp.TradeOutcomeTracker.MetaLearner as ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner;
-            if (ml == null) return Results.Json(new { status = "offline", message = "MetaLearner is currently offline waiting for calibration data." });
-            return Results.Json(new { status = "online", weights = ml.GetCurrentWeights() });
+            return Results.Json(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
         
         app.MapGet("/api/stats/ml", async (HttpContext context) =>
@@ -498,18 +496,14 @@ public static partial class MiniAppController
             return Results.Ok(new { success = true, message = "Postback processed successfully" });
         });
 
-        /* Admin MetaLearner Reset & Inspect Endpoints */
+        /* Admin MetaLearner Endpoints (Deprecated) */
         app.MapPost("/api/admin/reset-meta-weights", async (HttpContext context) =>
         {
             var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
             if (!isAuthorized)
                 return Results.Json(new { error = authError }, statusCode: 401);
 
-            if (TradeOutcomeTracker.MetaLearner != null)
-            {
-                await TradeOutcomeTracker.MetaLearner.ResetAllWeightsAndDbAsync();
-            }
-            return Results.Ok(new { status = "success", message = "MetaLearner weights reset to default priors (ML dominant 1.35) and DB table meta_learner_weights truncated." });
+            return Results.Ok(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
 
         app.MapGet("/api/admin/meta-weights", async (HttpContext context, string? asset, string? timeframe) =>
@@ -518,16 +512,7 @@ public static partial class MiniAppController
             if (!isAuthorized)
                 return Results.Json(new { error = authError }, statusCode: 401);
 
-            if (TradeOutcomeTracker.MetaLearner is ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner oml)
-            {
-                if (!string.IsNullOrEmpty(asset) && !string.IsNullOrEmpty(timeframe))
-                {
-                    var w = oml.GetWeights(asset, timeframe);
-                    return Results.Ok(new { asset, timeframe, weights = w });
-                }
-                return Results.Ok(oml.GetCurrentWeights());
-            }
-            return Results.Json(new { error = "MetaLearner not available" });
+            return Results.Ok(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
     }
 }

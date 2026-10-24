@@ -335,8 +335,6 @@ public class MarketAnalysisOrchestrator(
                  CombinedReasoningText = consensus.CombinedReasoningText + $"\n⚠️ Предупреждение риск-контроля: {gatekeeper.Reason}" 
              };
         }
-        
-        double[] metaWeights = TradeOutcomeTracker.MetaLearner?.GetWeights(cleanAsset, timeframe) ?? [];
 
         string? taTelemetry = null;
         string? mlTelemetry = null;
@@ -378,8 +376,7 @@ public class MarketAnalysisOrchestrator(
                 SpreadBps = liveSpreadBps,
                 TickCountLastCandle = closedCandles.Length > 0 ? closedCandles[^1].Volume : 0
             },
-            MetaLearner = new {
-                Weights = metaWeights,
+            NeuralBrain = new {
                 Prob = consensus.MlProb,
                 Score = consensus.MlScoreRaw,
                 FinalProb = consensus.Probability
@@ -393,7 +390,7 @@ public class MarketAnalysisOrchestrator(
             Smc = smcResult,
             Ta = taDetail,
             MacroContext = mlFeatures.MacroContext,
-            MetaLearner = mlFeatures.MetaLearner
+            NeuralBrain = mlFeatures.NeuralBrain
         };
         string shadowFeaturesJson = System.Text.Json.JsonSerializer.Serialize(shadowMlFeatures);
 

@@ -7,7 +7,6 @@ namespace ValutaBot.MiniApp;
 
 public static class TradeOutcomeTracker
 {
-    public static ValutaBot.MiniApp.Features.MarketAnalysis.Engines.IOnlineMetaLearner? MetaLearner { get; set; }
     public static ValutaBot.MiniApp.Services.ICircuitBreakerService? CircuitBreaker { get; set; }
     public static IAutoCalibrationEngine? AutoCalib { get; set; }
     private static volatile bool _initialized = false;
@@ -52,7 +51,6 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
         string key = $"{asset}_{timeframe}";
         return _consecutiveLosses.TryGetValue(key, out int count) ? count : 0;
     }
-    private static int _eurusdTradeCounter = 0;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _tfVerifiedCounters = new();
 
     public static async Task InitializeAsync()
@@ -66,7 +64,6 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
 
             // L2-FIX: Создание таблиц
             await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureCalibrationTableAsync();
-            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureMetaWeightsTableAsync();
             var calibData = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
             if (AutoCalib != null)
             {
@@ -77,16 +74,11 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             }
             BotLogger.Info($"[TradeOutcomeTracker] Restored {calibData.Count} EMA calibration states from PostgreSQL.");
 
-            if (MetaLearner != null)
-            {
-                await MetaLearner.InitializeFromDbAsync();
-            }
-
             var outcomes = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadTradeOutcomesAsync(1000);
             BotLogger.Info($"[TradeOutcomeTracker] Loaded {outcomes.Count} historical outcomes from PostgreSQL DB (for reporting only).");
 
             _initialized = true;
-            BotLogger.Info("[TradeOutcomeTracker] Online Reinforcement Learning engine initialized successfully.");
+            BotLogger.Info("[TradeOutcomeTracker] Trade outcome tracker initialized successfully.");
         }
         catch (Exception ex)
         {
@@ -268,20 +260,6 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 }
             }
 
-            // Online Bayesian SGD MetaLearner weight update & PostgreSQL persistence
-            if (isLiveDirectional || (isShadowDirectional && record.Probability >= 57))
-            {
-                MetaLearner?.PartialFit(
-                    record.Asset,
-                    record.Timeframe,
-                    record.TaScore,
-                    record.OfScore,
-                    record.SmcScore,
-                    record.MlScore,
-                    wasCorrect,
-                    record.Direction);
-            }
-
             string cleanDirection = record.Direction.StartsWith("SHADOW_") 
                 ? record.Direction["SHADOW_".Length..] 
                 : record.Direction;
@@ -291,51 +269,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
 
             BotLogger.Info($"[TradeOutcomeTracker] Verified trade {record.Id} ({record.Asset} {record.Timeframe}) -> {(wasCorrect ? "WIN" : "LOSS")}.");
 
-            // ── ML Telemetry: Continuous Calibration ──
-            if (isLiveDirectional && record.Asset == "EUR/USD OTC")
-            {
-                int currentCount = Interlocked.Increment(ref _eurusdTradeCounter);
-                if (currentCount % 20 == 0)
-                {
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            var globalStats = "No Global Stats";
-                            var ofStats = "No OF Stats";
-                            var taStats = "No TA Stats";
-                            
-                            string report = $"[📊 ML Self-Learning]\nAsset: {record.Asset} | Trades: {currentCount}\n\n" +
-                                            $"🔹 GLOBAL: {globalStats}\n" +
-                                            $"🔹 OrderFlow: {ofStats}\n" +
-                                            $"🔹 TechAnalysis: {taStats}";
-                            
-                            await TelegramBotService.SendMessageToAdmins(report);
-                            
-                            string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                            Directory.CreateDirectory(logDir);
-                            string logFile = Path.Combine(logDir, "ml_calibration.csv");
-                            
-                            await _csvSemaphore.WaitAsync(); // B5-FIX: Prevent IOException when multiple trades complete at same time
-                            try
-                            {
-                                bool writeHeader = !System.IO.File.Exists(logFile);
-                                using var writer = new System.IO.StreamWriter(logFile, append: true);
-                                if (writeHeader) await writer.WriteLineAsync("Timestamp,Iteration,Asset,GlobalStats,OrderFlowStats,TechAnalysisStats");
-                                await writer.WriteLineAsync($"{DateTime.UtcNow:O},{currentCount},{record.Asset},{globalStats},{ofStats},{taStats}");
-                            }
-                            finally
-                            {
-                                _csvSemaphore.Release();
-                            }
-                        }
-                        catch (Exception tEx)
-                        {
-                            BotLogger.Error("[TradeOutcomeTracker] Error sending ML telemetry", tEx);
-                        }
-                    });
-                }
-            }
+
 
 // EVOLUTION DUMP removed: redundant query bypassing 99% shadow outcomes
 

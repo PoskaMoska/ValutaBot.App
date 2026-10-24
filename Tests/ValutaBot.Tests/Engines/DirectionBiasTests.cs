@@ -123,30 +123,6 @@ namespace ValutaBot.Tests.Engines
                 $"Противоположные входы должны давать противоположные направления. Получено: оба = {dB.FinalDirection}");
         }
 
-        // ── TEST 4: MetaLearner стартовый bias ───────────────────────────────────
-        [Fact]
-        public void MetaLearner_FreshInstance_NeutralInputGivesNearFifty()
-        {
-            var meta = new OnlineMetaLearner();
-
-            double probNeutral = meta.Predict("DIAG_FRESH", "m1", 0.0, 0.0, 0.0, 0.0, false);
-            double probBuy     = meta.Predict("DIAG_FRESH", "m1", 0.3, 0.3, 0.3, 0.3, false);
-            double probPut     = meta.Predict("DIAG_FRESH", "m1", -0.3, -0.3, -0.3, -0.3, false);
-
-            output.WriteLine($"Neutral  (0,0,0,0)    → prob={probNeutral:F4}  (expected ~0.5)");
-            output.WriteLine($"Moderate BUY (+0.3ea) → prob={probBuy:F4}    (expected > 0.5)");
-            output.WriteLine($"Moderate PUT (-0.3ea) → prob={probPut:F4}    (expected < 0.5)");
-            output.WriteLine($"Bias at neutral: {Math.Abs(probNeutral - 0.5):F4}");
-
-            // Нейтральный вход должен давать ~0.5 (допуск ±0.1)
-            Assert.True(Math.Abs(probNeutral - 0.5) < 0.1,
-                $"MetaLearner bias слишком большой: при нейтральных входах prob={probNeutral:F4} (ожидалось 0.4-0.6)");
-
-            // Симметрия: BUY > 0.5, PUT < 0.5
-            Assert.True(probBuy > 0.5, $"При BUY сигналах prob={probBuy:F4} должна быть > 0.5");
-            Assert.True(probPut < 0.5, $"При PUT сигналах prob={probPut:F4} должна быть < 0.5");
-        }
-
         // ── TEST 5: При нулевой марже (prob≈0.5) — бот всегда даёт 50% ──────────
         [Fact]
         public async Task Consensus_WhenAllNeutral_ProbabilityIsExactly50()

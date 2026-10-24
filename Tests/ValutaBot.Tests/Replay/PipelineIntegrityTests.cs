@@ -93,7 +93,6 @@ public class PipelineIntegrityTests(ITestOutputHelper output)
     {
         var s = TestScenarioLoader.Load(scenarioName);
         var ta = new TechnicalAnalysisEngine();
-        var learner = new OnlineMetaLearner();
 
         double[] prices = Array.ConvertAll(s.Candles, c => c.Close);
         double[] volumes = Array.ConvertAll(s.Candles, c => c.Volume);
@@ -114,9 +113,6 @@ public class PipelineIntegrityTests(ITestOutputHelper output)
         var mlSignal  = new MlSignal("BUY", 0.6, 0.5, "v1.0");
         var stateSignal = new StateSignal("Normal", 0.1, 0.0);
         var mtfResult = new ConfluenceMatrixResult(1.0, true, 100, "BUY", "NEUTRAL", new(), "");
-
-        // MetaLearner устанавливаем в TradeOutcomeTracker для этого теста
-        ValutaBot.MiniApp.TradeOutcomeTracker.MetaLearner = learner;
 
         var matrix    = new ConfluenceMatrixEngine(null!, ta);
         var consensus = matrix.EvaluateMatrixAsync(

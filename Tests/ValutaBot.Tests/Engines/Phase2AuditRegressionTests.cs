@@ -302,59 +302,6 @@ namespace ValutaBot.Tests.Engines
         }
 
         // ═══════════════════════════════════════════════════════════════════
-        // DOJI-1: MetaLearner — corrupted ml=0 training vs correct ml=0.8
-        // ═══════════════════════════════════════════════════════════════════
-
-        [Fact]
-        public void DOJI1_MetaLearner_TrainedWithCorrectMl_WeightsDiverge()
-        {
-            // WHAT THE TEST PROVES:
-            // A learner trained with ml=0 (old poisoned state — MlScore lost in DB)
-            // does not update w[4] (the ML weight) correctly.
-            // A learner trained with ml=0.8 properly trains w[4].
-            // The two learners MUST produce different predictions when
-            // given a STRONG negative ML signal (-1.0), because:
-            //   - Poisoned: w[4] ≈ initial (1.0, decayed slightly) → high prob
-            //   - Correct:  w[4] learned ml=+0.8 → responds differently to ml=-1.0
-
-            var learnerPoisoned = new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner();
-            var learnerCorrect  = new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner();
-
-            for (int i = 0; i < 50; i++)
-            {
-                learnerPoisoned.PartialFit("EURUSD", "1m", 0.5, 0.0, 0.0, 0.0, wasWin: true, direction: "BUY");
-                learnerCorrect.PartialFit("EURUSD", "1m", 0.5, 0.0, 0.0, 0.8, wasWin: true, direction: "BUY");
-            }
-
-            // Test with OPPOSITE ML signal: if w[4] was learned from ml=+0.8,
-            // then seeing ml=-1.0 should produce a meaningfully different result
-            double probPoisoned = learnerPoisoned.Predict("EURUSD", "1m", 0.5, 0.0, 0.0, -1.0, false);
-            double probCorrect  = learnerCorrect.Predict("EURUSD",  "1m", 0.5, 0.0, 0.0, -1.0, false);
-
-            _out.WriteLine($"[DOJI-1] Poisoned (ml=-1.0 probe): {probPoisoned:F4} | Correct (ml=-1.0 probe): {probCorrect:F4}");
-
-            // Core assertion: they MUST differ (MlScore poisoning caused w[4] divergence)
-            Assert.NotEqual(probPoisoned, probCorrect);
-            // Correct learner was trained on positive ml → should be MORE averse to negative ml
-            Assert.True(probCorrect < probPoisoned, 
-                $"Learner trained with real ml=0.8 should be MORE averse to ml=-1.0. " +
-                $"Poisoned={probPoisoned:F4} Correct={probCorrect:F4}");
-        }
-
-        [Fact]
-        public void DOJI1_MetaLearner_NeutralDirection_IsNoOp()
-        {
-            var learner = new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner();
-
-            double before = learner.Predict("BTCUSDT", "5m", 0.8, 0.0, 0.0, 0.0, false);
-            learner.PartialFit("BTCUSDT", "5m", 0.8, 0.0, 0.0, 0.0, wasWin: true, direction: "NEUTRAL");
-            double after = learner.Predict("BTCUSDT", "5m", 0.8, 0.0, 0.0, 0.0, false);
-
-            Assert.Equal(before, after, precision: 10);
-            _out.WriteLine($"[DOJI-1] NEUTRAL → no weight change: before={before:F6} after={after:F6}");
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
         // DOJI-2: Doji filter boundary checks
         // ═══════════════════════════════════════════════════════════════════
 
@@ -472,33 +419,6 @@ namespace ValutaBot.Tests.Engines
             _out.WriteLine("[STRESS-1] 10,000 ticks, 6 indicators — all finite. ✓");
         }
 
-        // ═══════════════════════════════════════════════════════════════════
-        // STRESS-2: OnlineMetaLearner — 500 PartialFit, weights stay in [-4, 4]
-        // ═══════════════════════════════════════════════════════════════════
-
-        [Fact]
-        public void Stress_MetaLearner_500Updates_WeightsRemainSane()
-        {
-            var learner = new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.OnlineMetaLearner();
-            var rng = new Random(42);
-
-            for (int i = 0; i < 500; i++)
-            {
-                double ta  = (rng.NextDouble() * 2) - 1;
-                double of  = (rng.NextDouble() * 2) - 1;
-                double smc = (rng.NextDouble() * 2) - 1;
-                double ml  = (rng.NextDouble() * 2) - 1;
-                bool win   = rng.NextDouble() > 0.45;
-                learner.PartialFit("EURUSD", "1m", ta, of, smc, ml, win, win ? "BUY" : "PUT");
-            }
-
-            double prob = learner.Predict("EURUSD", "1m", 0.5, 0.3, 0.2, 0.4, false);
-
-            Assert.True(double.IsFinite(prob), "MetaLearner Predict must be finite after 500 updates");
-            Assert.InRange(prob, 0.0, 1.0);
-
-            _out.WriteLine($"[STRESS-2] MetaLearner after 500 PartialFit: Predict = {prob:F4}");
-        }
     }
 }
 
