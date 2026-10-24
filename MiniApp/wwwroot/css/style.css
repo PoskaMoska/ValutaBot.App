@@ -808,7 +808,7 @@
             border: 1px solid rgba(124,77,255,0.2);
             box-shadow: 0 4px 12px rgba(124, 77, 255, 0.05);
         }
-        .candle-countdown .time.critical { color: #ff1744; }
+        .candle-countdown .time.critical { color: #00e676; text-shadow: 0 0 10px rgba(0, 230, 118, 0.4); }
 
         /* в”Ђв”Ђв”Ђ Status Bar в”Ђв”Ђв”Ђ */
         .status-bar {

@@ -225,17 +225,19 @@ function updateCountdown() {
     el.innerText = `${mins}:${secs.toString().padStart(2,'0')}`;
     
     // Динамические пороги светофора под таймфрейм
-    let greenThresh = 5;
-    let yellowThresh = 15;
+    // Адаптировано под моментальный расчет бота (~0.08с):
+    // 1m: на 10с желтеет (подготовка 7с), на 3с зеленеет (клик -> вход ровно в 00с)
+    let greenThresh = 3;
+    let yellowThresh = 10;
     
     if (tfSec <= 5) {
         greenThresh = 1; yellowThresh = 2;
     } else if (tfSec <= 10) {
-        greenThresh = 2; yellowThresh = 4;
+        greenThresh = 1; yellowThresh = 3;
     } else if (tfSec <= 15) {
-        greenThresh = 2; yellowThresh = 5;
+        greenThresh = 1; yellowThresh = 4;
     } else if (tfSec <= 30) {
-        greenThresh = 3; yellowThresh = 10;
+        greenThresh = 2; yellowThresh = 6;
     }
 
     if (remaining <= greenThresh) {
