@@ -57,6 +57,7 @@ export function clearResults() {
     safeSetStyle('resultsTabBar', 'display', 'none');
     safeSetStyle('resultsGrid', 'display', 'none');
     safeSetStyle('aiCopilotCard', 'display', 'none');
+    safeSetStyle('consensusRadarCard', 'display', 'none');
     safeSetStyle('tabContentAI', 'display', 'none');
     safeSetStyle('mlEnsembleCard', 'display', 'none');
     safeSetStyle('confluenceCard', 'display', 'none');
