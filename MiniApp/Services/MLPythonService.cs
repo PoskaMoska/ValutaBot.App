@@ -91,43 +91,6 @@ public static class MLPythonService
         // Note: HttpClient instances are obtained via IHttpClientFactory to benefit from Polly policies.
     }
 
-    public class MarketDataColumnar
-    {
-        public long[] openTime { get; set; } = [];
-        public double[] open { get; set; } = [];
-        public double[] high { get; set; } = [];
-        public double[] low { get; set; } = [];
-        public double[] close { get; set; } = [];
-        public double[] volume { get; set; } = [];
-    }
-
-    private static MarketDataColumnar ToColumnar(System.Collections.Generic.IList<MiniAppController.OhlcCandle> candles)
-    {
-        int count = candles.Count;
-        var columnar = new MarketDataColumnar
-        {
-            openTime = new long[count],
-            open = new double[count],
-            high = new double[count],
-            low = new double[count],
-            close = new double[count],
-            volume = new double[count]
-        };
-
-        for (int i = 0; i < count; i++)
-        {
-            var c = candles[i];
-            columnar.openTime[i] = c.Timestamp == default ? 0 : new DateTimeOffset(c.Timestamp.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc) : c.Timestamp).ToUnixTimeSeconds();
-            columnar.open[i] = c.Open;
-            columnar.high[i] = c.High;
-            columnar.low[i] = c.Low;
-            columnar.close[i] = c.Close;
-            columnar.volume[i] = c.Volume;
-        }
-        
-        return columnar;
-    }
-
     public record MLPythonPrediction(
         string Direction,
         double Confidence,

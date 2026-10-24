@@ -191,13 +191,14 @@ public class OnlineMetaLearner : IOnlineMetaLearner
 
         newCount = _updateCounts.AddOrUpdate(key, 1, (_, v) => v + 1);
 
-        // Persist to PostgreSQL asynchronously
-        double[] snapshot;
-        lock (w) { snapshot = (double[])w.Clone(); }
-        _ = TradeRepository.SaveMetaWeightAsync(key, snapshot, newCount);
-
-        // Also save to file
-        _ = SaveWeightsToFileAsync();
+        // Throttled persistence: save to PostgreSQL every 20 updates to prevent connection pool exhaustion
+        if (newCount % 20 == 0)
+        {
+            double[] snapshot;
+            lock (w) { snapshot = (double[])w.Clone(); }
+            _ = TradeRepository.SaveMetaWeightAsync(key, snapshot, newCount);
+            _ = SaveWeightsToFileAsync();
+        }
     }
 
     public async Task InitializeFromDbAsync()

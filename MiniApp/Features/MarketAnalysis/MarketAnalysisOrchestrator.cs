@@ -239,33 +239,29 @@ public class MarketAnalysisOrchestrator(
             }
         };
 
-        // ML (Dual-Stream Neural Brain / LightGBM)
+        // ML (Dual-Stream Neural Brain / PatchTST)
         var mlSw = Stopwatch.StartNew();
         var mlPrediction = _settings.EnableMachineLearning ? await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult, macroPayload) : null;
-        string lgbmDir = "NEUTRAL";
-        double lgbmConf = 0.5;
+        string mlDir = "NEUTRAL";
+        double mlConf = 0.5;
         if (mlPrediction != null) {
-            lgbmDir = mlPrediction.Direction;
-            lgbmConf = mlPrediction.Confidence;
+            mlDir = mlPrediction.Direction;
+            mlConf = mlPrediction.Confidence;
         }
         mlSw.Stop();
         ValutaMetrics.MlDuration.Observe(mlSw.Elapsed.TotalSeconds);
-        // Fix #4: Diagnose MetaLearner status and ML contribution clearly in logs
-        bool hasMetaLearner = TradeOutcomeTracker.MetaLearner != null;
         double mlRawProb = mlPrediction?.RawConfidence ?? 0.5;
         double mlScoreDebug = (mlRawProb - 0.5) * 2.0;
-        _logger.LogInformation("[TRACE {TraceId}] ML RawConf={RawConf:F4} > mlScore={MlScore:F4} | MetaLearner={HasML} | Model={Version}",
-            traceId, mlRawProb, mlScoreDebug, hasMetaLearner ? "ACTIVE" : "OFFLINE (fallback weights)", mlPrediction?.ModelVersion ?? "null");
-        if (!hasMetaLearner)
-            _logger.LogWarning("[TRACE {TraceId}] MetaLearner is NULL — using degraded fallback (TA*0.2 + SMC*0.2 + OF*0.1 + ML*0.2). Direction quality REDUCED.", traceId);
+        _logger.LogInformation("[TRACE {TraceId}] Neural Brain: Verdict={Dir} Conf={Conf:F4} (RawConf={RawConf:F4}) | Model={Version}",
+            traceId, mlDir, mlConf, mlRawProb, mlPrediction?.ModelVersion ?? "null");
         if (mlPrediction != null) {
             string hasOb = smcResult.OrderBlockType != null ? "Yes" : "No";
-            string mlLgbmTrace = mlPrediction.TopFeatures != null && mlPrediction.TopFeatures.Count >= 3 
-                ? $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {lgbmDir} ({lgbmConf*100:F1}%) | Explainer: {mlPrediction.TopFeatures[0]}, {mlPrediction.TopFeatures[1]}, {mlPrediction.TopFeatures[2]}" 
-                : $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {lgbmDir} ({lgbmConf*100:F1}%)";
-            traceLines.Add($"[5. PREDICT ML] {mlLgbmTrace} -> {mlSw.ElapsedMilliseconds}ms");
+            string mlTrace = mlPrediction.TopFeatures != null && mlPrediction.TopFeatures.Count >= 3 
+                ? $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {mlDir} ({mlConf*100:F1}%) | Explainer: {mlPrediction.TopFeatures[0]}, {mlPrediction.TopFeatures[1]}, {mlPrediction.TopFeatures[2]}" 
+                : $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {mlDir} ({mlConf*100:F1}%)";
+            traceLines.Add($"[5. PREDICT ML] {mlTrace} -> {mlSw.ElapsedMilliseconds}ms");
         } else {
-            traceLines.Add($"[5. PREDICT ML] Python result (conf: {lgbmConf:F2}) -> {mlSw.ElapsedMilliseconds}ms");
+            traceLines.Add($"[5. PREDICT ML] Neural Brain offline (conf: {mlConf:F2}) -> {mlSw.ElapsedMilliseconds}ms");
         }
         
         // 7. Matrix & Consensus
@@ -282,7 +278,7 @@ public class MarketAnalysisOrchestrator(
         
         var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.hmaVal, taResult.volStrengthVal, mainAtr, mainAdx);
         var smcSignal = new SmcSignal(smcResult.BosDirection ?? "", smcResult.SweepDirection ?? "", smcResult.OrderBlockType ?? "", smcResult.FvgType ?? "", "");
-        var mlSignal = new MlSignal(lgbmDir, lgbmConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline", mlPrediction?.HorizonCandles, mlPrediction?.RawConfidence);
+        var mlSignal = new MlSignal(mlDir, mlConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline", mlPrediction?.HorizonCandles, mlPrediction?.RawConfidence);
         var stateSignal = new StateSignal(state.VelocityRegime, state.VelocityBpsPerSec, state.MomentumContribution);
 
         var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
@@ -325,7 +321,8 @@ public class MarketAnalysisOrchestrator(
         {
             ["TechAnalysis"] = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
             ["SMC"]          = DirectionExtensions.FromScore(consensus.SmcScore).ToSignal(),
-            ["LIGHTGBM"]     = lgbmDir,
+            ["NeuralBrain"]    = mlDir,
+            ["LIGHTGBM"]       = mlDir,
         };
 
         // RECORD (Fire and forget) ONLY IF CONFIDENCE IS HIGH ENOUGH

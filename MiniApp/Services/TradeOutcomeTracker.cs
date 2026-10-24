@@ -337,45 +337,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 }
             }
 
-            // 🛑 EVOLUTION DUMP: Dynamic trigger by timeframe (only on live directional trades) 🛑
-            if (isLiveDirectional)
-            {
-                int currentTfCount = _tfVerifiedCounters.AddOrUpdate(record.Timeframe, 1, (_, count) => count + 1);
-                int threshold = 5; // Default for m15, h1, etc.
-                string tfLow = record.Timeframe.ToLower().Trim();
-                if (tfLow.StartsWith("s")) threshold = 30;
-                else if (tfLow == "m1") threshold = 25;
-                else if (tfLow == "m5") threshold = 10;
-
-                if (currentTfCount % threshold == 0)
-                {
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            var dump = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetEvolutionDumpAsync();
-                            if (dump != null && dump.TotalTrades > 0)
-                            {
-                                var sbTrace = new System.Text.StringBuilder();
-                                sbTrace.AppendLine("=================================================");
-                                sbTrace.AppendLine("[🧠 EVOLUTION DUMP] Анализ развития интеллекта (За последние 48 часов)");
-                                double diff = dump.NewMlWinRate - dump.OldMlWinRate;
-                                string diffStr = diff > 0 ? $"+{diff:F1}" : $"{diff:F1}";
-                                sbTrace.AppendLine($"[Вывод] Система стабильно умнеет. Адаптация к рынку успешна.");
-                                sbTrace.AppendLine($"              (До этого: {dump.OldMlWinRate:F1}% -> Интеллект {(diff >= 0 ? "вырос на" : "изменился на")} {diffStr}%).");
-                                sbTrace.AppendLine($"[Превосходство] За эти 48ч Нейросеть {dump.MlSavedTrades} раз пошла против классических");
-                                sbTrace.AppendLine($"                индикаторов (TA) и оказалась права.");
-                                sbTrace.AppendLine("=================================================");
-                                BotLogger.Info($"\n{sbTrace}");
-                            }
-                        }
-                        catch (Exception evEx)
-                        {
-                            BotLogger.Warn($"[TradeOutcomeTracker] Evolution dump error: {evEx.Message}");
-                        }
-                    });
-                }
-            }
+// EVOLUTION DUMP removed: redundant query bypassing 99% shadow outcomes
 
         }
         catch (Exception ex)

@@ -23,9 +23,6 @@ public static class SignalTracker
         _livePrices[asset] = price;
     }
 
-    private static List<(string signalName, int verified, int correct)>? _signalVotesCache;
-    private static DateTime _signalVotesCacheExpiry = DateTime.MinValue;
-    private static readonly SemaphoreSlim _signalVotesCacheLock = new(1, 1);
     // Legacy background verification timer removed.
 
     // ── Public Write API ───────────────────────────────────────────────────
@@ -192,38 +189,6 @@ public static class SignalTracker
             double weight = Math.Clamp(agreeRate / 0.5, 0.2, 2.0); // simple calibration
             return (v.signalName, Math.Round(agreeRate * 100, 1), Math.Round(weight, 2), v.verified);
         }).OrderByDescending(s => s.Item2).ToArray();
-    }
-
-    public static double CalculateSignalWeight(System.Collections.Generic.IEnumerable<(string signalName, int verified, int correct)> votes, string signalName, double baseWeight = 1.0)
-    {
-        var v = System.Linq.Enumerable.FirstOrDefault(votes, x => x.signalName == signalName);
-        if (v.verified <= 0) return baseWeight; // BUG-3 FIX: verified=0 > division by zero
-        double agreeRate = (double)v.correct / v.verified;
-        double adjustment = agreeRate / 0.5;
-        return System.Math.Clamp(baseWeight * adjustment, 0.2, 2.0);
-    }
-
-    public static async Task<double> GetSignalWeightAsync(string signalName, double baseWeight = 1.0)
-    {
-        // L1-FIX: Используем кэш 30 сек — убираем SELECT на каждый тик
-        if (_signalVotesCache == null || DateTime.UtcNow > _signalVotesCacheExpiry)
-        {
-            await _signalVotesCacheLock.WaitAsync();
-            try
-            {
-                // Double-check после получения блокировки
-                if (_signalVotesCache == null || DateTime.UtcNow > _signalVotesCacheExpiry)
-                {
-                    _signalVotesCache = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetAllSignalVotesAsync();
-                    _signalVotesCacheExpiry = DateTime.UtcNow.AddSeconds(30);
-                }
-            }
-            finally
-            {
-                _signalVotesCacheLock.Release();
-            }
-        }
-        return CalculateSignalWeight(_signalVotesCache, signalName, baseWeight);
     }
 
     // ── Background Verification ────────────────────────────────────────────
