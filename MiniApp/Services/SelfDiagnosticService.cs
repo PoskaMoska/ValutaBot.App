@@ -33,6 +33,7 @@ public class SelfDiagnosticService : BackgroundService
     private DateTime _lastDatasetAuditTime = DateTime.MinValue;
     private DateTime _lastDatasetTelegramDigestDate = DateTime.MinValue;
     private DateTime _lastChaosAuditTime = DateTime.MinValue;
+    private DateTime _lastTradingQualityAuditTime = DateTime.MinValue;
 
     private readonly string _mlStateFilePath = "ml_service/data/ml_health_state.txt";
 
@@ -409,7 +410,35 @@ public class SelfDiagnosticService : BackgroundService
             }
         }
         
-        // 8. Continuous Autonomous In-Process Saboteur (Micro-Assault every 3 minutes)
+        // 8. Dedicated Autonomous Trading Quality Sentinel (Full 5-scenario sweep every 10 min & on boot)
+        if (DateTime.UtcNow - _lastTradingQualityAuditTime >= TimeSpan.FromMinutes(10))
+        {
+            _lastTradingQualityAuditTime = DateTime.UtcNow;
+            try
+            {
+                var chaosService = scope.ServiceProvider.GetService<ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService>();
+                if (chaosService != null)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await chaosService.RunCategoryAuditAsync(ValutaBot.MiniApp.Features.ChaosAudit.Models.ChaosCategory.TradingLogicQuality, stoppingToken);
+                        }
+                        catch (Exception exCat)
+                        {
+                            BotLogger.Warn($"[TradingSentinel] Autonomous quality audit notice: {exCat.Message}");
+                        }
+                    }, stoppingToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradingSentinel] Trigger error: {ex.Message}");
+            }
+        }
+
+        // 9. Continuous Autonomous In-Process Saboteur (Micro-Assault every 3 minutes)
         if (DateTime.UtcNow - _lastChaosAuditTime >= TimeSpan.FromMinutes(3))
         {
             _lastChaosAuditTime = DateTime.UtcNow;
