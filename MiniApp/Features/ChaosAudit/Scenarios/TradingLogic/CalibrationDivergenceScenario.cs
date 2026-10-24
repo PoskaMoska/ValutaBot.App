@@ -50,7 +50,7 @@ public class CalibrationDivergenceScenario : IChaosScenario
                     SUM(CASE WHEN was_win = TRUE THEN 1 ELSE 0 END) as wins,
                     ROUND(AVG(CASE WHEN was_win = TRUE THEN 100.0 ELSE 0.0 END), 2) as winrate
                 FROM trade_outcomes
-                WHERE created_at >= NOW() - INTERVAL '12 hours'
+                WHERE created_at >= NOW() - INTERVAL '2 hours'
                   AND direction IN ('BUY', 'PUT', 'SHADOW_BUY', 'SHADOW_PUT')
                   AND was_win IS NOT NULL
                 GROUP BY 1;";
@@ -61,7 +61,7 @@ public class CalibrationDivergenceScenario : IChaosScenario
             if (rows.Count == 0)
             {
                 return ChaosScenarioResult.Success(Name, Category, sw.ElapsedMilliseconds,
-                    "No verified trade outcomes in the last 12h for calibration check.", "insufficient_data");
+                    "No verified trade outcomes in the last 2h for calibration check.", "insufficient_data");
             }
 
             var dict = new Dictionary<string, (long Total, double WinRate)>();
@@ -73,22 +73,22 @@ public class CalibrationDivergenceScenario : IChaosScenario
                 dict[b] = (tot, wr);
             }
 
-            // Check High Confidence bracket (>= 60%)
-            if (dict.TryGetValue("HIGH_60_PLUS", out var high) && high.Total >= 40)
+            // Check High Confidence bracket (>= 60%) in recent 2h window
+            if (dict.TryGetValue("HIGH_60_PLUS", out var high) && high.Total >= 30)
             {
                 if (high.WinRate < 50.0)
                 {
-                    string observed = $"Conf >= 60%: WinRate = {high.WinRate:F2}% (Wins={Math.Round(high.Total * high.WinRate / 100.0)}/{high.Total})";
+                    string observed = $"[Окно 2ч] Conf >= 60%: WinRate = {high.WinRate:F2}% (Wins={Math.Round(high.Total * high.WinRate / 100.0)}/{high.Total})";
                     return ChaosScenarioResult.Failure(
                         Name,
                         Category,
                         sw.ElapsedMilliseconds,
-                        $"Critical confidence inversion: high-confidence signals (>= 60%) have sub-50% winrate ({high.WinRate:F1}%) in the last 12h.",
-                        "Live outcome calibration check [>=60% bucket]",
+                        $"Critical confidence inversion: high-confidence signals (>= 60%) have sub-50% winrate ({high.WinRate:F1}%) in the last 2h.",
+                        "Live outcome calibration check [>=60% bucket, 2h window]",
                         observed,
                         "WinRate >= 53.0% for high confidence (>=60%)",
-                        "Overconfident model logits or market regime divergence causing false certainty.",
-                        "Recalibrate TemperatureScaler or run train_brain.py on recent PO-era data.",
+                        "Overconfident model logits or micro-reversal regime on short timeframes (e.g. s5) causing false certainty.",
+                        "Recalibrate TemperatureScaler or apply mean-reversion filter on s5.",
                         ChaosSeverity.Critical,
                         "Повышенные риски и убытки при сделках с мнимой высокой уверенностью нейросети."
                     );
