@@ -88,7 +88,7 @@ public class AutoTradingScannerService : BackgroundService
         var queuedKeys = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         var inFlightKeys = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
 
-        RealtimeTickCollector.OnCandleClosed += (pair, tf) =>
+        Action<string, string> candleClosedHandler = (pair, tf) =>
         {
             if (_targetPairs.Contains(pair, StringComparer.OrdinalIgnoreCase) && _subminuteTfs.Contains(tf, StringComparer.OrdinalIgnoreCase))
             {
@@ -102,6 +102,8 @@ public class AutoTradingScannerService : BackgroundService
                 }
             }
         };
+
+        RealtimeTickCollector.OnCandleClosed += candleClosedHandler;
 
         var workers = new List<Task>();
         for (int i = 0; i < 4; i++) // 4 concurrent workers
@@ -141,7 +143,15 @@ public class AutoTradingScannerService : BackgroundService
             }, stoppingToken));
         }
 
-        await Task.WhenAll(workers);
+        try
+        {
+            await Task.WhenAll(workers);
+        }
+        finally
+        {
+            RealtimeTickCollector.OnCandleClosed -= candleClosedHandler;
+            channel.Writer.TryComplete();
+        }
     }
 
     private long _lastCircuitBreakerWarnTicks = 0;

@@ -163,7 +163,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };
 
-            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord);
+            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord, record.Id);
 
             // Background neutral samples (HOLD) are strictly for offline Transformer training (export_dataset.py).
             // They must never affect Circuit Breaker, consecutive loss streaks, post-mortem dumps, or online RL weights.

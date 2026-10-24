@@ -165,13 +165,13 @@ public class DataRetentionService : BackgroundService
 
         // 5. Prune expired subminute and historical candles according to current zone
         int subPoDeleted = await ExecuteSafeDeleteAsync(conn, "subminute_candles (PO)",
-            "DELETE FROM subminute_candles WHERE asset LIKE '%_PO' AND open_time < @cutoff", new { cutoff = subCutoff });
+            "DELETE FROM subminute_candles WHERE asset LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz", new { cutoff = subCutoff });
         int subLegacyDeleted = await ExecuteSafeDeleteAsync(conn, "subminute_candles (legacy)",
-            "DELETE FROM subminute_candles WHERE asset NOT LIKE '%_PO' AND open_time < @cutoff", new { cutoff = legacySubCutoff });
+            "DELETE FROM subminute_candles WHERE asset NOT LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz", new { cutoff = legacySubCutoff });
         int histDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles",
-            "DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff = histCutoff });
+            "DELETE FROM historical_candles WHERE open_time::timestamptz < @cutoff::timestamptz", new { cutoff = histCutoff });
         int pendingDeleted = await ExecuteSafeDeleteAsync(conn, "pending_trades",
-            "DELETE FROM pending_trades WHERE verify_at < @cutoff", new { cutoff = stalePendingCutoff });
+            "DELETE FROM pending_trades WHERE verify_at::timestamptz < @cutoff::timestamptz", new { cutoff = stalePendingCutoff });
 
         // 6. Importance Sampling and Pruning for trade_outcomes
         int shadowDeleted = 0;
@@ -257,7 +257,7 @@ public class DataRetentionService : BackgroundService
 
         // Step 2: Aggressively delete old subminute candles (keep only 24h for live analysis)
         int emergencySubDeleted = await ExecuteSafeDeleteAsync(conn, "subminute_candles (Emergency: >24h)",
-            @"DELETE FROM subminute_candles WHERE open_time < NOW() - INTERVAL '24 hours'",
+            @"DELETE FROM subminute_candles WHERE open_time::timestamptz < NOW() - INTERVAL '24 hours'",
             new { });
 
         // Step 3: Compact ALL features_json immediately (not just old ones)
@@ -270,7 +270,7 @@ public class DataRetentionService : BackgroundService
 
         // Step 4: Delete old historical candles aggressively
         int emergencyHistDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles (Emergency: >7d)",
-            "DELETE FROM historical_candles WHERE open_time < NOW() - INTERVAL '7 days'",
+            "DELETE FROM historical_candles WHERE open_time::timestamptz < NOW() - INTERVAL '7 days'",
             new { });
 
         BotLogger.Warn($"[SmartStorageGovernor] Emergency purge complete: {emergencyShadowDeleted} shadow/hold, {emergencySubDeleted} subminute candles, {emergencyCompacted} JSON compacted, {emergencyHistDeleted} historical.");

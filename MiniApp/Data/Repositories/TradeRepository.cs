@@ -177,7 +177,7 @@ FROM outcome_data;");
             }
         }
 
-        public static async Task SaveTradeOutcomeAsync(TradeOutcomeRecord outcome)
+        public static async Task SaveTradeOutcomeAsync(TradeOutcomeRecord outcome, string? pendingTradeIdToDelete = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             try
@@ -254,9 +254,10 @@ FROM outcome_data;");
                         bb_squeeze = EXCLUDED.bb_squeeze,
                         ta_telemetry = EXCLUDED.ta_telemetry,
                         ml_telemetry = EXCLUDED.ml_telemetry,
-                        smc_telemetry = EXCLUDED.smc_telemetry
-                ", new
+                        smc_telemetry = EXCLUDED.smc_telemetry;
+                " + (!string.IsNullOrEmpty(pendingTradeIdToDelete) ? " DELETE FROM pending_trades WHERE id = @PendingTradeId;" : ""), new
                 {
+                    PendingTradeId = pendingTradeIdToDelete,
                     outcome.Id,
                     outcome.Asset,
                     outcome.Timeframe,

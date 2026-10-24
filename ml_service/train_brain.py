@@ -100,18 +100,40 @@ class TemperatureScaler(nn.Module):
 
 def calibrate_temperature(val_logits, val_labels, max_iter=50):
     """
-    Calibrates directional temperature T on validation logits (z_BUY - z_PUT)
-    so that the 85th percentile of directional conviction maps cleanly to 58% confidence
-    (log(0.58 / 0.42) = 0.32277), guaranteeing well-spread selective trading thresholds
-    where Top 15% across all 30 cells starts at >= 58%.
+    Standard Temperature Scaling (Guo et al., 2017):
+    Optimizes single scalar T > 0 on validation set using Negative Log-Likelihood (NLL).
+    Prevents overconfidence while preserving genuine high conviction (60-80%),
+    without artificially squashing predictions to 58%.
     """
-    val_logits = val_logits.detach().cpu()
-    diff = (val_logits[:, 1] - val_logits[:, 2]).numpy()
-    p_sniper_diff = float(np.percentile(np.abs(diff), 85.0))
-    if p_sniper_diff < 1e-4:
+    val_logits = val_logits.detach()
+    if not isinstance(val_labels, torch.Tensor):
+        val_labels = torch.tensor(val_labels)
+    val_labels = val_labels.detach().long()
+
+    # Filter out invalid labels if any
+    mask = (val_labels >= 0) & (val_labels < val_logits.shape[-1])
+    val_logits = val_logits[mask]
+    val_labels = val_labels[mask]
+
+    if len(val_labels) < 50:
         return 1.0
-    temp = p_sniper_diff / 0.32277
-    return max(0.05, min(5.0, temp))
+
+    scaler = TemperatureScaler(init_temp=1.0).to(val_logits.device)
+    optimizer = torch.optim.LBFGS(scaler.parameters(), lr=0.05, max_iter=max_iter)
+
+    def eval_nll():
+        optimizer.zero_grad()
+        scaled = scaler(val_logits)
+        loss = F.cross_entropy(scaled, val_labels)
+        loss.backward()
+        return loss
+
+    try:
+        optimizer.step(eval_nll)
+        t = float(scaler.temperature.item())
+        return max(0.5, min(3.0, t))
+    except Exception:
+        return 1.0
 
 
 def compute_ece(probs, targets, n_bins=10):

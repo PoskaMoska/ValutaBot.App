@@ -83,6 +83,21 @@ public static class ClockSkewMonitor
         {
             if (window.Length >= MinSamples)
             {
+                if (Math.Abs(median) >= 1_800_000)
+                {
+                    double hoursShift = -Math.Round(median / 3_600_000.0);
+                    if (Math.Abs(hoursShift) >= 1.0)
+                    {
+                        double oldOffset = PocketOptionWebSocketStream.ServerTimeOffsetSec;
+                        double newOffset = oldOffset + (hoursShift * 3600.0);
+                        PocketOptionWebSocketStream.ServerTimeOffsetSec = newOffset;
+                        BotLogger.Warn($"[ClockSkew] Auto-adjusted ServerTimeOffsetSec from {oldOffset}s to {newOffset}s due to {hoursShift:F0}h timezone/DST drift.");
+                        Array.Clear(_ring, 0, _ring.Length);
+                        _count = 0;
+                        _next = 0;
+                    }
+                }
+
                 if (!_alerting && Math.Abs(median) > AlertAbsMs)
                 {
                     _alerting = true;

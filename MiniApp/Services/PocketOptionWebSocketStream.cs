@@ -41,7 +41,7 @@ public static class PocketOptionWebSocketStream
     private const int ReconnectAfterConnectedMs = 1_000;
     private const int MinBackoffMs = 5_000;
     private const int MaxBackoffMs = 60_000;
-    private const double ServerTimeOffsetSec = 7200.0; // Pocket Option server time is UTC+2
+    public static double ServerTimeOffsetSec { get; set; } = 7200.0; // Pocket Option server time is UTC+2 (auto-adjusted on DST)
 
     private readonly record struct PoTickRow(string Asset, double Ts, double Price, long RecvMs);
 

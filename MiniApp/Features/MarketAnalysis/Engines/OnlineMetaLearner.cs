@@ -204,6 +204,20 @@ public class OnlineMetaLearner : IOnlineMetaLearner
     {
         try
         {
+            // Purge any stale leftover .tmp files from previous crashes or unclosed file handles
+            try
+            {
+                var dir = Path.GetDirectoryName(_savePath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                {
+                    foreach (var file in Directory.GetFiles(dir, "meta_weights_v4.json.tmp.*"))
+                    {
+                        try { File.Delete(file); } catch { }
+                    }
+                }
+            }
+            catch { }
+
             var dbWeights = await TradeRepository.LoadMetaWeightsAsync();
             if (dbWeights.Count > 0)
             {
@@ -263,6 +277,8 @@ public class OnlineMetaLearner : IOnlineMetaLearner
         return Task.Run(async () =>
         {
             if (!_saveLock.Wait(0)) return;
+            string? tmpPath = null;
+            bool moved = false;
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_savePath)!);
@@ -273,13 +289,18 @@ public class OnlineMetaLearner : IOnlineMetaLearner
                 }
                 
                 string json = JsonSerializer.Serialize(dict);
-                string tmpPath = _savePath + $".tmp.{Guid.NewGuid():N}";
+                tmpPath = _savePath + $".tmp.{Guid.NewGuid():N}";
                 await File.WriteAllTextAsync(tmpPath, json);
                 File.Move(tmpPath, _savePath, overwrite: true);
+                moved = true;
             }
             catch { }
             finally
             {
+                if (!moved && tmpPath != null && File.Exists(tmpPath))
+                {
+                    try { File.Delete(tmpPath); } catch { }
+                }
                 _saveLock.Release();
             }
         });

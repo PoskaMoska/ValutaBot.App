@@ -435,6 +435,8 @@ public class MarketAnalysisOrchestrator(
 
         if (canExecuteReal)
         {
+            if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshRealPrice) && freshRealPrice > 0)
+                currentLivePrice = freshRealPrice;
             _lastRealTradeTimeByAsset[cleanAsset] = DateTime.UtcNow;
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
@@ -451,9 +453,11 @@ public class MarketAnalysisOrchestrator(
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
-        else if (isDirectional && (consensus.Probability >= 45 || isCbHalted || isS5))
+        else if (isDirectional && (consensus.Probability >= 54 || isCbHalted || (isS5 && (isExhaustedOnS5 || !htfAligned || isCooldownActive))))
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
+            if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshShadowPrice) && freshShadowPrice > 0)
+                currentLivePrice = freshShadowPrice;
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, shadowFeaturesJson,
                 smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 effectiveMarketRegime,

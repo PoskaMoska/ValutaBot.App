@@ -81,25 +81,24 @@ namespace ValutaBot.Tests.Engines
         }
 
         [Fact]
-        public async Task TA_StrongOppositeToML_ReducesFinalScore()
+        public async Task PureNeuralBrain_ML_DominatesDirection_EvenWhenTA_Opposes()
         {
-            // Правило: если |TA| > 0.8 и ML не согласен — Confluence применяет штраф 0.5x
-            // TA = сильный BUY, ML = сильный PUT → finalScore должен быть меньше чем при согласии
+            // Pure Neural Brain (Вариант 1): Нейросеть определяет направление без подавления старыми индикаторами.
+            // TA = сильный BUY (+0.9), но ML = PUT (0.90) -> Направление строго PUT.
             var (_, smc, of, _, st) = NeutralBundle();
             var taStrong = new TaSignal(0.9, 0.9, 65.0, 1.1, 0.3, 0.0005, 32.0);
             var mlPut    = new MlSignal("PUT", 0.9, null, "v1");
-
-            // Agreement (оба BUY)
             var mlBuy    = new MlSignal("BUY", 0.9, null, "v1");
+
             var decAgree = await _cm.EvaluateMatrixAsync("EUR/USD", "m1", false, 1.0,
                 taStrong, smc, of, mlBuy, st, _neutralMtf);
-            // Conflict (TA=BUY, ML=PUT)
             var decConfl = await _cm.EvaluateMatrixAsync("EUR/USD", "m1", false, 1.0,
                 taStrong, smc, of, mlPut, st, _neutralMtf);
 
-            output.WriteLine($"Agree prob: {decAgree.Probability}%, Conflict prob: {decConfl.Probability}%");
-            Assert.True(decConfl.Probability < decAgree.Probability,
-                "Конфликт TA vs ML должен снизить вероятность");
+            output.WriteLine($"Agree dir: {decAgree.FinalDirection} ({decAgree.Probability}%), Conflict dir: {decConfl.FinalDirection} ({decConfl.Probability}%)");
+            Assert.Equal("BUY", decAgree.FinalDirection);
+            Assert.Equal("PUT", decConfl.FinalDirection);
+            Assert.True(decConfl.Probability >= 60, "Нейросеть сохраняет высокую вероятность при чистом нейромозге");
         }
     }
 
