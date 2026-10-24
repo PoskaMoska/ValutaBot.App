@@ -306,6 +306,9 @@ public class MarketAnalysisOrchestrator(
         matrixSw.Stop();
         traceLines.Add($"[6. Консенсус]       Матрица сведена (Фаза: {state.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
 
+        var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(closedCandles, timeframe);
+        traceLines.Add($"[6.8 Noise Gate]     {noiseAudit.RegimeDescription} (TR: {noiseAudit.LocalAtrBps:F2} bps, Порог: {noiseAudit.NoiseFloorBps:F1} bps, Z: {noiseAudit.ZScore:F2})");
+
         // 8. Final Formatting & Data Integrity
         var dbSw = Stopwatch.StartNew();
         var timeout = _timeoutEngine.CalculateTimeout(cleanAsset, timeframe, mainAtr, 1.0, smcResult, currentLivePrice, state, isForex);
@@ -407,6 +410,7 @@ public class MarketAnalysisOrchestrator(
 
         int requiredProb = isS5 ? 59 : 57;
         bool htfAligned = mtfResult.DominantDirection == consensus.FinalDirection && isDirectional;
+        bool isGoldenSetup = mtfResult.IsGoldenSetup && (!isSubminute || noiseAudit.IsTradeableImpulse);
 
         bool isCooldownActive = false;
         if (isS5 && _lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var lastRealTime))
@@ -566,14 +570,26 @@ public class MarketAnalysisOrchestrator(
                 QualityScore = 35
             };
         }
-        else if (mtfResult.IsGoldenSetup && isDirectional && consensus.Probability >= 57)
+        else if (isGoldenSetup && isDirectional && consensus.Probability >= 57)
         {
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "GOLDEN",
-                Title = "⭐ Идеальный сетап (Golden Setup)",
-                Message = $"Все 3 уровня анализа синхронны: нейросеть ({mlPrediction?.ModelVersion ?? "Neural Brain"}), датчики SMC и теханализ подтверждают движение {consensus.FinalDirection}. Конфликтов нет.",
+                Title = "⭐ Снайперский импульс (Golden Setup)",
+                Message = $"Все 3 уровня анализа синхронны: нейросеть ({mlPrediction?.ModelVersion ?? "Neural Brain"}), датчики SMC и импульс волатильности ({noiseAudit.LocalAtrBps:F1} bps) подтверждают {consensus.FinalDirection}. Порог шума преодолен.",
                 QualityScore = 96
+            };
+        }
+        else if (isSubminute && !noiseAudit.IsTradeableImpulse)
+        {
+            copilotAdvice = new CopilotAdviceDto
+            {
+                Status = "CAUTION",
+                Title = $"⚡ Вход в консолидации ({consensus.FinalDirection})",
+                Message = $"Амплитуда свечей ({noiseAudit.LocalAtrBps:F2} bps) ниже порога шума брокера ({noiseAudit.NoiseFloorBps:F1} bps). Направление — {consensus.FinalDirection} ({consensus.Probability}%). Ожидайте смену свечи для входа.",
+                RecommendedAsset = cleanAsset,
+                RecommendedTf = timeframe.ToUpper(),
+                QualityScore = Math.Min(65, consensus.Probability)
             };
         }
         else if (conflictPenalty < 1.0)
@@ -681,7 +697,7 @@ public class MarketAnalysisOrchestrator(
             atr = Math.Round(GetSafeLimit(mainAtr), isForex ? 5 : 2),
             chartData = mainPrices,
             chartOhlc = candles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
-            goldenSetup = mtfResult.IsGoldenSetup,
+            goldenSetup = isGoldenSetup,
             confluenceLabel = mtfResult.ConfluenceLabel,
             confluenceRatio = mtfResult.ConfluenceRatio,
             lgbmModelVersion = mlPrediction?.ModelVersion ?? "offline",
