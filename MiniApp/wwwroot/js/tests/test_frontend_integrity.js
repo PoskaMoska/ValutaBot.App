@@ -194,8 +194,8 @@ async function runAllTests() {
 
         // 3. ML & Consensus Radar Integrity
         assert(getVal(document, 'radarMl').includes('ВВЕРХ (68%)'), "Radar ML displays 'ВВЕРХ (68%)'");
-        assert(getVal(document, 'radarTa').includes('ВВЕРХ (65%)'), "Radar TA displays 'ВВЕРХ (65%)'");
-        assert(getVal(document, 'radarSmc').includes('ВВЕРХ (62%)'), "Radar SMC displays 'ВВЕРХ (62%)'");
+        assertEq("Radar TA is removed (no indicator noise)", getVal(document, 'radarTa'), '');
+        assertEq("Radar SMC is removed (no indicator noise)", getVal(document, 'radarSmc'), '');
         assertEq("Radar OF is disabled (empty, no ghost data)", getVal(document, 'radarOf'), '');
 
         // 4. Golden Setup Badge
@@ -268,8 +268,8 @@ async function runAllTests() {
 
         // Radar checks for neutral/put
         assert(getVal(document, 'radarMl').includes('ВНИЗ (51%)'), "Radar ML displays 'ВНИЗ (51%)'");
-        assert(getVal(document, 'radarTa').includes('НЕЙТРАЛЬНО'), "Radar TA displays 'НЕЙТРАЛЬНО'");
-        assert(getVal(document, 'radarSmc').includes('НЕЙТРАЛЬНО'), "Radar SMC displays 'НЕЙТРАЛЬНО'");
+        assertEq("Radar TA is removed", getVal(document, 'radarTa'), '');
+        assertEq("Radar SMC is removed", getVal(document, 'radarSmc'), '');
 
         // Copilot caution state
         assertEq("Copilot Title is Caution", getVal(document, 'copilotHeadline'), '⚡ Вход в консолидации (PUT)');

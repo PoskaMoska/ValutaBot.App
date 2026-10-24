@@ -192,43 +192,24 @@
             </div>
         </div>
 
-        <!-- 5. Consensus Radar -->
-            <div class='news-card' id='consensusRadarCard' style='display:none;margin-bottom:8px'>
-                <div class='news-header'>
-                    <span class='news-badge' style='background:linear-gradient(135deg,#8b5cf6,#6d28d9)'>🎯 Нейромозг и датчики</span>
-                    <span class='news-label'>PatchTST + сенсоры C#</span>
-                </div>
-                <div style='display:grid;grid-template-columns:1fr;gap:6px;margin-top:8px;padding-right:4px;'>
-                    
-                    <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
-                        <div style='display:flex; align-items:center; gap:6px;'>
-                            <span style='font-size:12px;'>🤖</span>
-                            <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Нейросеть (Решение)</span>
-                        </div>
-                        <div id='radarMl' style='font-size:10px; font-weight:700;'>--</div>
+        <!-- Neural Network Card (Sole AI Brain, indicators removed) -->
+        <div class='news-card' id='consensusRadarCard' style='display:none;margin-top:10px;margin-bottom:8px'>
+            <div class='news-header'>
+                <span class='news-badge' style='background:linear-gradient(135deg,#8b5cf6,#6d28d9)'>🧠 Нейросеть</span>
+                <span class='news-label'>PatchTST Brain</span>
+            </div>
+            <div style='display:grid;grid-template-columns:1fr;gap:6px;margin-top:8px;padding-right:4px;'>
+                <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
+                    <div style='display:flex; align-items:center; gap:6px;'>
+                        <span style='font-size:12px;'>🤖</span>
+                        <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Прогноз нейросети</span>
                     </div>
-
-                    <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
-                        <div style='display:flex; align-items:center; gap:6px;'>
-                            <span style='font-size:12px;'>📊</span>
-                            <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Датчик Smart Money (SMC)</span>
-                        </div>
-                        <div id='radarSmc' style='font-size:10px; font-weight:700;'>--</div>
-                    </div>
-
-
-                    <div style='display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:6px;'>
-                        <div style='display:flex; align-items:center; gap:6px;'>
-                            <span style='font-size:12px;'>📐</span>
-                            <span style='font-size:10px; color:var(--subtext); font-weight:600;'>Датчик Теханализа (TA)</span>
-                        </div>
-                        <div id='radarTa' style='font-size:10px; font-weight:700;'>--</div>
-                    </div>
-
+                    <div id='radarMl' style='font-size:10px; font-weight:700;'>--</div>
                 </div>
             </div>
+        </div>
 
-        <!-- Tab Bar removed by user request so all info is on one screen -->
+                    <!-- Tab Bar removed by user request so all info is on one screen -->
 
         <!-- ═══ TAB: ИИ Аналитика ═══ -->
         <div id='tabContentAI' style='display:none'>
@@ -309,6 +290,6 @@
         </div>
     </div>
     
-    <script type="module" src="/js/main.js?v=20261025_radar"></script>
+    <script type="module" src="/js/main.js?v=20261025_pure_neural"></script>
 </body>
 </html>
