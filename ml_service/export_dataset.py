@@ -334,7 +334,7 @@ class SubminuteCandleStore:
                         iv = "m5"
                     key = (clean_a, iv)
                     bucket = self.series.setdefault(key, ([], []))
-                    ts_str = str(ot)[:19]
+                    ts_str = str(ot)[:19].replace("T", " ")
                     if not bucket[0] or bucket[0][-1] != ts_str:
                         bucket[0].append(ts_str)
                         bucket[1].append({
@@ -361,7 +361,17 @@ class SubminuteCandleStore:
         bucket = self.series.get((clean_a, iv))
         if not bucket or not bucket[0]:
             return []
-        iso_cut = created_at_dt.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(created_at_dt, "strftime") else str(created_at_dt)[:19].replace(" ", "T")
+
+        # Strict Anti-Leakage: a candle is ONLY valid if it was 100% closed BEFORE created_at_dt.
+        # open_time + candle_duration <= created_at_dt  ==>  open_time <= created_at_dt - candle_duration
+        dur_sec = TF_SECONDS.get(iv, 60)
+        from datetime import timedelta
+        if hasattr(created_at_dt, "timestamp"):
+            cutoff_dt = created_at_dt - timedelta(seconds=dur_sec)
+            iso_cut = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            iso_cut = str(created_at_dt)[:19].replace("T", " ")
+
         idx = bisect.bisect_right(bucket[0], iso_cut)
         start = max(0, idx - count)
         return bucket[1][start:idx]
