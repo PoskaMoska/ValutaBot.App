@@ -237,9 +237,7 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
             stats.EmaWinRate = (alpha * outcomeVal) + ((1.0 - alpha) * stats.EmaWinRate);
             ValutaMetrics.WinRateRatio.WithLabels(asset, timeframe).Set(stats.EmaWinRate);
             
-            // Persist to DB asynchronously
-            _ = Task.Run(() => ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveCalibrationStateAsync(
-                sourceName, asset, timeframe, stats.TotalTrades, stats.EmaWinRate));
+            // Indicator calibration decoupled in Pure Neural Brain mode
         }
     }
 

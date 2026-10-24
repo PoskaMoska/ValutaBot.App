@@ -147,12 +147,9 @@ public static partial class MiniAppController
         builder.Services.AddHostedService<HistoricalCandleAccumulatorService>();
         builder.Services.AddHostedService<ValutaBot.MiniApp.Services.DataRetentionService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
         builder.Services.AddHostedService<ValutaBot.App.MiniApp.Services.SelfDiagnosticService>(); // Post-deploy self-scanner
-        builder.Services.AddSingleton<ValutaBot.MiniApp.Services.INewsCalendarService, ValutaBot.MiniApp.Services.NewsCalendarService>();
-builder.Services.AddHostedService<ValutaBot.MiniApp.Services.NewsCalendarService>(p => (ValutaBot.MiniApp.Services.NewsCalendarService)p.GetRequiredService<ValutaBot.MiniApp.Services.INewsCalendarService>());
 builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerService>(); // Dual-engine architecture (fast subminute, slow m1)
         builder.Services.AddHostedService<ValutaBot.MiniApp.Services.TrialReminderBackgroundService>(); // 3-day trial reminders & funnel
 
-        builder.Services.AddHttpClient("FNG").AddStandardResilienceHandler();
         builder.Services.AddHttpClient("MLPythonService", client => 
         {
             client.Timeout = TimeSpan.FromSeconds(10);
@@ -368,29 +365,9 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         await app.RunAsync($"http://0.0.0.0:{port}");
     }
 
-    private static async Task<object> GetFearGreedIndex()
+    private static Task<object> GetFearGreedIndex()
     {
-        const string cacheKey = "fear_greed";
-        if (_cache.TryGetValue(cacheKey, out object? cached))
-            return cached!;
-
-        try
-        {
-            var json = await HttpFactory!.CreateClient("FNG").GetStringAsync("https://api.alternative.me/fng/?limit=1");
-            using var doc = JsonDocument.Parse(json);
-            var data = doc.RootElement.GetProperty("data")[0];
-            var result = new
-            {
-                value = int.TryParse(data.GetProperty("value").GetString(), out var v) ? v : 50,
-                classification = data.GetProperty("value_classification").GetString() ?? "Neutral"
-            };
-            _cache.Set(cacheKey, (object)result, TimeSpan.FromHours(1));
-            return result;
-        }
-        catch
-        {
-            return new { value = 50, classification = "Neutral" };
-        }
+        return Task.FromResult<object>(new { value = 50, classification = "Neutral" });
     }
 }
 

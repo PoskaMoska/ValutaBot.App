@@ -201,12 +201,6 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE pending_trades ADD COLUMN minutes_to_news INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
                 END $$;
 
-                CREATE TABLE IF NOT EXISTS signal_votes (
-                    id SERIAL PRIMARY KEY,
-                    signal_name TEXT NOT NULL,
-                    was_correct BOOLEAN NOT NULL,
-                    created_at TEXT NOT NULL
-                );
 
                 
                 CREATE TABLE IF NOT EXISTS subminute_candles (

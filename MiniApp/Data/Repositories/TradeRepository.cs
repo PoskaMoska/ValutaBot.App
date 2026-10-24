@@ -501,13 +501,7 @@ FROM outcome_data;");
             await conn.ExecuteAsync("DELETE FROM pending_trades WHERE id = @id", new { id });
         }
 
-        public static async Task RecordSignalVoteAsync(string signalName, bool wasCorrect)
-        {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            using var conn = DbConnectionFactory.GetConnection();
-            await conn.ExecuteAsync("INSERT INTO signal_votes (signal_name, was_correct, created_at) VALUES (@signalName, @wasCorrect, @now)", 
-                new { signalName, wasCorrect, now = DateTime.UtcNow.ToString("o") });
-        }
+
 
         public static async Task<(int Total, int Verified, int Correct)> GetOverallStatsAsync()
         {
@@ -591,106 +585,9 @@ FROM outcome_data;");
             return result;
         }
 
-        public static async Task<List<(string signalName, int verified, int correct)>> GetAllSignalVotesAsync()
-        {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<(string, int, int)>();
-            using var conn = DbConnectionFactory.GetConnection();
-            var rows = await conn.QueryAsync(
-                "SELECT signal_name, COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_correct THEN 1 ELSE 0 END), 0) as Correct FROM signal_votes GROUP BY signal_name");
-            
-            var result = new List<(string, int, int)>();
-            foreach (var r in rows)
-            {
-                result.Add((r.signal_name, Convert.ToInt32(r.verified), Convert.ToInt32(r.correct)));
-            }
-            return result;
-        }
 
-        // РІвЂќР‚РІвЂќР‚ L2-FIX: Р СџР ВµРЎР‚РЎРѓР С‘РЎРѓРЎвЂљР ВµР Р…РЎвЂљР Р…Р С•РЎРѓРЎвЂљРЎРЉ EMA-Р Р†Р ВµРЎРѓР С•Р Р† AutoCalibrationEngine РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚РІвЂќР‚
 
-        /// <summary>
-        /// Р РЋР С•РЎвЂ¦РЎР‚Р В°Р Р…РЎРЏР ВµРЎвЂљ EMA-РЎРѓР С•РЎРѓРЎвЂљР С•РЎРЏР Р…Р С‘Р Вµ Р С”Р В°Р В»Р С‘Р В±РЎР‚Р С•Р Р†РЎвЂ°Р С‘Р С”Р В° Р Р† PostgreSQL.
-        /// Р вЂ™РЎвЂ№Р В·РЎвЂ№Р Р†Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р С‘Р В· TradeOutcomeTracker Р С—Р С•РЎРѓР В»Р Вµ Р С”Р В°Р В¶Р Т‘Р С•Р в„– Р С•Р В±РЎР‚Р В°Р В±Р С•РЎвЂљР С”Р С‘ РЎРѓР Т‘Р ВµР В»Р С”Р С‘.
-        /// </summary>
-        public static async Task SaveCalibrationStateAsync(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate)
-        {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            try
-            {
-                using var conn = DbConnectionFactory.GetConnection();
-                await conn.ExecuteAsync(@"
-                    INSERT INTO calibration_state (source_name, asset, timeframe, total_trades, ema_win_rate, updated_at)
-                    VALUES (@sourceName, @asset, @timeframe, @totalTrades, @emaWinRate, @updatedAt)
-                    ON CONFLICT (source_name, asset, timeframe) DO UPDATE SET
-                        total_trades = EXCLUDED.total_trades,
-                        ema_win_rate = EXCLUDED.ema_win_rate,
-                        updated_at   = EXCLUDED.updated_at",
-                    new { sourceName, asset, timeframe, totalTrades, emaWinRate, updatedAt = DateTime.UtcNow.ToString("o") });
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Warn($"[TradeRepository] SaveCalibrationState notice: {ex.Message}");
-            }
-        }
 
-        /// <summary>
-        /// Р вЂ”Р В°Р С–РЎР‚РЎС“Р В¶Р В°Р ВµРЎвЂљ РЎРѓР С•РЎвЂ¦РЎР‚Р В°Р Р…РЎвЂР Р…Р Р…РЎвЂ№Р Вµ EMA-Р Р†Р ВµРЎРѓР В° Р С—РЎР‚Р С‘ РЎРѓРЎвЂљР В°РЎР‚РЎвЂљР Вµ Р В±Р С•РЎвЂљР В°.
-        /// Р вЂ™Р С•Р В·Р Р†РЎР‚Р В°РЎвЂ°Р В°Р ВµРЎвЂљ РЎРѓР С—Р С‘РЎРѓР С•Р С” Р В·Р В°Р С—Р С‘РЎРѓР ВµР в„– Р Т‘Р В»РЎРЏ Р Р†Р С•РЎРѓРЎРѓРЎвЂљР В°Р Р…Р С•Р Р†Р В»Р ВµР Р…Р С‘РЎРЏ AutoCalibrationEngine._statsMap.
-        /// </summary>
-        public static async Task<List<(string sourceName, string asset, string timeframe, int totalTrades, double emaWinRate)>> LoadCalibrationStateAsync()
-        {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString()))
-                return new List<(string, string, string, int, double)>();
-            try
-            {
-                using var conn = DbConnectionFactory.GetConnection();
-                var rows = await conn.QueryAsync(
-                    "SELECT source_name, asset, timeframe, total_trades, ema_win_rate FROM calibration_state");
-                var result = new List<(string, string, string, int, double)>();
-                foreach (var r in rows)
-                {
-                    result.Add((
-                        (string)r.source_name,
-                        (string)r.asset,
-                        (string)r.timeframe,
-                        Convert.ToInt32(r.total_trades),
-                        Convert.ToDouble(r.ema_win_rate)
-                    ));
-                }
-                return result;
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Warn($"[TradeRepository] LoadCalibrationState notice: {ex.Message}");
-                return new List<(string, string, string, int, double)>();
-            }
-        }
-
-        /// <summary>
-        /// Р РЋР С•Р В·Р Т‘Р В°РЎвЂРЎвЂљ РЎвЂљР В°Р В±Р В»Р С‘РЎвЂ РЎС“ calibration_state Р ВµРЎРѓР В»Р С‘ Р Р…Р Вµ РЎРѓРЎС“РЎвЂ°Р ВµРЎРѓРЎвЂљР Р†РЎС“Р ВµРЎвЂљ.
-        /// </summary>
-        public static async Task EnsureCalibrationTableAsync()
-        {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            try
-            {
-                using var conn = DbConnectionFactory.GetConnection();
-                await conn.ExecuteAsync(@"
-                    CREATE TABLE IF NOT EXISTS calibration_state (
-                        source_name  TEXT NOT NULL,
-                        asset        TEXT NOT NULL,
-                        timeframe    TEXT NOT NULL,
-                        total_trades INT  NOT NULL DEFAULT 0,
-                        ema_win_rate DOUBLE PRECISION NOT NULL DEFAULT 0.5,
-                        updated_at   TEXT NOT NULL,
-                        PRIMARY KEY (source_name, asset, timeframe)
-                    )");
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Warn($"[TradeRepository] EnsureCalibrationTable notice: {ex.Message}");
-            }
-        }
         public static async Task<System.Collections.Generic.List<bool?>> GetRecentOutcomesAsync(int limit = 10, DateTime? sinceUtc = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool?>();

@@ -62,17 +62,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
         {
             if (_initialized) return;
 
-            // L2-FIX: Создание таблиц
-            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.EnsureCalibrationTableAsync();
-            var calibData = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadCalibrationStateAsync();
-            if (AutoCalib != null)
-            {
-                foreach (var item in calibData)
-                {
-                    AutoCalib.RestoreState(item.sourceName, item.asset, item.timeframe, item.totalTrades, item.emaWinRate);
-                }
-            }
-            BotLogger.Info($"[TradeOutcomeTracker] Restored {calibData.Count} EMA calibration states from PostgreSQL.");
+            // Pure Neural Brain active: indicator calibration table decoupled
 
             var outcomes = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.LoadTradeOutcomesAsync(1000);
             BotLogger.Info($"[TradeOutcomeTracker] Loaded {outcomes.Count} historical outcomes from PostgreSQL DB (for reporting only).");

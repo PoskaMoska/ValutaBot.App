@@ -20,8 +20,7 @@ public class MarketAnalysisOrchestrator(
     IConfluenceMatrixEngine cmEngine,
     ITradeTimeoutEngine timeoutEngine,
     Microsoft.Extensions.Options.IOptions<TradingBotSettings> settings,
-    ILogger<MarketAnalysisOrchestrator> logger,
-    ValutaBot.MiniApp.Services.INewsCalendarService? newsCalendar = null
+    ILogger<MarketAnalysisOrchestrator> logger
 ) : IMarketAnalysisOrchestrator
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
@@ -37,7 +36,6 @@ public class MarketAnalysisOrchestrator(
     private readonly ITradeTimeoutEngine _timeoutEngine = timeoutEngine;
     private readonly TradingBotSettings _settings = settings.Value;
     private readonly ILogger<MarketAnalysisOrchestrator> _logger = logger;
-    private readonly ValutaBot.MiniApp.Services.INewsCalendarService? _newsCalendar = newsCalendar;
 
     /// <summary>
     /// Extracts the ML regime token (TREND/FLAT/CHAOS/ALL) from a model version such as
@@ -200,7 +198,7 @@ public class MarketAnalysisOrchestrator(
             priceEntropy = mainAtr > 0 ? (stdev20 / mainAtr) : 0.0;
         }
 
-        int? minutesToNews = _newsCalendar?.GetMinutesToNextHighImpactNews(cleanAsset);
+        int? minutesToNews = -1;
         var dayAnchors = isSubminute
             ? new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.DayLevelAnchors(currentLivePrice, currentLivePrice, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             : await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
@@ -283,21 +281,7 @@ public class MarketAnalysisOrchestrator(
 
         var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
         
-        // --- NEWS CALENDAR INTEGRATION ---
-        if (minutesToNews.HasValue && minutesToNews.Value >= 0 && minutesToNews.Value <= 15)
-        {
-            ValutaMetrics.NewsBlocksTotal.WithLabels(cleanAsset).Inc();
-            var nextNews = _newsCalendar?.GetNextHighImpactNews(cleanAsset);
-            string newsWarning = $"⚠️ ВНИМАНИЕ: Через {minutesToNews.Value} мин выходит важная новость ({nextNews?.Title}). Повышенная волатильность!";
-            consensus = consensus with {
-                CombinedReasoningText = consensus.CombinedReasoningText + "\n" + newsWarning
-            };
-            traceLines.Add($"[6.5 NEWS] {newsWarning}");
-        }
-        else if (minutesToNews.HasValue)
-        {
-            traceLines.Add($"[6.5 NEWS] Next high-impact news in {minutesToNews.Value} minutes");
-        }
+        // News calendar decoupled (Pocket Option OTC is 24/7 algorithmic feed unaffected by FX calendar)
 
         matrixSw.Stop();
         traceLines.Add($"[6. Консенсус]       Матрица сведена (Фаза: {state.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");

@@ -180,15 +180,9 @@ public static class SignalTracker
         return total - verified;
     }
 
-    public static async Task<(string name, double agreeRatePct, double weight, int count)[]> GetSignalStatsAsync()
+    public static Task<(string name, double agreeRatePct, double weight, int count)[]> GetSignalStatsAsync()
     {
-        var votes = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.GetAllSignalVotesAsync();
-        return votes.Select(v =>
-        {
-            double agreeRate = v.verified > 0 ? (double)v.correct / v.verified : 0.5;
-            double weight = Math.Clamp(agreeRate / 0.5, 0.2, 2.0); // simple calibration
-            return (v.signalName, Math.Round(agreeRate * 100, 1), Math.Round(weight, 2), v.verified);
-        }).OrderByDescending(s => s.Item2).ToArray();
+        return Task.FromResult(Array.Empty<(string name, double agreeRatePct, double weight, int count)>());
     }
 
     // ── Background Verification ────────────────────────────────────────────
