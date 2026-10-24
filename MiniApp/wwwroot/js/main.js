@@ -1,7 +1,9 @@
-import { initPriceWebSocket, syncTime, executeAnalysis, timeOffset, resetSignalKey } from './api.js?v=20261016_neural';
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20261016_neural';
+import { initPriceWebSocket, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261025_pure_neural';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction } from './state.js?v=20261025_pure_neural';
+export { tg, getCustomInitData, currentAsset, currentTf };
+import { switchResultTab, updateTrafficLight } from './ui.js?v=20261025_pure_neural';
 
-export const tg = window.Telegram ? window.Telegram.WebApp : null;
+// tg and getCustomInitData imported from state.js
 if (tg) {
     try {
         tg.expand();
@@ -18,7 +20,8 @@ if (tg) {
     } catch(e) {}
 }
 
-export function getCustomInitData() {
+onCopilotAction(applyCopilotRecommendation);
+function _legacyGetCustomInitData() {
     const urlParams = new URLSearchParams(window.location.search);
     const userId = urlParams.get('custom_user_id') || urlParams.get('userId');
     const userSign = urlParams.get('custom_user_sign') || urlParams.get('userSign');
@@ -28,8 +31,8 @@ export function getCustomInitData() {
     return '';
 }
 
-export let currentAsset = 'EUR/USD OTC';
-export let currentTf = 'm1';
+
+
 
 const assetsList = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
 
@@ -72,7 +75,7 @@ function setAsset(el) {
     el = el.closest('.asset-item') || el;
     let a = el.getAttribute('data-asset');
     if (!a) return;
-    currentAsset = a;
+    setCurrentAsset(a);
     const selEl = document.getElementById('selectedAsset');
     if (selEl) selEl.innerText = a;
     document.querySelectorAll('.asset-item').forEach(i => i.classList.remove('active'));
@@ -90,7 +93,7 @@ function setTf(el) {
     el = el.closest('.tf-btn') || el;
     let tf = el.getAttribute('data-tf');
     if (!tf) return;
-    currentTf = tf.toLowerCase();
+    setCurrentTf(tf);
     const selEl = document.getElementById('selectedTf');
     if (selEl) selEl.innerText = tf;
     document.querySelectorAll('.tf-btn').forEach(i => i.classList.remove('active'));
@@ -110,7 +113,7 @@ export function applyCopilotRecommendation(rec) {
         if (item) {
             setAsset(item);
         } else {
-            currentAsset = rec.asset;
+            setCurrentAsset(rec.asset);
             const selEl = document.getElementById('selectedAsset');
             if (selEl) selEl.innerText = rec.asset;
             initPriceWebSocket();
@@ -124,7 +127,7 @@ export function applyCopilotRecommendation(rec) {
         if (tfItem) {
             setTf(tfItem);
         } else {
-            currentTf = rec.tf.toLowerCase();
+            setCurrentTf(rec.tf);
             const selEl = document.getElementById('selectedTf');
             if (selEl) selEl.innerText = tfUpper;
             initPriceWebSocket();

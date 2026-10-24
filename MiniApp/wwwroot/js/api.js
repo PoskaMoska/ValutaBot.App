@@ -1,9 +1,10 @@
-import { tg, currentAsset, currentTf, getCustomInitData, applyCopilotRecommendation } from './main.js?v=20261016_neural';
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData, updateAiCopilot } from './ui.js?v=20261016_neural';
+import { tg, currentAsset, currentTf, getCustomInitData, timeOffset, setTimeOffset, lastPriceVal, setLastPriceVal, priceSocket, setPriceSocket, triggerCopilotAction } from './state.js?v=20261025_pure_neural';
 
-export let priceSocket = null;
-export let lastPriceVal = 0;
-export let timeOffset = 0;
+import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData, updateAiCopilot } from './ui.js?v=20261025_pure_neural';
+
+
+
+
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -46,7 +47,7 @@ export function initPriceWebSocket() {
                 if (data && data.price !== undefined) {
                     const newPrice = data.price;
                     updateLivePriceUI(newPrice);
-                    lastPriceVal = newPrice;
+                    setLastPriceVal(newPrice);
                 }
             } catch (e) {
                 console.error('Error parsing WS message:', e);
@@ -82,7 +83,7 @@ export function closePriceWebSocket() {
         } catch(e) {}
         priceSocket = null;
     }
-    lastPriceVal = 0;
+    setLastPriceVal(0);
 }
 
 export async function syncTime() {
@@ -93,8 +94,8 @@ export async function syncTime() {
             }
         });
         var d = await r.json();
-        timeOffset = d.t - Date.now();
-    } catch(e) { timeOffset = 0; }
+        setTimeOffset(d.t - Date.now());
+    } catch(e) { setTimeOffset(0); }
 }
 
 export async function executeAnalysis() {
@@ -476,7 +477,7 @@ export async function executeAnalysis() {
 
             // AI Copilot Tactical Intelligence
             updateAiCopilot(data, (rec) => {
-                applyCopilotRecommendation(rec);
+                triggerCopilotAction(rec);
             });
 
             const tabReg = document.getElementById('resultsTabBar');
