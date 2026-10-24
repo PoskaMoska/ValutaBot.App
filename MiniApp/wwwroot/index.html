@@ -165,6 +165,28 @@
             </div>
         </div>
 
+        <!-- 1. Блок состояния рынка (Market Weather) -->
+        <!-- MARKET WEATHER WIDGET -->
+            <div class='ml-card' id='marketWeatherCard' style='display:none;margin-top:10px;margin-bottom:8px;background:rgba(14, 165, 233, 0.05);border:1px solid rgba(14, 165, 233, 0.2); padding: 8px;'>
+                <div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;width:100%'>
+                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center;align-items:center'>
+                        <div style='font-size:10px;font-weight:800;color:var(--subtext);line-height:1.2' id='weatherTitle'>🌍<br>РЫНОК</div>
+                    </div>
+                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center'>
+                        <div style='font-size:8px;color:var(--subtext);line-height:1.1;text-transform:uppercase'>Сессия</div>
+                        <div style='font-size:9px;font-weight:700;margin-top:3px;color:#e2e8f0;line-height:1.1;word-break:break-word' id='weatherSession'>--</div>
+                    </div>
+                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center'>
+                        <div style='font-size:8px;color:var(--subtext);line-height:1.1;text-transform:uppercase'>Фаза</div>
+                        <div style='font-size:9px;font-weight:700;margin-top:3px;color:#e2e8f0;line-height:1.1;word-break:break-word' id='weatherPhase'>--</div>
+                    </div>
+                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center'>
+                        <div style='font-size:8px;color:var(--subtext);line-height:1.1;text-transform:uppercase'>Энтропия</div>
+                        <div style='font-size:9px;font-weight:700;margin-top:3px;color:#e2e8f0;line-height:1.1;word-break:break-word' id='weatherEntropy'>--</div>
+                    </div>
+                </div>
+            </div>
+
         <!-- AI COPILOT TACTICAL CARD -->
         <div class='ai-copilot-card' id='aiCopilotCard' style='display:none;'>
             <div class='copilot-header'>
@@ -213,28 +235,6 @@
 
         <!-- ═══ TAB: ИИ Аналитика ═══ -->
         <div id='tabContentAI' style='display:none'>
-
-            <!-- MARKET WEATHER WIDGET -->
-            <div class='ml-card' style='margin-bottom:12px;background:rgba(14, 165, 233, 0.05);border:1px solid rgba(14, 165, 233, 0.2); padding: 8px;'>
-                <div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;width:100%'>
-                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center;align-items:center'>
-                        <div style='font-size:10px;font-weight:800;color:var(--subtext);line-height:1.2' id='weatherTitle'>🌍<br>РЫНОК</div>
-                    </div>
-                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center'>
-                        <div style='font-size:8px;color:var(--subtext);line-height:1.1;text-transform:uppercase'>Сессия</div>
-                        <div style='font-size:9px;font-weight:700;margin-top:3px;color:#e2e8f0;line-height:1.1;word-break:break-word' id='weatherSession'>--</div>
-                    </div>
-                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center'>
-                        <div style='font-size:8px;color:var(--subtext);line-height:1.1;text-transform:uppercase'>Фаза</div>
-                        <div style='font-size:9px;font-weight:700;margin-top:3px;color:#e2e8f0;line-height:1.1;word-break:break-word' id='weatherPhase'>--</div>
-                    </div>
-                    <div style='background:rgba(255,255,255,0.03);padding:4px;border-radius:6px;text-align:center;display:flex;flex-direction:column;justify-content:center'>
-                        <div style='font-size:8px;color:var(--subtext);line-height:1.1;text-transform:uppercase'>Энтропия</div>
-                        <div style='font-size:9px;font-weight:700;margin-top:3px;color:#e2e8f0;line-height:1.1;word-break:break-word' id='weatherEntropy'>--</div>
-                    </div>
-                </div>
-            </div>
-
 
             <!-- 3. Monte Carlo & Risk Card -->
             <div class='ml-card' id='mcCard' style='display:none;margin-bottom:8px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.25)'>
@@ -290,6 +290,6 @@
         </div>
     </div>
     
-    <script type="module" src="/js/main.js?v=20261025_pure_neural"></script>
+    <script type="module" src="/js/main.js?v=20261025_layout"></script>
 </body>
 </html>

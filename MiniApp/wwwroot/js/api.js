@@ -261,6 +261,14 @@ export async function executeAnalysis() {
 
 
             // Market Weather Bindings
+            const mwCard = document.getElementById('marketWeatherCard');
+            if (mwCard) {
+                if (data.uiMarketSession || data.uiMarketPhase || data.uiMarketEntropy || data.direction) {
+                    mwCard.style.display = 'block';
+                } else {
+                    mwCard.style.display = 'none';
+                }
+            }
             const wSession = document.getElementById("weatherSession");
             if (wSession && data.uiMarketSession) {
                 wSession.innerText = data.uiMarketSession;

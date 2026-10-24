@@ -56,6 +56,7 @@ export function clearResults() {
     safeSetHtml('durChart', '');
     safeSetStyle('resultsTabBar', 'display', 'none');
     safeSetStyle('resultsGrid', 'display', 'none');
+    safeSetStyle('marketWeatherCard', 'display', 'none');
     safeSetStyle('aiCopilotCard', 'display', 'none');
     safeSetStyle('consensusRadarCard', 'display', 'none');
     safeSetStyle('tabContentAI', 'display', 'none');
