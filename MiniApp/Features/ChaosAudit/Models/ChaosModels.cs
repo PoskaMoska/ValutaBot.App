@@ -8,7 +8,8 @@ public enum ChaosCategory
 {
     Invariants,
     DataAndDbFaults,
-    StressAndOutages
+    StressAndOutages,
+    TradingLogicQuality
 }
 
 public enum ChaosSeverity

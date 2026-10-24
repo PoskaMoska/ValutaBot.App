@@ -1,4 +1,4 @@
-import { lastPriceVal } from './api.js?v=20261016_neural';
+import { lastPriceVal } from './state.js?v=20261025_pure_neural';
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');

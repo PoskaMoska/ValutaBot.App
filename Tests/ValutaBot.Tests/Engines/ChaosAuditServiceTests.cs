@@ -9,6 +9,7 @@ using ValutaBot.MiniApp.Features.ChaosAudit;
 using ValutaBot.MiniApp.Features.ChaosAudit.Models;
 using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.DataFaults;
 using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.Invariants;
+using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.TradingLogic;
 using ValutaBot.MiniApp.Services;
 using Xunit;
 
@@ -85,6 +86,11 @@ public class ChaosAuditServiceTests
         var stressReport = await chaosService.RunCategoryAuditAsync(ChaosCategory.StressAndOutages);
         Assert.NotNull(stressReport);
         Assert.All(stressReport.Results, r => Assert.Equal(ChaosCategory.StressAndOutages, r.Category));
+
+        var qualityReport = await chaosService.RunCategoryAuditAsync(ChaosCategory.TradingLogicQuality);
+        Assert.NotNull(qualityReport);
+        Assert.All(qualityReport.Results, r => Assert.Equal(ChaosCategory.TradingLogicQuality, r.Category));
+        Assert.Equal(5, qualityReport.TotalScenarios);
     }
 
     [Fact]
@@ -191,5 +197,33 @@ public class ChaosAuditServiceTests
         Assert.True(stats.AttacksRepelled >= 1);
         Assert.NotNull(stats.LastAttackScenario);
         Assert.NotNull(stats.LastAttackUtc);
+    }
+
+    [Fact]
+    public async Task TradingLogicQualityScenarios_ExecuteGracefully()
+    {
+        var biasScenario = new DirectionalBiasAnomalyScenario();
+        var calScenario = new CalibrationDivergenceScenario();
+        var leakScenario = new TemporalDataLeakageScenario();
+        var entropyScenario = new ConfidenceEntropyScenario();
+        var streakScenario = new ConsecutiveLossStreakScenario();
+
+        var r1 = await biasScenario.ExecuteAsync(_serviceProvider);
+        var r2 = await calScenario.ExecuteAsync(_serviceProvider);
+        var r3 = await leakScenario.ExecuteAsync(_serviceProvider);
+        var r4 = await entropyScenario.ExecuteAsync(_serviceProvider);
+        var r5 = await streakScenario.ExecuteAsync(_serviceProvider);
+
+        Assert.NotNull(r1);
+        Assert.NotNull(r2);
+        Assert.NotNull(r3);
+        Assert.NotNull(r4);
+        Assert.NotNull(r5);
+
+        Assert.Equal(ChaosCategory.TradingLogicQuality, r1.Category);
+        Assert.Equal(ChaosCategory.TradingLogicQuality, r2.Category);
+        Assert.Equal(ChaosCategory.TradingLogicQuality, r3.Category);
+        Assert.Equal(ChaosCategory.TradingLogicQuality, r4.Category);
+        Assert.Equal(ChaosCategory.TradingLogicQuality, r5.Category);
     }
 }

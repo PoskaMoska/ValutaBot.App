@@ -15,6 +15,7 @@ using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios;
 using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.DataFaults;
 using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.Invariants;
 using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.StressAndOutages;
+using ValutaBot.MiniApp.Features.ChaosAudit.Scenarios.TradingLogic;
 
 namespace ValutaBot.MiniApp.Features.ChaosAudit;
 
@@ -75,6 +76,13 @@ public class ChaosAuditService : IChaosAuditService
         // 3. Service Outages & Load / Stress
         _scenarios.Add(new MLServiceOutageToleranceScenario());
         _scenarios.Add(new ConcurrentBurstStressScenario());
+
+        // 4. Autonomous Trading Logic & Model Quality Invariants (Auditing real DB trades & live predictions)
+        _scenarios.Add(new DirectionalBiasAnomalyScenario());
+        _scenarios.Add(new CalibrationDivergenceScenario());
+        _scenarios.Add(new TemporalDataLeakageScenario());
+        _scenarios.Add(new ConfidenceEntropyScenario());
+        _scenarios.Add(new ConsecutiveLossStreakScenario());
     }
 
     public ChaosAuditReport? GetLatestReport() => _latestReport;

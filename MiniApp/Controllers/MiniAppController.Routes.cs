@@ -378,7 +378,7 @@ public static partial class MiniAppController
                 var report = await chaos.RunCategoryAuditAsync(cat);
                 return Results.Json(report);
             }
-            return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages" });
+            return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages, TradingLogicQuality" });
         });
 
         app.MapGet("/api/admin/clock-skew", () =>
