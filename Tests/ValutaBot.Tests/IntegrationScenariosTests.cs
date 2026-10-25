@@ -102,6 +102,7 @@ namespace ValutaBot.Tests
             
             // Prove ML prediction is incorporated without blowing up
             Assert.True(result.probability > 0 || result.direction == "NEUTRAL", "Signal should have probability if not neutral");
+            ValutaBot.MiniApp.MLPythonService.SetFactory(null);
         }
     }
 }

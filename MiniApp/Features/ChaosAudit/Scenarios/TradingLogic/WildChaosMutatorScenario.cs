@@ -67,12 +67,12 @@ public class WildChaosMutatorScenario : IChaosScenario
             // When consecutiveLosses >= 3, the engine MUST apply dampening.
             // -------------------------------------------------------------
             var decisionNormal = await cmEngine.EvaluateMatrixAsync(
-                "CHAOS_MUT_ASSET", "s5", true, 1.0,
+                "CHAOS_MUT_ASSET", "s10", true, 1.0,
                 taConflicting, smcConflicting, mlConflicting, stateConflicting, mtfConflicting,
                 consecutiveLosses: 0, volRatio: 1.0);
 
             var decisionDampened = await cmEngine.EvaluateMatrixAsync(
-                "CHAOS_MUT_ASSET", "s5", true, 1.0,
+                "CHAOS_MUT_ASSET", "s10", true, 1.0,
                 taConflicting, smcConflicting, mlConflicting, stateConflicting, mtfConflicting,
                 consecutiveLosses: 3, volRatio: 1.0);
 

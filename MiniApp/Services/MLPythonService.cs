@@ -22,7 +22,7 @@ public static class MLPythonService
     private static string _baseUrl = string.Empty;
     private static IHttpClientFactory? _httpFactory;
 
-    public static void SetFactory(IHttpClientFactory factory) => _httpFactory = factory;
+    public static void SetFactory(IHttpClientFactory? factory) => _httpFactory = factory;
 
     /// <summary>Raw outcome of a contract probe against /predict (status code is preserved, unlike PredictAsync which swallows it).</summary>
     public record MlContractProbe(bool ServiceConfigured, int? StatusCode, MLPythonPrediction? Prediction, string? Error, long ElapsedMs);

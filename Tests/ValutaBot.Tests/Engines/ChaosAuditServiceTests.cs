@@ -21,6 +21,7 @@ public class ChaosAuditServiceTests
 
     public ChaosAuditServiceTests()
     {
+        ValutaBot.MiniApp.MLPythonService.SetFactory(null);
         Environment.SetEnvironmentVariable("DATABASE_URL", "");
         var services = new ServiceCollection();
 

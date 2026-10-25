@@ -390,6 +390,14 @@ public class ConfluenceMatrixEngine(
             double neuralConf = mlSignal.Confidence > 0 ? mlSignal.Confidence : 0.50;
             finalProbPct = (int)Math.Clamp(Math.Round(neuralConf * 100.0), 50, 92);
 
+            // S5 Micro-Timeframe Noise Calibration:
+            // 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
+            // Cap confidence to 57% so s5 does not trigger false certainty on single-tick bursts.
+            if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
+            {
+                finalProbPct = Math.Min(57, finalProbPct);
+            }
+
             // Circuit Breaker risk dampener (C# риск-менеджмент серий потерь)
             int mlLiveLosses = Math.Max(consecutiveLosses, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0);
             if (mlLiveLosses >= 3)
@@ -408,14 +416,6 @@ public class ConfluenceMatrixEngine(
             {
                 finalProbPct = Math.Max(50, (int)Math.Round(finalProbPct * conflictPenalty));
                 safetyNotes.Add("⚠️ MTF Conflict: Противоречие со старшим таймфреймом");
-            }
-
-            // S5 Micro-Timeframe Noise Calibration:
-            // 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
-            // Cap confidence to 57% so s5 does not trigger false certainty on single-tick bursts.
-            if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
-            {
-                finalProbPct = Math.Min(57, finalProbPct);
             }
         }
         else

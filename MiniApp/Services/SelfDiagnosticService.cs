@@ -410,6 +410,14 @@ public class SelfDiagnosticService : BackgroundService
             }
         }
         
+        // 8 & 9. Autonomous Chaos & Trading Quality Sentinel
+        // By default, autonomous background assaults are DISABLED in production to prevent DB load and alert storms.
+        // On-demand audit commands (/sabotage, /chaos, /sabotage_stats) remain fully active and responsive.
+        bool enableAutonomousChaos = _configuration.GetValue<bool>("ChaosAudit:AutonomousEnabled", false)
+            || Environment.GetEnvironmentVariable("CHAOS_AUTONOMOUS_ENABLED") == "true";
+
+        if (enableAutonomousChaos)
+        {
         // 8. Dedicated Autonomous Trading Quality Sentinel (Full 5-scenario sweep every 10 min & on boot)
         if (DateTime.UtcNow - _lastTradingQualityAuditTime >= TimeSpan.FromMinutes(10))
         {
@@ -464,6 +472,7 @@ public class SelfDiagnosticService : BackgroundService
             {
                 BotLogger.Warn($"[Saboteur] Micro-assault trigger notice: {exChaos.Message}");
             }
+        }
         }
 
         if (!currentDbHealthy || !currentMlHealthy)

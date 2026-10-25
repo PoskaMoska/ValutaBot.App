@@ -411,6 +411,12 @@ public class MarketAnalysisOrchestrator(
             && !isCbHalted
             && (!isS5 || (htfAligned && !isCooldownActive && !isExhaustedOnS5));
 
+        // Throttled shadow logging: only when DatasetCollectionMode is true or Circuit Breaker is actively halting,
+        // and throttled to at most 1 write per minute per asset/tf to avoid 140,000+ row/day DB saturation.
+        bool allowShadowRecord = isDirectional
+            && (_settings.DatasetCollectionMode || isCbHalted)
+            && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
+
         if (canExecuteReal)
         {
             if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshRealPrice) && freshRealPrice > 0)
@@ -431,7 +437,7 @@ public class MarketAnalysisOrchestrator(
             dbSw.Stop();
             traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
         }
-        else if (isDirectional && (consensus.Probability >= 54 || isCbHalted || (isS5 && (isExhaustedOnS5 || !htfAligned || isCooldownActive))))
+        else if (allowShadowRecord)
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
             if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshShadowPrice) && freshShadowPrice > 0)
@@ -459,20 +465,20 @@ public class MarketAnalysisOrchestrator(
         {
             dbSw.Stop();
             
-            // --- V3 SYSTEMATIC NEGATIVE SAMPLING (Prevents Selection Bias for Deep Learning / Transformers) ---
-            bool isPeriodicSampleDue = !_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastTime) 
-                                       || (DateTime.UtcNow - lastTime).TotalMinutes >= 3.0;
+            // Background HOLD sampling: ONLY when DatasetCollectionMode is explicitly active
+            bool isPeriodicSampleDue = _settings.DatasetCollectionMode && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastTime) 
+                                       || (DateTime.UtcNow - lastTime).TotalMinutes >= 5.0);
 
-            if (isPeriodicSampleDue || System.Random.Shared.NextDouble() < 0.005)
+            if (isPeriodicSampleDue)
             {
                 _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
                 _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, shadowFeaturesJson,
                     "NONE", false, false, 1.0, "NEUTRAL", effectiveMarketRegime, state.VelocityRegime ?? "UNKNOWN", mainAtr, mainAdx, taResult.rsiVal, false, minutesToNews ?? -1, "", "", 0.0, priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
-                traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения нейтральному рынку ({consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");
+                traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения ({consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");
             }
             else
             {
-                traceLines.Add($"[8. База данных]     ПРОПУСК: Слабый сигнал ({consensus.Probability}%). Ожидаем >= 57% -> {dbSw.ElapsedMilliseconds}ms");
+                traceLines.Add($"[8. База данных]     ПРОПУСК: Сигнал не прошел критерии входа ({consensus.Probability}%). Ожидаем >= {requiredProb}% -> {dbSw.ElapsedMilliseconds}ms");
             }
         }
 
