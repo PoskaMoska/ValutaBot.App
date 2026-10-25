@@ -11,4 +11,6 @@ public interface IChaosAuditService
     Task<ChaosScenarioResult?> RunSingleSabotageRoundAsync(CancellationToken ct = default);
     SabotageStatsDto GetSaboteurStats();
     ChaosAuditReport? GetLatestReport();
+    void ResetAlertQuota();
+    int GetActiveAlertCount();
 }

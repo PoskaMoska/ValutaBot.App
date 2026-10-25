@@ -16,7 +16,7 @@ public class AdminSabotageCommand : ITelegramCommand
 {
     public bool CanHandle(long chatId, string command, string cleanText)
     {
-        return command is "/sabotage" or "/break" or "/sabotage_stats" or "/chaos" or "/chaos_stats";
+        return command is "/sabotage" or "/break" or "/sabotage_stats" or "/chaos" or "/chaos_stats" or "/sabotage_reset" or "/chaos_reset";
     }
 
     public async Task ExecuteAsync(long chatId, string command, string cleanText, bool isAdmin, string token, string webAppUrl)
@@ -34,6 +34,16 @@ public class AdminSabotageCommand : ITelegramCommand
             return;
         }
 
+        if (command is "/sabotage_reset" or "/chaos_reset")
+        {
+            chaosService.ResetAlertQuota();
+            await TelegramBotService.SendMessage(token, chatId,
+                "✅ <b>Лимит уязвимостей сброшен!</b>\n\n" +
+                "Счётчик активных уязвимостей обнулён (0/5). Внутренний диверсант снова готов отправлять уведомления о найденных аномалиях.\n\n" +
+                "💡 <i>Чтобы запустить немедленный штурм прямо сейчас, отправьте /sabotage.</i>");
+            return;
+        }
+
         if (command is "/sabotage_stats" or "/chaos_stats")
         {
             var stats = chaosService.GetSaboteurStats();
@@ -44,6 +54,7 @@ public class AdminSabotageCommand : ITelegramCommand
             sb.AppendLine($"🚀 <b>Всего внутренних атак:</b> {stats.TotalAttacksLaunched}");
             sb.AppendLine($"🛡 <b>Отражено защитой:</b> {stats.AttacksRepelled} ({stats.RepelRatePct:F1}%)");
             sb.AppendLine($"💥 <b>Пробито брешей:</b> {stats.AttacksBreached}");
+            sb.AppendLine($"📊 <b>Активных алертов:</b> {chaosService.GetActiveAlertCount()} / 5");
             sb.AppendLine($"🎯 <b>Последняя атака:</b> {stats.LastAttackScenario ?? "еще не запускалась"}");
             sb.AppendLine($"⏳ <b>Время последней атаки:</b> {(stats.LastAttackUtc.HasValue ? stats.LastAttackUtc.Value.ToString("HH:mm:ss UTC") : "нет")}");
             sb.AppendLine();

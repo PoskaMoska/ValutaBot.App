@@ -45,9 +45,20 @@ public class ChaosAuditService : IChaosAuditService
     private string? _lastAttackScenario;
     private ChaosScenarioResult? _lastBreachResult;
 
-    // Deduplication tracking to prevent spamming: 4-hour cooldown per scenario failure unless severity escalates
+    // Deduplication tracking: adaptive 2-hour cooldown per scenario failure and 5-finding quota standoff
     private static readonly ConcurrentDictionary<string, (ChaosSeverity Severity, DateTime AlertedUtc)> _alertedFindings = new();
-    private static readonly TimeSpan AlertCooldown = TimeSpan.FromHours(4);
+    private static readonly TimeSpan AlertCooldown = TimeSpan.FromHours(2);
+    private const int MaxActiveAlertsBeforeStandby = 5;
+    private static bool _standbyMessageSent = false;
+
+    public void ResetAlertQuota()
+    {
+        _alertedFindings.Clear();
+        _standbyMessageSent = false;
+        BotLogger.Info("[SABOTEUR] Alert findings quota reset by administrator.");
+    }
+
+    public int GetActiveAlertCount() => _alertedFindings.Count;
 
     public ChaosAuditService(IServiceProvider serviceProvider, ILogger<ChaosAuditService>? logger = null)
     {
@@ -84,6 +95,8 @@ public class ChaosAuditService : IChaosAuditService
         _scenarios.Add(new TemporalDataLeakageScenario());
         _scenarios.Add(new ConfidenceEntropyScenario());
         _scenarios.Add(new ConsecutiveLossStreakScenario());
+        _scenarios.Add(new AutonomousAnomalyMinerScenario());
+        _scenarios.Add(new WildChaosMutatorScenario());
     }
 
     public ChaosAuditReport? GetLatestReport() => _latestReport;
@@ -324,7 +337,7 @@ public class ChaosAuditService : IChaosAuditService
 
             if (_alertedFindings.TryGetValue(key, out var existing))
             {
-                // Suppress if notified within 4h and severity has not escalated
+                // Suppress if notified within 2h and severity has not escalated
                 if ((now - existing.AlertedUtc) < AlertCooldown && r.Severity <= existing.Severity)
                 {
                     BotLogger.Info($"[SABOTEUR] Breach '{key}' already notified ({Math.Round((now - existing.AlertedUtc).TotalMinutes)}m ago) — suppressing repeat Telegram alert.");
@@ -332,9 +345,36 @@ public class ChaosAuditService : IChaosAuditService
                 }
             }
 
+            // Quota Standoff Check: if 5 distinct vulnerabilities are already active
+            if (!_alertedFindings.ContainsKey(key) && _alertedFindings.Count >= MaxActiveAlertsBeforeStandby)
+            {
+                if (!_standbyMessageSent)
+                {
+                    _standbyMessageSent = true;
+                    string standbyMsg =
+                        "🛑 <b>[ДИВЕРСАНТ: ДОСТИГНУТ ЛИМИТ УЯЗВИМОСТЕЙ (5/5)]</b>\n\n" +
+                        "В системе зафиксировано <b>5 активных уязвимостей</b>.\n" +
+                        "Диверсант продолжает внутренние проверки в фоне, но <b>приостановил отправку сообщений в Telegram</b>, чтобы не загромождать чат до вашего возвращения.\n\n" +
+                        "💡 <i>Отправьте /sabotage_reset для сброса лимита и повторного боевого штурма.</i>";
+                    await TelegramBotService.SendMessageToAdmins(standbyMsg);
+                }
+                BotLogger.Info($"[SABOTEUR] Alert quota ({MaxActiveAlertsBeforeStandby}) reached. Suppressing new alert for '{key}' until admin review.");
+                return;
+            }
+
             _alertedFindings[key] = (r.Severity, now);
             string msg = FormatBreachMessage(r);
             await TelegramBotService.SendMessageToAdmins(msg);
+
+            // If we just reached the 5th finding, notify the admin that standby is engaged
+            if (_alertedFindings.Count >= MaxActiveAlertsBeforeStandby && !_standbyMessageSent)
+            {
+                _standbyMessageSent = true;
+                string standbyNotice =
+                    "\n🛑 <b>[ДИВЕРСАНТ: ЛИМИТ ДОСТИГНУТ (5/5)]</b>\n" +
+                    "<i>Достигнут лимит 5 активных уязвимостей. Новые уведомления временно приостановлены до вашего возвращения (/sabotage_reset).</i>";
+                await TelegramBotService.SendMessageToAdmins(standbyNotice);
+            }
         }
         catch (Exception ex)
         {
@@ -353,7 +393,7 @@ public class ChaosAuditService : IChaosAuditService
                 return;
             }
 
-            // Deduplication: only alert if findings are new, severity escalated, or 4h cooldown elapsed
+            // Deduplication: only alert if findings are new, severity escalated, or 2h cooldown elapsed
             var now = DateTime.UtcNow;
             var toAlert = new List<ChaosScenarioResult>();
 
@@ -369,13 +409,28 @@ public class ChaosAuditService : IChaosAuditService
                     }
                 }
 
+                // Check quota before adding new distinct key
+                if (!_alertedFindings.ContainsKey(key) && _alertedFindings.Count >= MaxActiveAlertsBeforeStandby)
+                {
+                    continue;
+                }
+
                 _alertedFindings[key] = (r.Severity, now);
                 toAlert.Add(r);
             }
 
             if (toAlert.Count == 0)
             {
-                BotLogger.Info("[CHAOS-AUDIT] Active findings in 4h cooldown — suppressing repeat Telegram alerts.");
+                if (_alertedFindings.Count >= MaxActiveAlertsBeforeStandby && !_standbyMessageSent)
+                {
+                    _standbyMessageSent = true;
+                    string standbyMsg =
+                        "🛑 <b>[ДИВЕРСАНТ: ЛИМИТ УЯЗВИМОСТЕЙ ДОСТИГНУТ (5/5)]</b>\n\n" +
+                        "В системе зафиксировано <b>5 активных уязвимостей</b>.\n" +
+                        "Диверсант приостановил отправку сообщений в Telegram до вашего возвращения.\n\n" +
+                        "💡 <i>Отправьте /sabotage_reset для сброса лимита.</i>";
+                    await TelegramBotService.SendMessageToAdmins(standbyMsg);
+                }
                 return;
             }
 
@@ -383,6 +438,15 @@ public class ChaosAuditService : IChaosAuditService
             {
                 string msg = FormatBreachMessage(r);
                 await TelegramBotService.SendMessageToAdmins(msg);
+            }
+
+            if (_alertedFindings.Count >= MaxActiveAlertsBeforeStandby && !_standbyMessageSent)
+            {
+                _standbyMessageSent = true;
+                string standbyNotice =
+                    "\n🛑 <b>[ДИВЕРСАНТ: ЛИМИТ ДОСТИГНУТ (5/5)]</b>\n" +
+                    "<i>Достигнут лимит 5 активных уязвимостей. Новые уведомления временно приостановлены до вашего возвращения (/sabotage_reset).</i>";
+                await TelegramBotService.SendMessageToAdmins(standbyNotice);
             }
         }
         catch (Exception ex)
