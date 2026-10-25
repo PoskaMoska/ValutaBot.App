@@ -348,6 +348,25 @@ class PatchTSTPredictor:
                 )
             model.eval()
 
+            # Directional logit centering: eliminate learned prior bias (e.g. +0.21 on s10)
+            # Ensures symmetric 50/50 prior on neutral market features to prevent one-sided directional skew
+            if self._is_dual_stream and hasattr(model, "tf_heads"):
+                for head in model.tf_heads:
+                    if hasattr(head, "bias") and head.bias is not None and head.bias.data.shape[0] >= 3:
+                        b = head.bias.data
+                        skew = (b[1] - b[2]) / 2.0
+                        head.bias.data[1] -= skew
+                        head.bias.data[2] += skew
+                log.info("[PatchTSTPredictor] Centered directional logits on all 5 tf_heads (zero baseline prior skew).")
+            elif hasattr(model, "classifier"):
+                last_layer = model.classifier[-1]
+                if hasattr(last_layer, "bias") and last_layer.bias is not None and last_layer.bias.data.shape[0] >= 3:
+                    b = last_layer.bias.data
+                    skew = (b[1] - b[2]) / 2.0
+                    last_layer.bias.data[1] -= skew
+                    last_layer.bias.data[2] += skew
+                log.info("[PatchTSTPredictor] Centered directional logits on sequence classifier.")
+
             self._temperature = float(checkpoint.get("temperature", 1.5)) if checkpoint.get("temperature") is not None else 1.5
 
             self.model = model
@@ -446,12 +465,13 @@ class PatchTSTPredictor:
 
             # Calibrated confidence:
             # In binary options, raw_dir_prob (p_buy_cond or p_put_cond) directly reflects binary directional confidence.
-            # We gently dampen only if HOLD probability spikes into abnormal flat chop (>0.50).
-            chop_penalty = 1.0 if p_hold <= 0.50 else max(0.25, (1.0 - p_hold) / 0.50)
+            # Flat chop (HOLD) dampens directional confidence proportionally:
+            # When p_hold is high, flat movement indicates high risk of expiry tie/loss on Pocket Option.
+            chop_penalty = max(0.20, 1.0 - p_hold * 0.75)
             calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * chop_penalty
 
-            # Safety floor at 50% (never below chance), no ceiling — let the model speak
-            calibrated_prob = max(0.50, min(0.99, round(float(calibrated_prob), 4)))
+            # Safety floor at 50% (never below chance), ceiling at 92%
+            calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
             # Signed P(BUY) in [0, 1] (>0.5 for BUY, <0.5 for PUT) so C# mlScore = (rawProb - 0.5)*2 has the right sign
             raw_prob = round(float(p_buy_cond), 4)
 

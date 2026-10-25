@@ -45,8 +45,9 @@ public class ChaosAuditService : IChaosAuditService
     private string? _lastAttackScenario;
     private ChaosScenarioResult? _lastBreachResult;
 
-    // Deduplication tracking to prevent spamming the exact same unchanged breach within 24h
-    private static readonly ConcurrentDictionary<string, (string Fingerprint, DateTime AlertedUtc)> _alertedFindings = new();
+    // Deduplication tracking to prevent spamming: 4-hour cooldown per scenario failure unless severity escalates
+    private static readonly ConcurrentDictionary<string, (ChaosSeverity Severity, DateTime AlertedUtc)> _alertedFindings = new();
+    private static readonly TimeSpan AlertCooldown = TimeSpan.FromHours(4);
 
     public ChaosAuditService(IServiceProvider serviceProvider, ILogger<ChaosAuditService>? logger = null)
     {
@@ -319,19 +320,19 @@ public class ChaosAuditService : IChaosAuditService
         try
         {
             string key = r.ScenarioName;
-            string fingerprint = $"{r.Severity}:{r.Description}:{r.TriggerDetails}";
             var now = DateTime.UtcNow;
 
             if (_alertedFindings.TryGetValue(key, out var existing))
             {
-                if (existing.Fingerprint == fingerprint && (now - existing.AlertedUtc) < TimeSpan.FromHours(24))
+                // Suppress if notified within 4h and severity has not escalated
+                if ((now - existing.AlertedUtc) < AlertCooldown && r.Severity <= existing.Severity)
                 {
-                    BotLogger.Info($"[SABOTEUR] Breach '{key}' unchanged within 24h — suppressing repeat Telegram alert.");
+                    BotLogger.Info($"[SABOTEUR] Breach '{key}' already notified ({Math.Round((now - existing.AlertedUtc).TotalMinutes)}m ago) — suppressing repeat Telegram alert.");
                     return;
                 }
             }
 
-            _alertedFindings[key] = (fingerprint, now);
+            _alertedFindings[key] = (r.Severity, now);
             string msg = FormatBreachMessage(r);
             await TelegramBotService.SendMessageToAdmins(msg);
         }
@@ -352,34 +353,33 @@ public class ChaosAuditService : IChaosAuditService
                 return;
             }
 
-            // Deduplication: only alert on findings that are new or changed within 24h
+            // Deduplication: only alert if findings are new, severity escalated, or 4h cooldown elapsed
             var now = DateTime.UtcNow;
-            var newOrChanged = new List<ChaosScenarioResult>();
+            var toAlert = new List<ChaosScenarioResult>();
 
             foreach (var r in unpassed)
             {
                 string key = r.ScenarioName;
-                string fingerprint = $"{r.Severity}:{r.Description}:{r.TriggerDetails}";
 
                 if (_alertedFindings.TryGetValue(key, out var existing))
                 {
-                    if (existing.Fingerprint == fingerprint && (now - existing.AlertedUtc) < TimeSpan.FromHours(24))
+                    if ((now - existing.AlertedUtc) < AlertCooldown && r.Severity <= existing.Severity)
                     {
-                        continue; // Duplicate within 24 hours, suppress repeat alert
+                        continue; // Cooldown active, suppress spam
                     }
                 }
 
-                _alertedFindings[key] = (fingerprint, now);
-                newOrChanged.Add(r);
+                _alertedFindings[key] = (r.Severity, now);
+                toAlert.Add(r);
             }
 
-            if (newOrChanged.Count == 0)
+            if (toAlert.Count == 0)
             {
-                BotLogger.Info("[CHAOS-AUDIT] Active findings unchanged within 24h — suppressing repeat Telegram alert.");
+                BotLogger.Info("[CHAOS-AUDIT] Active findings in 4h cooldown — suppressing repeat Telegram alerts.");
                 return;
             }
 
-            foreach (var r in newOrChanged)
+            foreach (var r in toAlert)
             {
                 string msg = FormatBreachMessage(r);
                 await TelegramBotService.SendMessageToAdmins(msg);
