@@ -386,7 +386,7 @@ public class MarketAnalysisOrchestrator(
         bool isCbHalted = isGlobalCbHalted || isSymbolQuarantined;
         string sampleKey = $"{cleanAsset}_{timeframe}";
 
-        int requiredProb = isS5 ? 59 : 57;
+        int requiredProb = isS5 ? 58 : 57;
         bool htfAligned = mtfResult.DominantDirection == consensus.FinalDirection && isDirectional;
         bool isGoldenSetup = mtfResult.IsGoldenSetup && (!isSubminute || noiseAudit.IsTradeableImpulse);
 
@@ -458,7 +458,7 @@ public class MarketAnalysisOrchestrator(
                 : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard" 
                 : (isS5 && !htfAligned ? ", S5 HTF divergence guard" 
                 : (isS5 && isCooldownActive ? ", S5 cooldown guard" 
-                : (isS5 && consensus.Probability < 59 ? ", S5 prob threshold guard" : "")))));
+                : (isS5 && consensus.Probability < 58 ? ", S5 prob threshold guard" : "")))));
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else

@@ -479,9 +479,10 @@ class PatchTSTPredictor:
 
             # S5 Micro-Regime Dampener:
             # 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
-            # Dampen confidence into [50% - 57%] so s5 does not claim false certainty on pure high-frequency tick noise.
+            # Dampen confidence into [50% - 65%] so s5 does not claim false certainty on pure high-frequency tick noise,
+            # while allowing genuine high-conviction momentum trades (>=58%) to execute.
             if str(interval).lower() == "s5":
-                calibrated_prob = min(0.57, 0.50 + (calibrated_prob - 0.50) * 0.50)
+                calibrated_prob = min(0.65, 0.50 + (calibrated_prob - 0.50) * 0.80)
 
             # Safety floor at 50% (never below chance), ceiling at 92%
             calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))

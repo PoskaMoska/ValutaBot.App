@@ -395,7 +395,7 @@ public class ConfluenceMatrixEngine(
             // Cap confidence to 57% so s5 does not trigger false certainty on single-tick bursts.
             if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
             {
-                finalProbPct = Math.Min(57, finalProbPct);
+                finalProbPct = Math.Min(65, finalProbPct);
             }
 
             // Circuit Breaker risk dampener (C# риск-менеджмент серий потерь)
