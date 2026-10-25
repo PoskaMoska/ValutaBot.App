@@ -159,7 +159,7 @@ public class MarketAnalysisOrchestrator(
         await smcTask;
         var smcResult = await smcTask;
         engSw.Stop();
-        traceLines.Add($"[4. Структура]       SMC отрисован -> {engSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[4. Структура]       Анализ структуры завершен -> {engSw.ElapsedMilliseconds}ms");
 
         // Macro & Mathematical Sensors (Computed BEFORE Neural Brain so live inference receives real PriceEntropy & context)
         double priceEntropy = 0.0;
@@ -558,7 +558,7 @@ public class MarketAnalysisOrchestrator(
             {
                 Status = "GOLDEN",
                 Title = "⭐ Снайперский импульс (Golden Setup)",
-                Message = $"Все 3 уровня анализа синхронны: нейросеть ({mlPrediction?.ModelVersion ?? "Neural Brain"}), датчики SMC и импульс волатильности ({noiseAudit.LocalAtrBps:F1} bps) подтверждают {consensus.FinalDirection}. Порог шума преодолен.",
+                Message = $"Все 3 уровня анализа синхронны: нейросеть ({mlPrediction?.ModelVersion ?? "Neural Brain"}), контекст старшего ТФ и импульс волатильности ({noiseAudit.LocalAtrBps:F1} bps) подтверждают {consensus.FinalDirection}. Порог шума преодолен.",
                 QualityScore = 96
             };
         }

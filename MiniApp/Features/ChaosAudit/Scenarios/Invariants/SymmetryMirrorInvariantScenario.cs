@@ -16,6 +16,7 @@ public class SymmetryMirrorInvariantScenario : IChaosScenario
 
     public async Task<ChaosScenarioResult> ExecuteAsync(IServiceProvider sp, CancellationToken ct = default)
     {
+        await Task.CompletedTask;
         var sw = Stopwatch.StartNew();
         try
         {

@@ -326,6 +326,7 @@ public class ConfluenceMatrixEngine(
         StateSignal stateSignal,
         ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0)
     {
+        await Task.CompletedTask;
         double taScore = taSignal.Score;
 
         // OF DISABLED: 35.8% empirical win-rate (5.5Пѓ anti-signal on live data). 
@@ -432,7 +433,6 @@ public class ConfluenceMatrixEngine(
         }
         coPilot.AppendLine("[Показания датчиков C# (Телеметрия)]");
         coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
-        coPilot.AppendLine($" - Датчик структуры SMC: {smcScore:F2} (BOS={smcSignal.BosDirection}, OB={smcSignal.OrderBlockType}, FVG={smcSignal.FvgType})");
         coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult.DominantDirection}{(mtfResult.IsGoldenSetup ? " [GOLDEN]" : "")}");
         coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal.VelocityBpsPerSec:F2} bps/s");
         if (safetyNotes.Count > 0)
@@ -444,7 +444,10 @@ public class ConfluenceMatrixEngine(
         coPilot.AppendLine($"-> Итог: {finalDir} {finalProbPct}%");
 
         string consensusReasoning = coPilot.ToString();
-        BotLogger.Info($"\n{consensusReasoning}");
+        if (!asset.StartsWith("CHAOS_"))
+        {
+            BotLogger.Info($"\n{consensusReasoning}");
+        }
 
         return new ConsensusDecision(
             CandidateDirection: finalDir,

@@ -64,7 +64,8 @@ public class ChaosAuditServiceTests
 
         Assert.NotNull(report);
         Assert.True(report.TotalScenarios >= 7, $"Expected >= 7 scenarios, got {report.TotalScenarios}");
-        Assert.Equal(0, report.FailedCount);
+        var failures = string.Join("; ", report.Results.Where(r => !r.Passed).Select(r => $"{r.ScenarioName}: {r.Description} ({r.RootCause})"));
+        Assert.True(report.FailedCount == 0, $"Failures ({report.FailedCount}): {failures}");
         Assert.Equal("PASS", report.Status);
         Assert.NotNull(chaosService.GetLatestReport());
     }

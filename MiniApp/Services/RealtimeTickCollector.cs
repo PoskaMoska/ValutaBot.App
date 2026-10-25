@@ -170,7 +170,7 @@ namespace ValutaBot.MiniApp
         private static readonly SemaphoreSlim _dbWriteLock = new(1, 1);
         private static readonly CancellationTokenSource _collectorCts = new();
 
-        public static async Task InitializeAsync()
+        public static Task InitializeAsync()
         {
             if (Interlocked.Exchange(ref _isInitialized, 1) == 0)
             {
@@ -188,6 +188,7 @@ namespace ValutaBot.MiniApp
                 _ = Task.Run(PrewarmRingBuffersAsync);
                 BotLogger.Info("[TickCollector] Initialized continuous real-time subminute candle accumulation (Batched & Flush-Protected).");
             }
+            return Task.CompletedTask;
         }
 
         public static void Initialize()

@@ -16,6 +16,7 @@ public class ExtremeCandleFuzzingScenario : IChaosScenario
 
     public async Task<ChaosScenarioResult> ExecuteAsync(IServiceProvider sp, CancellationToken ct = default)
     {
+        await Task.CompletedTask;
         var sw = Stopwatch.StartNew();
         const string fuzzAsset = "CHAOS_FUZZ";
         try

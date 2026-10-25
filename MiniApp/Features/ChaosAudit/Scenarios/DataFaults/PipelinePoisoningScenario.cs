@@ -25,6 +25,7 @@ public class PipelinePoisoningScenario : IChaosScenario
 
     public async Task<ChaosScenarioResult> ExecuteAsync(IServiceProvider sp, CancellationToken ct = default)
     {
+        await Task.CompletedTask;
         var sw = Stopwatch.StartNew();
         const string testAsset = "CHAOS_POISON";
         const string testTf = "s5";
