@@ -15,19 +15,19 @@
     <InternalsVisibleTo Include="ValutaBot.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="MiniApp\wwwroot\**">
+    <Content Include="MiniApp/wwwroot/**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Content Remove="MiniApp\wwwroot\js\tests\**" />
+    <Content Remove="MiniApp/wwwroot/js/tests/**" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Remove="Tests\**" />
-    <Compile Remove="Benchmarks\**" />
-    <Content Remove="Tests\**" />
-    <Content Remove="Benchmarks\**" />
-    <None Remove="Tests\**" />
-    <None Remove="Benchmarks\**" />
+    <Compile Remove="Tests/**" />
+    <Compile Remove="Benchmarks/**" />
+    <Content Remove="Tests/**" />
+    <Content Remove="Benchmarks/**" />
+    <None Remove="Tests/**" />
+    <None Remove="Benchmarks/**" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.89" />
@@ -39,4 +39,3 @@
     <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
   </ItemGroup>
 </Project>
-

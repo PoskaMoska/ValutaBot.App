@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using Xunit;
 using Xunit.Abstractions;
@@ -89,7 +89,7 @@ public class PipelineIntegrityTests(ITestOutputHelper output)
     [InlineData("sweep_reversal")]
     [InlineData("volatility_chaos")]
     [InlineData("cold_start_5candles")]
-    public void Pipeline_ConfluenceAlwaysBuyOrPut(string scenarioName)
+    public async Task Pipeline_ConfluenceAlwaysBuyOrPut(string scenarioName)
     {
         var s = TestScenarioLoader.Load(scenarioName);
         var ta = new TechnicalAnalysisEngine();
@@ -115,9 +115,9 @@ public class PipelineIntegrityTests(ITestOutputHelper output)
         var mtfResult = new ConfluenceMatrixResult(1.0, true, 100, "BUY", "NEUTRAL", new(), "");
 
         var matrix    = new ConfluenceMatrixEngine(null!, ta);
-        var consensus = matrix.EvaluateMatrixAsync(
+        var consensus = await matrix.EvaluateMatrixAsync(
             s.Asset, s.Timeframe, false, 0.0,
-            taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, 0, volStr > 0 ? 1.0 : 0.8).GetAwaiter().GetResult();
+            taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult, 0, volStr > 0 ? 1.0 : 0.8);
 
         output.WriteLine($"[{scenarioName}] Direction={consensus.FinalDirection} Prob={consensus.Probability}%");
 
