@@ -251,7 +251,7 @@ def test_07_fastapi_e2e_predict_endpoint(api_client):
     data = response.json()
     print(f"\n[FastAPI E2E] Status: {response.status_code} | Payload Response: {data}")
 
-    assert data["model_version"] == "patch_tst_v3"
+    assert data["model_version"] in ("patch_tst_v3", "patch_tst_v4")
     assert data["direction"] in ("BUY", "PUT")
     assert 0.50 <= data["confidence"] <= 0.99
     assert any(f in data.get("top_features", []) for f in ("PatchTST_MicroCrossAttn", "NeuralBrain_SequenceEncoder"))

@@ -77,7 +77,7 @@ def test_health_endpoint_patch_tst_status():
     assert data["status"] == "ok"
     assert "patch_tst_available" in data
     assert data["patch_tst_available"] is True, "PatchTST brain weights must be loaded and available in production!"
-    assert data["patch_tst_version"] == "patch_tst_v3"
+    assert data["patch_tst_version"] in ("patch_tst_v3", "patch_tst_v4")
 
 
 @pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="Requires DATABASE_URL to run against database")

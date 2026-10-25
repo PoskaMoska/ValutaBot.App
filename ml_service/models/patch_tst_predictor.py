@@ -23,15 +23,21 @@ from datetime import datetime
 
 log = logging.getLogger("patch-tst-predictor")
 
-_MODEL_PATH = Path(__file__).parent / "patch_tst_brain_v3.pt"
+_MODEL_PATH = Path(__file__).parent / "patch_tst_brain_v4.pt"
+_FALLBACK_V3_PATH = Path(__file__).parent / "patch_tst_brain_v3.pt"
 _FALLBACK_MODEL_PATH = Path(__file__).parent / "sequence_brain_v3.pt"
 
 
 def _resolve_model_path() -> Optional[Path]:
     candidate_paths = [
+        Path("data/models/patch_tst_brain_v4.pt"),
+        Path("/app/data/models/patch_tst_brain_v4.pt"),
+        _MODEL_PATH,
+        Path("models/patch_tst_brain_v4.pt"),
+        Path("/app/models/patch_tst_brain_v4.pt"),
         Path("data/models/patch_tst_brain_v3.pt"),
         Path("/app/data/models/patch_tst_brain_v3.pt"),
-        _MODEL_PATH,
+        _FALLBACK_V3_PATH,
         Path("models/patch_tst_brain_v3.pt"),
         Path("/app/models/patch_tst_brain_v3.pt"),
         Path("data/models/sequence_brain_v3.pt"),
@@ -374,7 +380,8 @@ class PatchTSTPredictor:
             vs = checkpoint.get("val_stats") or {}
             dir_wr = vs.get("wr_dir_60") or vs.get("wr_60") or vs.get("wr_58") or vs.get("wr_57") or vs.get("wr_50") or val_acc or 0.0
             n_samples = vs.get("total") or vs.get("n_val")
-            self._arch_tag = "patch_tst_v3" if self._is_dual_stream else "seq_brain_v3"
+            version_tag = "v4" if "v4" in model_path.name else "v3"
+            self._arch_tag = f"patch_tst_{version_tag}" if self._is_dual_stream else f"seq_brain_{version_tag}"
             self.metrics = {
                 "accuracy": round(float(dir_wr) / 100.0, 4),
                 "val_loss": checkpoint.get("val_loss"),
@@ -481,7 +488,7 @@ class PatchTSTPredictor:
             # Signed P(BUY) in [0, 1] (>0.5 for BUY, <0.5 for PUT) so C# mlScore = (rawProb - 0.5)*2 has the right sign
             raw_prob = round(float(p_buy_cond), 4)
 
-            arch_tag = "patch_tst_v3" if self._is_dual_stream else "seq_brain_v3"
+            arch_tag = self._arch_tag
             log.info(
                 f"[Neural Brain] {symbol} {interval} -> {direction} | "
                 f"Calibrated: {calibrated_prob*100:.1f}% | P(BUY|dir): {raw_prob*100:.1f}% | "

@@ -308,16 +308,17 @@ def train_model(
     weight_decay_start=1e-3,
     weight_decay_end=1e-5,
     d_model=64,
-    dropout=0.05
+    dropout=0.05,
+    num_threads=None
 ):
     is_dual_stream = model_type.lower() in ("dual_stream", "dual_stream_patch_brain", "patch_tst")
 
     if save_path is None:
         base_models_dir = "ml_service/models" if os.path.exists("ml_service") else "models"
         if is_dual_stream:
-            save_path = f"{base_models_dir}/patch_tst_brain_v3.pt"
+            save_path = f"{base_models_dir}/patch_tst_brain_v4.pt"
         else:
-            save_path = f"{base_models_dir}/sequence_brain_v3.pt"
+            save_path = f"{base_models_dir}/sequence_brain_v4.pt"
 
     if not os.path.exists(data_path):
         alt = data_path.replace("ml_service/", "") if data_path.startswith("ml_service/") else f"ml_service/{data_path}"
@@ -390,10 +391,9 @@ def train_model(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cuda = device.type == "cuda"
     if not use_cuda:
-        # Cap threads to min(4, cpu_count) to avoid thread contention & CFS quota throttling in Docker containers
-        num_threads = min(4, max(1, os.cpu_count() or 4))
+        threads_to_set = num_threads if num_threads is not None else min(8, max(1, os.cpu_count() or 4))
         try:
-            torch.set_num_threads(num_threads)
+            torch.set_num_threads(threads_to_set)
         except Exception:
             pass
     print(f"[+] Training Device: {device} (Threads: {torch.get_num_threads()}, Mixed Precision AMP: {'Enabled' if use_cuda else 'Disabled (CPU)'})")
@@ -714,7 +714,7 @@ def train_model(
 
 
 if __name__ == "__main__":
-    default_data = "ml_service/data/dataset_v3.npz" if os.path.exists("ml_service") else "data/dataset_v3.npz"
+    default_data = "ml_service/data/dataset_v4.npz" if os.path.exists("ml_service/data/dataset_v4.npz") else ("ml_service/data/dataset_v3.npz" if os.path.exists("ml_service") else "data/dataset_v4.npz")
     parser = argparse.ArgumentParser(description="Train Neural Temporal Brains (SequenceBrain or DualStreamPatchBrain)")
     parser.add_argument("--data", default=default_data, help="Path to exported .npz dataset")
     parser.add_argument("--model", choices=["sequence", "dual_stream", "sequence_brain", "dual_stream_patch_brain", "patch_tst"], default="patch_tst", help="Model architecture")
@@ -731,6 +731,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight-decay-end", type=float, default=1e-5, help="Final weight decay for AdamW")
     parser.add_argument("--d-model", type=int, default=64, help="Hidden model dimension")
     parser.add_argument("--dropout", type=float, default=0.05, help="Dropout probability")
+    parser.add_argument("--num-threads", type=int, default=None, help="Number of CPU threads for PyTorch")
     args = parser.parse_args()
 
     train_model(
@@ -748,5 +749,6 @@ if __name__ == "__main__":
         weight_decay_start=args.weight_decay_start,
         weight_decay_end=args.weight_decay_end,
         d_model=args.d_model,
-        dropout=args.dropout
+        dropout=args.dropout,
+        num_threads=args.num_threads
     )

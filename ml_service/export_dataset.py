@@ -397,11 +397,11 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-PO_CUTOFF_UTC = "2026-10-20 21:26:50+00"
+PO_CUTOFF_UTC = "2026-10-21 20:15:00+00"
 
 def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=8, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True):
     print("=" * 60)
-    print("[*] Neural Brain Dataset Exporter (V3 Architecture)")
+    print("[*] Neural Brain Dataset Exporter (V4 Architecture)")
     print(f"Connecting to database...")
     print("=" * 60)
     
@@ -439,14 +439,14 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
         if stride_hf:
             hf_filter = """
               AND (
-                  (LOWER(timeframe) = 's5' AND MOD(ABS(hashtext(id)), 5) = 0)
-                  OR (LOWER(timeframe) = 's10' AND MOD(ABS(hashtext(id)), 3) = 0)
-                  OR (LOWER(timeframe) = 's15' AND MOD(ABS(hashtext(id)), 2) = 0)
-                  OR LOWER(timeframe) NOT IN ('s5', 's10', 's15')
+                  (LOWER(timeframe) = 's5' AND MOD(ABS(hashtext(id)), 10) = 0)
+                  OR LOWER(timeframe) != 's5'
               )
+              AND ABS(pnl_bps) <= 500
             """
-            print(f"[*] Filtering Golden PO OTC V3 era (created_at >= {min_date}) with harmonized cadence striding (s5: 1/5, s10: 1/3, s15: 1/2, s30/m1: 100%)")
+            print(f"[*] Filtering Golden PO OTC V4 era (created_at >= {min_date}) with high-fidelity cadence (s5: 1/10, s10: 100%, s15: 100%, s30: 100%, m1: 100%)")
         else:
+            hf_filter = "AND ABS(pnl_bps) <= 500"
             print(f"[*] Filtering strictly Pocket Option OTC era (created_at >= {min_date}, no Tiingo archive)")
         query = f"""
             SELECT 
@@ -687,8 +687,8 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
 
 
 if __name__ == "__main__":
-    default_out = "ml_service/data/dataset_v3.npz" if os.path.exists("ml_service") else "data/dataset_v3.npz"
-    parser = argparse.ArgumentParser(description="Export V3 dataset from PostgreSQL")
+    default_out = "ml_service/data/dataset_v4.npz" if os.path.exists("ml_service") else "data/dataset_v4.npz"
+    parser = argparse.ArgumentParser(description="Export V4 dataset from PostgreSQL")
     parser.add_argument("--db-url", default=os.getenv("DATABASE_URL", DEFAULT_DB_URL))
     parser.add_argument("--out", default=default_out)
     parser.add_argument("--limit", type=int, default=None)
