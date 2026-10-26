@@ -13,17 +13,14 @@ namespace ValutaBot.MiniApp;
 /// </summary>
 public static class SignalTracker
 {
-    // Cooldown map using MemoryCache to automatically handle expiry without O(N) sweeping
-    private static readonly Microsoft.Extensions.Caching.Memory.MemoryCache _cooldownCache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
-    // FIX #6: internal ????? PendingTradeVerificationService ??? ?????? ???? ??? ???????????? ????
+    // Cooldown map using atomic CAS ticks to prevent duplicate trade entry races
+    private static readonly ConcurrentDictionary<string, long> _cooldownExpiryTicks = new(StringComparer.OrdinalIgnoreCase);
     internal static readonly ConcurrentDictionary<string, double> _livePrices = new();
 
     public static void UpdateLivePrice(string asset, double price)
     {
         _livePrices[asset] = price;
     }
-
-    // Legacy background verification timer removed.
 
     // ── Public Write API ───────────────────────────────────────────────────
 
@@ -52,29 +49,51 @@ public static class SignalTracker
         double priceEntropy = 0.0, int trendMaturity = 0, double pricePositionPct = 0.5, bool bbSqueeze = false, string? taTelemetry = null, string? mlTelemetry = null, string? smcTelemetry = null)
     {
         if (!PriceFeed.UsePocketOption && MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
+
+        // Hard Circuit Breaker Guard: Never record a live order when Circuit Breaker is active!
+        bool isRealTrade = direction is "BUY" or "PUT";
+        if (isRealTrade && TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true)
+        {
+            BotLogger.Warn($"[Tracker] BLOCKED live {direction} on {asset}: Circuit Breaker is HALTED ({TradeOutcomeTracker.CircuitBreaker.GetHaltedReason()}). Downgrading to SHADOW.");
+            direction = "SHADOW_" + direction;
+            isRealTrade = false;
+        }
+
         string sym = asset.ToUpper();
-        var now = DateTime.UtcNow;
-        // FIX FORENSICS: Real broker expiry is measured from trade entry time (now), NOT from the past grid boundary.
-        // Using gridTime truncated trades placed mid-candle (e.g. 5s trades verified after 2s, 1m trades after 30s).
-        // Adding durationSecs + 1s buffer guarantees the trade has fully expired before verification.
+        var now = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+            : DateTime.UtcNow;
         int durationSecs = Math.Max(1, expiryCandles) * timeframeSecs;
         DateTime verifyAt = now.AddSeconds(durationSecs);
 
-        bool isRealTrade = direction is "BUY" or "PUT";
         string cooldownKey = isRealTrade ? $"REAL_{asset}_{timeframe}" : $"SHADOW_{asset}_{timeframe}";
-        
-        bool isOnCooldown = _cooldownCache.TryGetValue(cooldownKey, out _);
-        if (isOnCooldown)
-        {
-            BotLogger.Warn($"[Tracker] Cooldown active for {cooldownKey}. Skipping duplicate signal recording.");
-            return;
-        }
 
         // Separate REAL vs SHADOW cooldowns so background SHADOW/HOLD samples never block real live trades.
         double cooldownSecs = isRealTrade
             ? Math.Max(durationSecs, timeframeSecs)
             : Math.Max(1.0, timeframeSecs - 1.0);
-        _cooldownCache.Set(cooldownKey, true, TimeSpan.FromSeconds(cooldownSecs));
+
+        long nowTicks = DateTime.UtcNow.Ticks;
+        long newExpiryTicks = nowTicks + TimeSpan.FromSeconds(cooldownSecs).Ticks;
+
+        while (true)
+        {
+            if (_cooldownExpiryTicks.TryGetValue(cooldownKey, out long activeExpiryTicks))
+            {
+                if (nowTicks < activeExpiryTicks)
+                {
+                    BotLogger.Warn($"[Tracker] Cooldown active for {cooldownKey}. Skipping duplicate signal recording.");
+                    return;
+                }
+                if (_cooldownExpiryTicks.TryUpdate(cooldownKey, newExpiryTicks, activeExpiryTicks))
+                    break;
+            }
+            else
+            {
+                if (_cooldownExpiryTicks.TryAdd(cooldownKey, newExpiryTicks))
+                    break;
+            }
+        }
 
         var record = new PredictionRecord
         {
@@ -84,7 +103,7 @@ public static class SignalTracker
             Timeframe   = timeframe,
             BrokerSymbol = sym,
             EntryPrice  = price,
-            CreatedAt   = DateTime.UtcNow,
+            CreatedAt   = now,
             VerifyAt    = verifyAt,
             IsForex     = isForex,
             SourceDirections = sourceDirections ?? new Dictionary<string, string>(),
@@ -120,8 +139,6 @@ public static class SignalTracker
         };
 
         await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
-        
-        // Local Task.Run verification removed. PendingTradeVerificationService handles all verifications.
 
         Console.WriteLine($"[Tracker] Recorded {direction} {asset}/{timeframe} @ {price:F5} " +
                           $"? target verify at {verifyAt:HH:mm:ss}");
@@ -184,12 +201,6 @@ public static class SignalTracker
     {
         return Task.FromResult(Array.Empty<(string name, double agreeRatePct, double weight, int count)>());
     }
-
-    // ── Background Verification ────────────────────────────────────────────
-
-    // Validation logic (VerifyPendingAsync and FetchExitPriceAsync) was fully surgically excised (Ace of Swords).
-    // The legacy timer caused race conditions with the new memory-driven validator,
-    // and using JSON serialization on old archive rows crashed the system (10 of Swords + 6 of Cups).
 
     private static string MapToBrokerSymbol(string asset) =>
         asset.ToUpper()
@@ -297,9 +308,3 @@ public static class SignalTracker
             : 1.0;
     }
 }
-
-
-
-
-
-

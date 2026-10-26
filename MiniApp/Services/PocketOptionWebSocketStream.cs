@@ -91,6 +91,28 @@ public static class PocketOptionWebSocketStream
     public static int ConsecutiveAuthFailures => Volatile.Read(ref _consecutiveAuthFailures);
 
     /// <summary>
+    /// Returns the current extrapolated Pocket Option broker time in UTC.
+    /// Uses high-resolution local clock delta since the last broker tick to maintain sub-millisecond continuity.
+    /// Falls back to DateTime.UtcNow if no broker ticks have been received yet.
+    /// </summary>
+    public static DateTime GetBrokerTimeUtc()
+    {
+        var lastBroker = LastBrokerTickUtc;
+        var lastLocal = _lastTickTime;
+        if (lastBroker != DateTime.MinValue && lastLocal != DateTime.MinValue)
+        {
+            var elapsed = DateTime.UtcNow - lastLocal;
+            // Bound elapsed delta to 10s in case stream stalled
+            if (elapsed.TotalSeconds >= 0 && elapsed.TotalSeconds <= 10.0)
+            {
+                return lastBroker + elapsed;
+            }
+            return lastBroker;
+        }
+        return DateTime.UtcNow;
+    }
+
+    /// <summary>
     /// Actively forces a WebSocket reconnection (called by Watchdog or SelfDiagnosticService when feed stalls).
     /// </summary>
     public static void ForceReconnect(string reason)
@@ -166,14 +188,14 @@ public static class PocketOptionWebSocketStream
         Interlocked.Exchange(ref _loopRunning, 0);
     }
 
-    private static async Task<(string? authPayloadJson, string? tradingUrl)> LoadSessionFromDbAsync()
+    private static async Task<(string? authPayloadJson, string? tradingUrl)> LoadSessionFromDbAsync(CancellationToken token = default)
     {
         try
         {
             using var conn = DbConnectionFactory.GetConnection();
-            await conn.OpenAsync();
+            await conn.OpenAsync(token);
             var stateJson = await conn.QueryFirstOrDefaultAsync<string>(
-                "SELECT state FROM po_collector_state WHERE id = 1;");
+                new CommandDefinition("SELECT state FROM po_collector_state WHERE id = 1;", cancellationToken: token));
 
             if (!string.IsNullOrEmpty(stateJson))
             {
@@ -234,7 +256,7 @@ public static class PocketOptionWebSocketStream
         return autoSession;
     }
 
-    public static async Task<(bool ok, string message)> UpdateSessionAsync(string rawInput)
+    public static async Task<(bool ok, string message)> UpdateSessionAsync(string rawInput, CancellationToken token = default)
     {
         if (string.IsNullOrWhiteSpace(rawInput))
             return (false, "Пустой токен.");
@@ -343,7 +365,7 @@ public static class PocketOptionWebSocketStream
             string fullStateJson = $"{{\"authPayload\":{newAuthPayloadJson},\"tradingUrl\":{JsonSerializer.Serialize(tradingUrl)}}}";
 
             using var conn = DbConnectionFactory.GetConnection();
-            await conn.OpenAsync();
+            await conn.OpenAsync(token);
             await conn.ExecuteAsync(@"
                 INSERT INTO po_collector_state (id, state, updated_at, status)
                 VALUES (1, @State, now(), 'RECONNECTING')
@@ -372,21 +394,21 @@ public static class PocketOptionWebSocketStream
         {
             while (!token.IsCancellationRequested)
             {
-                await Task.Delay(15000, token);
+                await Task.Delay(2000, token);
                 var ws = _webSocket;
                 if (ws == null || ws.State != WebSocketState.Open) continue;
 
                 var now = DateTime.UtcNow;
                 var frameIdleSeconds = (now - _lastMessageTime).TotalSeconds;
                 var tickIdleSeconds = (now - _lastTickTime).TotalSeconds;
-                if (frameIdleSeconds > 15)
+                if (frameIdleSeconds > 5)
                 {
                     try { await SendTextAsync(ws, "2", token); } catch { }
                 }
 
-                // Send Socket.IO application-level status heartbeat 42["ps"] every ~45s
+                // Send Socket.IO application-level status heartbeat 42["ps"] every ~35s
                 // to prevent demo-api-eu.po.market from dropping the connection on its 3-minute timer.
-                if ((now - _lastPsHeartbeat).TotalSeconds >= 45)
+                if ((now - _lastPsHeartbeat).TotalSeconds >= 35)
                 {
                     try
                     {
@@ -396,11 +418,11 @@ public static class PocketOptionWebSocketStream
                     catch { }
                 }
 
-                // Reconnect if raw socket is silent >40s OR if no market ticks arrived for >60s despite open socket (zombie subscription)
-                bool isDead = frameIdleSeconds > 40 || tickIdleSeconds > 60;
+                // Fast-fail: Reconnect if raw socket is silent >12s OR if no market ticks arrived for >15s despite open socket (zombie subscription)
+                bool isDead = frameIdleSeconds > 12 || tickIdleSeconds > 15;
                 if (isDead && ws.State == WebSocketState.Open)
                 {
-                    BotLogger.Warn($"[PO WS] Watchdog detected silent drop (frameIdle={frameIdleSeconds:F0}s, tickIdle={tickIdleSeconds:F0}s). Dropping connection to reconnect...");
+                    BotLogger.Warn($"[PO WS] Watchdog detected silent drop or feed stall (frameIdle={frameIdleSeconds:F1}s, tickIdle={tickIdleSeconds:F1}s). Dropping connection to reconnect immediately...");
                     _lastTickTime = now;
                     try { _connectionCts?.Cancel(); } catch { }
                 }
@@ -418,7 +440,7 @@ public static class PocketOptionWebSocketStream
             while (!token.IsCancellationRequested)
             {
                 Status = "CONNECTING";
-                var (authPayloadJson, tradingUrl) = await LoadSessionFromDbAsync();
+                var (authPayloadJson, tradingUrl) = await LoadSessionFromDbAsync(token);
 
                 if (string.IsNullOrEmpty(authPayloadJson) || string.IsNullOrEmpty(tradingUrl))
                 {
@@ -541,7 +563,7 @@ public static class PocketOptionWebSocketStream
         BotLogger.Info("[PO WS] Subscriptions dispatched.");
     }
 
-    private static async Task HandleAuthRejectedAsync()
+    private static async Task HandleAuthRejectedAsync(CancellationToken token = default)
     {
         int fails = Interlocked.Increment(ref _consecutiveAuthFailures);
         var (autoPayload, autoUrl) = GenerateTryDemoSession();
@@ -553,7 +575,7 @@ public static class PocketOptionWebSocketStream
         {
             string fullStateJson = $"{{\"authPayload\":{autoPayload},\"tradingUrl\":{JsonSerializer.Serialize(autoUrl)}}}";
             using var conn = DbConnectionFactory.GetConnection();
-            await conn.OpenAsync();
+            await conn.OpenAsync(token);
             await conn.ExecuteAsync(@"
                 INSERT INTO po_collector_state (id, state, updated_at, status)
                 VALUES (1, @State, now(), 'AUTO_HEALED')
@@ -642,7 +664,7 @@ public static class PocketOptionWebSocketStream
             {
                 if (!subscribed)
                 {
-                    await HandleAuthRejectedAsync();
+                    await HandleAuthRejectedAsync(connectionToken);
                 }
                 break;
             }
@@ -747,13 +769,15 @@ public static class PocketOptionWebSocketStream
         catch { }
     }
 
-    private static bool TryAdvanceCandleWatermark(string candleKey, double srvTs)
+    private static bool TryAdvanceCandleWatermark(string candleKey, double srvTs, bool isBackfill = false)
     {
+        if (isBackfill) return true;
         while (true)
         {
             if (_lastCandleSrvTs.TryGetValue(candleKey, out double prevTs))
             {
-                if (srvTs <= prevTs) return false;
+                if (srvTs < prevTs) return false;
+                if (srvTs == prevTs) return true;
                 if (_lastCandleSrvTs.TryUpdate(candleKey, srvTs, prevTs)) return true;
             }
             else
@@ -793,7 +817,7 @@ public static class PocketOptionWebSocketStream
         }
         Interlocked.Increment(ref _totalTicksIngested);
 
-        bool fedToCandles = TryAdvanceCandleWatermark(candleKey, srvTs);
+        bool fedToCandles = TryAdvanceCandleWatermark(candleKey, srvTs, isBackfill);
         if (fedToCandles)
         {
             _ = RealtimeTickCollector.OnPriceUpdateAsync(candleKey, price, tickTimeUtc, isBackfill);

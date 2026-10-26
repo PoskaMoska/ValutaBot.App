@@ -201,8 +201,6 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE pending_trades ADD COLUMN minutes_to_news INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
                 END $$;
 
-
-                
                 CREATE TABLE IF NOT EXISTS subminute_candles (
                     id SERIAL PRIMARY KEY,
                     asset TEXT NOT NULL,
@@ -225,9 +223,6 @@ namespace ValutaBot.App.MiniApp.Data
                     custom_config JSONB DEFAULT '{}'
                 );
 
-                -- FIX D-4: Removed destructive UPDATE user_settings that reset enable_ml/smc/of to true
-                -- for ALL users on every application restart, ignoring saved user preferences.
-
                 CREATE TABLE IF NOT EXISTS historical_candles (
                     id        SERIAL PRIMARY KEY,
                     asset     TEXT   NOT NULL,
@@ -246,8 +241,10 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at);
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime_tz ON subminute_candles ((open_time::timestamptz));
                 DROP INDEX IF EXISTS idx_hist_candles_asset;
                 DROP TABLE IF EXISTS neutral_signals;
+
                 -- Preserve module_diagnostics across C# restarts (populated nightly by Python _daily_diagnostics_loop)
                 CREATE TABLE IF NOT EXISTS module_diagnostics (
                     id SERIAL PRIMARY KEY,
@@ -259,9 +256,6 @@ namespace ValutaBot.App.MiniApp.Data
                     suggested_filter JSONB
                 );
 
-                -- FIX 1: Persist CircuitBreaker halt state across restarts.
-                -- Without this, _haltedUntil resets to null on every process restart,
-                -- causing the bot to resume trading immediately after a crash/redeploy.
                 CREATE TABLE IF NOT EXISTS circuit_breaker_state (
                     id          INTEGER PRIMARY KEY DEFAULT 1,
                     halted_until TIMESTAMPTZ NULL,
@@ -307,12 +301,9 @@ namespace ValutaBot.App.MiniApp.Data
 
             BotLogger.Info("[PostgreSQL DB] Database tables initialized successfully.");
 
-            // AutoCalibrationEngine is now wired via DI in MiniAppController
-
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();
             RealtimeTickCollector.Initialize();
         }
-
     }
 }

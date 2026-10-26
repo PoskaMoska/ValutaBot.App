@@ -172,7 +172,7 @@ def build_macro_vector_live(
     asian_low = float(macro.get("DistToAsianLowBps", 0.0)) / 100.0
 
     # Real-time indicators from candles if available
-    pe = float(macro.get("PriceEntropy", 0.5))
+    pe = min(5.0, max(0.0, float(macro.get("PriceEntropy", 0.5))))
     adx = float(macro.get("Adx", 25.0)) / 100.0
     rsi = (float(macro.get("Rsi", 50.0)) - 50.0) / 50.0
     news_m = float(macro.get("MinutesToNews", 120.0))
@@ -249,7 +249,7 @@ def build_macro_vector_live(
     hma_slope = float(ta.get("HmaSlope", 0.0)) / 10.0
     vol_ratio = min(3.0, float(ta.get("VolRatio", 1.0))) / 3.0
     bb_sq = float(1.0 if macro.get("BbSqueeze") else 0.0)
-    price_pos = float(macro.get("PricePositionPct", 0.5))
+    price_pos = min(1.0, max(0.0, float(macro.get("PricePositionPct", 0.5))))
     trend_mat = float(macro.get("TrendMaturity", 0.0)) / 100.0
     last_ticks = float(macro.get("TickCountLastCandle", 1.0))
     tick_density = math.log1p(max(0.0, last_ticks)) / 5.0
@@ -482,7 +482,7 @@ class PatchTSTPredictor:
             # Dampen confidence into [50% - 65%] so s5 does not claim false certainty on pure high-frequency tick noise,
             # while allowing genuine high-conviction momentum trades (>=58%) to execute.
             if str(interval).lower() == "s5":
-                calibrated_prob = min(0.65, 0.50 + (calibrated_prob - 0.50) * 0.80)
+                calibrated_prob = min(0.57, 0.50 + (calibrated_prob - 0.50) * 0.80)
 
             # Safety floor at 50% (never below chance), ceiling at 92%
             calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))

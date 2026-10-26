@@ -349,7 +349,8 @@ public static class MLPythonService
         bool isForex = false,
         MiniAppController.OhlcCandle[]? mtfCandles = null,
         ValutaBot.MiniApp.SmcEngine.SmcAnalysisResult? smcResult = null,
-        object? macroContext = null)
+        object? macroContext = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl))
             return null;
@@ -405,9 +406,12 @@ public static class MLPythonService
             using var content = new ByteArrayContent(jsonBytes);
             content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
+            int timeoutMs = interval.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? 1800 : 4000;
+            using var timeoutCts = new CancellationTokenSource(timeoutMs);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
             var client = _httpFactory?.CreateClient("MLPythonService") ?? throw new InvalidOperationException("HttpFactory not set");
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var response = await client.PostAsync(new Uri($"{_baseUrl}/predict"), content);
+            var response = await client.PostAsync(new Uri($"{_baseUrl}/predict"), content, linkedCts.Token);
             sw.Stop();
             
             if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
@@ -419,7 +423,7 @@ public static class MLPythonService
                 return null;
             }
             
-            var responseBody = await response.Content.ReadAsStringAsync();
+            var responseBody = await response.Content.ReadAsStringAsync(linkedCts.Token);
             BotLogger.Info($"[MLPythonService] PredictAsync completed in {sw.ElapsedMilliseconds}ms for {symbol} {interval}");
             var result = JsonSerializer.Deserialize<MLPythonPrediction>(responseBody, _jsonOptions);
             
@@ -448,6 +452,11 @@ public static class MLPythonService
                     TopFeatures:      result.TopFeatures
                 );
             }
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            BotLogger.Warn($"[MLPython] PredictAsync timed out after deadline for {symbol} {interval}");
             return null;
         }
         catch (Polly.CircuitBreaker.BrokenCircuitException)

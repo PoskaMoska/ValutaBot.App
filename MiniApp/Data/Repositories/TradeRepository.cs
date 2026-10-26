@@ -501,8 +501,6 @@ FROM outcome_data;");
             await conn.ExecuteAsync("DELETE FROM pending_trades WHERE id = @id", new { id });
         }
 
-
-
         public static async Task<(int Total, int Verified, int Correct)> GetOverallStatsAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return (0, 0, 0);
@@ -585,9 +583,6 @@ FROM outcome_data;");
             return result;
         }
 
-
-
-
         public static async Task<System.Collections.Generic.List<bool?>> GetRecentOutcomesAsync(int limit = 10, DateTime? sinceUtc = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool?>();
@@ -596,7 +591,7 @@ FROM outcome_data;");
                 ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
                 : "";
             string sinceFilter = sinceUtc.HasValue
-                ? "AND verified_at > @SinceUtc"
+                ? "AND verified_at::timestamptz > @SinceUtc"
                 : "";
             var rows = await conn.QueryAsync<bool?>($@"
                 SELECT was_win 
@@ -605,17 +600,21 @@ FROM outcome_data;");
                   AND direction IN ('BUY', 'PUT')
                   {eraFilter}
                   {sinceFilter}
-                ORDER BY verified_at DESC 
+                ORDER BY verified_at::timestamptz DESC 
                 LIMIT @Limit
             ", new { Limit = limit, SinceUtc = sinceUtc });
             return rows.ToList();
         }
-        public static async Task<System.Collections.Generic.List<bool>> GetRecentOutcomesForAssetAsync(string asset, string timeframe, int limit = 20)
+
+        public static async Task<System.Collections.Generic.List<bool>> GetRecentOutcomesForAssetAsync(string asset, string timeframe, int limit = 20, DateTime? sinceUtc = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool>();
             using var conn = DbConnectionFactory.GetConnection();
             string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
                 ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                : "";
+            string sinceFilter = sinceUtc.HasValue
+                ? "AND verified_at::timestamptz > @SinceUtc"
                 : "";
             var rows = await conn.QueryAsync<bool>($@"
                 SELECT was_win 
@@ -623,9 +622,10 @@ FROM outcome_data;");
                 WHERE asset = @Asset AND timeframe = @Timeframe AND was_win IS NOT NULL 
                   AND direction IN ('BUY', 'PUT')
                   {eraFilter}
-                ORDER BY verified_at DESC 
+                  {sinceFilter}
+                ORDER BY verified_at::timestamptz DESC 
                 LIMIT @Limit
-            ", new { Asset = asset, Timeframe = timeframe, Limit = limit });
+            ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtc = sinceUtc });
             return rows.ToList();
         }
 

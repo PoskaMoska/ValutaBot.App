@@ -170,8 +170,8 @@ public class AutoCalibrationEngine : IAutoCalibrationEngine
                 MarketRegime.HighVolatilityChaos => 1.4, // Liquidity sweeps — в хаосе лучший сигнал
                 _ => 1.0
             },
-            // LIGHTGBM и SKENDER_MATH калибруются по режиму
-            "LIGHTGBM" => regime switch
+            // NeuralBrain (PatchTST) и SKENDER_MATH калибруются по режиму
+            "NeuralBrain" or "LIGHTGBM" => regime switch
             {
                 MarketRegime.TrendingImpulse    => 1.3, // ML отлично распознаёт импульсы
                 MarketRegime.RangingFlat        => 0.9,

@@ -39,7 +39,7 @@ public class MarketAnalysisOrchestrator(
 
     /// <summary>
     /// Extracts the ML regime token (TREND/FLAT/CHAOS/ALL) from a model version such as
-    /// "lgbm-v1-USDJPY_s10_TREND-1790964297". Returns "UNKNOWN" if it cannot be parsed.
+    /// "patch-tst-v3-USDJPY_s10_TREND-1790964297". Returns "UNKNOWN" if it cannot be parsed.
     /// </summary>
     private static string ExtractMlRegime(string? modelVersion)
     {
@@ -106,7 +106,7 @@ public class MarketAnalysisOrchestrator(
         // Prepare closed candles (cap at `limit` after dropping forming candle)
         int intervalSecs = _fetcher.TimeframeSeconds(timeframe);
         DateTime referenceNowUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
-            ? PocketOptionWebSocketStream.LastBrokerTickUtc.AddMilliseconds(250)
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
         bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= referenceNowUtc;
         var closedCandles = isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
@@ -130,7 +130,7 @@ public class MarketAnalysisOrchestrator(
         traceLines.Add($"[2. Gatekeeper]      Риск-контроль пройден ({(string.IsNullOrEmpty(gatekeeper.Reason) ? "Волатильность в норме" : gatekeeper.Reason)}) -> {gatekeeperSw.ElapsedMilliseconds}ms");
 
         // 4. Continuous State
-        var state = ContinuousStateEngine.EvaluateContinuousState(mainPrices, cleanAsset, timeframe);
+        var state = ContinuousStateEngine.EvaluateContinuousState(closedPrices, cleanAsset, timeframe, isAlreadyClosed: true);
         
         // 5. Higher TF Data
         string? higherTf = _fetcher.HigherTf(timeframe);
@@ -139,7 +139,7 @@ public class MarketAnalysisOrchestrator(
             higherCandles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, higherTf, cleanAsset, 100);
         }
         var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1 && higherTf != null) 
-            ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= DateTime.UtcNow) ? higherCandles : higherCandles.Take(higherCandles.Length - 1).ToArray())
+            ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= referenceNowUtc) ? higherCandles : higherCandles.Take(higherCandles.Length - 1).ToArray())
             : [];
 
         // 6. Engines (Parallel)
@@ -176,7 +176,7 @@ public class MarketAnalysisOrchestrator(
             double maxHigh = last20.Max(c => c.High);
             double minLow = last20.Min(c => c.Low);
             if (maxHigh > minLow) {
-                pricePositionPct = (currentLivePrice - minLow) / (maxHigh - minLow);
+                pricePositionPct = Math.Clamp((currentLivePrice - minLow) / (maxHigh - minLow), 0.0, 1.0);
             }
 
             double sma20 = last20.Average(c => c.Close);
@@ -198,7 +198,7 @@ public class MarketAnalysisOrchestrator(
                 else break;
             }
             trendMaturity = streak;
-            priceEntropy = mainAtr > 0 ? (stdev20 / mainAtr) : 0.0;
+            priceEntropy = mainAtr > 1e-6 ? Math.Clamp(stdev20 / mainAtr, 0.0, 5.0) : 0.0;
         }
 
         int? minutesToNews = -1;
@@ -287,7 +287,7 @@ public class MarketAnalysisOrchestrator(
         // News calendar decoupled (Pocket Option OTC is 24/7 algorithmic feed unaffected by FX calendar)
 
         matrixSw.Stop();
-        traceLines.Add($"[6. Консенсус]       Матрица сведена (Фаза: {state.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[6. Риск-контроль]    Нейросеть и фильтры сведены (Фаза: {state.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
 
         var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(closedCandles, timeframe);
         traceLines.Add($"[6.8 Noise Gate]     {noiseAudit.RegimeDescription} (TR: {noiseAudit.LocalAtrBps:F2} bps, Порог: {noiseAudit.NoiseFloorBps:F1} bps, Z: {noiseAudit.ZScore:F2})");
@@ -342,6 +342,7 @@ public class MarketAnalysisOrchestrator(
                 VelocityRegime = state.VelocityRegime ?? "UNKNOWN",
                 Atr = mainAtr,
                 Adx = mainAdx,
+                Rsi = taDetail.RsiVal,
                 PriceEntropy = priceEntropy,
                 TrendMaturity = trendMaturity,
                 PricePositionPct = pricePositionPct,
@@ -389,7 +390,7 @@ public class MarketAnalysisOrchestrator(
         bool isCbHalted = isGlobalCbHalted || isSymbolQuarantined;
         string sampleKey = $"{cleanAsset}_{timeframe}";
 
-        int requiredProb = isS5 ? 58 : 57;
+        int requiredProb = 57;
         bool htfAligned = mtfResult.DominantDirection == consensus.FinalDirection && isDirectional;
         bool isGoldenSetup = mtfResult.IsGoldenSetup && (!isSubminute || noiseAudit.IsTradeableImpulse);
 
@@ -422,19 +423,36 @@ public class MarketAnalysisOrchestrator(
 
         if (canExecuteReal)
         {
-            if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshRealPrice) && freshRealPrice > 0)
+            if (PriceFeed.UsePocketOption)
             {
-                double slippageBps = Math.Abs(freshRealPrice - currentLivePrice) / currentLivePrice * 10000.0;
-                if (slippageBps > 1.5)
+                if (PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshRealPrice, maxAgeSeconds: 1.5) && freshRealPrice > 0)
                 {
-                    _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: slippage {SlippageBps:F2} bps exceeds 1.5 bps threshold (signal: {CurrentPrice}, fresh: {FreshPrice})",
-                        cleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice);
-                    traceLines.Add($"[8. SlippageGate]    [ОТКЛОНЕНО] Проскальзывание {slippageBps:F2} bps превышает лимит 1.5 bps -> 0ms");
-                    canExecuteReal = false;
+                    // Asymmetric Slippage Gate: only block adverse slippage
+                    // BUY: freshRealPrice > currentLivePrice means buying at a higher/worse price.
+                    // PUT: freshRealPrice < currentLivePrice means selling at a lower/worse price.
+                    bool isAdverse = (consensus.FinalDirection == "BUY" && freshRealPrice > currentLivePrice) ||
+                                     (consensus.FinalDirection == "PUT" && freshRealPrice < currentLivePrice);
+                    double slippageBps = Math.Abs(freshRealPrice - currentLivePrice) / currentLivePrice * 10000.0;
+
+                    if (isAdverse && slippageBps > 1.5)
+                    {
+                        _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: adverse slippage {SlippageBps:F2} bps exceeds 1.5 bps threshold (signal: {CurrentPrice}, fresh: {FreshPrice}, dir: {Dir})",
+                            cleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice, consensus.FinalDirection);
+                        traceLines.Add($"[8. SlippageGate]    [ОТКЛОНЕНО] Неблагоприятное проскальзывание {slippageBps:F2} bps превышает лимит 1.5 bps -> 0ms");
+                        canExecuteReal = false;
+                    }
+                    else
+                    {
+                        currentLivePrice = freshRealPrice;
+                    }
                 }
                 else
                 {
-                    currentLivePrice = freshRealPrice;
+                    // Fail-Closed: If broker live price is stale (>1.5s) or unavailable, abort trade for capital preservation
+                    _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: live price feed is stale (>1.5s) or unavailable. Trade aborted.",
+                        cleanAsset, timeframe);
+                    traceLines.Add("[8. SlippageGate]    [ОТКЛОНЕНО] Поток котировок брокера устарел (>1.5с) или недоступен -> 0ms");
+                    canExecuteReal = false;
                 }
             }
 

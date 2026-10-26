@@ -43,6 +43,8 @@ public class AutoTradingScannerService : BackgroundService
     // s30:  2 candles/min × 30 min =  60 max → require  40
     // m1:   1 candle/min            → require 40 (PO mode)
     // FIX: Old hardcoded 160 physically blocked s15 and s30 from ever scanning.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastScannedCandleTimes = new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly System.Collections.Generic.Dictionary<string, int> _minCandlesPerTf =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -110,36 +112,40 @@ public class AutoTradingScannerService : BackgroundService
         {
             workers.Add(Task.Run(async () =>
             {
-                await foreach (var item in channel.Reader.ReadAllAsync(stoppingToken))
+                try
                 {
-                    string key = $"{item.pair}:{item.tf}";
-                    queuedKeys.TryRemove(key, out _);
-
-                    if (stoppingToken.IsCancellationRequested) break;
-
-                    // Drop stale events that waited too long in queue relative to their timeframe (prevents s5/s10 entry skew)
-                    double maxQueueWaitSec = item.tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 1.5
-                        : item.tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 2.2
-                        : 3.5;
-                    if ((DateTime.UtcNow - item.queuedAtUtc).TotalSeconds > maxQueueWaitSec)
+                    await foreach (var item in channel.Reader.ReadAllAsync(stoppingToken))
                     {
-                        continue;
-                    }
+                        string key = $"{item.pair}:{item.tf}";
+                        queuedKeys.TryRemove(key, out _);
 
-                    if (!inFlightKeys.TryAdd(key, 1))
-                    {
-                        continue;
-                    }
+                        if (stoppingToken.IsCancellationRequested) break;
 
-                    try
-                    {
-                        await ProcessSubminuteScanAsync(item.pair, item.tf, stoppingToken);
-                    }
-                    finally
-                    {
-                        inFlightKeys.TryRemove(key, out _);
+                        // Drop stale events that waited too long in queue relative to their timeframe (prevents s5/s10 entry skew)
+                        double maxQueueWaitSec = item.tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 1.5
+                            : item.tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 2.2
+                            : 3.5;
+                        if ((DateTime.UtcNow - item.queuedAtUtc).TotalSeconds > maxQueueWaitSec)
+                        {
+                            continue;
+                        }
+
+                        if (!inFlightKeys.TryAdd(key, 1))
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            await ProcessSubminuteScanAsync(item.pair, item.tf, stoppingToken);
+                        }
+                        finally
+                        {
+                            inFlightKeys.TryRemove(key, out _);
+                        }
                     }
                 }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
             }, stoppingToken));
         }
 
@@ -158,6 +164,7 @@ public class AutoTradingScannerService : BackgroundService
 
     private async Task ProcessSubminuteScanAsync(string pair, string tf, CancellationToken stoppingToken)
     {
+        stoppingToken.ThrowIfCancellationRequested();
         if (IsWeekendPause(pair)) return;
 
         if (!_settings.DatasetCollectionMode && _circuitBreaker.IsHalted())
@@ -173,6 +180,7 @@ public class AutoTradingScannerService : BackgroundService
 
         try
         {
+            stoppingToken.ThrowIfCancellationRequested();
             using var scope = _serviceProvider.CreateScope();
             var orchestrator = scope.ServiceProvider.GetRequiredService<IMarketAnalysisOrchestrator>();
             var userSettings = await UserRepository.GetSettingsAsync(0);
@@ -184,6 +192,14 @@ public class AutoTradingScannerService : BackgroundService
             {
                 var lastCandleTime = recentCandles[^1].Timestamp;
 
+                // Atomic deduplication barrier against scanning the same candle
+                string scanKey = $"{pair}:{tf}";
+                if (_lastScannedCandleTimes.TryGetValue(scanKey, out var prevScannedTime) && prevScannedTime >= lastCandleTime)
+                {
+                    _logger.LogDebug($"[AutoScanner] Skipped {scanKey}: candle {lastCandleTime:HH:mm:ss.fff} already analyzed.");
+                    return;
+                }
+
                 // Entry Window Guard: prevent entering trades late into the candle lifecycle (e.g. at second 4 of a 5s bar)
                 int tfSecs = tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 5
                     : tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 10
@@ -191,7 +207,7 @@ public class AutoTradingScannerService : BackgroundService
                     : tf.Equals("s30", StringComparison.OrdinalIgnoreCase) ? 30 : 60;
 
                 DateTime refTime = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
-                    ? PocketOptionWebSocketStream.LastBrokerTickUtc
+                    ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
                     : DateTime.UtcNow;
 
                 DateTime newCandleOpen = lastCandleTime.AddSeconds(tfSecs) <= refTime.AddMilliseconds(500)
@@ -209,14 +225,28 @@ public class AutoTradingScannerService : BackgroundService
                     return;
                 }
 
-                if ((DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30)
+                // CAS claim on the candle timestamp before starting inference
+                if (!_lastScannedCandleTimes.TryAdd(scanKey, lastCandleTime) &&
+                    !_lastScannedCandleTimes.TryUpdate(scanKey, lastCandleTime, prevScannedTime))
+                {
+                    _logger.LogDebug($"[AutoScanner] Skipped {scanKey}: candle {lastCandleTime:HH:mm:ss.fff} claimed by another worker.");
+                    return;
+                }
+
+                double maxCandleAgeSec = tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 6.0
+                    : tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 12.0
+                    : tf.Equals("s15", StringComparison.OrdinalIgnoreCase) ? 18.0
+                    : tf.Equals("s30", StringComparison.OrdinalIgnoreCase) ? 35.0
+                    : 70.0;
+
+                if ((refTime - lastCandleTime).TotalSeconds <= maxCandleAgeSec)
                 {
                     _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles, +{elapsedSinceOpenSec:F2}s into bar)...");
                     await orchestrator.ExecuteAnalysisAsync(AnalysisAsset(pair), tf, userSettings);
                 }
                 else
                 {
-                    _logger.LogWarning($"[AutoScanner-Fast] Stale candles for {pair}/{tf}: last={lastCandleTime:HH:mm:ss}. Skipping.");
+                    _logger.LogWarning($"[AutoScanner-Fast] Stale candles for {pair}/{tf}: last={lastCandleTime:HH:mm:ss}, refTime={refTime:HH:mm:ss} (age {(refTime - lastCandleTime).TotalSeconds:F1}s > limit {maxCandleAgeSec:F1}s). Skipping.");
                 }
             }
         }
@@ -326,4 +356,5 @@ public class AutoTradingScannerService : BackgroundService
                (dayOfWeek == DayOfWeek.Sunday && DateTime.UtcNow.Hour < 21) ||
                (dayOfWeek == DayOfWeek.Friday && DateTime.UtcNow.Hour >= 21);
     }
-}
+}
+

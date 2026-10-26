@@ -28,8 +28,11 @@ public class PendingTradeVerificationService : BackgroundService
     private static async Task SweepExpiredTradesAsync(CancellationToken ct)
     {
         List<SignalTracker.PredictionRecord> expired;
+        DateTime currentRefTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+            : DateTime.UtcNow;
         // Wait 4s after VerifyAt so RealtimeTickCollector's 3s batch buffer has guaranteed flushed the expiry s5 candle to PostgreSQL.
-        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(DateTime.UtcNow.AddSeconds(-4)); }
+        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(currentRefTime.AddSeconds(-4)); }
         catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Could not load pending trades: {ex.Message}"); return; }
 
         if (expired.Count == 0) return;
@@ -59,7 +62,10 @@ public class PendingTradeVerificationService : BackgroundService
         double? exitPrice = null;
         string verifyInterval = "s5"; 
         
-        double secondsOverdue = (DateTime.UtcNow - record.VerifyAt).TotalSeconds;
+        DateTime currentRefTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+            : DateTime.UtcNow;
+        double secondsOverdue = (currentRefTime - record.VerifyAt).TotalSeconds;
 
         try
         {
@@ -78,12 +84,10 @@ public class PendingTradeVerificationService : BackgroundService
             DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20) ? createdBucket : targetGrid.AddSeconds(-20);
 
             // Locate the enclosing candle [open_time, open_time + 5s) covering verifyUtc
+            // FIX: Always settle on close_price of the candle covering verifyUtc.
+            // Old 'WHEN @VerifyAt - open_time <= 2.5s THEN open_price' truncated 5s trades to 1-3s.
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
-                SELECT 
-                    CASE 
-                        WHEN @VerifyAt - open_time::timestamptz <= INTERVAL '2.5 seconds' THEN open_price 
-                        ELSE close_price 
-                    END
+                SELECT close_price
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
                   AND open_time::timestamptz <= @VerifyAt
@@ -138,7 +142,7 @@ public class PendingTradeVerificationService : BackgroundService
                 });
             }
 
-            // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid) using indexed s5 candles
+            // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] using timestamptz comparison
             if (exitPrice.HasValue && exitPrice.Value > 0)
             {
                 try
@@ -148,13 +152,13 @@ public class PendingTradeVerificationService : BackgroundService
                         FROM subminute_candles
                         WHERE asset = @Asset
                           AND interval = @Interval
-                          AND open_time >= @CreatedBucket
-                          AND open_time <  @TargetGrid
+                          AND open_time::timestamptz >= @CreatedBucket::timestamptz
+                          AND open_time::timestamptz <= @TargetGrid::timestamptz
                     ", new { 
                         Asset = cleanAsset, 
                         Interval = verifyInterval,
-                        CreatedBucket = createdBucket.ToString("O"), 
-                        TargetGrid = targetGrid.ToString("O") 
+                        CreatedBucket = createdBucket.ToString("o"), 
+                        TargetGrid = targetGrid.ToString("o") 
                     });
 
                     double exitVal = exitPrice.Value;
@@ -190,20 +194,15 @@ public class PendingTradeVerificationService : BackgroundService
 
         if (!exitPrice.HasValue || exitPrice.Value <= 0)
         {
-            // FIX D-1: Removed duplicate null-check block that was dead code.
-            // Previous logic: first block handled >120 (discard) and <120 (wait) but left
-            // ==120 unhandled, falling through to a second block with a wrong >60 threshold.
-            // New logic: wait up to 120 seconds, then discard.
             if (secondsOverdue >= 120)
             {
                 BotLogger.Warn($"[PendingVerifier] STALE trade {record.Id} ({record.Asset}/{record.Timeframe}): no DB candle after {secondsOverdue:F0}s, discarding.");
                 await TradeRepository.DeletePendingTradeAsync(record.Id);
             }
-            // else: still within 120s window — wait for next sweep cycle
             return;
         }
 
-        double priceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
+        double rawPriceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
 
         // Guard: NEUTRAL / SHADOW_NEUTRAL сигнал не несёт обучающей информации
         if (record.Direction is "NEUTRAL" or "SHADOW_NEUTRAL")
@@ -213,22 +212,34 @@ public class PendingTradeVerificationService : BackgroundService
             return;
         }
 
-        bool isExactDoji = Math.Abs(priceDiff) < 1e-8; // entry == exit
+        bool isExactDoji = Math.Abs(rawPriceDiff) < 1e-8; // entry == exit
         
         record.ExitPrice = exitPrice.Value;
-        record.PnlBps = Math.Round(priceDiff * 10000, 2);
         
-        if (isExactDoji || record.Direction is "HOLD" or "SHADOW_HOLD") {
+        if (isExactDoji || record.Direction is "HOLD" or "SHADOW_HOLD") 
+        {
             record.WasCorrect = null; // TIE or neutral HOLD sample
-        } else {
-            record.WasCorrect = (record.Direction.EndsWith("BUY") && exitPrice.Value > record.EntryPrice)
-                             || (record.Direction.EndsWith("PUT") && exitPrice.Value < record.EntryPrice);
+            record.PnlBps = 0.0;
+        } 
+        else 
+        {
+            bool isBuy = !string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY");
+            bool isPut = !string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("PUT");
+
+            record.WasCorrect = (isBuy && exitPrice.Value > record.EntryPrice)
+                             || (isPut && exitPrice.Value < record.EntryPrice);
+
+            // Financial PnL Invariant:
+            // BUY: Profit when Exit > Entry
+            // PUT: Profit when Exit < Entry (rawPriceDiff is negative, so pnl = -rawPriceDiff * 10000)
+            double effectivePnlDiff = isPut ? -rawPriceDiff : rawPriceDiff;
+            record.PnlBps = Math.Round(effectivePnlDiff * 10000, 2);
         }
 
         await TradeOutcomeTracker.OnTradeVerifiedAsync(record);
-        await TradeRepository.DeletePendingTradeAsync(record.Id);
+        // Note: SaveTradeOutcomeAsync already deletes pending trade by ID atomically in the same SQL batch
 
         string resultStr = record.WasCorrect.HasValue ? (record.WasCorrect.Value ? "WIN" : "LOSS") : "TIE";
-        BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {resultStr} @ {exitPrice.Value} (Target: {record.VerifyAt:HH:mm:ss})");
+        BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {resultStr} @ {exitPrice.Value} (Target: {record.VerifyAt:HH:mm:ss}, PnL: {record.PnlBps:+#0.00;-#0.00;0.00} bps)");
     }
 }

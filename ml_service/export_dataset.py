@@ -39,6 +39,9 @@ ASSET_MAP = {
     "USDJPY": 3, "USD/JPY": 3, "USDJPY_OTC": 3,
     "USDCAD": 4, "USD/CAD": 4, "USDCAD_OTC": 4,
     "USDCHF": 5, "USD/CHF": 5, "USDCHF_OTC": 5,
+    "EURJPY": 6, "EUR/JPY": 6, "EURJPY_OTC": 6,
+    "GBPJPY": 7, "GBP/JPY": 7, "GBPJPY_OTC": 7,
+    "BTCUSD": 8, "ETHUSD": 9
 }
 
 TF_SECONDS = {
@@ -197,7 +200,7 @@ def extract_macro_vector(row_dict, feat_obj):
     
     # 10. Price Entropy (0..1)
     pe_raw = row_dict.get("price_entropy")
-    pe = float(pe_raw if pe_raw is not None else macro.get("PriceEntropy", 0.5))
+    pe = min(5.0, max(0.0, float(pe_raw if pe_raw is not None else macro.get("PriceEntropy", 0.5))))
     
     # 11. ADX (0..1)
     adx_raw = row_dict.get("adx_at_signal")
@@ -276,7 +279,7 @@ def extract_macro_vector(row_dict, feat_obj):
     hma_slope = float(ta.get("HmaSlope", 0.0)) / 10.0
     vol_ratio = min(3.0, float(ta.get("VolRatio", 1.0))) / 3.0
     bb_sq = float(1.0 if (macro.get("BbSqueeze") or row_dict.get("bb_squeeze")) else 0.0)
-    price_pos = float(macro.get("PricePositionPct", row_dict.get("price_position_pct", 0.5) or 0.5))
+    price_pos = min(1.0, max(0.0, float(macro.get("PricePositionPct", row_dict.get("price_position_pct", 0.5) or 0.5))))
     trend_mat = float(macro.get("TrendMaturity", row_dict.get("trend_maturity", 0.0) or 0.0)) / 100.0
     last_ticks = float(macro.get("TickCountLastCandle", 1.0))
     tick_density = math.log1p(max(0.0, last_ticks)) / 5.0

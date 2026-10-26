@@ -155,8 +155,9 @@ namespace ValutaBot.MiniApp
         // FIX 4 (2026-09-13): Bounded channel prevents unbounded memory growth during DB outages.
         // With CreateUnbounded, a PostgreSQL outage at ~100 ticks/sec fills ~30k events in 5min → OOM.
         // DropOldest: gaps in subminute_candles are acceptable; OOM is not.
+        private const int ChannelCapacity = 100_000;
         private static readonly Channel<TickEvent> _tickChannel = Channel.CreateBounded<TickEvent>(
-            new BoundedChannelOptions(100_000)
+            new BoundedChannelOptions(ChannelCapacity)
             {
                 FullMode     = BoundedChannelFullMode.DropOldest,
                 SingleReader = true,   // only ProcessTickQueueAsync reads
@@ -466,6 +467,13 @@ namespace ValutaBot.MiniApp
 
                     if (liveCandle != null)
                     {
+                        if (closedCandles.Length > 0 && closedCandles[^1].Timestamp >= liveCandle.Timestamp)
+                        {
+                            return closedCandles.Length > limit
+                                ? closedCandles[^limit..]
+                                : closedCandles;
+                        }
+
                         var combined = new MiniAppController.OhlcCandle[closedCandles.Length + 1];
                         Array.Copy(closedCandles, 0, combined, 0, closedCandles.Length);
                         combined[^1] = liveCandle;
@@ -625,19 +633,22 @@ namespace ValutaBot.MiniApp
         private static void QueueTick(string asset, string interval, double price, long nowTicks, long intervalTicks)
         {
             var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
-            if (!_tickChannel.Writer.TryWrite(new TickEvent(asset, interval, price, openTime)))
+            if (_tickChannel.Reader.Count >= ChannelCapacity)
             {
-                // DropOldest policy means TryWrite succeeds by evicting; if it returns false,
-                // the channel writer is completed (shutdown). Track for diagnostics.
-                System.Threading.Interlocked.Increment(ref _droppedTickCount);
-                if ((DateTime.UtcNow - _lastDropWarningAt).TotalSeconds >= 30)
+                long dropped = Interlocked.Increment(ref _droppedTickCount);
+                var now = DateTime.UtcNow;
+                if ((now - _lastDropWarningAt).TotalSeconds >= 30)
                 {
-                    _lastDropWarningAt = DateTime.UtcNow;
-                    BotLogger.Warn($"[TickCollector] Channel full — ticks being dropped. Dropped so far: {_droppedTickCount}. DB may be lagging.");
+                    _lastDropWarningAt = now;
+                    BotLogger.Warn($"[TickCollector] Channel full ({ChannelCapacity}) — backpressure evicting ticks. Dropped count: {dropped}. PostgreSQL write pipeline is lagging.");
                 }
             }
-        }
 
+            if (!_tickChannel.Writer.TryWrite(new TickEvent(asset, interval, price, openTime)))
+            {
+                Interlocked.Increment(ref _droppedTickCount);
+            }
+        }
 
         private static void UpdateAccumulator(
             ConcurrentDictionary<string, CandleAccumulator> dict,
@@ -645,13 +656,16 @@ namespace ValutaBot.MiniApp
         {
             var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
             var acc = dict.GetOrAdd(asset, _ => new CandleAccumulator());
+            Action<string, string>? notifyCandleClosed = null;
+            string? closedTf = null;
+
             lock (acc)
             {
                 if (acc.OpenTime != default && openTime < acc.OpenTime) return; // late tick: never rewind the live candle
                 if (acc.OpenTime != openTime && acc.OpenTime != default)
                 {
                     acc.Reset(openTime);
-                    string closedTf = dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1";
+                    closedTf = dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1";
                     string closedDbInterval = closedTf == "m1" ? "1min" : closedTf;
                     if (acc.LastClosed != null)
                     {
@@ -660,12 +674,38 @@ namespace ValutaBot.MiniApp
                     }
                     _recentCandlesCache.TryRemove($"{asset}:{closedDbInterval}", out _);
                     if (!isBackfill)
-                        OnCandleClosed?.Invoke(asset, closedTf);
+                        notifyCandleClosed = OnCandleClosed;
                 }
                 else if (acc.OpenTime == default)
                     acc.OpenTime = openTime;
 
                 acc.AddTick(price);
+            }
+
+            if (notifyCandleClosed != null && closedTf != null)
+            {
+                try
+                {
+                    notifyCandleClosed.Invoke(asset, closedTf);
+                }
+                catch (Exception ex)
+                {
+                    BotLogger.Warn($"[TickCollector] OnCandleClosed notification error: {ex.Message}");
+                }
+            }
+        }
+
+        public static async Task StopAsync(CancellationToken ct = default)
+        {
+            try
+            {
+                _collectorCts.Cancel();
+                _tickChannel.Writer.TryComplete();
+                await FlushAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TickCollector] StopAsync notice: {ex.Message}");
             }
         }
     }

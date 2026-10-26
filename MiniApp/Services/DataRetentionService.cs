@@ -163,11 +163,23 @@ public class DataRetentionService : BackgroundService
         var shadowCutoff = DateTime.UtcNow.Subtract(shadowRetention);
         var stalePendingCutoff = DateTime.UtcNow.AddHours(-2).ToString("o");
 
-        // 5. Prune expired subminute and historical candles according to current zone
-        int subPoDeleted = await ExecuteSafeDeleteAsync(conn, "subminute_candles (PO)",
-            "DELETE FROM subminute_candles WHERE asset LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz", new { cutoff = subCutoff });
-        int subLegacyDeleted = await ExecuteSafeDeleteAsync(conn, "subminute_candles (legacy)",
-            "DELETE FROM subminute_candles WHERE asset NOT LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz", new { cutoff = legacySubCutoff });
+        // 5. Prune expired subminute candles using chunked deletions to prevent hot tick insert starvation
+        int subPoDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (PO)",
+            @"DELETE FROM subminute_candles
+              WHERE ctid IN (
+                  SELECT ctid FROM subminute_candles
+                  WHERE asset LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz
+                  LIMIT 10000
+              )", new { cutoff = subCutoff });
+
+        int subLegacyDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (legacy)",
+            @"DELETE FROM subminute_candles
+              WHERE ctid IN (
+                  SELECT ctid FROM subminute_candles
+                  WHERE asset NOT LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz
+                  LIMIT 10000
+              )", new { cutoff = legacySubCutoff });
+
         int histDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles",
             "DELETE FROM historical_candles WHERE open_time::timestamptz < @cutoff::timestamptz", new { cutoff = histCutoff });
         int pendingDeleted = await ExecuteSafeDeleteAsync(conn, "pending_trades",
@@ -241,8 +253,6 @@ public class DataRetentionService : BackgroundService
 
     /// <summary>
     /// Critical emergency purge for when filesystem is at >94% (4800 MB+).
-    /// Uses table swap pattern (CREATE AS SELECT → DROP → RENAME) to physically return
-    /// disk space to the OS without needing 2x space like VACUUM FULL does.
     /// </summary>
     private static async Task RunEmergencyCriticalPurgeAsync(System.Data.Common.DbConnection conn, StorageTelemetry telemetry)
     {
@@ -255,10 +265,14 @@ public class DataRetentionService : BackgroundService
                 AND created_at::timestamptz < NOW() - INTERVAL '6 hours'",
             new { });
 
-        // Step 2: Aggressively delete old subminute candles (keep only 24h for live analysis)
-        int emergencySubDeleted = await ExecuteSafeDeleteAsync(conn, "subminute_candles (Emergency: >24h)",
-            @"DELETE FROM subminute_candles WHERE open_time::timestamptz < NOW() - INTERVAL '24 hours'",
-            new { });
+        // Step 2: Aggressively delete old subminute candles chunked (keep only 24h for live analysis)
+        int emergencySubDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (Emergency: >24h)",
+            @"DELETE FROM subminute_candles
+              WHERE ctid IN (
+                  SELECT ctid FROM subminute_candles
+                  WHERE open_time::timestamptz < NOW() - INTERVAL '24 hours'
+                  LIMIT 10000
+              )", new { });
 
         // Step 3: Compact ALL features_json immediately (not just old ones)
         int emergencyCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: JSON Compaction ALL)",
@@ -376,6 +390,27 @@ public class DataRetentionService : BackgroundService
         {
             BotLogger.Warn($"[SmartStorageGovernor] Query skipped for {tableLabel}: {ex.Message}");
             return 0;
+        }
+    }
+
+    private static async Task<int> ExecuteChunkedDeleteSubminuteAsync(System.Data.Common.DbConnection conn, string tableLabel, string sql, object param, int chunkSize = 10000)
+    {
+        int totalDeleted = 0;
+        try
+        {
+            while (true)
+            {
+                int deleted = await conn.ExecuteAsync(sql, param, commandTimeout: 60);
+                totalDeleted += deleted;
+                if (deleted < chunkSize) break;
+                await Task.Delay(50); // 50ms yield for live tick inserts
+            }
+            return totalDeleted;
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[SmartStorageGovernor] Chunked delete notice for {tableLabel}: {ex.Message}");
+            return totalDeleted;
         }
     }
 }

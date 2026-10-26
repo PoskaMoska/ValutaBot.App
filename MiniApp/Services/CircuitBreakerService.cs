@@ -48,6 +48,8 @@ namespace ValutaBot.MiniApp.Services
             new(StringComparer.OrdinalIgnoreCase);
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _shadowRecoveryStreak =
             new(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _symbolQuarantineWatermarks =
+            new(StringComparer.OrdinalIgnoreCase);
 
         private static string GetSymbolKey(string asset, string timeframe)
             => $"{AssetSanitizer.Sanitize(asset)}_{timeframe.Trim().ToLowerInvariant()}";
@@ -96,8 +98,31 @@ namespace ValutaBot.MiniApp.Services
 
         public bool IsHalted()
         {
-            // ── Autonomous bypass: if we haven't yet reached the dataset readiness
-            // threshold, Circuit Breaker is completely inactive. No config needed.
+            lock (_lock)
+            {
+                // Refresh CB halt state from DB if cache is stale
+                var cacheStale = (DateTime.UtcNow - _cacheLoadedAt).TotalSeconds > _settings.CircuitBreakerDbCacheTtlSeconds;
+                if (cacheStale)
+                {
+                    _ = Task.Run(async () => await RefreshCacheFromDbAsync());
+                }
+
+                // 1. ABSOLUTE PRIORITY: if system is halted (memory or DB), trading is ALWAYS forbidden!
+                if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
+                    return true;
+
+                // Halt expired → record expiration watermark, clear state, and delete DB row
+                if (_haltedUntil.HasValue && DateTime.UtcNow >= _haltedUntil.Value)
+                {
+                    _lastCooldownExpiredUtc = _haltedUntil.Value;
+                    _haltedUntil = null;
+                    _haltReason = string.Empty;
+                    BotLogger.Info($"[CircuitBreaker] Cooldown expired. Fresh evaluation window starts after {_lastCooldownExpiredUtc:HH:mm:ss} UTC.");
+                    _ = Task.Run(async () => await DeleteHaltFromDbAsync());
+                }
+            }
+
+            // 2. Autonomous bypass: only active when NO explicit Halt is in effect
             if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < _settings.DatasetReadinessThreshold)
             {
                 // Kick an async refresh so the count stays up-to-date (fire-and-forget)
@@ -113,37 +138,11 @@ namespace ValutaBot.MiniApp.Services
                 return false;
             }
 
-            lock (_lock)
-            {
-                // Refresh CB halt state from DB if cache is stale
-                var cacheStale = (DateTime.UtcNow - _cacheLoadedAt).TotalSeconds > _settings.CircuitBreakerDbCacheTtlSeconds;
-                if (cacheStale)
-                {
-                    _ = Task.Run(async () => await RefreshCacheFromDbAsync());
-                }
-
-                if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
-                    return true;
-
-                // Halt expired → record expiration watermark, clear state, and delete DB row
-                if (_haltedUntil.HasValue && DateTime.UtcNow >= _haltedUntil.Value)
-                {
-                    _lastCooldownExpiredUtc = _haltedUntil.Value;
-                    _haltedUntil = null;
-                    _haltReason = string.Empty;
-                    BotLogger.Info($"[CircuitBreaker] Cooldown expired. Fresh evaluation window starts after {_lastCooldownExpiredUtc:HH:mm:ss} UTC.");
-                    _ = Task.Run(async () => await DeleteHaltFromDbAsync());
-                }
-                return false;
-            }
+            return false;
         }
 
         public string? GetHaltedReason()
         {
-            // During dataset collection show informative progress instead of null
-            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < _settings.DatasetReadinessThreshold)
-                return null; // scanner treats null as "not halted" — correct behaviour
-
             lock (_lock)
             {
                 if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
@@ -151,8 +150,13 @@ namespace ValutaBot.MiniApp.Services
                     var remain = (_haltedUntil.Value - DateTime.UtcNow).TotalMinutes;
                     return $"CIRCUIT_BREAKER_ACTIVE (Resumes in {remain:F0}m — {_haltReason})";
                 }
-                return null;
             }
+
+            // During dataset collection show informative progress instead of null
+            if (_cachedOutcomeCount >= 0 && _cachedOutcomeCount < _settings.DatasetReadinessThreshold)
+                return null; // scanner treats null as "not halted" — correct behaviour
+
+            return null;
         }
 
         public bool IsSymbolQuarantined(string asset, string timeframe, out string? reason)
@@ -168,6 +172,7 @@ namespace ValutaBot.MiniApp.Services
                     return true;
                 }
 
+                _symbolQuarantineWatermarks[key] = DateTime.UtcNow;
                 _symbolQuarantine.TryRemove(key, out _);
                 _shadowRecoveryStreak.TryRemove(key, out _);
                 BotLogger.Info($"[CircuitBreaker] Per-symbol quarantine expired for {key}. Resuming live trading.");
@@ -189,6 +194,7 @@ namespace ValutaBot.MiniApp.Services
                         int streak = _shadowRecoveryStreak.AddOrUpdate(key, 1, (_, c) => c + 1);
                         if (streak >= 2)
                         {
+                            _symbolQuarantineWatermarks[key] = DateTime.UtcNow;
                             _symbolQuarantine.TryRemove(key, out _);
                             _shadowRecoveryStreak.TryRemove(key, out _);
                             BotLogger.Info($"[CircuitBreaker] Early self-healing recovery for {key}: 2 consecutive SHADOW wins! Lifting quarantine.");
@@ -206,7 +212,8 @@ namespace ValutaBot.MiniApp.Services
 
             try
             {
-                var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(asset, timeframe, 12);
+                DateTime? sinceUtc = _symbolQuarantineWatermarks.TryGetValue(key, out var wm) ? wm : null;
+                var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(asset, timeframe, 12, sinceUtc);
                 if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 4) return;
 
                 int consecutiveLosses = 0;
@@ -277,8 +284,15 @@ namespace ValutaBot.MiniApp.Services
                 int consecutiveLosses = 0;
                 foreach (var win in recentOutcomes)
                 {
-                    if (win == false) consecutiveLosses++;
-                    else break; // Win or Tie resets the streak
+                    if (win == false) 
+                    {
+                        consecutiveLosses++;
+                    }
+                    else if (win == true) 
+                    {
+                        break; // Only real WIN resets the loss streak
+                    }
+                    // win == null (Doji/Tie) -> continue (does NOT break the loss streak)
                 }
                 if (consecutiveLosses >= _settings.CircuitBreakerMaxConsecutiveLosses)
                 {

@@ -11,13 +11,23 @@
   let tradingUrl = null;
   let auxStarted = false;
 
-  setInterval(function () {
-    if (!buf.length || typeof window.__poPush !== 'function') return;
-    const batch = buf; buf = [];
-    try { window.__poPush(JSON.stringify(batch)); } catch (e) { /* python side gone */ }
-  }, 1000);
+  let pushTimer = null;
+  function scheduleFlush() {
+    if (pushTimer) return;
+    pushTimer = setTimeout(function () {
+      pushTimer = null;
+      if (!buf.length || typeof window.__poPush !== 'function') return;
+      const batch = buf; buf = [];
+      try { window.__poPush(JSON.stringify(batch)); } catch (e) { /* python side gone */ }
+    }, 20); // 20ms micro-batching instead of 1000ms delay
+  }
 
-  function push(rec) { if (buf.length < 50000) buf.push(rec); }
+  function push(rec) {
+    if (buf.length < 50000) buf.push(rec);
+    if (typeof window.__poPush === 'function') {
+      scheduleFlush();
+    }
+  }
 
   function evName(text) {
     const m = /^4[25]\d*-?\["([^"]+)"/.exec(text);

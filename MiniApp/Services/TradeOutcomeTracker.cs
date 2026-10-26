@@ -12,7 +12,7 @@ public static class TradeOutcomeTracker
     private static volatile bool _initialized = false;
     private static readonly SemaphoreSlim _initSemaphore = new(1, 1);
     private static readonly SemaphoreSlim _csvSemaphore = new(1, 1); // B5-FIX: Concurrent CSV write lock
-private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _consecutiveLosses = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _consecutiveLosses = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastTradeTime = new();
 
     private static int ComputeSecondsSinceLastTrade(string asset, string timeframe, DateTime createdAt)
@@ -121,7 +121,7 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 HourUtc = record.CreatedAt.Hour,
                 // Phase 1: Decision Snapshot
                 TaDirection = record.SourceDirections.GetValueOrDefault("TechAnalysis", "NEUTRAL"),
-                MlDirection = record.SourceDirections.GetValueOrDefault("LIGHTGBM", "NEUTRAL"),
+                MlDirection = record.SourceDirections.GetValueOrDefault("NeuralBrain", record.SourceDirections.GetValueOrDefault("LIGHTGBM", "NEUTRAL")),
                 SmcDirection = record.SourceDirections.GetValueOrDefault("SMC", "NEUTRAL"),
                 OfDirection = "NEUTRAL",
                 ConflictCount = record.SourceDirections.Count(kv => kv.Value != "NEUTRAL" && kv.Value != record.Direction && !record.Direction.StartsWith("SHADOW")),
@@ -158,18 +158,18 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             bool isShadowDirectional = record.Direction is "SHADOW_BUY" or "SHADOW_PUT";
             if (isShadowDirectional && CircuitBreaker != null && record.Probability >= 57)
             {
-                _ = CircuitBreaker.CheckSymbolStateAsync(record.Asset, record.Timeframe, record.WasCorrect, isShadow: true);
+                await CircuitBreaker.CheckSymbolStateAsync(record.Asset, record.Timeframe, record.WasCorrect, isShadow: true);
             }
 
             if (isLiveDirectional)
             {
                 if (CircuitBreaker != null)
                 {
-                    _ = CircuitBreaker.CheckStateAsync(); // Fire and forget so it doesn't block verification
-                    _ = CircuitBreaker.CheckSymbolStateAsync(record.Asset, record.Timeframe, record.WasCorrect, isShadow: false);
+                    await CircuitBreaker.CheckStateAsync();
+                    await CircuitBreaker.CheckSymbolStateAsync(record.Asset, record.Timeframe, record.WasCorrect, isShadow: false);
                 }
 
-                // 🔥 DRIFT DETECTION 🔥
+                // Drift detection (background)
                 _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
             }
 
@@ -180,12 +180,11 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             {
                 if (isLiveDirectional)
                 {
-                    // A tie breaks the loss streak!
-                    _consecutiveLosses[lossKey] = 0;
+                    // A tie / refund DOES NOT break the loss streak! In financial risk management a refund is not a win.
+                    // Preserve current consecutive loss count.
                     ValutaMetrics.TradeOutcomesTotal.WithLabels(record.Asset, record.Timeframe, "TIE").Inc();
-                    ValutaMetrics.ConsecutiveLosses.WithLabels(record.Asset, record.Timeframe).Set(0);
                 }
-                BotLogger.Warn($"[TradeOutcomeTracker] Doji for {record.Asset} (entry==exit). Saved to DB but skipping ML/WF feedback.");
+                BotLogger.Warn($"[TradeOutcomeTracker] Doji for {record.Asset} (entry==exit). Preserving loss streak ({GetConsecutiveLosses(record.Asset, record.Timeframe)}). Saved to DB.");
                 return;
             }
 
@@ -226,14 +225,14 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
             // ── TRAINING DOJI FILTER (Exact / Micro-Tie Threshold) ──
             // In binary options, even a 1-pipette (0.1 bps = 0.001%) move determines a full payout or loss.
             // Only skip exact/micro ties (< 0.0001% = 0.01 bps, matching export_dataset.py min_pnl_threshold)
-            // so AutoCalib and OnlineMetaLearner receive 97%+ of real directional outcomes.
+            // so AutoCalib and Neural Brain receive 97%+ of real directional outcomes.
             double pctDiff = record.EntryPrice > 1e-8 ? Math.Abs(exitPriceVal - record.EntryPrice) / record.EntryPrice * 100.0 : 0;
             const double dojiThreshold = 0.0001;
             bool isTrainingDoji = pctDiff < dojiThreshold;
 
             if (isTrainingDoji)
             {
-                BotLogger.Warn($"[TradeOutcomeTracker] Training Doji (Noise) for {record.Asset} (pctDiff={pctDiff:F4}% < {dojiThreshold:F3}%). Skipping ML/WF feedback to prevent weight poisoning.");
+                BotLogger.Warn($"[TradeOutcomeTracker] Training Doji (Noise) for {record.Asset} (pctDiff={pctDiff:F4}% < {dojiThreshold:F3}%). Skipping trade feedback to prevent training on noise.");
                 return;
             }
 
@@ -254,30 +253,11 @@ private static readonly System.Collections.Concurrent.ConcurrentDictionary<strin
                 ? record.Direction["SHADOW_".Length..] 
                 : record.Direction;
 
-            // V3 DualStreamPatchBrain / SequenceBrain learns from PostgreSQL trade_outcomes via export_dataset.py;
-            // OnlineMetaLearner above handles real-time ensemble adaptation in C# without dead HTTP /feedback calls.
-
             BotLogger.Info($"[TradeOutcomeTracker] Verified trade {record.Id} ({record.Asset} {record.Timeframe}) -> {(wasCorrect ? "WIN" : "LOSS")}.");
-
-
-
-// EVOLUTION DUMP removed: redundant query bypassing 99% shadow outcomes
-
         }
         catch (Exception ex)
         {
             BotLogger.Error($"[TradeOutcomeTracker] Error processing trade outcome for {record.Id}", ex);
         }
     }
-
 }
-
-
-
-
-
-
-
-
-
-

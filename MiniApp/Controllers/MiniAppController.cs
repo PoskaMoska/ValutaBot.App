@@ -225,7 +225,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         // Init Telegram notifier from config or env (set in Railway dashboard)
         TelegramNotifier.Init(builder.Configuration["TelegramBotToken"] ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));
 
-        // Init LightGBM Python ML microservice URL
+        // Init Neural Brain (PatchTST) Python ML microservice URL
         MLPythonService.Init(Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? builder.Configuration["MLService:BaseUrl"] ?? "http://localhost:8765");
 
         builder.Environment.WebRootPath = System.IO.Path.Combine(AppContext.BaseDirectory, "MiniApp", "wwwroot");
@@ -289,7 +289,7 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
             try
             {
                 Console.WriteLine("[TickCollector] Application stopping: performing final tick flush to DB...");
-                RealtimeTickCollector.FlushAsync(CancellationToken.None).GetAwaiter().GetResult();
+                RealtimeTickCollector.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {

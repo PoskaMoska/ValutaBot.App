@@ -21,7 +21,7 @@ public class ConfluenceMatrixEngine(
     IMarketAnalyzer marketAnalyzer,
     IAutoCalibrationEngine? autoCalib = null) : IConfluenceMatrixEngine
 {
-    // 4D Matrix вЂ” fetch mode (always makes 3 HTTP requests)
+    // 4D Matrix — fetch mode (always makes 3 HTTP requests)
     // Named distinctly from the smart-reuse overload to make fallback behavior explicit.
     // Only called directly when no pre-loaded candles are available.
     private async Task<ConfluenceMatrixResult> Evaluate4DMatrixFetchAsync(
@@ -79,14 +79,14 @@ public class ConfluenceMatrixEngine(
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "рџ’Ћ РР”Р•РђР›Р¬РќР«Р™ РЎРР“РќРђР› (3 РўР¤ - 100%)",
-                >= 0.65 => "рџ’Ћ РЎРР›Р¬РќР«Р™ РЎРР“РќРђР› (2 РўР¤ - 67%)",
-                _       => "рџ’Ћ РЎР›РђР‘Р«Р™ РЎРР“РќРђР› (1 РўР¤ - 33%)"
+                >= 0.99 => "💎 ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "💎 СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "💎 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
-            string summary = $"РІР‚Сћ 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label}";
+            string summary = $"• MTF Alignment ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label}";
 
-            BotLogger.Info($"[Confluence 3D] {asset} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup}");
+            BotLogger.Info($"[MTF Alignment] {asset} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup}");
 
             return new ConfluenceMatrixResult(
                 ConfluenceRatio:      confluenceRatio,
@@ -100,12 +100,12 @@ public class ConfluenceMatrixEngine(
         }
         catch (Exception ex)
         {
-            BotLogger.Error($"[Confluence 3D] Error evaluating matrix for {asset}", ex);
+            BotLogger.Error($"[MTF Alignment] Error evaluating matrix for {asset}", ex);
             return new ConfluenceMatrixResult(
                 ConfluenceRatio: 0.0,
                 IsGoldenSetup: false,
                 ProbabilityBoost: 0,
-                ConfluenceLabel: "рџ’Ћ 3D Matrix Unavailable",
+                ConfluenceLabel: "💎 MTF Alignment Unavailable",
                 SummaryReasoning: "MTF sync failed due to rate limits",
                 TimeframeDirections: new Dictionary<string, string>(),
                 DominantDirection: "NEUTRAL"
@@ -155,7 +155,7 @@ public class ConfluenceMatrixEngine(
     {
         if (prices == null || prices.Length < 10 || ohlcCandles == null || ohlcCandles.Length < 10)
         {
-            BotLogger.Info($"[Confluence 3D] Not enough real OHLC candles for {tf} ({prices?.Length ?? 0}) РІР‚вЂќ returning NEUTRAL.");
+            BotLogger.Info($"[MTF Alignment] Not enough real OHLC candles for {tf} ({prices?.Length ?? 0}) — returning NEUTRAL.");
             return "NEUTRAL";
         }
 
@@ -174,7 +174,7 @@ public class ConfluenceMatrixEngine(
         }
         catch (Exception ex)
         {
-            BotLogger.Warn($"[Confluence 3D] ScoreDirectionFromCandles failed for {tf}: {ex.Message}");
+            BotLogger.Warn($"[MTF Alignment] ScoreDirectionFromCandles failed for {tf}: {ex.Message}");
             return "NEUTRAL";
         }
     }
@@ -200,7 +200,7 @@ public class ConfluenceMatrixEngine(
             higherCandles == null || higherPrices == null ||
             higherCandles.Length < 10 || higherPrices.Length < 10)
         {
-            BotLogger.Info($"[Confluence 3D] Pre-loaded candles missing or too short for {asset}/{primaryTimeframe} вЂ” falling back to 3-fetch mode.");
+            BotLogger.Info($"[MTF Alignment] Pre-loaded candles missing or too short for {asset}/{primaryTimeframe} — falling back to 3-fetch mode.");
             return await Evaluate4DMatrixFetchAsync(asset, primaryTimeframe, isForex, binanceSymbol);
         }
 
@@ -269,14 +269,14 @@ public class ConfluenceMatrixEngine(
 
             string label = confluenceRatio switch
             {
-                >= 0.99 => "рџ’Ћ РР”Р•РђР›Р¬РќР«Р™ РЎРР“РќРђР› (3 РўР¤ - 100%)",
-                >= 0.65 => "рџ’Ћ РЎРР›Р¬РќР«Р™ РЎРР“РќРђР› (2 РўР¤ - 67%)",
-                _       => "рџ’Ћ РЎР›РђР‘Р«Р™ РЎРР“РќРђР› (1 РўР¤ - 33%)"
+                >= 0.99 => "💎 ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
+                >= 0.65 => "💎 СИЛЬНЫЙ СИГНАЛ (2 ТФ - 67%)",
+                _       => "💎 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)"
             };
 
-            string summary = $"РІР‚Сћ 4D Matrix ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch smart]";
+            string summary = $"• MTF Alignment ({microTf.ToUpper()}+{primaryTf.ToUpper()}+{macroTf.ToUpper()}): {label} [1-fetch smart]";
 
-            BotLogger.Info($"[Confluence 3D] {asset}/{primaryTimeframe} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup} | Smart 1-fetch");
+            BotLogger.Info($"[MTF Alignment] {asset}/{primaryTimeframe} | Ratio: {confluenceRatio * 100}% ({maxAgree}/3 {dominantDir}) | Boost: +{boost}% | Golden: {isGoldenSetup} | Smart 1-fetch");
 
             return new ConfluenceMatrixResult(
                 ConfluenceRatio:      confluenceRatio,
@@ -290,7 +290,7 @@ public class ConfluenceMatrixEngine(
         }
         catch (Exception ex)
         {
-            BotLogger.Error($"[Confluence 3D] Error in 1-fetch mode for {asset}", ex);
+            BotLogger.Error($"[MTF Alignment] Error in 1-fetch mode for {asset}", ex);
             return await Evaluate4DMatrixFetchAsync(asset, primaryTimeframe, isForex, binanceSymbol);
         }
     }
@@ -395,11 +395,11 @@ public class ConfluenceMatrixEngine(
             // Cap confidence to 57% so s5 does not trigger false certainty on single-tick bursts.
             if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
             {
-                finalProbPct = Math.Min(65, finalProbPct);
+                finalProbPct = Math.Min(57, finalProbPct);
             }
 
             // Circuit Breaker risk dampener (C# риск-менеджмент серий потерь)
-            int mlLiveLosses = Math.Max(consecutiveLosses, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0);
+            int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
             if (mlLiveLosses >= 3)
             {
                 finalProbPct = Math.Max(50, finalProbPct - 6);

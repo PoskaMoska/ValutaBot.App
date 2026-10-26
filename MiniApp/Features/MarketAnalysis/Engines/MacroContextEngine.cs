@@ -49,10 +49,11 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
                 double posPct = (cached.anchors.DayHigh > cached.anchors.DayLow)
                     ? Math.Clamp((currentPrice - cached.anchors.DayLow) / (cached.anchors.DayHigh - cached.anchors.DayLow), 0.0, 1.0)
                     : 0.5;
-                double distHigh = Math.Round((cached.anchors.DayHigh - currentPrice) / currentPrice * 10000, 2);
-                double distLow = Math.Round((currentPrice - cached.anchors.DayLow) / currentPrice * 10000, 2);
-                double distAsiaH = cached.anchors.AsianHigh > 0 ? Math.Round((cached.anchors.AsianHigh - currentPrice) / currentPrice * 10000, 2) : 0.0;
-                double distAsiaL = cached.anchors.AsianLow > 0 ? Math.Round((currentPrice - cached.anchors.AsianLow) / currentPrice * 10000, 2) : 0.0;
+                double safeCurrentPrice = Math.Max(1e-6, currentPrice);
+                double distHigh = Math.Round((cached.anchors.DayHigh - currentPrice) / safeCurrentPrice * 10000, 2);
+                double distLow = Math.Round((currentPrice - cached.anchors.DayLow) / safeCurrentPrice * 10000, 2);
+                double distAsiaH = cached.anchors.AsianHigh > 0 ? Math.Round((cached.anchors.AsianHigh - currentPrice) / safeCurrentPrice * 10000, 2) : 0.0;
+                double distAsiaL = cached.anchors.AsianLow > 0 ? Math.Round((currentPrice - cached.anchors.AsianLow) / safeCurrentPrice * 10000, 2) : 0.0;
 
                 return cached.anchors with {
                     DayRangePositionPct = Math.Round(posPct, 3),
@@ -92,10 +93,11 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
                 if (dayL > currentPrice) dayL = currentPrice;
 
                 double posPct = (dayH > dayL) ? Math.Clamp((currentPrice - dayL) / (dayH - dayL), 0.0, 1.0) : 0.5;
-                double distHigh = Math.Round((dayH - currentPrice) / currentPrice * 10000, 2);
-                double distLow = Math.Round((currentPrice - dayL) / currentPrice * 10000, 2);
-                double distAsiaH = asiaH > 0 ? Math.Round((asiaH - currentPrice) / currentPrice * 10000, 2) : 0.0;
-                double distAsiaL = asiaL > 0 ? Math.Round((currentPrice - asiaL) / currentPrice * 10000, 2) : 0.0;
+                double safePrice = Math.Max(1e-6, currentPrice);
+                double distHigh = Math.Round((dayH - currentPrice) / safePrice * 10000, 2);
+                double distLow = Math.Round((currentPrice - dayL) / safePrice * 10000, 2);
+                double distAsiaH = asiaH > 0 ? Math.Round((asiaH - currentPrice) / safePrice * 10000, 2) : 0.0;
+                double distAsiaL = asiaL > 0 ? Math.Round((currentPrice - asiaL) / safePrice * 10000, 2) : 0.0;
 
                 var anchors = new DayLevelAnchors(
                     DayHigh: dayH,
