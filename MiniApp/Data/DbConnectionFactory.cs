@@ -271,19 +271,21 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf ON trade_outcomes(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_dir ON trade_outcomes(created_at DESC, direction);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_at ON trade_outcomes(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_at ON trade_outcomes(verified_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified ON trade_outcomes(asset, timeframe, verified_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes(created_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
-                CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at);
-                CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime_tz ON subminute_candles ((open_time::timestamptz));
+                CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_lookup ON subminute_candles(asset, interval, open_time DESC);
                 DROP INDEX IF EXISTS idx_hist_candles_asset;
                 DROP TABLE IF EXISTS neutral_signals;
-
-                -- Functional expression indexes for instant timestamptz seeks (eliminates full table scans)
-                CREATE INDEX IF NOT EXISTS idx_subminute_candles_lookup ON subminute_candles (asset, interval, ((open_time::timestamptz)) DESC);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_tz ON trade_outcomes (((created_at::timestamptz)) DESC);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_tz ON trade_outcomes (((verified_at::timestamptz)) DESC);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified_tz ON trade_outcomes (asset, timeframe, ((verified_at::timestamptz)) DESC);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes (((created_at::timestamptz)) DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
-                CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_tz ON pending_trades (((verify_at::timestamptz)) ASC);
+                DROP INDEX IF EXISTS idx_subminute_candles_opentime_tz;
+                DROP INDEX IF EXISTS idx_pending_trades_verify_tz;
+                DROP INDEX IF EXISTS idx_trade_outcomes_created_tz;
+                DROP INDEX IF EXISTS idx_trade_outcomes_verified_tz;
+                DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf_verified_tz;
 
                 -- Table-level high-load tuning: fillfactor=80 enables HOT (Heap-Only Tuple) in-place updates for real-time ticks
                 DO $$
