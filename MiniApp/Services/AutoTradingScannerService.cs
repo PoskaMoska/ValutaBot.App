@@ -183,9 +183,35 @@ public class AutoTradingScannerService : BackgroundService
             if (recentCandles.Length >= minCandles)
             {
                 var lastCandleTime = recentCandles[^1].Timestamp;
+
+                // Entry Window Guard: prevent entering trades late into the candle lifecycle (e.g. at second 4 of a 5s bar)
+                int tfSecs = tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 5
+                    : tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 10
+                    : tf.Equals("s15", StringComparison.OrdinalIgnoreCase) ? 15
+                    : tf.Equals("s30", StringComparison.OrdinalIgnoreCase) ? 30 : 60;
+
+                DateTime refTime = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+                    ? PocketOptionWebSocketStream.LastBrokerTickUtc
+                    : DateTime.UtcNow;
+
+                DateTime newCandleOpen = lastCandleTime.AddSeconds(tfSecs) <= refTime.AddMilliseconds(500)
+                    ? lastCandleTime.AddSeconds(tfSecs)
+                    : lastCandleTime;
+
+                double elapsedSinceOpenSec = (refTime - newCandleOpen).TotalSeconds;
+                double maxAllowedElapsed = tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 0.8
+                    : tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 1.5
+                    : 2.5;
+
+                if (elapsedSinceOpenSec > maxAllowedElapsed)
+                {
+                    _logger.LogWarning($"[AutoScanner] Skipped {pair}/{tf}: entry boundary expired (+{elapsedSinceOpenSec:F2}s into candle, limit {maxAllowedElapsed:F1}s).");
+                    return;
+                }
+
                 if ((DateTime.UtcNow - lastCandleTime).TotalSeconds <= 30)
                 {
-                    _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles)...");
+                    _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles, +{elapsedSinceOpenSec:F2}s into bar)...");
                     await orchestrator.ExecuteAnalysisAsync(AnalysisAsset(pair), tf, userSettings);
                 }
                 else

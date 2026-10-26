@@ -105,7 +105,10 @@ public class MarketAnalysisOrchestrator(
 
         // Prepare closed candles (cap at `limit` after dropping forming candle)
         int intervalSecs = _fetcher.TimeframeSeconds(timeframe);
-        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= DateTime.UtcNow;
+        DateTime referenceNowUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+            ? PocketOptionWebSocketStream.LastBrokerTickUtc.AddMilliseconds(250)
+            : DateTime.UtcNow;
+        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= referenceNowUtc;
         var closedCandles = isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
         if (closedCandles.Length > limit)
             closedCandles = closedCandles.TakeLast(limit).ToArray();
@@ -420,22 +423,39 @@ public class MarketAnalysisOrchestrator(
         if (canExecuteReal)
         {
             if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshRealPrice) && freshRealPrice > 0)
-                currentLivePrice = freshRealPrice;
-            _lastRealTradeTimeByAsset[cleanAsset] = DateTime.UtcNow;
-            _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
-            _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
-                smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                effectiveMarketRegime,
-                state.VelocityRegime ?? "UNKNOWN",
-                mainAtr, mainAdx, taResult.rsiVal,
-                htfAligned,
-                minutesToNews ?? -1,
-                consensus.CombinedReasoningText ?? "",
-                mlPrediction?.ModelVersion ?? "",
-                mlPrediction?.Accuracy ?? 0.0,
-                priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
-            dbSw.Stop();
-            traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
+            {
+                double slippageBps = Math.Abs(freshRealPrice - currentLivePrice) / currentLivePrice * 10000.0;
+                if (slippageBps > 1.5)
+                {
+                    _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: slippage {SlippageBps:F2} bps exceeds 1.5 bps threshold (signal: {CurrentPrice}, fresh: {FreshPrice})",
+                        cleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice);
+                    traceLines.Add($"[8. SlippageGate]    [ОТКЛОНЕНО] Проскальзывание {slippageBps:F2} bps превышает лимит 1.5 bps -> 0ms");
+                    canExecuteReal = false;
+                }
+                else
+                {
+                    currentLivePrice = freshRealPrice;
+                }
+            }
+
+            if (canExecuteReal)
+            {
+                _lastRealTradeTimeByAsset[cleanAsset] = DateTime.UtcNow;
+                _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
+                _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
+                    smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
+                    effectiveMarketRegime,
+                    state.VelocityRegime ?? "UNKNOWN",
+                    mainAtr, mainAdx, taResult.rsiVal,
+                    htfAligned,
+                    minutesToNews ?? -1,
+                    consensus.CombinedReasoningText ?? "",
+                    mlPrediction?.ModelVersion ?? "",
+                    mlPrediction?.Accuracy ?? 0.0,
+                    priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
+                dbSw.Stop();
+                traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
+            }
         }
         else if (allowShadowRecord)
         {

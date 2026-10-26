@@ -153,6 +153,15 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         builder.Services.AddHttpClient("MLPythonService", client => 
         {
             client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestVersion = System.Net.HttpVersion.Version20;
+            client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+        }).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
+            KeepAlivePingDelay = TimeSpan.FromSeconds(15),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
+            EnableMultipleHttp2Connections = true
         }).AddStandardResilienceHandler(options =>
         {
             // Never retry timed-out live scalping predictions (retrying an s5 candle after 4-6s is stale and causes a retry storm)

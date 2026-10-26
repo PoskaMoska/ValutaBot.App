@@ -36,6 +36,13 @@ public static class ClockSkewMonitor
     /// <summary>Replaceable sink (tests swap it out). Default: Telegram admins.</summary>
     public static Func<string, Task> AlertSink { get; set; } = msg => TelegramBotService.SendMessageToAdmins(msg);
 
+    public static TimeSpan SystemClockOffset { get; private set; } = TimeSpan.Zero;
+
+    public static void RecordHttpDrift(TimeSpan drift)
+    {
+        SystemClockOffset = drift;
+    }
+
     public static SkewSnapshot? GetLatest() => _latest;
 
     /// <summary>Record one live (non-backfill) tick. Cheap: ring write + a throttled evaluation once a minute.</summary>
@@ -110,6 +117,7 @@ public static class ClockSkewMonitor
                 }
             }
             alertingNow = _alerting;
+            SystemClockOffset = TimeSpan.FromMilliseconds(median);
             _latest = new SkewSnapshot(window.Length, Math.Round(median, 1), Math.Round(Pct(0.05), 1), Math.Round(Pct(0.95), 1),
                 Math.Round(window[0], 1), Math.Round(window[^1], 1), alertingNow, nowUtc);
         }

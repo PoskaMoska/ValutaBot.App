@@ -101,8 +101,13 @@ public static class LatencyProbe
                     : new HttpClient { Timeout = TimeSpan.FromMilliseconds(TimeoutMs) };
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                await client.GetAsync(new Uri(PingTarget));
+                var resp = await client.GetAsync(new Uri(PingTarget));
                 sw.Stop();
+                if (resp.Headers.Date.HasValue)
+                {
+                    var drift = DateTime.UtcNow - resp.Headers.Date.Value.UtcDateTime;
+                    ValutaBot.MiniApp.Services.ClockSkewMonitor.RecordHttpDrift(drift);
+                }
 
                 totalMs += sw.Elapsed.TotalMilliseconds;
                 succeeded++;

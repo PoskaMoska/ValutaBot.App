@@ -69,32 +69,51 @@ public class PendingTradeVerificationService : BackgroundService
             await conn.OpenAsync();
             
             // Physical duration expiry: verifyUtc is the exact moment the contract expires.
-            long s5Ticks = TimeSpan.FromSeconds(5).Ticks;
             DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();
             DateTime verifyUtc = record.VerifyAt.Kind == DateTimeKind.Utc ? record.VerifyAt : record.VerifyAt.ToUniversalTime();
+            long s5Ticks = TimeSpan.FromSeconds(5).Ticks;
             DateTime createdBucket = new DateTime(createdUtc.Ticks - (createdUtc.Ticks % s5Ticks), DateTimeKind.Utc);
-            DateTime expiryBucket = new DateTime(verifyUtc.Ticks - (verifyUtc.Ticks % s5Ticks), DateTimeKind.Utc);
-            DateTime targetGrid = expiryBucket;
-            DateTime minAllowedSub = createdBucket > expiryBucket.AddSeconds(-20) ? createdBucket : expiryBucket.AddSeconds(-20);
+            DateTime targetGrid = new DateTime(verifyUtc.Ticks - (verifyUtc.Ticks % s5Ticks), DateTimeKind.Utc);
+            if (targetGrid <= createdBucket) targetGrid = createdBucket.AddSeconds(5);
+            DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20) ? createdBucket : targetGrid.AddSeconds(-20);
 
+            // Locate the enclosing candle [open_time, open_time + 5s) covering verifyUtc
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                 SELECT 
                     CASE 
-                        WHEN open_time = @ExpiryBucket THEN open_price 
+                        WHEN @VerifyAt - open_time::timestamptz <= INTERVAL '2.5 seconds' THEN open_price 
                         ELSE close_price 
                     END
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
-                  AND open_time <= @ExpiryBucket
-                  AND open_time >= @MinAllowed
+                  AND open_time::timestamptz <= @VerifyAt
+                  AND open_time::timestamptz + INTERVAL '5 seconds' >= @VerifyAt
                 ORDER BY open_time DESC
                 LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
-                ExpiryBucket = expiryBucket.ToString("O"),
-                MinAllowed = minAllowedSub.ToString("O")
+                VerifyAt = verifyUtc
             });
+
+            if (!exitPrice.HasValue || exitPrice.Value <= 0)
+            {
+                // Fallback: nearest candle on or before verifyUtc within allowed window
+                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
+                    SELECT close_price
+                    FROM subminute_candles
+                    WHERE asset = @Asset AND interval = @Interval
+                      AND open_time::timestamptz <= @VerifyAt
+                      AND open_time::timestamptz >= @MinAllowed
+                    ORDER BY open_time DESC
+                    LIMIT 1
+                ", new { 
+                    Asset = cleanAsset, 
+                    Interval = verifyInterval, 
+                    VerifyAt = verifyUtc,
+                    MinAllowed = minAllowedSub
+                });
+            }
 
             // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m).
             // Not in PO mode: historical_candles holds Tiingo prices, which must never settle an OTC trade.

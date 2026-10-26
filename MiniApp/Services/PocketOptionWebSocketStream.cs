@@ -74,7 +74,7 @@ public static class PocketOptionWebSocketStream
     }
 
     // Live price store: last tick per symbol
-    private static readonly ConcurrentDictionary<string, double> _livePrices = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, (double Price, long TimestampUtcTicks)> _livePrices = new(StringComparer.OrdinalIgnoreCase);
 
     // Watermark per candle asset key (e.g. EURUSD_PO) to prevent duplicate volume while backfilling reconnect gaps
     private static readonly ConcurrentDictionary<string, double> _lastCandleSrvTs = new(StringComparer.OrdinalIgnoreCase);
@@ -87,6 +87,7 @@ public static class PocketOptionWebSocketStream
     public static long TotalTicksIngested => Interlocked.Read(ref _totalTicksIngested);
     public static string Status { get; private set; } = "IDLE";
     public static DateTime LastTickUtc => _lastTickTime;
+    public static DateTime LastBrokerTickUtc { get; private set; } = DateTime.MinValue;
     public static int ConsecutiveAuthFailures => Volatile.Read(ref _consecutiveAuthFailures);
 
     /// <summary>
@@ -117,9 +118,19 @@ public static class PocketOptionWebSocketStream
         }
     }
 
-    public static bool TryGetLivePrice(string symbol, out double price)
+    public static bool TryGetLivePrice(string symbol, out double price, double maxAgeSeconds = 2.0)
     {
-        return _livePrices.TryGetValue(AssetSanitizer.Sanitize(symbol), out price);
+        if (_livePrices.TryGetValue(AssetSanitizer.Sanitize(symbol), out var entry))
+        {
+            long ageTicks = DateTime.UtcNow.Ticks - entry.TimestampUtcTicks;
+            if (ageTicks <= TimeSpan.FromSeconds(maxAgeSeconds).Ticks && entry.Price > 0)
+            {
+                price = entry.Price;
+                return true;
+            }
+        }
+        price = 0;
+        return false;
     }
 
     public static void StartStream(string[]? assets = null)
@@ -769,7 +780,8 @@ public static class PocketOptionWebSocketStream
 
         if (!isBackfill)
         {
-            _livePrices[baseAsset] = price;
+            _livePrices[baseAsset] = (price, DateTime.UtcNow.Ticks);
+            LastBrokerTickUtc = new DateTime(tickTimeUtc, DateTimeKind.Utc);
             _lastMessageTime = DateTime.UtcNow;
             _lastTickTime = DateTime.UtcNow;
             ValutaBot.MiniApp.Services.ClockSkewMonitor.Record(tickTimeUtc);
