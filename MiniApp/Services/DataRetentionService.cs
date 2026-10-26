@@ -35,10 +35,10 @@ public record StorageTelemetry(
 public class DataRetentionService : BackgroundService
 {
     private const double MaxVolumeCapacityMb = 5120.0; // Railway 5 GB starter volume (5 * 1024 MB)
-    private const double GreenThresholdMb    = 2000.0; // 39%: Safe operational zone (~2.7 GB physical disk)
-    private const double YellowThresholdMb   = 2800.0; // 55%: Importance sampling + 24h shadow window (~3.5 GB physical disk)
-    private const double RedThresholdMb      = 3400.0; // 66%: High-frequency cleanup every 15 min (~4.1 GB physical disk)
-    private const double EmergencyThresholdMb= 3800.0; // 74%: Critical purge before physical disk exceeds 90%
+    private const double GreenThresholdMb    = 1600.0; // Safe operational zone (~2.8 GB physical disk with WAL)
+    private const double YellowThresholdMb   = 2400.0; // Importance sampling + 24h shadow window (~3.6 GB physical disk)
+    private const double RedThresholdMb      = 3000.0; // High-frequency cleanup every 15 min (~4.2 GB physical disk)
+    private const double EmergencyThresholdMb= 3300.0; // Critical purge before physical disk exceeds 90% (leaving 600 MB WAL/temp buffer)
 
     private static StorageTelemetry? _latestTelemetry;
     private static bool _tableTuningApplied = false;
@@ -212,19 +212,24 @@ public class DataRetentionService : BackgroundService
                 new { });
 
             jsonCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Features JSON Compaction)",
-                @"UPDATE trade_outcomes
+                @"WITH targets AS (
+                      SELECT ctid FROM trade_outcomes
+                      WHERE features_json IS NOT NULL
+                        AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
+                      LIMIT 2000
+                  )
+                  UPDATE trade_outcomes
                   SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
-                  WHERE features_json IS NOT NULL
-                    AND features_json LIKE '%""Candles""%'",
+                  WHERE ctid IN (SELECT ctid FROM targets)",
                 new { });
         }
 
         // 7. Non-blocking VACUUM maintenance
         try
         {
-            if (forceEmergencyVacuum)
+            if (forceEmergencyVacuum && (MaxVolumeCapacityMb - telemetry.DatabaseSizeMb) >= 2000.0)
             {
-                BotLogger.Warn("[SmartStorageGovernor] Manual VACUUM FULL requested. Rewriting tables to release filesystem blocks...");
+                BotLogger.Warn("[SmartStorageGovernor] Manual VACUUM FULL requested and safe headroom verified. Rewriting tables...");
                 await conn.ExecuteAsync("VACUUM FULL trade_outcomes;", commandTimeout: 300);
                 await conn.ExecuteAsync("VACUUM FULL subminute_candles;", commandTimeout: 300);
                 await conn.ExecuteAsync("VACUUM FULL pending_trades;", commandTimeout: 60);
@@ -232,6 +237,10 @@ public class DataRetentionService : BackgroundService
             }
             else
             {
+                if (forceEmergencyVacuum)
+                {
+                    BotLogger.Warn("[SmartStorageGovernor] VACUUM FULL bypassed: Insufficient disk headroom (<2.0 GB free) on 5GB volume to safely duplicate table file. Using non-blocking VACUUM (ANALYZE).");
+                }
                 await conn.ExecuteAsync("VACUUM (ANALYZE) trade_outcomes;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) subminute_candles;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) pending_trades;", commandTimeout: 60);
@@ -276,10 +285,15 @@ public class DataRetentionService : BackgroundService
 
         // Step 3: Compact ALL features_json immediately (not just old ones)
         int emergencyCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: JSON Compaction ALL)",
-            @"UPDATE trade_outcomes
+            @"WITH targets AS (
+                  SELECT ctid FROM trade_outcomes
+                  WHERE features_json IS NOT NULL
+                    AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
+                  LIMIT 5000
+              )
+              UPDATE trade_outcomes
               SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
-              WHERE features_json IS NOT NULL
-                AND features_json LIKE '%""Candles""%'",
+              WHERE ctid IN (SELECT ctid FROM targets)",
             new { });
 
         // Step 4: Delete old historical candles aggressively
@@ -307,24 +321,25 @@ public class DataRetentionService : BackgroundService
         try
         {
             // Zero-downtime PostgreSQL table storage tuning:
-            // autovacuum_vacuum_scale_factor = 0.05 instructs Postgres to automatically clean dead tuples
-            // every 5% table modifications instead of the default 20%, keeping bloat near zero.
+            // fillfactor=80 on subminute_candles enables HOT updates for high-frequency ticks.
             await conn.ExecuteAsync(@"
                 ALTER TABLE trade_outcomes SET (
                     autovacuum_vacuum_scale_factor = 0.05,
-                    autovacuum_vacuum_cost_limit = 1000,
+                    autovacuum_vacuum_cost_limit = 1500,
                     autovacuum_vacuum_cost_delay = 2
                 );
                 ALTER TABLE subminute_candles SET (
-                    autovacuum_vacuum_scale_factor = 0.05,
-                    autovacuum_vacuum_cost_limit = 1000,
+                    fillfactor = 80,
+                    autovacuum_vacuum_scale_factor = 0.02,
+                    autovacuum_vacuum_cost_limit = 2000,
                     autovacuum_vacuum_cost_delay = 2
                 );
                 ALTER TABLE pending_trades SET (
-                    autovacuum_vacuum_scale_factor = 0.02
+                    autovacuum_vacuum_scale_factor = 0.01,
+                    autovacuum_vacuum_cost_limit = 1000
                 );
             ", commandTimeout: 30);
-            BotLogger.Info("[SmartStorageGovernor] Applied table-level autovacuum tuning (scale_factor=0.05).");
+            BotLogger.Info("[SmartStorageGovernor] Applied table-level autovacuum and HOT tuning (fillfactor=80, scale_factor=0.02).");
         }
         catch (Exception ex)
         {

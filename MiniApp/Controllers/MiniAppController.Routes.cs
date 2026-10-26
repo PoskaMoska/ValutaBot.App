@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -39,10 +40,7 @@ public static partial class MiniAppController
             await context.Response.SendFileAsync(System.IO.Path.Combine(app.Environment.WebRootPath, "index.html"));
         });
 
-
-
-        // FIX: /api/time was called by frontend (syncTime in api.js) but never registered.
-        // Every page load produced a 404, leaving timeOffset=0 and disabling clock-drift compensation.
+        // /api/time for clock-drift compensation
         app.MapGet("/api/time", (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
@@ -56,13 +54,13 @@ public static partial class MiniAppController
             return Results.Ok(new { status = "Event emitted to Sentry", eventId = eventId.ToString() });
         });
 
-        // SELF-HEALING: Endpoint Здоровья для Railway и BetterStack
+        // Health endpoint for Railway and external uptime probes
         app.MapGet("/api/health", async (HttpContext context) =>
         {
             string dbStatus = "Unknown";
             string mlStatus = "Unknown";
 
-            // 1. Проверяем БД
+            // 1. Check DB
             try
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
@@ -76,7 +74,7 @@ public static partial class MiniAppController
                 return Results.Json(new { status = "Unhealthy", db = dbStatus, ml = mlStatus, error = ex.Message }, statusCode: 500);
             }
 
-            // 2. Проверяем ML сервис (просто пинг /health)
+            // 2. Check ML service ping
             try
             {
                 var mlUrl = Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? app.Configuration["MLService:BaseUrl"] ?? "http://localhost:8765";
@@ -126,19 +124,18 @@ public static partial class MiniAppController
             {
                 var orchestrator = context.RequestServices.GetRequiredService<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator>();
                 var result = await orchestrator.ExecuteAnalysisAsync(assetTrimmed, tf, userSettings);
-                // result is now a strongly-typed AnalysisResponseDto — read fields directly, no JSON parsing needed
                 bool isNeutralSignal = string.IsNullOrEmpty(result.direction)
                     || string.Equals(result.direction, "NEUTRAL", StringComparison.OrdinalIgnoreCase);
                 double effectiveProbPct = result.probability > 0 ? result.probability : result.lgbmConfidence;
                 double confidence = isNeutralSignal ? 0.5 : Math.Clamp(effectiveProbPct / 100.0, 0.0, 1.0);
-                double variance   = 0.0; // not currently in DTO; reserved for future
+                double variance   = 0.0;
                 double volatility = result.atr > 0 ? result.atr : 1.0;
                 bool isMlOverruled = !isNeutralSignal
                     && !string.IsNullOrEmpty(result.lgbmDirection)
                     && result.lgbmDirection != "NEUTRAL"
                     && !string.Equals(result.direction, result.lgbmDirection, StringComparison.OrdinalIgnoreCase);
 
-                // BO Kelly Criterion (always 0 when signal is NEUTRAL)
+                // BO Kelly Criterion
                 double payout = 0.82;
                 double q = 1.0 - confidence;
                 double kellyPct = isNeutralSignal ? 0.0 : confidence - (q / payout);
@@ -220,8 +217,7 @@ public static partial class MiniAppController
             }
         }).RequireRateLimiting("Global");
 
-        
-                        // Endpoint for Tampermonkey PO Data Vacuum (loopback or internal secret only)
+        // Endpoint for Tampermonkey PO Data Vacuum (loopback or internal secret only)
         app.MapPost("/api/collector/tick", async (HttpContext context) =>
         {
             var remoteIp = context.Connection.RemoteIpAddress;
@@ -230,7 +226,7 @@ public static partial class MiniAppController
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
             string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
             bool hasValidSecret = !string.IsNullOrEmpty(providedSecret) &&
-                System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                CryptographicOperations.FixedTimeEquals(
                     Encoding.UTF8.GetBytes(providedSecret),
                     Encoding.UTF8.GetBytes(expectedSecret));
 
@@ -260,8 +256,13 @@ public static partial class MiniAppController
             return Results.Ok();
         });
 
+        // SRE-FIX: Protected against DoS and unauthorized access via AuthService and Global Rate Limiter
         app.MapGet("/api/stats/overnight", async (HttpContext context) =>
         {
+            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
+            if (!isAuthorized)
+                return Results.Json(new { error = authError }, statusCode: 401);
+
             try
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
@@ -296,15 +297,20 @@ public static partial class MiniAppController
             {
                 return Results.Problem("DB Error: " + ex.Message);
             }
-        });
+        }).RequireRateLimiting("Global");
 
         app.MapGet("/api/stats/weights", (HttpContext context) =>
         {
             return Results.Json(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
         
+        // SRE-FIX: Protected against DoS and data scraping
         app.MapGet("/api/stats/ml", async (HttpContext context) =>
         {
+            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
+            if (!isAuthorized)
+                return Results.Json(new { error = authError }, statusCode: 401);
+
             try
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
@@ -329,7 +335,7 @@ public static partial class MiniAppController
             {
                 return Microsoft.AspNetCore.Http.Results.Json(new { error = ex.Message }, statusCode: 500);
             }
-        });
+        }).RequireRateLimiting("Global");
 
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
         app.MapGet("/api/stats/dataset-audit", async (HttpContext context) =>
@@ -363,14 +369,36 @@ public static partial class MiniAppController
             return rep != null ? Results.Json(rep) : Results.Json(new { status = "NO_REPORT_YET", message = "Run POST /api/chaos/run to execute initial audit." });
         });
 
-        app.MapPost("/api/chaos/run", async (ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
+        // SRE-FIX: Protected with X-Internal-Secret to prevent external invocation of chaos faults
+        app.MapPost("/api/chaos/run", async (HttpContext context, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
+            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
+            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
+            if (string.IsNullOrEmpty(providedSecret) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(providedSecret),
+                    Encoding.UTF8.GetBytes(expectedSecret)))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
             var report = await chaos.RunFullAuditAsync();
             return Results.Json(report);
         });
 
-        app.MapPost("/api/chaos/run/{category}", async (string category, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
+        // SRE-FIX: Protected with X-Internal-Secret
+        app.MapPost("/api/chaos/run/{category}", async (HttpContext context, string category, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
+            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
+            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
+            if (string.IsNullOrEmpty(providedSecret) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(providedSecret),
+                    Encoding.UTF8.GetBytes(expectedSecret)))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
             if (Enum.TryParse<ValutaBot.MiniApp.Features.ChaosAudit.Models.ChaosCategory>(category, true, out var cat))
             {
                 var report = await chaos.RunCategoryAuditAsync(cat);
@@ -397,8 +425,19 @@ public static partial class MiniAppController
             }
         });
 
-        app.MapPost("/api/admin/db-maintenance", async (bool? full) =>
+        // SRE-FIX: Protected with X-Internal-Secret against unauthorized VACUUM FULL table locks
+        app.MapPost("/api/admin/db-maintenance", async (HttpContext context, bool? full) =>
         {
+            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
+            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
+            if (string.IsNullOrEmpty(providedSecret) ||
+                !CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(providedSecret),
+                    Encoding.UTF8.GetBytes(expectedSecret)))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
             try
             {
                 var result = await ValutaBot.MiniApp.Services.DataRetentionService.RunEmergencyCleanupAsync(allowVacuumFull: full == true);
@@ -457,16 +496,22 @@ public static partial class MiniAppController
         {
             var query = context.Request.Query;
             
-            // SECURITY: Verify Postback Secret (if configured in environment)
+            // SRE-FIX: Fail-closed verification with constant-time comparison
             string? expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET");
-            if (!string.IsNullOrWhiteSpace(expectedSecret))
+            if (string.IsNullOrWhiteSpace(expectedSecret))
             {
-                string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
-                if (providedSecret != expectedSecret)
-                {
-                    BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
-                    return Results.Unauthorized();
-                }
+                BotLogger.Error("[Security] POSTBACK_SECRET is not configured on server. Postback rejected.");
+                return Results.Problem("Postback endpoint is misconfigured.", statusCode: StatusCodes.Status500InternalServerError);
+            }
+
+            string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
+            byte[] expBytes = Encoding.UTF8.GetBytes(expectedSecret);
+            byte[] provBytes = Encoding.UTF8.GetBytes(providedSecret);
+
+            if (expBytes.Length != provBytes.Length || !CryptographicOperations.FixedTimeEquals(expBytes, provBytes))
+            {
+                BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
+                return Results.Unauthorized();
             }
 
             string pocketId = query.TryGetValue("pocketId", out var pVal) ? pVal.ToString().Trim() : "";

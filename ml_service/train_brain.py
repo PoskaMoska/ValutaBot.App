@@ -381,11 +381,11 @@ def train_model(
     train_y, val_y, test_y = y[:idx_train], y[idx_train:idx_val], y[idx_val:]
     train_pnl, val_pnl, test_pnl = y_pnl[:idx_train], y_pnl[idx_train:idx_val], y_pnl[idx_val:]
 
-    # Class balance weights: suppress flat HOLD class (0.05) so 98% of gradient optimizes directional BUY vs PUT
+    # Class balance weights: suppress flat HOLD class (0.05); weight directional BUY/PUT with payout asymmetry (1.18x)
     class_counts = np.bincount(train_y, minlength=3)
     print(f"    Train class counts: HOLD={class_counts[0]:,}, BUY={class_counts[1]:,}, PUT={class_counts[2]:,}")
 
-    weights = np.array([0.05, 1.0, 1.0], dtype=np.float32)
+    weights = np.array([0.05, 1.18, 1.18], dtype=np.float32)
     print(f"    Directional Class weights for Loss: HOLD={weights[0]:.4f}, BUY={weights[1]:.4f}, PUT={weights[2]:.4f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -455,14 +455,16 @@ def train_model(
         if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
             model.macro_encoder[0].weight.data[:, 22] = 0.0
         if is_dual_stream and hasattr(model, "calibrate_cell_experts"):
-            print("[*] Pre-calibrating 30 microstructure cell experts & sniper gates...")
+            print("[*] Pre-calibrating 30 microstructure cell experts & sniper gates (Train + Val only, zero test leak)...")
+            s1_calib = int(idx_train * 0.60)
+            s2_calib = idx_train
             model.calibrate_cell_experts(
-                torch.tensor(X_candles, dtype=torch.float32),
-                torch.tensor(X_mtf, dtype=torch.float32),
-                torch.tensor(X_macro, dtype=torch.float32),
-                torch.tensor(y, dtype=torch.long),
-                idx_train,
-                idx_val
+                torch.tensor(X_candles[:idx_val], dtype=torch.float32),
+                torch.tensor(X_mtf[:idx_val], dtype=torch.float32),
+                torch.tensor(X_macro[:idx_val], dtype=torch.float32),
+                torch.tensor(y[:idx_val], dtype=torch.long),
+                s1_calib,
+                s2_calib
             )
             print("[+] Microstructure cell calibration complete.")
 
@@ -562,10 +564,10 @@ def train_model(
             f"{current_lr:<8.2e}"
         )
 
-        # Early stopping and checkpointing (prioritize out-of-sample directional WinRate at >=50%, >=57%, and >=60%)
-        wr57_score = val_stats["wr_57"] if val_stats.get("n_57", 0) >= 100 else val_stats["wr_50"]
-        wr60_score = val_stats["wr_60"] if val_stats.get("n_60", 0) >= 100 else wr57_score
-        epoch_score = 0.25 * val_stats["wr_50"] + 0.35 * wr57_score + 0.40 * wr60_score
+        # Early stopping and checkpointing (prioritize out-of-sample directional WinRate at >=57% and >=60% for positive EV)
+        wr57_score = val_stats["wr_57"] if val_stats.get("n_57", 0) >= 30 else val_stats["wr_55"]
+        wr60_score = val_stats["wr_60"] if val_stats.get("n_60", 0) >= 20 else wr57_score
+        epoch_score = 0.40 * wr57_score + 0.60 * wr60_score
         if epoch_score >= best_val_wr:
             best_val_wr = epoch_score
             best_val_loss = val_stats["loss"]
@@ -624,14 +626,16 @@ def train_model(
         if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
             model.macro_encoder[0].weight.data[:, 22] = 0.0
         if is_dual_stream and hasattr(model, "calibrate_cell_experts"):
-            print("[*] Re-calibrating microstructure cell experts on best checkpoint weights...")
+            print("[*] Re-calibrating microstructure cell experts on best checkpoint weights (zero test leak)...")
+            s1_calib = int(idx_train * 0.60)
+            s2_calib = idx_train
             model.calibrate_cell_experts(
-                torch.tensor(X_candles, dtype=torch.float32),
-                torch.tensor(X_mtf, dtype=torch.float32),
-                torch.tensor(X_macro, dtype=torch.float32),
-                torch.tensor(y, dtype=torch.long),
-                idx_train,
-                idx_val
+                torch.tensor(X_candles[:idx_val], dtype=torch.float32),
+                torch.tensor(X_mtf[:idx_val], dtype=torch.float32),
+                torch.tensor(X_macro[:idx_val], dtype=torch.float32),
+                torch.tensor(y[:idx_val], dtype=torch.long),
+                s1_calib,
+                s2_calib
             )
             print("[+] Microstructure cell calibration complete.")
         if not is_dual_stream:

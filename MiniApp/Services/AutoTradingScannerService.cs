@@ -108,7 +108,7 @@ public class AutoTradingScannerService : BackgroundService
         RealtimeTickCollector.OnCandleClosed += candleClosedHandler;
 
         var workers = new List<Task>();
-        for (int i = 0; i < 4; i++) // 4 concurrent workers
+        for (int i = 0; i < 6; i++) // 6 concurrent workers matching all 6 monitored OTC currency pairs
         {
             workers.Add(Task.Run(async () =>
             {
@@ -122,9 +122,9 @@ public class AutoTradingScannerService : BackgroundService
                         if (stoppingToken.IsCancellationRequested) break;
 
                         // Drop stale events that waited too long in queue relative to their timeframe (prevents s5/s10 entry skew)
-                        double maxQueueWaitSec = item.tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 1.5
-                            : item.tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 2.2
-                            : 3.5;
+                        double maxQueueWaitSec = item.tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 2.0
+                            : item.tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 2.8
+                            : 4.0;
                         if ((DateTime.UtcNow - item.queuedAtUtc).TotalSeconds > maxQueueWaitSec)
                         {
                             continue;
@@ -200,7 +200,15 @@ public class AutoTradingScannerService : BackgroundService
                     return;
                 }
 
-                // Entry Window Guard: prevent entering trades late into the candle lifecycle (e.g. at second 4 of a 5s bar)
+                // Dead Man's Switch: abort immediately if ticks for this specific symbol stopped arriving
+                if (PriceFeed.UsePocketOption && !PocketOptionWebSocketStream.IsSymbolFeedAlive(pair, maxIdleSeconds: 2.0))
+                {
+                    _logger.LogWarning($"[AutoScanner-Fast] Skipped {pair}/{tf}: symbol tick feed is stale (>2.0s idle).");
+                    return;
+                }
+
+                // Entry Window & Anti-Early Expiration Guard:
+                // Prevents entering trades late into the candle lifecycle OR too close to candle close
                 int tfSecs = tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 5
                     : tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 10
                     : tf.Equals("s15", StringComparison.OrdinalIgnoreCase) ? 15
@@ -210,18 +218,39 @@ public class AutoTradingScannerService : BackgroundService
                     ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
                     : DateTime.UtcNow;
 
-                DateTime newCandleOpen = lastCandleTime.AddSeconds(tfSecs) <= refTime.AddMilliseconds(500)
-                    ? lastCandleTime.AddSeconds(tfSecs)
-                    : lastCandleTime;
+                long bucketTicks = TimeSpan.FromSeconds(tfSecs).Ticks;
+                DateTime currentCandleOpen = new DateTime(refTime.Ticks - (refTime.Ticks % bucketTicks), DateTimeKind.Utc);
+                DateTime currentCandleClose = currentCandleOpen.AddSeconds(tfSecs);
 
-                double elapsedSinceOpenSec = (refTime - newCandleOpen).TotalSeconds;
-                double maxAllowedElapsed = tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 0.8
-                    : tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 1.5
-                    : 2.5;
+                double elapsedFromOpen = (refTime - currentCandleOpen).TotalSeconds;
+                double remainingToClose = (currentCandleClose - refTime).TotalSeconds;
 
-                if (elapsedSinceOpenSec > maxAllowedElapsed)
+                double maxOpenElapsed = tfSecs switch
                 {
-                    _logger.LogWarning($"[AutoScanner] Skipped {pair}/{tf}: entry boundary expired (+{elapsedSinceOpenSec:F2}s into candle, limit {maxAllowedElapsed:F1}s).");
+                    5 => 0.8,
+                    10 => 1.5,
+                    15 => 2.2,
+                    _ => 3.0
+                };
+
+                double minRemainingBuffer = tfSecs switch
+                {
+                    5 => 1.2,
+                    10 => 2.0,
+                    15 => 3.0,
+                    30 => 4.0,
+                    _ => 5.0
+                };
+
+                if (elapsedFromOpen > maxOpenElapsed)
+                {
+                    _logger.LogWarning($"[AutoScanner] Skipped {pair}/{tf}: open window elapsed (+{elapsedFromOpen:F2}s > {maxOpenElapsed:F1}s).");
+                    return;
+                }
+
+                if (remainingToClose < minRemainingBuffer)
+                {
+                    _logger.LogWarning($"[AutoScanner] Skipped {pair}/{tf}: insufficient time to candle close ({remainingToClose:F2}s < {minRemainingBuffer:F1}s). Early expiry risk averted.");
                     return;
                 }
 
@@ -241,8 +270,8 @@ public class AutoTradingScannerService : BackgroundService
 
                 if ((refTime - lastCandleTime).TotalSeconds <= maxCandleAgeSec)
                 {
-                    _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles, +{elapsedSinceOpenSec:F2}s into bar)...");
-                    await orchestrator.ExecuteAnalysisAsync(AnalysisAsset(pair), tf, userSettings);
+                    _logger.LogInformation($"[AutoScanner-Fast] Scanning {pair} on {tf} ({recentCandles.Length}/{minCandles} candles, +{elapsedFromOpen:F2}s into bar)...");
+                    await orchestrator.ExecuteAnalysisAsync(AnalysisAsset(pair), tf, userSettings, recentCandles);
                 }
                 else
                 {

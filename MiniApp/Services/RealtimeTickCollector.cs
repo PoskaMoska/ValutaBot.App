@@ -289,9 +289,9 @@ namespace ValutaBot.MiniApp
 
             try
             {
-                using var conn = DbConnectionFactory.GetConnection();
-                await conn.OpenAsync(ct);
-                using var tx = conn.BeginTransaction();
+                await using var conn = await DbConnectionFactory.OpenConnectionAsync(ct);
+
+                await using var tx = await conn.BeginTransactionAsync(ct);
                 
                 // D1-1 FIX: Materialise each group into a List before First/Last.
                 // Channel.CreateBounded with DropOldest evicts the oldest entries when full,
@@ -320,7 +320,8 @@ namespace ValutaBot.MiniApp
                 // With 8s cap: retry cycle is 8s + 0.5s delay = ~8.5s max blocked per attempt.
                 const int DbCommandTimeoutSecs = 8;
 
-                foreach (var batchItem in grouped)
+                // High-load optimization: execute the entire grouped batch in one command instead of N sequential proxy roundtrips
+
                 {
                     await conn.ExecuteAsync(@"
                         INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
@@ -330,10 +331,10 @@ namespace ValutaBot.MiniApp
                             low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
                             close_price = EXCLUDED.close_price,
                             volume      = subminute_candles.volume + EXCLUDED.volume;
-                    ", batchItem, tx, commandTimeout: DbCommandTimeoutSecs);
+                    ", grouped.ToList(), tx, commandTimeout: DbCommandTimeoutSecs);
                 }
                 
-                tx.Commit();
+                await tx.CommitAsync(ct);
                 return true;
             }
             catch (Exception ex)
@@ -347,6 +348,7 @@ namespace ValutaBot.MiniApp
         {
             var buffer = new List<TickEvent>(1000);
             var token = _collectorCts.Token;
+            int consecutiveBatchFailures = 0;
 
             try
             {
@@ -388,6 +390,17 @@ namespace ValutaBot.MiniApp
                         if (success)
                         {
                             buffer.Clear(); // Only clear on success to prevent tick loss
+                            consecutiveBatchFailures = 0;
+                        }
+                        else
+                        {
+                            consecutiveBatchFailures++;
+                            if (consecutiveBatchFailures >= 5)
+                            {
+                                BotLogger.Error($"[TickCollector] Batch write failed {consecutiveBatchFailures} times consecutively. Discarding {buffer.Count} poisoned ticks to restore channel ingestion.");
+                                buffer.Clear();
+                                consecutiveBatchFailures = 0;
+                            }
                         }
                     }
                     

@@ -46,7 +46,7 @@ public class PendingTradeVerificationService : BackgroundService
             
             tasks.Add(Task.Run(async () =>
             {
-                await semaphore.WaitAsync(ct);
+                await semaphore.WaitAsync(ct).ConfigureAwait(false);
                 try { await VerifyTradeAsync(record); }
                 catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Failed to verify {record.Id}: {ex.Message}"); }
                 finally { semaphore.Release(); }
@@ -84,13 +84,11 @@ public class PendingTradeVerificationService : BackgroundService
             DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20) ? createdBucket : targetGrid.AddSeconds(-20);
 
             // Locate the enclosing candle [open_time, open_time + 5s) covering verifyUtc
-            // FIX: Always settle on close_price of the candle covering verifyUtc.
-            // Old 'WHEN @VerifyAt - open_time <= 2.5s THEN open_price' truncated 5s trades to 1-3s.
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
                 SELECT close_price
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
-                  AND open_time::timestamptz <= @VerifyAt
+                  AND open_time::timestamptz < @VerifyAt
                   AND open_time::timestamptz + INTERVAL '5 seconds' >= @VerifyAt
                 ORDER BY open_time DESC
                 LIMIT 1
@@ -107,7 +105,7 @@ public class PendingTradeVerificationService : BackgroundService
                     SELECT close_price
                     FROM subminute_candles
                     WHERE asset = @Asset AND interval = @Interval
-                      AND open_time::timestamptz <= @VerifyAt
+                      AND open_time::timestamptz < @VerifyAt
                       AND open_time::timestamptz >= @MinAllowed
                     ORDER BY open_time DESC
                     LIMIT 1
@@ -156,7 +154,7 @@ public class PendingTradeVerificationService : BackgroundService
                           AND open_time::timestamptz <= @TargetGrid::timestamptz
                     ", new { 
                         Asset = cleanAsset, 
-                        Interval = verifyInterval,
+                        Interval = verifyInterval, 
                         CreatedBucket = createdBucket.ToString("o"), 
                         TargetGrid = targetGrid.ToString("o") 
                     });
@@ -196,9 +194,55 @@ public class PendingTradeVerificationService : BackgroundService
         {
             if (secondsOverdue >= 120)
             {
-                BotLogger.Warn($"[PendingVerifier] STALE trade {record.Id} ({record.Asset}/{record.Timeframe}): no DB candle after {secondsOverdue:F0}s, discarding.");
-                await TradeRepository.DeletePendingTradeAsync(record.Id);
+                // SRE-FIX: Do NOT silently delete the trade! Archive into trade_outcomes with cancelled status
+                // to maintain audit trail and dataset integrity across container restarts/gaps.
+                BotLogger.Warn($"[PendingVerifier] REBOOT/GAP TIMEOUT: trade {record.Id} ({record.Asset}/{record.Timeframe}) lacked s5 candles during downtime. Archiving outcome.");
+
+                var staleOutcome = new TradeOutcomeRecord
+                {
+                    Id = record.Id,
+                    Asset = record.Asset,
+                    Timeframe = record.Timeframe,
+                    Direction = record.Direction,
+                    Probability = record.Probability,
+                    EntryPrice = record.EntryPrice,
+                    ExitPrice = record.EntryPrice,
+                    PnlBps = 0.0,
+                    WasWin = null, // Cancelled / unresolved due to downtime
+                    ReasoningText = "CANCELLED_DUE_TO_CONTAINER_REBOOT_OR_FEED_DOWNTIME",
+                    CreatedAt = record.CreatedAt.ToString("o"),
+                    VerifiedAt = DateTime.UtcNow.ToString("o"),
+                    TaDirection = record.SourceDirections.GetValueOrDefault("TechAnalysis", "NEUTRAL"),
+                    MlDirection = record.SourceDirections.GetValueOrDefault("NeuralBrain", record.SourceDirections.GetValueOrDefault("LIGHTGBM", "NEUTRAL")),
+                    SmcDirection = record.SourceDirections.GetValueOrDefault("SMC", "NEUTRAL"),
+                    DynamicHorizon = record.DynamicHorizon,
+                    MarketRegime = record.MarketRegime,
+                    VelocityRegime = record.VelocityRegime,
+                    AtrAtSignal = record.AtrAtSignal,
+                    AdxAtSignal = record.AdxAtSignal,
+                    RsiAtSignal = record.RsiAtSignal,
+                    HigherTfAligned = record.HigherTfAligned,
+                    MinutesToNews = record.MinutesToNews,
+                    FeaturesJson = record.FeaturesJson,
+                    SmcBosDir = record.SmcBosDir,
+                    SmcHasOb = record.SmcHasOb,
+                    SmcHasFvg = record.SmcHasFvg,
+                    OfDeltaRatio = record.OfDeltaRatio,
+                    OfState = record.OfState,
+                    TaTelemetry = record.TaTelemetry,
+                    MlTelemetry = record.MlTelemetry,
+                    SmcTelemetry = record.SmcTelemetry
+                };
+
+                await TradeRepository.SaveTradeOutcomeAsync(staleOutcome, record.Id);
             }
+            return;
+        }
+
+        if (record.EntryPrice <= 0 || double.IsNaN(record.EntryPrice))
+        {
+            BotLogger.Warn($"[PendingVerifier] Invalid EntryPrice {record.EntryPrice} for trade {record.Id} — discarding.");
+            await TradeRepository.DeletePendingTradeAsync(record.Id);
             return;
         }
 

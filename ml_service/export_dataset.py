@@ -88,6 +88,16 @@ MACRO_FEATURE_NAMES = [
 ]
 
 
+def _safe_float(val, default=0.0):
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        return default if math.isnan(f) or math.isinf(f) else f
+    except (ValueError, TypeError):
+        return default
+
+
 def normalize_candles(candles_list, seq_len=160, channels=8, tf_sec=5):
     """
     Normalizes a sequence of OHLCV candles into a stationary [seq_len, channels] array.
@@ -115,13 +125,12 @@ def normalize_candles(candles_list, seq_len=160, channels=8, tf_sec=5):
 
     for i, c in enumerate(tail):
         idx = offset + i
-        op = float(c.get("Open", c.get("open", 1.0)))
-        hi = float(c.get("High", c.get("high", op)))
-        lo = float(c.get("Low", c.get("low", op)))
-        cl = float(c.get("Close", c.get("close", op)))
-
-        if op <= 0:
+        op = _safe_float(c.get("Open", c.get("open")), default=1.0)
+        if op <= 0.0:
             op = 1e-5
+        hi = _safe_float(c.get("High", c.get("high")), default=op)
+        lo = _safe_float(c.get("Low", c.get("low")), default=op)
+        cl = _safe_float(c.get("Close", c.get("close")), default=op)
 
         arr[idx, 0] = ((cl - op) / op) * 10000.0
         arr[idx, 1] = ((hi - op) / op) * 10000.0
@@ -131,7 +140,7 @@ def normalize_candles(candles_list, seq_len=160, channels=8, tf_sec=5):
         cur_ts = None
         ts_raw = c.get("Timestamp") or c.get("timestamp") or c.get("openTime")
         if isinstance(ts_raw, (int, float)) and ts_raw > 0:
-            cur_ts = float(ts_raw)
+            cur_ts = float(ts_raw) / 1000.0 if float(ts_raw) > 1e11 else float(ts_raw)
         elif isinstance(ts_raw, str) and len(ts_raw) >= 19:
             try:
                 cur_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
@@ -144,13 +153,13 @@ def normalize_candles(candles_list, seq_len=160, channels=8, tf_sec=5):
             and (cur_ts - prev_ts) > max_allowed_gap_sec
         )
 
-        if prev_close is not None and prev_close > 0 and not is_time_gap:
+        if prev_close is not None and prev_close > 0.0 and not is_time_gap:
             arr[idx, 3] = ((cl - prev_close) / prev_close) * 10000.0
         else:
             arr[idx, 3] = 0.0
 
         if channels >= 5:
-            vol = float(c.get("Volume", c.get("volume", 0.0)) or 0.0)
+            vol = _safe_float(c.get("Volume", c.get("volume")), default=0.0)
             arr[idx, 4] = math.log1p(max(0.0, vol)) / 10.0
 
         if channels >= 8:
@@ -304,6 +313,7 @@ class SubminuteCandleStore:
     """
     Lazily loads subminute_candles (*_PO) and historical_candles (*_PO) from PostgreSQL
     to reconstruct 160 micro-candles and 30 MTF-candles in O(log N) for compacted trade_outcomes rows (>24h old).
+    Strictly sorts and deduplicates timestamps across tables to guarantee monotonic indexation.
     """
     def __init__(self, conn, min_date):
         self.conn = conn
@@ -315,8 +325,9 @@ class SubminuteCandleStore:
         if self.loaded:
             return
         self.loaded = True
-        print("[*] Loading subminute_candles (*_PO) index for compacted >24h rows...")
+        print("[*] Loading subminute & historical candles into strictly monotonic index...")
         cur = self.conn.cursor()
+        raw_buckets = {}
         for tbl, o_col, h_col, l_col, c_col in [
             ("subminute_candles", "open_price", "high_price", "low_price", "close_price"),
             ("historical_candles", "open", "high", "low", "close"),
@@ -326,7 +337,7 @@ class SubminuteCandleStore:
                     SELECT asset, interval, open_time, {o_col}, {h_col}, {l_col}, {c_col}, volume
                     FROM {tbl}
                     WHERE asset LIKE '%%_PO'
-                    ORDER BY asset, interval, open_time ASC
+                    ORDER BY open_time ASC
                 """)
                 for asset, interval, ot, op, hi, lo, cl, vol in cur.fetchall():
                     clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
@@ -336,22 +347,31 @@ class SubminuteCandleStore:
                     elif iv in ("5min", "5m", "m5"):
                         iv = "m5"
                     key = (clean_a, iv)
-                    bucket = self.series.setdefault(key, ([], []))
+                    bucket = raw_buckets.setdefault(key, [])
                     ts_str = str(ot)[:19].replace("T", " ")
-                    if not bucket[0] or bucket[0][-1] != ts_str:
-                        bucket[0].append(ts_str)
-                        bucket[1].append({
-                            "Timestamp": ot,
-                            "Open": float(op),
-                            "High": float(hi),
-                            "Low": float(lo),
-                            "Close": float(cl),
-                            "Volume": float(vol or 1.0)
-                        })
+                    bucket.append((ts_str, {
+                        "Timestamp": ot,
+                        "Open": _safe_float(op, 1.0),
+                        "High": _safe_float(hi, 1.0),
+                        "Low": _safe_float(lo, 1.0),
+                        "Close": _safe_float(cl, 1.0),
+                        "Volume": _safe_float(vol, 1.0)
+                    }))
             except Exception as tbl_err:
                 print(f"[-] Warning: Failed to load candles from {tbl}: {tbl_err}")
         cur.close()
-        print(f"[+] Indexed {len(self.series)} (asset, timeframe) series from subminute/historical tables.")
+
+        for key, rows_list in raw_buckets.items():
+            rows_list.sort(key=lambda x: x[0])
+            dedup_ts = []
+            dedup_c = []
+            for ts, c in rows_list:
+                if not dedup_ts or dedup_ts[-1] != ts:
+                    dedup_ts.append(ts)
+                    dedup_c.append(c)
+            self.series[key] = (dedup_ts, dedup_c)
+
+        print(f"[+] Monotonically indexed {len(self.series)} (asset, timeframe) series from subminute/historical tables.")
 
     def get_candles_before(self, asset: str, timeframe: str, created_at_dt, count: int):
         self._ensure_loaded()
@@ -380,19 +400,28 @@ class SubminuteCandleStore:
         return bucket[1][start:idx]
 
 
-def determine_label(direction, was_win, pnl_bps, min_pnl_threshold=1e-4):
+def determine_label(entry_price, exit_price, direction, pnl_bps_recorded, min_pnl_threshold=0.30):
     """
-    Determines 3-class target for true binary options payouts:
-      0: HOLD / Tie / Exact Flat (|pnl_bps| <= 1e-4, entry_price == exit_price)
-      1: BUY (Market went UP: pnl_bps > 1e-4 -> BUY win)
-      2: PUT (Market went DOWN: pnl_bps < -1e-4 -> PUT win)
+    AUDIT 4 FIX: Accurately identifies true market direction irrespective of order direction.
+    Class 0: HOLD / Chop (|raw_delta_bps| <= min_pnl_threshold)
+    Class 1: BUY  (Market moved UP:   raw_delta_bps > min_pnl_threshold)
+    Class 2: PUT  (Market moved DOWN: raw_delta_bps < -min_pnl_threshold)
     """
-    if pnl_bps is None or abs(pnl_bps) <= min_pnl_threshold:
-        return 0
-    elif pnl_bps > min_pnl_threshold:
-        return 1
+    en = _safe_float(entry_price)
+    ex = _safe_float(exit_price)
+    if en > 0.0 and ex > 0.0:
+        raw_pnl_bps = ((ex - en) / en) * 10000.0
     else:
-        return 2
+        is_put = str(direction or "").upper().endswith("PUT")
+        pnl_val = _safe_float(pnl_bps_recorded)
+        raw_pnl_bps = -pnl_val if is_put else pnl_val
+
+    if abs(raw_pnl_bps) <= min_pnl_threshold:
+        return 0, raw_pnl_bps
+    elif raw_pnl_bps > min_pnl_threshold:
+        return 1, raw_pnl_bps
+    else:
+        return 2, raw_pnl_bps
 
 
 import sys
@@ -402,13 +431,14 @@ if hasattr(sys.stdout, "reconfigure"):
 
 PO_CUTOFF_UTC = "2026-10-21 20:15:00+00"
 
-def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=8, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True):
+def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=8, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True, min_pnl_bps=0.30):
     print("=" * 60)
     print("[*] Neural Brain Dataset Exporter (V4 Architecture)")
     print(f"Connecting to database...")
     print("=" * 60)
     
     conn = psycopg2.connect(db_url)
+    conn.autocommit = True  # Release oldest_xmin immediately so autovacuum is not blocked during dataset export
     cur = conn.cursor()
     
     if include_tiingo:
@@ -574,17 +604,19 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
         # 4. Target Label
         direction = str(row_dict.get("direction") or "")
         was_win = row_dict.get("was_win")
-        pnl = float(row_dict.get("pnl_bps") or 0.0)
-        label = determine_label(direction, was_win, pnl)
+        pnl = _safe_float(row_dict.get("pnl_bps"))
+        en_p = _safe_float(row_dict.get("entry_price"))
+        ex_p = _safe_float(row_dict.get("exit_price"))
+        label, raw_pnl = determine_label(en_p, ex_p, direction, pnl, min_pnl_threshold=min_pnl_bps)
         
-        mfe = float(row_dict.get("max_favorable_bps") or 0.0)
-        mae = float(row_dict.get("max_adverse_bps") or 0.0)
+        mfe = _safe_float(row_dict.get("max_favorable_bps"))
+        mae = _safe_float(row_dict.get("max_adverse_bps"))
         
         x_candles_list.append(candle_tensor)
         x_mtf_candles_list.append(mtf_tensor)
         x_macro_list.append(macro_vec)
         y_list.append(label)
-        y_pnl_list.append(pnl)
+        y_pnl_list.append(raw_pnl)
         y_mfe_list.append(mfe)
         y_mae_list.append(mae)
         
@@ -700,6 +732,7 @@ if __name__ == "__main__":
     parser.add_argument("--channels", type=int, choices=[4, 5, 8], default=8, help="Candle feature channels: 4 (OHLC), 5 (OHLCV) or 8 (OHLCV+Wicks+Range)")
     parser.add_argument("--include-tiingo", action="store_true", help="Include legacy Tiingo era rows (not recommended for PO OTC)")
     parser.add_argument("--min-date", default=PO_CUTOFF_UTC, help="Minimum created_at UTC timestamp for PO era")
+    parser.add_argument("--min-pnl-bps", type=float, default=0.30, help="Minimum price delta in bps for non-HOLD classification")
     parser.add_argument("--no-stride-hf", action="store_true", help="Disable SQL striding of high-frequency s5/s10 rows")
     args = parser.parse_args()
     
@@ -712,5 +745,6 @@ if __name__ == "__main__":
         channels=args.channels,
         include_tiingo=args.include_tiingo,
         min_date=args.min_date,
-        stride_hf=not args.no_stride_hf
+        stride_hf=not args.no_stride_hf,
+        min_pnl_bps=args.min_pnl_bps
     )

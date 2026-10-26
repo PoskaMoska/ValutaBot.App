@@ -51,7 +51,8 @@ def main():
         str(ml_dir / "export_dataset.py"),
         "--db-url", args.db_url,
         "--out", str(temp_dataset),
-        "--min-date", "2026-10-21 20:15:00+00"
+        "--min-date", "2026-10-21 20:15:00+00",
+        "--min-pnl-bps", "0.30"
     ]
     run_step(export_args, "Exporting clean dataset from PostgreSQL (V4 cadence)")
 

@@ -8,7 +8,7 @@ namespace ValutaBot.App.MiniApp.Data
 {
     public static class DbConnectionFactory
     {
-        private static NpgsqlDataSource? _dataSource;
+        private static volatile NpgsqlDataSource? _dataSource;
         private static readonly object _initLock = new();
 
         public static string GetConnectionString()
@@ -17,16 +17,26 @@ namespace ValutaBot.App.MiniApp.Data
             if (string.IsNullOrEmpty(envVar)) return "";
 
             NpgsqlConnectionStringBuilder builder;
-            if (envVar.StartsWith("postgres://") || envVar.StartsWith("postgresql://"))
+            if (envVar.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) || 
+                envVar.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
             {
                 var uri = new Uri(envVar);
-                var userInfo = uri.UserInfo.Split(':');
+                string username = "";
+                string password = "";
+
+                if (!string.IsNullOrEmpty(uri.UserInfo))
+                {
+                    var parts = uri.UserInfo.Split(':', 2);
+                    username = Uri.UnescapeDataString(parts[0]);
+                    password = parts.Length > 1 ? Uri.UnescapeDataString(parts[1]) : "";
+                }
+
                 builder = new NpgsqlConnectionStringBuilder
                 {
                     Host = uri.Host,
                     Port = uri.Port > 0 ? uri.Port : 5432,
-                    Username = userInfo.Length > 0 ? userInfo[0] : "",
-                    Password = userInfo.Length > 1 ? userInfo[1] : "",
+                    Username = username,
+                    Password = password,
                     Database = uri.LocalPath.TrimStart('/')
                 };
             }
@@ -35,13 +45,17 @@ namespace ValutaBot.App.MiniApp.Data
                 builder = new NpgsqlConnectionStringBuilder(envVar);
             }
 
-            // TCP Keepalive sends probe packets every 30s to keep cloud proxy sockets (e.g. Railway) alive
-            builder.KeepAlive = 30;
-            // Retire pooled connections after 5m to avoid stale socket reuse after cloud proxy resets
-            builder.ConnectionLifetime = 300;
-            builder.ConnectionIdleLifetime = 60;
-            builder.Timeout = 15;
+            // TCP Keepalive & Socket options optimized for Railway cloud proxy
+            builder.TcpKeepAlive = true;          // Low-level SO_KEEPALIVE on the OS socket
+            builder.KeepAlive = 15;               // Application keepalive probe every 15s (before proxy's 60s idle timeout)
+            builder.ConnectionLifetime = 300;     // Rotate pooled connections every 5m
+            builder.ConnectionIdleLifetime = 25;  // Evict idle connections after 25s so proxy cannot sever them silently
+            builder.Timeout = 10;                 // 10s connection timeout
             builder.CommandTimeout = 30;
+
+            // Connection pool bounds to prevent 53300: sorry, too many clients on Railway
+            builder.MaxPoolSize = 30;
+            builder.MinPoolSize = 3;
 
             return builder.ToString();
         }
@@ -56,11 +70,29 @@ namespace ValutaBot.App.MiniApp.Data
                     {
                         string connStr = GetConnectionString();
                         if (!string.IsNullOrEmpty(connStr))
-                            _dataSource = NpgsqlDataSource.Create(connStr);
+                        {
+                            var dataSourceBuilder = new NpgsqlDataSourceBuilder(connStr);
+                            _dataSource = dataSourceBuilder.Build();
+                        }
                     }
                 }
             }
             return _dataSource?.CreateConnection() ?? new NpgsqlConnection(GetConnectionString());
+        }
+
+        public static async ValueTask<NpgsqlConnection> OpenConnectionAsync(CancellationToken ct = default)
+        {
+            if (_dataSource == null)
+            {
+                GetConnection(); // trigger initialization
+            }
+            if (_dataSource != null)
+            {
+                return await _dataSource.OpenConnectionAsync(ct);
+            }
+            var conn = new NpgsqlConnection(GetConnectionString());
+            await conn.OpenAsync(ct);
+            return conn;
         }
 
         public static async Task InitializeAsync()
@@ -244,6 +276,40 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime_tz ON subminute_candles ((open_time::timestamptz));
                 DROP INDEX IF EXISTS idx_hist_candles_asset;
                 DROP TABLE IF EXISTS neutral_signals;
+
+                -- Functional expression indexes for instant timestamptz seeks (eliminates full table scans)
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_lookup ON subminute_candles (asset, interval, ((open_time::timestamptz)) DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_tz ON trade_outcomes (((created_at::timestamptz)) DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_tz ON trade_outcomes (((verified_at::timestamptz)) DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified_tz ON trade_outcomes (asset, timeframe, ((verified_at::timestamptz)) DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes (((created_at::timestamptz)) DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_tz ON pending_trades (((verify_at::timestamptz)) ASC);
+
+                -- Table-level high-load tuning: fillfactor=80 enables HOT (Heap-Only Tuple) in-place updates for real-time ticks
+                DO $$
+                BEGIN
+                    BEGIN
+                        ALTER TABLE subminute_candles SET (
+                            fillfactor = 80,
+                            autovacuum_vacuum_scale_factor = 0.02,
+                            autovacuum_vacuum_cost_limit = 2000,
+                            autovacuum_vacuum_cost_delay = 2
+                        );
+                    EXCEPTION WHEN others THEN END;
+                    BEGIN
+                        ALTER TABLE trade_outcomes SET (
+                            autovacuum_vacuum_scale_factor = 0.05,
+                            autovacuum_vacuum_cost_limit = 1500,
+                            autovacuum_vacuum_cost_delay = 2
+                        );
+                    EXCEPTION WHEN others THEN END;
+                    BEGIN
+                        ALTER TABLE pending_trades SET (
+                            autovacuum_vacuum_scale_factor = 0.01,
+                            autovacuum_vacuum_cost_limit = 1000
+                        );
+                    EXCEPTION WHEN others THEN END;
+                END $$;
 
                 -- Preserve module_diagnostics across C# restarts (populated nightly by Python _daily_diagnostics_loop)
                 CREATE TABLE IF NOT EXISTS module_diagnostics (

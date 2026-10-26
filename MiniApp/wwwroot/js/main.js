@@ -1,13 +1,16 @@
-import { initPriceWebSocket, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261025_pure_neural';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction } from './state.js?v=20261025_pure_neural';
+import { initPriceWebSocket, closePriceWebSocket, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261026_audit_v1';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction } from './state.js?v=20261026_audit_v1';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20261025_pure_neural';
+import { switchResultTab, updateTrafficLight } from './ui.js?v=20261026_audit_v1';
 
-// tg and getCustomInitData imported from state.js
+// 1. Telegram WebApp Lifecycle & Viewport Stabilization
 if (tg) {
     try {
-        tg.expand();
         tg.ready();
+        tg.expand();
+        if (typeof tg.enableClosingConfirmation === 'function') {
+            tg.enableClosingConfirmation(); // Prevent accidental swipe dismiss
+        }
         if (window.Sentry && tg.initDataUnsafe?.user) {
             const u = tg.initDataUnsafe.user;
             Sentry.setUser({
@@ -21,37 +24,28 @@ if (tg) {
 }
 
 onCopilotAction(applyCopilotRecommendation);
-function _legacyGetCustomInitData() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const userId = urlParams.get('custom_user_id') || urlParams.get('userId');
-    const userSign = urlParams.get('custom_user_sign') || urlParams.get('userSign');
-    if (userId && userSign) {
-        return `custom_user_id=${userId}&custom_user_sign=${userSign}`;
-    }
-    return '';
-}
-
-
-
 
 const assetsList = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
 
 function getTopAssets() {
     try {
         const h = JSON.parse(localStorage.getItem('vhistory') || '[]');
-        var freq = {};
-        for (var i = 0; i < h.length; i++) { var e = h[i]; freq[e.asset] = (freq[e.asset] || 0) + 1; }
-        return Object.keys(freq).sort(function(a,b) { return freq[b] - freq[a]; }).slice(0, 8);
+        const freq = {};
+        for (let i = 0; i < h.length; i++) { 
+            const a = h[i]?.asset;
+            if (a) freq[a] = (freq[a] || 0) + 1; 
+        }
+        return Object.keys(freq).sort((a,b) => freq[b] - freq[a]).slice(0, 8);
     } catch(e) { return []; }
 }
 
 function renderAssets(arr) {
     const top = getTopAssets();
     const majors = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
-    return arr.map(function(a) {
-        var star = top.indexOf(a) !== -1 ? '<span class="top-star">★</span>' : '';
-        var cls = majors.indexOf(a) !== -1 ? 'asset-item major' : 'asset-item';
-        return '<div class="' + cls + '" data-asset="' + a + '">' + a + star + '</div>';
+    return arr.map(a => {
+        const star = top.indexOf(a) !== -1 ? '<span class="top-star">★</span>' : '';
+        const cls = majors.indexOf(a) !== -1 ? 'asset-item major' : 'asset-item';
+        return `<div class="${cls}" data-asset="${a}">${a}${star}</div>`;
     }).join('');
 }
 
@@ -62,18 +56,26 @@ function initAssetGrid() {
     }
 }
 
-function toggleMenu(m, b) {
+function toggleMenu(m) {
     document.querySelectorAll('.asset-menu, .tf-menu').forEach(menu => { 
-        if(menu.id !== m) menu.classList.remove('show'); 
+        if (menu.id !== m) menu.classList.remove('show'); 
     });
     const menuEl = document.getElementById(m);
     if (menuEl) menuEl.classList.toggle('show');
 }
 
+let switchThrottleTimer = null;
+function throttledWsSwitch() {
+    if (switchThrottleTimer) clearTimeout(switchThrottleTimer);
+    switchThrottleTimer = setTimeout(() => {
+        initPriceWebSocket();
+    }, 200);
+}
+
 function setAsset(el) {
     if (!el) return;
     el = el.closest('.asset-item') || el;
-    let a = el.getAttribute('data-asset');
+    const a = el.getAttribute('data-asset');
     if (!a) return;
     setCurrentAsset(a);
     const selEl = document.getElementById('selectedAsset');
@@ -84,53 +86,56 @@ function setAsset(el) {
     if (menuEl) menuEl.classList.remove('show');
     const sphere = document.getElementById('mainSphere');
     if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
-    initPriceWebSocket();
+    
+    throttledWsSwitch();
     resetSignalKey();
 }
 
 function setTf(el) {
     if (!el) return;
     el = el.closest('.tf-btn') || el;
-    let tf = el.getAttribute('data-tf');
+    const tf = el.getAttribute('data-tf');
     if (!tf) return;
     setCurrentTf(tf);
     const selEl = document.getElementById('selectedTf');
-    if (selEl) selEl.innerText = tf;
+    if (selEl) selEl.innerText = tf.toUpperCase();
     document.querySelectorAll('.tf-btn').forEach(i => i.classList.remove('active'));
     el.classList.add('active');
     const menuEl = document.getElementById('tfMenu');
     if (menuEl) menuEl.classList.remove('show');
     const sphere = document.getElementById('mainSphere');
     if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
-    initPriceWebSocket();
+    
+    throttledWsSwitch();
     resetSignalKey();
 }
 
 export function applyCopilotRecommendation(rec) {
     if (!rec) return;
     if (rec.asset) {
-        const item = document.querySelector(`.asset-item[data-asset="${rec.asset}"]`);
+        const safeAsset = CSS.escape(rec.asset);
+        const item = document.querySelector(`.asset-item[data-asset="${safeAsset}"]`);
         if (item) {
             setAsset(item);
         } else {
             setCurrentAsset(rec.asset);
             const selEl = document.getElementById('selectedAsset');
             if (selEl) selEl.innerText = rec.asset;
-            initPriceWebSocket();
+            throttledWsSwitch();
             resetSignalKey();
         }
     }
     if (rec.tf) {
         const tfUpper = rec.tf.toUpperCase();
-        const tfItem = document.querySelector(`.tf-btn[data-tf="${tfUpper}"]`) ||
-                       document.querySelector(`.tf-btn[data-tf="${rec.tf.toLowerCase()}"]`);
+        const safeTf = CSS.escape(tfUpper);
+        const tfItem = document.querySelector(`.tf-btn[data-tf="${safeTf}"]`);
         if (tfItem) {
             setTf(tfItem);
         } else {
             setCurrentTf(rec.tf);
             const selEl = document.getElementById('selectedTf');
             if (selEl) selEl.innerText = tfUpper;
-            initPriceWebSocket();
+            throttledWsSwitch();
             resetSignalKey();
         }
     }
@@ -138,7 +143,6 @@ export function applyCopilotRecommendation(rec) {
         executeAnalysis();
     }, 250);
 }
-
 
 function handleGlobalInteraction(e) {
     const target = e.target;
@@ -152,13 +156,13 @@ function handleGlobalInteraction(e) {
 
     const assetTrigger = target.closest('#assetBtn');
     if (assetTrigger) {
-        toggleMenu('assetMenu', 'assetBtn');
+        toggleMenu('assetMenu');
         return;
     }
 
     const tfTrigger = target.closest('#tfBtn');
     if (tfTrigger) {
-        toggleMenu('tfMenu', 'tfBtn');
+        toggleMenu('tfMenu');
         return;
     }
 
@@ -193,24 +197,46 @@ function handleGlobalInteraction(e) {
 
 document.addEventListener('click', handleGlobalInteraction);
 
+// URL Params with CSS Injection Guard
 (function() {
-    var p = new URLSearchParams(window.location.search);
-    var a = p.get('asset'), t = p.get('tf');
-    if (a) {
-        var el = document.querySelector('.asset-item[data-asset="' + a.toUpperCase() + '"]');
-        if (el) { setAsset(el); el.scrollIntoView && el.scrollIntoView({ block: 'nearest' }); }
-    }
-    if (t) {
-        var el = document.querySelector('.tf-btn[data-tf="' + t.toUpperCase() + '"]');
-        if (el) setTf(el);
-    }
+    try {
+        const p = new URLSearchParams(window.location.search);
+        const a = p.get('asset');
+        const t = p.get('tf');
+        if (a) {
+            const el = document.querySelector(`.asset-item[data-asset="${CSS.escape(a.toUpperCase())}"]`);
+            if (el) { setAsset(el); el.scrollIntoView && el.scrollIntoView({ block: 'nearest' }); }
+        }
+        if (t) {
+            const el = document.querySelector(`.tf-btn[data-tf="${CSS.escape(t.toUpperCase())}"]`);
+            if (el) setTf(el);
+        }
+    } catch(e) {}
 })();
 
-const topCatInitial = document.querySelector('.top-cat-btn');
-if (topCatInitial) initAssetGrid();
-else initAssetGrid();
+initAssetGrid();
 syncTime();
 initPriceWebSocket();
+
+// Page Visibility API - Battery and Railway Resource Protection
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        closePriceWebSocket();
+    } else {
+        syncTime();
+        initPriceWebSocket();
+    }
+});
+
+// Network Reconnect Recovery
+window.addEventListener('online', () => {
+    syncTime();
+    initPriceWebSocket();
+});
+
+window.addEventListener('offline', () => {
+    closePriceWebSocket();
+});
 
 function getTfSeconds() {
     const map = { s3:3, s5:5, s10:10, s15:15, s30:30, m1:60, m2:120, m3:180, m5:300, m15:900, m30:1800, h1:3600, h4:14400, d1:86400 };
@@ -218,6 +244,8 @@ function getTfSeconds() {
 }
 
 function updateCountdown() {
+    if (document.hidden) return; // Do not calculate countdown when tab is minimized
+
     const tfSec = getTfSeconds();
     const now = Math.floor((Date.now() + timeOffset) / 1000);
     const remaining = tfSec - (now % tfSec);
@@ -227,9 +255,6 @@ function updateCountdown() {
     if (!el) return;
     el.innerText = `${mins}:${secs.toString().padStart(2,'0')}`;
     
-    // Динамические пороги светофора под таймфрейм
-    // Адаптировано под моментальный расчет бота (~0.08с):
-    // 1m: на 10с желтеет (подготовка 7с), на 3с зеленеет (клик -> вход ровно в 00с)
     let greenThresh = 3;
     let yellowThresh = 10;
     

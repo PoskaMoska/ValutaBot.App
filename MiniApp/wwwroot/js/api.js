@@ -1,10 +1,49 @@
-import { tg, currentAsset, currentTf, getCustomInitData, timeOffset, setTimeOffset, lastPriceVal, setLastPriceVal, priceSocket, setPriceSocket, triggerCopilotAction } from './state.js?v=20261025_pure_neural';
+import { 
+    tg, 
+    currentAsset, 
+    currentTf, 
+    getCustomInitData,
+    getAuthHeader, 
+    timeOffset, 
+    setTimeOffset, 
+    lastPriceVal, 
+    setLastPriceVal, 
+    priceSocket, 
+    setPriceSocket, 
+    triggerCopilotAction,
+    setCircuitBreakerState
+} from './state.js?v=20261026_audit_v1';
 
-import { updateLivePriceUI, renderError, clearResults, startStatusBar, stopStatusBar, flashResults, renderDirSvg, renderMiniChart, renderSparklinePrediction, switchResultTab, parseMd, pricesToBars, renderExpiryCandles, showAiChart, hideAiChart, updateAiChartData, updateAiCopilot } from './ui.js?v=20261025_pure_neural';
+function resolveAuthData() {
+    try {
+        if (typeof getAuthHeader === 'function') return getAuthHeader();
+    } catch (e) {}
+    try {
+        if (typeof tg !== 'undefined' && tg && tg.initData) return tg.initData;
+        if (typeof getCustomInitData === 'function') return getCustomInitData();
+    } catch (e) {}
+    return '';
+}
 
-
-
-
+import { 
+    updateLivePriceUI, 
+    renderError, 
+    clearResults, 
+    startStatusBar, 
+    stopStatusBar, 
+    flashResults, 
+    renderDirSvg, 
+    renderMiniChart, 
+    renderSparklinePrediction, 
+    switchResultTab, 
+    parseMd, 
+    pricesToBars, 
+    renderExpiryCandles, 
+    showAiChart, 
+    hideAiChart, 
+    updateAiChartData, 
+    updateAiCopilot 
+} from './ui.js?v=20261026_audit_v1';
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -12,6 +51,7 @@ export function resetSignalKey() { lastSignalKey = null; }
 
 let reconnectTimeout = null;
 let reconnectAttempts = 0;
+let isAnalyzingInProgress = false;
 
 export function initPriceWebSocket() {
     closePriceWebSocket();
@@ -35,17 +75,18 @@ export function initPriceWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/prices?asset=${encodeURIComponent(currentAsset)}`;
         
-        priceSocket = new WebSocket(wsUrl);
+        const sock = new WebSocket(wsUrl);
+        setPriceSocket(sock);
 
-        priceSocket.onopen = function() {
+        sock.onopen = function() {
             reconnectAttempts = 0;
         };
 
-        priceSocket.onmessage = function(event) {
+        sock.onmessage = function(event) {
             try {
                 const data = JSON.parse(event.data);
                 if (data && data.price !== undefined) {
-                    const newPrice = data.price;
+                    const newPrice = Number(data.price);
                     updateLivePriceUI(newPrice);
                     setLastPriceVal(newPrice);
                 }
@@ -54,12 +95,10 @@ export function initPriceWebSocket() {
             }
         };
 
-        priceSocket.onclose = function(e) {
-            console.log('Price WebSocket closed');
-            if (e.code !== 1000 && reconnectAttempts < 10) {
+        sock.onclose = function(e) {
+            if (e.code !== 1000 && reconnectAttempts < 10 && !document.hidden) {
                 const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 15000);
                 reconnectAttempts++;
-                console.log(`Reconnecting WS in ${delay}ms... (Attempt ${reconnectAttempts})`);
                 clearTimeout(reconnectTimeout);
                 reconnectTimeout = setTimeout(() => {
                     initPriceWebSocket();
@@ -67,11 +106,11 @@ export function initPriceWebSocket() {
             }
         };
 
-        priceSocket.onerror = function(err) {
-            console.error('Price WebSocket error:', err);
+        sock.onerror = function(err) {
+            console.warn('Price WebSocket error:', err);
         };
     } catch (err) {
-        console.error('Failed to create WebSocket:', err);
+        console.warn('Failed to create WebSocket:', err);
     }
 }
 
@@ -79,71 +118,101 @@ export function closePriceWebSocket() {
     clearTimeout(reconnectTimeout);
     if (priceSocket) {
         try {
+            priceSocket.onopen = null;
+            priceSocket.onmessage = null;
+            priceSocket.onerror = null;
+            priceSocket.onclose = null;
             priceSocket.close(1000); // 1000 means normal closure
         } catch(e) {}
-        priceSocket = null;
+        setPriceSocket(null);
     }
     setLastPriceVal(0);
 }
 
 export async function syncTime() {
     try {
-        var r = await fetch('/api/time', {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+        const r = await fetch('/api/time', {
             headers: {
-                'X-Telegram-Init-Data': tg ? tg.initData : ''
-            }
+                'X-Telegram-Init-Data': resolveAuthData()
+            },
+            signal: controller.signal
         });
-        var d = await r.json();
-        setTimeOffset(d.t - Date.now());
-    } catch(e) { setTimeOffset(0); }
+        clearTimeout(timeoutId);
+
+        if (r.ok) {
+            const d = await r.json();
+            if (d && d.t) {
+                setTimeOffset(d.t - Date.now());
+            }
+        }
+    } catch(e) { 
+        setTimeOffset(0); 
+    }
 }
 
 export async function executeAnalysis() {
     const btn = document.getElementById('btnGet');
-    if (btn && btn.disabled) return;
+    if (isAnalyzingInProgress || (btn && btn.disabled)) return;
+
+    // Mutex lock against rapid double-clicks
+    isAnalyzingInProgress = true;
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'СКАНИРОВАНИЕ...';
+    }
+
     const sphere = document.getElementById('mainSphere');
-    
-    let animFrame;
-    try {
-        const ed = document.getElementById('errorDisplay');
-        if (ed) ed.style.display = 'none';
-        clearResults();
-        startStatusBar();
+    const ed = document.getElementById('errorDisplay');
+    if (ed) ed.style.display = 'none';
 
-        animFrame = requestAnimationFrame(() => {
-            if (sphere) {
-                sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
-                sphere.classList.add('analyzing');
-            }
-            if (btn) {
-                btn.disabled = true;
-                btn.innerText = 'СКАНИРОВАНИЕ...';
-            }
-        });
+    clearResults();
+    startStatusBar();
 
-        showAiChart(currentAsset, currentTf);
+    if (sphere) {
+        sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
+        sphere.classList.add('analyzing');
+    }
 
-        // Fetch early OHLC specifically for the animated chart during the analysis phase
-        fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}`, {
-            headers: {
-                'X-Telegram-Init-Data': tg && tg.initData ? tg.initData : getCustomInitData()
+    showAiChart(currentAsset, currentTf);
+
+    // Fetch early OHLC for the animated chart during the analysis phase
+    fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}`, {
+        headers: {
+            'X-Telegram-Init-Data': resolveAuthData()
+        }
+    })
+        .then(r => r.json())
+        .then(ohlc => {
+            if (ohlc && ohlc.length) {
+                updateAiChartData(ohlc);
             }
         })
-            .then(r => r.json())
-            .then(ohlc => {
-                if (ohlc && ohlc.length) {
-                    updateAiChartData(ohlc);
-                }
-            })
-            .catch(err => console.log('ohlc error', err));
+        .catch(err => console.log('ohlc error', err));
 
-        const startTime = Date.now();
+    const startTime = Date.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 18000); // 18s fail-safe timeout
 
+    try {
         const res = await fetch(`/api/analyze?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}&_=${Date.now()}`, {
             headers: {
-                'X-Telegram-Init-Data': tg && tg.initData ? tg.initData : getCustomInitData()
-            }
+                'X-Telegram-Init-Data': resolveAuthData()
+            },
+            signal: controller.signal
         });
+
+        clearTimeout(timeoutId);
+
+        const contentType = (res.headers && typeof res.headers.get === 'function')
+            ? (res.headers.get('content-type') || '')
+            : 'application/json';
+        if (contentType && !contentType.includes('application/json')) {
+            throw new Error(`Сервер вернул статус ${res.status} (${res.statusText || 'Неверный ответ'})`);
+        }
+
         const rawData = await res.json();
         
         let data = rawData;
@@ -164,19 +233,25 @@ export async function executeAnalysis() {
                 btn.disabled = false;
                 btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';
             }
+            isAnalyzingInProgress = false;
 
-            if(data.error) {
+            // 1. Explicit Circuit Breaker Check First
+            if (data.reason === 'CIRCUIT_BREAKER_ACTIVE' || (data.message && data.message.includes('Circuit Breaker'))) {
+                if (typeof setCircuitBreakerState === 'function') setCircuitBreakerState(true);
+                renderError('⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ ⚠️', 'Сработал защитный предохранитель депозита (Circuit Breaker).\n' + (data.message || ''));
+                return;
+            }
+
+            // 2. Generic Error Check
+            if (data.error) {
                 const debugMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${window.location.href}`;
                 renderError(data.error, debugMsg);
                 return;
             }
 
-            if(data.reason === 'CIRCUIT_BREAKER_ACTIVE') {
-                renderError('⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ ⚠️', 'Сработал защитный предохранитель депозита (Circuit Breaker).\n' + data.message);
-                return;
-            }
+            if (typeof setCircuitBreakerState === 'function') setCircuitBreakerState(false);
             
-            // Apply config to UI elements
+            // Apply config to UI elements if present
             if (config) {
                 const mlCard = document.getElementById('mlEnsembleCard');
                 if (mlCard) mlCard.style.display = config.ml ? 'block' : 'none';
@@ -200,25 +275,29 @@ export async function executeAnalysis() {
                     : 'Направление';
             }
 
-            if (data.direction === 'BUY') {
-                resDir.innerHTML = 'ВВЕРХ';
-                resDir.style.color = '#00e676';
-                sphere.classList.add('buy-signal');
-            } else if (data.direction === 'PUT') {
-                resDir.innerHTML = 'ВНИЗ';
-                resDir.style.color = '#ff1744';
-                sphere.classList.add('put-signal');
-            } else {
-                resDir.innerHTML = 'НЕЙТРАЛЬНО';
-                resDir.style.color = 'var(--dim)';
-                sphere.classList.add('neutral-signal');
+            if (resDir) {
+                if (data.direction === 'BUY') {
+                    resDir.innerHTML = 'ВВЕРХ';
+                    resDir.style.color = '#00e676';
+                    if (sphere) sphere.classList.add('buy-signal');
+                } else if (data.direction === 'PUT') {
+                    resDir.innerHTML = 'ВНИЗ';
+                    resDir.style.color = '#ff1744';
+                    if (sphere) sphere.classList.add('put-signal');
+                } else {
+                    resDir.innerHTML = 'НЕЙТРАЛЬНО';
+                    resDir.style.color = 'var(--dim)';
+                    if (sphere) sphere.classList.add('neutral-signal');
+                }
             }
 
-            document.getElementById('resProb').innerText = data.probability + '%';
-            document.getElementById('resProb').style.color = data.probability >= 58 ? '#00e676' : data.probability >= 54 ? '#ffd600' : 'var(--accent)';
+            const probEl = document.getElementById('resProb');
+            if (probEl) {
+                probEl.innerText = data.probability + '%';
+                probEl.style.color = data.probability >= 58 ? '#00e676' : data.probability >= 54 ? '#ffd600' : 'var(--accent)';
+            }
 
-            // Measured fact vs model score: show real asset winrate when measured
-            // (the big % is a rescaled model score, NOT a measured win probability).
+            // Measured fact vs model score
             const factEl = document.getElementById('resProbFact');
             if (factEl) {
                 if (data.winRateAsset != null && (data.signalsVerifiedAsset || 0) >= 5) {
@@ -228,7 +307,8 @@ export async function executeAnalysis() {
                 }
             }
 
-            document.getElementById('resDur').innerText = data.duration;
+            const durEl = document.getElementById('resDur');
+            if (durEl) durEl.innerText = data.duration || '--';
 
             if (data.rsi !== undefined) {
                 const rsiEl = document.getElementById('resRsi');
@@ -259,7 +339,6 @@ export async function executeAnalysis() {
                 if (rp) rp.innerHTML += " <span title='Конфликт со старшим таймфреймом (учтен нейросетью)'>⚠️</span>";
             }
 
-
             // Market Weather Bindings
             const mwCard = document.getElementById('marketWeatherCard');
             if (mwCard) {
@@ -272,14 +351,14 @@ export async function executeAnalysis() {
             const wSession = document.getElementById("weatherSession");
             if (wSession && data.uiMarketSession) {
                 wSession.innerText = data.uiMarketSession;
-                let sColor = "#f59e0b"; // default yellow for quiet/range
+                let sColor = "#f59e0b";
                 let sessionLow = data.uiMarketSession.toLowerCase();
-                if (sessionLow.includes("\u0435\u0432\u0440\u043e\u043f\u0430") || sessionLow.includes("\u0430\u043c\u0435\u0440\u0438\u043a\u0430") || sessionLow.includes("\u043d\u044c\u044e-\u0439\u043e\u0440\u043a") || sessionLow.includes("\u043b\u043e\u043d\u0434\u043e\u043d")) {
-                    sColor = "#10b981"; // green
+                if (sessionLow.includes("европа") || sessionLow.includes("америка") || sessionLow.includes("нью-йорк") || sessionLow.includes("лондон")) {
+                    sColor = "#10b981";
                 } else if (sessionLow.includes("otc")) {
-                    sColor = "#8b5cf6"; // purple
-                } else if (sessionLow.includes("\u043c\u0435\u0440\u0442\u0432") || sessionLow.includes("\u043f\u0438\u043b") || sessionLow.includes("\u0430\u0437\u0438")) {
-                    sColor = "#f59e0b"; // yellow
+                    sColor = "#8b5cf6";
+                } else if (sessionLow.includes("мертв") || sessionLow.includes("пил") || sessionLow.includes("ази")) {
+                    sColor = "#f59e0b";
                 }
                 wSession.style.color = sColor;
             }
@@ -287,14 +366,14 @@ export async function executeAnalysis() {
             const wPhase = document.getElementById("weatherPhase");
             if (wPhase && data.uiMarketPhase) {
                 wPhase.innerText = data.uiMarketPhase;
-                let phaseColor = "#10b981"; // Green default (upward/good)
+                let phaseColor = "#10b981";
                 let phaseLow = data.uiMarketPhase.toLowerCase();
-                if (phaseLow.includes("\u0444\u043b\u044d\u0442") || phaseLow.includes("\u0437\u0430\u043c\u0435\u0434\u043b\u0435\u043d\u0438\u0435") || phaseLow.includes("\u043a\u043e\u043d\u0441\u043e\u043b\u0438\u0434\u0430\u0446\u0438\u044f") || phaseLow.includes("\u0431\u043e\u043a\u043e\u0432\u0438\u043a")) {
-                    phaseColor = "#f59e0b"; // Yellow
-                } else if (phaseLow.includes("\u043c\u0435\u0434\u0432\u0435\u0436") || phaseLow.includes("\u043f\u0435\u0440\u0435\u043f\u0440\u043e\u0434\u0430\u043d") || phaseLow.includes("\u043f\u0430\u0434\u0435\u043d\u0438") || phaseLow.includes("\u0441\u0431\u0440\u043e\u0441")) {
-                    phaseColor = "#ef4444"; // Red
-                } else if (phaseLow.includes("\u0431\u044b\u0447") || phaseLow.includes("\u043f\u0435\u0440\u0435\u043a\u0443\u043f\u043b\u0435\u043d") || phaseLow.includes("\u0440\u043e\u0441\u0442")) {
-                    phaseColor = "#10b981"; // Green
+                if (phaseLow.includes("флэт") || phaseLow.includes("замедление") || phaseLow.includes("консолидация") || phaseLow.includes("боковик")) {
+                    phaseColor = "#f59e0b";
+                } else if (phaseLow.includes("медвеж") || phaseLow.includes("перепродан") || phaseLow.includes("падени") || phaseLow.includes("сброс")) {
+                    phaseColor = "#ef4444";
+                } else if (phaseLow.includes("быч") || phaseLow.includes("перекуплен") || phaseLow.includes("рост")) {
+                    phaseColor = "#10b981";
                 }
                 wPhase.style.color = phaseColor;
             }
@@ -305,23 +384,22 @@ export async function executeAnalysis() {
                 wEntropy.innerText = data.uiMarketEntropy;
                 let entColor = "#10b981";
                 let entLow = data.uiMarketEntropy.toLowerCase();
-                if (entLow.includes("\u043d\u043e\u0440\u043c") || entLow.includes("\u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d")) {
-                    entColor = "#10b981"; // Green
-                } else if (entLow.includes("\u0445\u0430\u043e\u0441") || entLow.includes("\u043e\u043f\u0430\u0441\u043d") || entLow.includes("\u0448\u0442\u043e\u0440\u043c")) {
-                    entColor = "#ef4444"; // Red
-                } else if (entLow.includes("\u043c\u0435\u0440\u0442\u0432") || entLow.includes("\u0441\u043e\u043d\u043d") || entLow.includes("\u0448\u0442\u0438\u043b\u044c")) {
-                    entColor = "#f59e0b"; // Yellow
+                if (entLow.includes("норм") || entLow.includes("безопасн")) {
+                    entColor = "#10b981";
+                } else if (entLow.includes("хаос") || entLow.includes("опасн") || entLow.includes("шторм")) {
+                    entColor = "#ef4444";
+                } else if (entLow.includes("мертв") || entLow.includes("сонн") || entLow.includes("штиль")) {
+                    entColor = "#f59e0b";
                 }
                 wEntropy.style.color = entColor;
                 if (wTitle) wTitle.style.color = entColor;
             }
 
             // ML Ensemble Card
-
             if (data.llmReport && !data.llmReport.includes('Оффлайн')) {
                 const mlCard = document.getElementById('mlEnsembleCard');
                 if (mlCard) mlCard.style.display = (config && config.ml === false) ? 'none' : 'block';
-                const badge = document.getElementById('mlEnsembleBadge');
+                const badge = document.getElementById('mlEnsembleBadge') || document.getElementById('mlModelBadge');
                 const isEnabled = data.lgbmModelVersion && data.lgbmModelVersion !== 'disabled';
                 if (badge) {
                     badge.innerText = isEnabled ? '🧠 ML Ансамбль' : '⚠️ ML';
@@ -356,6 +434,7 @@ export async function executeAnalysis() {
             const goldenBadgeMain = document.getElementById('goldenSetupBadgeMain');
             if (goldenBadge) goldenBadge.style.display = data.goldenSetup ? 'inline-block' : 'none';
             if (goldenBadgeMain) goldenBadgeMain.style.display = data.goldenSetup ? 'inline-block' : 'none';
+            
             const wrAssetEl = document.getElementById('winRateAsset');
             if (wrAssetEl) {
                 if (data.winRateAsset != null) {
@@ -377,53 +456,19 @@ export async function executeAnalysis() {
                     wrOverallEl.innerText = 'нет данных';
                 }
             }
-            const sigCountEl = document.getElementById('signalsCount');
+            const sigCountEl = document.getElementById('signalsCount') || document.getElementById('signalCount');
             if (sigCountEl) {
                 const verified = data.signalsVerified || 0;
                 const pending = data.signalsPending || 0;
                 sigCountEl.innerText = verified + (pending > 0 ? ' (+' + pending + ')' : '');
             }
 
-            // Monte Carlo & Risk Card (Hidden by user request)
-            /*
-            if (data.evLabel || data.kellyLabel) {
-                const mcCard = document.getElementById('mcCard');
-                if (mcCard) mcCard.style.display = 'none';
-                const mcSimEl = document.getElementById('mcSimCount');
-                if (mcSimEl && data.monteCarloIterations) {
-                    mcSimEl.innerText = (data.monteCarloSuccess || 0) + ' / ' + data.monteCarloIterations + ' удачных';
-                }
-                const evEl = document.getElementById('mcEv');
-                if (evEl) {
-                    evEl.innerText = data.evLabel || '--';
-                    evEl.style.color = (data.evPct && data.evPct > 0) ? '#10b981' : '#f43f5e';
-                }
-                const kellyEl = document.getElementById('mcKelly');
-                if (kellyEl) {
-                    kellyEl.innerText = data.kellyLabel || '--';
-                    kellyEl.style.color = (data.kellyRiskPct && data.kellyRiskPct > 0) ? '#f59e0b' : '#ff1744';
-                }
-                const wfEl = document.getElementById('wfStatus');
-                if (wfEl) {
-                    if (data.wfIsCooloffActive) {
-                        wfEl.innerText = 'Охлаждение';
-                        wfEl.style.color = '#ff1744';
-                    } else {
-                        wfEl.innerText = 'В норме';
-                        wfEl.style.color = '#10b981';
-                    }
-                }
-            }
-            */
-
             // Consensus Radar Card
             const rCard = document.getElementById('consensusRadarCard');
             if (rCard) {
-                // Show the radar if there is a direction
                 if (data.direction) {
                     rCard.style.display = 'block';
 
-                    // Formatting helper
                     const formatDir = (dir, conf) => {
                         if (dir === 'BUY') return `<span style='color:#10b981; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg> ВВЕРХ${conf ? ` (${conf}%)` : ''}</span>`;
                         if (dir === 'PUT') return `<span style='color:#ef4444; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg> ВНИЗ${conf ? ` (${conf}%)` : ''}</span>`;
@@ -437,7 +482,7 @@ export async function executeAnalysis() {
                     if (rSmc) rSmc.innerHTML = formatDir(data.smcDirection, data.smcConfidence);
 
                     const rOf = document.getElementById('radarOf');
-                    if (rOf) { rOf.closest('[data-module="of"]')?.style.setProperty('display','none'); rOf.innerHTML = ''; } // OF отключён
+                    if (rOf) { rOf.closest('[data-module="of"]')?.style.setProperty('display','none'); rOf.innerHTML = ''; }
 
                     const rTa = document.getElementById('radarTa');
                     if (rTa) rTa.innerHTML = formatDir(data.taDirection, data.taConfidence);
@@ -446,25 +491,7 @@ export async function executeAnalysis() {
                 }
             }
 
-            // News Card (Hidden by user request)
-            /*
-            if (data.newsScore && Math.abs(data.newsScore) > 0.1 && data.newsSummary) {
-                const nCard = document.getElementById('newsCard');
-                if (nCard) nCard.style.display = 'none';
-                const nSent = document.getElementById('newsSentimentEl');
-                if (nSent) {
-                    nSent.innerText = data.newsSentiment || '--';
-                    nSent.style.color = data.newsScore > 0 ? '#00e676' : '#ff1744';
-                }
-                const nSum = document.getElementById('newsSummaryEl');
-                if (nSum) nSum.innerText = data.newsSummary;
-            }
-            */
-
-            const probBars = pricesToBars(data.chartData, 20); // Get 20 candles for smoother history
-            // Honest projection length: expected move = ATR*sqrt(expiry) as a
-            // fraction of the displayed price span (volatility scaling). Falls
-            // back to legacy fixed dash when ATR is unavailable.
+            const probBars = pricesToBars(data.chartData, 20);
             let projFrac = null;
             if (data.atr > 0 && data.chartData && data.chartData.length >= 2 && (data.expiryCandles | 0) > 0) {
                 const tailP = data.chartData.slice(-20);
@@ -478,8 +505,6 @@ export async function executeAnalysis() {
             renderDirSvg(data.direction);
 
             const durBars = pricesToBars(data.chartData, 8);
-            // Expiry candles (N = expiryCandles) when backend provides OHLC;
-            // fallback to legacy price bars for old backend responses.
             if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);
             else if (durBars.length) renderMiniChart('durChart', durBars, '');
 
@@ -495,13 +520,20 @@ export async function executeAnalysis() {
 
         }, remainingDelay);
     } catch(e) {
-        if (animFrame) cancelAnimationFrame(animFrame);
+        clearTimeout(timeoutId);
+        hideAiChart(); // Ensure Canvas loop is stopped on failure!
         stopStatusBar();
         if (sphere) sphere.classList.remove('analyzing');
-        btn.disabled = false;
-        btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';
+        }
+        isAnalyzingInProgress = false;
+
+        const errorMsg = e.name === 'AbortError' ? 'Превышен лимит времени ответа сервера (18с)' : e.message;
         const catchMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${window.location.href}`;
-        renderError(e.message, catchMsg);
+        renderError(errorMsg, catchMsg);
+        
         if (window.Sentry) {
             Sentry.captureException(e, {
                 extra: {

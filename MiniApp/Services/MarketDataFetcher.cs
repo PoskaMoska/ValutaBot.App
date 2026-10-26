@@ -128,8 +128,11 @@ public class MarketDataFetcher
             if (poCandles.Length == 0)
                 throw new ExchangeUnavailableException("PO feed: no candles", $"Нет котировок Pocket Option для {poKey}. Поток PO не подключен.");
 
-            double ageSecs = (DateTime.UtcNow - poCandles[^1].Timestamp).TotalSeconds;
-            if (IsFeedStale(poCandles[^1].Timestamp, tfSecs, DateTime.UtcNow))
+            DateTime refNow = PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+                ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+                : DateTime.UtcNow;
+            double ageSecs = (refNow - poCandles[^1].Timestamp).TotalSeconds;
+            if (IsFeedStale(poCandles[^1].Timestamp, tfSecs, refNow))
                 throw new ExchangeUnavailableException("PO feed: stale", $"Котировки Pocket Option для {poKey} устарели ({ageSecs:F0}с).");
 
             RecordSuccess();

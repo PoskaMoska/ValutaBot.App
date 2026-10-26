@@ -138,7 +138,14 @@ public static class SignalTracker
             SmcTelemetry = smcTelemetry
         };
 
-        await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
+        try
+        {
+            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SavePendingTradeAsync(record);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Error($"[Tracker] Failed to persist pending trade {record.Id} ({asset}/{timeframe}): {ex.Message}", ex);
+        }
 
         Console.WriteLine($"[Tracker] Recorded {direction} {asset}/{timeframe} @ {price:F5} " +
                           $"? target verify at {verifyAt:HH:mm:ss}");

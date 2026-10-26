@@ -173,7 +173,7 @@ public static class TradeOutcomeTracker
                 _ = DriftDetectorService.AnalyzeAssetDriftAsync(record.Asset, record.Timeframe);
             }
 
-            bool isExactDoji = Math.Abs(record.PnlBps) < 1e-4; // Exact tie / Refund
+            bool isExactDoji = !record.WasCorrect.HasValue; // Exact tie / Refund (WasCorrect is null)
             string lossKey = $"{record.Asset}_{record.Timeframe}";
             
             if (isExactDoji)

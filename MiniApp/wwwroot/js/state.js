@@ -14,7 +14,9 @@
 // ReferenceError crashes across browser webviews.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export const tg = (typeof window !== 'undefined' && window.Telegram) ? window.Telegram.WebApp : null;
+export const tg = (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp) 
+    ? window.Telegram.WebApp 
+    : null;
 
 export function getCustomInitData() {
     if (typeof window === 'undefined') return '';
@@ -22,11 +24,21 @@ export function getCustomInitData() {
         const urlParams = new URLSearchParams(window.location.search);
         const userId = urlParams.get('custom_user_id') || urlParams.get('userId');
         const userSign = urlParams.get('custom_user_sign') || urlParams.get('userSign');
+        const authDate = urlParams.get('auth_date');
         if (userId && userSign) {
-            return `custom_user_id=${userId}&custom_user_sign=${userSign}`;
+            let res = `custom_user_id=${encodeURIComponent(userId)}&custom_user_sign=${encodeURIComponent(userSign)}`;
+            if (authDate) res += `&auth_date=${encodeURIComponent(authDate)}`;
+            return res;
         }
     } catch (e) {}
     return '';
+}
+
+export function getAuthHeader() {
+    if (tg && tg.initData && tg.initData.length > 0) {
+        return tg.initData;
+    }
+    return getCustomInitData();
 }
 
 // Active Asset & Timeframe selection
@@ -63,6 +75,12 @@ export function setLastPriceVal(val) {
 export let priceSocket = null;
 export function setPriceSocket(sock) {
     priceSocket = sock;
+}
+
+// Circuit Breaker State Tracking
+export let isCircuitBreakerActive = false;
+export function setCircuitBreakerState(active) {
+    isCircuitBreakerActive = Boolean(active);
 }
 
 // AI Copilot Action Handler Delegate

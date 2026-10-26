@@ -63,6 +63,16 @@ TF_SECONDS = {
 }
 
 
+def _safe_float(val, default=0.0):
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        return default if math.isnan(f) or math.isinf(f) else f
+    except (ValueError, TypeError):
+        return default
+
+
 def normalize_candles_live(
     candles: List[Dict],
     seq_len: int = 160,
@@ -95,13 +105,12 @@ def normalize_candles_live(
 
     for i, c in enumerate(tail):
         idx = offset + i
-        op = float(c.get("Open", c.get("open", 1.0)))
-        hi = float(c.get("High", c.get("high", op)))
-        lo = float(c.get("Low", c.get("low", op)))
-        cl = float(c.get("Close", c.get("close", op)))
-
-        if op <= 0:
+        op = _safe_float(c.get("Open", c.get("open")), default=1.0)
+        if op <= 0.0:
             op = 1e-5
+        hi = _safe_float(c.get("High", c.get("high")), default=op)
+        lo = _safe_float(c.get("Low", c.get("low")), default=op)
+        cl = _safe_float(c.get("Close", c.get("close")), default=op)
 
         arr[idx, 0] = ((cl - op) / op) * 10000.0
         arr[idx, 1] = ((hi - op) / op) * 10000.0
@@ -124,13 +133,13 @@ def normalize_candles_live(
             and (cur_ts - prev_ts) > max_allowed_gap_sec
         )
 
-        if prev_close is not None and prev_close > 0 and not is_time_gap:
+        if prev_close is not None and prev_close > 0.0 and not is_time_gap:
             arr[idx, 3] = ((cl - prev_close) / prev_close) * 10000.0
         else:
             arr[idx, 3] = 0.0
 
         if n_channels >= 5:
-            vol = float(c.get("Volume", c.get("volume", 0.0)) or 0.0)
+            vol = _safe_float(c.get("Volume", c.get("volume")), default=0.0)
             arr[idx, 4] = math.log1p(max(0.0, vol)) / 10.0
 
         if n_channels >= 8:
@@ -354,17 +363,8 @@ class PatchTSTPredictor:
                 )
             model.eval()
 
-            # Directional logit centering: eliminate learned prior bias (e.g. +0.21 on s10)
-            # Ensures symmetric 50/50 prior on neutral market features to prevent one-sided directional skew
-            if self._is_dual_stream and hasattr(model, "tf_heads"):
-                for head in model.tf_heads:
-                    if hasattr(head, "bias") and head.bias is not None and head.bias.data.shape[0] >= 3:
-                        b = head.bias.data
-                        skew = (b[1] - b[2]) / 2.0
-                        head.bias.data[1] -= skew
-                        head.bias.data[2] += skew
-                log.info("[PatchTSTPredictor] Centered directional logits on all 5 tf_heads (zero baseline prior skew).")
-            elif hasattr(model, "classifier"):
+            # Directional logit centering: SequenceBrain classifier only (DualStream is sign-antisymmetric by construction)
+            if not self._is_dual_stream and hasattr(model, "classifier"):
                 last_layer = model.classifier[-1]
                 if hasattr(last_layer, "bias") and last_layer.bias is not None and last_layer.bias.data.shape[0] >= 3:
                     b = last_layer.bias.data

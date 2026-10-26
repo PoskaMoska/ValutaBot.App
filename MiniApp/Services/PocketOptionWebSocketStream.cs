@@ -76,6 +76,23 @@ public static class PocketOptionWebSocketStream
     // Live price store: last tick per symbol
     private static readonly ConcurrentDictionary<string, (double Price, long TimestampUtcTicks)> _livePrices = new(StringComparer.OrdinalIgnoreCase);
 
+    // Monotonic tick arrival per symbol for Dead Man's Switch detection
+    private static readonly ConcurrentDictionary<string, long> _lastTickTicksBySymbol = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Per-symbol Dead Man's Switch: returns true if ticks for the specified asset arrived within maxIdleSeconds.
+    /// </summary>
+    public static bool IsSymbolFeedAlive(string symbol, double maxIdleSeconds = 2.0)
+    {
+        string clean = PriceFeed.BaseAsset(symbol);
+        if (_lastTickTicksBySymbol.TryGetValue(clean, out long lastTicks))
+        {
+            double elapsedSec = (DateTime.UtcNow.Ticks - lastTicks) / (double)TimeSpan.TicksPerSecond;
+            return elapsedSec <= maxIdleSeconds;
+        }
+        return false;
+    }
+
     // Watermark per candle asset key (e.g. EURUSD_PO) to prevent duplicate volume while backfilling reconnect gaps
     private static readonly ConcurrentDictionary<string, double> _lastCandleSrvTs = new(StringComparer.OrdinalIgnoreCase);
 
@@ -380,7 +397,9 @@ public static class PocketOptionWebSocketStream
             Interlocked.Exchange(ref _consecutiveAuthFailures, 0);
 
             try { _connectionCts?.Cancel(); } catch { }
-            return (true, $"Токен сохранён в po_collector_state (session={sessProp.GetString()![..Math.Min(6, sessProp.GetString()!.Length)]}***). Переподключение потока запущено.");
+            string sessStr = sessProp.GetString() ?? "";
+            string sessPrefix = sessStr.Length > 6 ? sessStr[..6] : sessStr;
+            return (true, $"Токен сохранён в po_collector_state (session={sessPrefix}***). Переподключение потока запущено.");
         }
         catch (Exception ex)
         {
@@ -394,21 +413,21 @@ public static class PocketOptionWebSocketStream
         {
             while (!token.IsCancellationRequested)
             {
-                await Task.Delay(2000, token);
+                await Task.Delay(1000, token);
                 var ws = _webSocket;
                 if (ws == null || ws.State != WebSocketState.Open) continue;
 
                 var now = DateTime.UtcNow;
                 var frameIdleSeconds = (now - _lastMessageTime).TotalSeconds;
                 var tickIdleSeconds = (now - _lastTickTime).TotalSeconds;
-                if (frameIdleSeconds > 5)
+                if (frameIdleSeconds > 3)
                 {
                     try { await SendTextAsync(ws, "2", token); } catch { }
                 }
 
-                // Send Socket.IO application-level status heartbeat 42["ps"] every ~35s
+                // Send Socket.IO application-level status heartbeat 42["ps"] every ~30s
                 // to prevent demo-api-eu.po.market from dropping the connection on its 3-minute timer.
-                if ((now - _lastPsHeartbeat).TotalSeconds >= 35)
+                if ((now - _lastPsHeartbeat).TotalSeconds >= 30)
                 {
                     try
                     {
@@ -418,8 +437,8 @@ public static class PocketOptionWebSocketStream
                     catch { }
                 }
 
-                // Fast-fail: Reconnect if raw socket is silent >12s OR if no market ticks arrived for >15s despite open socket (zombie subscription)
-                bool isDead = frameIdleSeconds > 12 || tickIdleSeconds > 15;
+                // Fast-fail: Reconnect if raw socket is silent >6s OR if no market ticks arrived for >8s despite open socket (zombie subscription)
+                bool isDead = frameIdleSeconds > 6 || tickIdleSeconds > 8;
                 if (isDead && ws.State == WebSocketState.Open)
                 {
                     BotLogger.Warn($"[PO WS] Watchdog detected silent drop or feed stall (frameIdle={frameIdleSeconds:F1}s, tickIdle={tickIdleSeconds:F1}s). Dropping connection to reconnect immediately...");
@@ -526,37 +545,60 @@ public static class PocketOptionWebSocketStream
 
     private static async Task<(string? text, byte[]? binary)> ReceiveFrameAsync(ClientWebSocket ws, CancellationToken token)
     {
-        var buffer = new byte[8192];
-        using var ms = new MemoryStream();
-        WebSocketReceiveResult result;
-        do
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(16384);
+        try
         {
-            result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), token);
-            if (result.MessageType == WebSocketMessageType.Close) return (null, null);
-            ms.Write(buffer, 0, result.Count);
-        } while (!result.EndOfMessage);
+            var firstResult = await ws.ReceiveAsync(new ArraySegment<byte>(rented), token);
+            if (firstResult.MessageType == WebSocketMessageType.Close) return (null, null);
 
-        byte[] bytes = ms.ToArray();
-        if (result.MessageType == WebSocketMessageType.Binary)
-        {
-            return (null, bytes);
+            if (firstResult.EndOfMessage)
+            {
+                if (firstResult.MessageType == WebSocketMessageType.Binary)
+                {
+                    byte[] binary = new byte[firstResult.Count];
+                    Buffer.BlockCopy(rented, 0, binary, 0, firstResult.Count);
+                    return (null, binary);
+                }
+                return (Encoding.UTF8.GetString(rented, 0, firstResult.Count), null);
+            }
+
+            using var ms = new MemoryStream();
+            ms.Write(rented, 0, firstResult.Count);
+            WebSocketReceiveResult nextResult;
+            do
+            {
+                nextResult = await ws.ReceiveAsync(new ArraySegment<byte>(rented), token);
+                if (nextResult.MessageType == WebSocketMessageType.Close) return (null, null);
+                ms.Write(rented, 0, nextResult.Count);
+            } while (!nextResult.EndOfMessage);
+
+            byte[] bytes = ms.ToArray();
+            if (nextResult.MessageType == WebSocketMessageType.Binary)
+            {
+                return (null, bytes);
+            }
+            return (Encoding.UTF8.GetString(bytes), null);
         }
-        return (Encoding.UTF8.GetString(bytes), null);
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     private static async Task SubscribeAllAssetsAsync(ClientWebSocket ws, CancellationToken connectionToken)
     {
         Interlocked.Exchange(ref _consecutiveAuthFailures, 0);
         Status = "ONLINE";
-        BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {string.Join(", ", _subscribedAssets)}");
-        await Task.Delay(150, connectionToken);
+        string assetList = string.Join(", ", _subscribedAssets);
+        BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {assetList}");
+        await Task.Delay(20, connectionToken);
         foreach (var asset in _subscribedAssets)
         {
-            string sub1 = $"42[\"changeSymbol\",{{\"asset\":\"{asset}\",\"period\":60}}]";
-            string sub2 = $"42[\"subfor\",\"{asset}\"]";
+            string sub1 = "42[\"changeSymbol\",{\"asset\":\"" + asset + "\",\"period\":60}]";
+            string sub2 = "42[\"subfor\",\"" + asset + "\"]";
             await SendTextAsync(ws, sub1, connectionToken);
             await SendTextAsync(ws, sub2, connectionToken);
-            await Task.Delay(50, connectionToken);
+            await Task.Delay(10, connectionToken);
         }
         await SendTextAsync(ws, "42[\"ps\"]", connectionToken);
         _lastPsHeartbeat = DateTime.UtcNow;
@@ -733,7 +775,10 @@ public static class PocketOptionWebSocketStream
                 }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PO WS] Error parsing updateStream JSON frame: {ex.Message}");
+        }
     }
 
     private static void ParseHistoryJson(string json)
@@ -805,6 +850,7 @@ public static class PocketOptionWebSocketStream
         if (!isBackfill)
         {
             _livePrices[baseAsset] = (price, DateTime.UtcNow.Ticks);
+            _lastTickTicksBySymbol[baseAsset] = DateTime.UtcNow.Ticks;
             LastBrokerTickUtc = new DateTime(tickTimeUtc, DateTimeKind.Utc);
             _lastMessageTime = DateTime.UtcNow;
             _lastTickTime = DateTime.UtcNow;

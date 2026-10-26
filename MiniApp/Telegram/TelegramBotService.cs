@@ -132,7 +132,29 @@ public partial class TelegramBotService : BackgroundService
                 var response = await MiniAppController.HttpFactory!.CreateClient("Telegram").GetAsync(url, stoppingToken);
                 if (!response.IsSuccessStatusCode)
                 {
-                    await Task.Delay(5000, stoppingToken);
+                    int backoffSeconds = 5;
+                    if ((int)response.StatusCode == 429)
+                    {
+                        try
+                        {
+                            var errJson = await response.Content.ReadAsStringAsync(stoppingToken);
+                            using var errDoc = JsonDocument.Parse(errJson);
+                            if (errDoc.RootElement.TryGetProperty("parameters", out var param) &&
+                                param.TryGetProperty("retry_after", out var retryAfter))
+                            {
+                                backoffSeconds = Math.Max(retryAfter.GetInt32(), 5);
+                            }
+                            else
+                            {
+                                backoffSeconds = 30;
+                            }
+                        }
+                        catch { backoffSeconds = 30; }
+
+                        BotLogger.Warn($"[TG Bot] Rate Limited (429). Telegram instructed backoff of {backoffSeconds}s.");
+                    }
+
+                    await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), stoppingToken);
                     continue;
                 }
 
@@ -305,8 +327,6 @@ public partial class TelegramBotService : BackgroundService
         }
     }
 
-
-
     private static async Task ResetChatMenuButton(string token, long chatId)
     {
         try
@@ -347,4 +367,3 @@ public partial class TelegramBotService : BackgroundService
         }
     }
 }
-

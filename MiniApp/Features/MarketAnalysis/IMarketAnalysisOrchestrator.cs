@@ -5,5 +5,5 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 
 public interface IMarketAnalysisOrchestrator
 {
-    Task<AnalysisResponseDto> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null);
+    Task<AnalysisResponseDto> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null, MiniAppController.OhlcCandle[]? preloadedCandles = null);
 }

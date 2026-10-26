@@ -1,4 +1,6 @@
-import { lastPriceVal } from './state.js?v=20261025_pure_neural';
+import { lastPriceVal } from './state.js?v=20261026_audit_v1';
+
+let priceFlashTimeout = null;
 
 export function updateLivePriceUI(price) {
     const valEl = document.getElementById('livePriceValue');
@@ -16,7 +18,8 @@ export function updateLivePriceUI(price) {
             valEl.className = 'live-price-value down';
         }
         
-        setTimeout(() => {
+        if (priceFlashTimeout) clearTimeout(priceFlashTimeout);
+        priceFlashTimeout = setTimeout(() => {
             if (valEl.innerText === formatted) {
                 valEl.className = 'live-price-value';
             }
@@ -70,23 +73,33 @@ export function clearResults() {
 }
 
 export function flashResults() {
-    document.querySelectorAll('.res-card').forEach(c => {
-        c.classList.remove('flash');
-        void c.offsetWidth;
-        c.classList.add('flash');
+    requestAnimationFrame(() => {
+        const cards = document.querySelectorAll('.res-card');
+        cards.forEach(c => c.classList.remove('flash'));
+        if (cards.length > 0) void cards[0].offsetWidth; // 1 single reflow instead of loop thrashing
+        cards.forEach(c => c.classList.add('flash'));
     });
 }
 
+// XSS-Safe Markdown Parser
 export function parseMd(text) {
     if (!text) return '';
-    return text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
-               .replace(/\*(.*?)\*/g, '<i>$1</i>')
-               .replace(/\n/g, '<br/>');
+    const escaped = String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+
+    return escaped
+        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+        .replace(/\*(.*?)\*/g, '<i>$1</i>')
+        .replace(/\n/g, '<br/>');
 }
 
 export function renderMiniChart(containerId, values, color) {
     const container = document.getElementById(containerId);
-    if(!container) return;
+    if (!container) return;
     const max = Math.max(...values, 1);
     container.innerHTML = values.map(v => {
         const h = Math.max(4, (v / max) * 38);
@@ -94,9 +107,7 @@ export function renderMiniChart(containerId, values, color) {
     }).join('');
 }
 
-// Expiry candles: renders N real OHLC candlesticks (N = expiryCandles),
-// so the "Время" card literally shows the N candles the trade lives through.
-// ohlc: [{o,h,l,c}...] chronological. Last candle = forming -> pulses.
+// Expiry candles: renders N real OHLC candlesticks (N = expiryCandles)
 export function renderExpiryCandles(containerId, ohlc, count) {
     const container = document.getElementById(containerId);
     if (!container || !ohlc || !ohlc.length) return;
@@ -127,10 +138,10 @@ export function renderExpiryCandles(containerId, ohlc, count) {
 
 export function renderDirSvg(direction) {
     const chart = document.getElementById('dirChart');
-    if(!chart) return;
-    if(direction === 'BUY') {
+    if (!chart) return;
+    if (direction === 'BUY') {
         chart.innerHTML = `<svg viewBox='0 0 80 40'><path d='M10 35 L30 25 L45 30 L70 5' stroke='#00e676' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='70' cy='5' r='3.5' fill='#00e676'/></svg>`;
-    } else if(direction === 'PUT') {
+    } else if (direction === 'PUT') {
         chart.innerHTML = `<svg viewBox='0 0 80 40'><path d='M10 5 L30 15 L45 10 L70 35' stroke='#ff1744' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='70' cy='35' r='3.5' fill='#ff1744'/></svg>`;
     } else {
         chart.innerHTML = `<svg viewBox='0 0 80 40'><path d='M10 20 L70 20' stroke='var(--dim)' stroke-width='2.5' stroke-dasharray='4 4' fill='none' stroke-linecap='round' opacity='0.5'/><circle cx='40' cy='20' r='3.5' fill='var(--dim)'/></svg>`;
@@ -161,9 +172,6 @@ export function renderSparklinePrediction(containerId, normalizedPrices, directi
     let predY = lastY;
     let predColor = 'var(--dim)';
 
-    // Projection length: if projFrac (expected move as fraction of chart
-    // height, from ATR*sqrt(expiry)/span) is given, the dashed segment shows
-    // a statistically sized move. Otherwise legacy fixed-geometry dash.
     const hasProj = Number.isFinite(projFrac) && projFrac > 0;
     const dashLen = hasProj ? Math.min(height - 8, Math.max(3, projFrac * height)) : null;
 
@@ -187,7 +195,7 @@ export function renderSparklinePrediction(containerId, normalizedPrices, directi
 }
 
 const sbStatuses = ['ЗАГРУЗКА ДАННЫХ', 'ПОЛУЧЕНИЕ ЦЕНЫ', 'АНАЛИЗ РЫНКА'];
-let sbTimer = null, sbIdx = 0;
+let sbTimer = null, sbFadeTimer = null, sbIdx = 0;
 
 export function startStatusBar() {
     const sb = document.getElementById('statusBar');
@@ -199,19 +207,23 @@ export function startStatusBar() {
     if (sub) { sub.textContent = sbStatuses[0]; sub.className = 'sb-sub'; }
     sbIdx = 0;
 
-    if (sbTimer) clearInterval(sbTimer);
+    stopStatusBar();
     sbTimer = setInterval(() => {
-        const title = document.getElementById('sbTitle');
-        if (title) {
-            const m = title.textContent.match(/\.+$/);
+        const titleEl = document.getElementById('sbTitle');
+        if (titleEl) {
+            const m = titleEl.textContent.match(/\.+$/);
             const dots = m ? m[0].length : 0;
-            title.innerHTML = 'АНАЛИЗИРУЮ РЫНОК<span class=\'blink\'>' + '.'.repeat((dots % 3) + 1) + '</span>';
+            titleEl.innerHTML = 'АНАЛИЗИРУЮ РЫНОК<span class=\'blink\'>' + '.'.repeat((dots % 3) + 1) + '</span>';
         }
         sbIdx = (sbIdx + 1) % sbStatuses.length;
-        const sub = document.getElementById('sbSub');
-        if (sub) {
-            sub.classList.add('fade');
-            setTimeout(() => { sub.textContent = sbStatuses[sbIdx]; sub.classList.remove('fade'); }, 200);
+        const subEl = document.getElementById('sbSub');
+        if (subEl) {
+            subEl.classList.add('fade');
+            if (sbFadeTimer) clearTimeout(sbFadeTimer);
+            sbFadeTimer = setTimeout(() => { 
+                subEl.textContent = sbStatuses[sbIdx]; 
+                subEl.classList.remove('fade'); 
+            }, 200);
         }
     }, 900);
 }
@@ -220,6 +232,7 @@ export function stopStatusBar() {
     const sb = document.getElementById('statusBar');
     if (sb) sb.classList.remove('show');
     if (sbTimer) { clearInterval(sbTimer); sbTimer = null; }
+    if (sbFadeTimer) { clearTimeout(sbFadeTimer); sbFadeTimer = null; }
 }
 
 export function pricesToBars(prices, count) {
@@ -240,16 +253,22 @@ export function renderError(rawError, debugText) {
     let desc = 'Произошла непредвиденная ошибка при обработке запроса.';
 
     if (rawError) {
-        const errLower = rawError.toLowerCase();
+        const errLower = String(rawError).toLowerCase();
         
-        if (errLower.includes('run out of api credits') || errLower.includes('api credits')) {
+        if (errLower.includes('circuit_breaker') || errLower.includes('предохранитель')) {
+            title = '⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ';
+            desc = 'Сработал защитный предохранитель депозита (Circuit Breaker). Пожалуйста, подождите или смените актив.';
+        } else if (errLower.includes('502') || errLower.includes('503') || errLower.includes('bad gateway') || errLower.includes('unexpected token') || errLower.includes('сервер вернул статус')) {
+            title = '⚠️ Сервер перезагружается';
+            desc = 'Сервер ValutaBot на Railway обновляется или временно недоступен. Попробуйте через 10-15 секунд.';
+        } else if (errLower.includes('run out of api credits') || errLower.includes('api credits')) {
             title = '⚠️ Лимит запросов исчерпан';
             desc = 'Превышен лимит запросов к внешнему потоку данных. Пожалуйста, повторите попытку чуть позже.';
         } else if (errLower.includes('too many requests') || errLower.includes('rate limit') || errLower.includes('429')) {
             title = '⚠️ Превышен лимит запросов';
-            const match = rawError.match(/(\d+)s/);
+            const match = String(rawError).match(/(\d+)s/);
             const sec = match ? ` на ${match[1]} сек.` : '';
-            desc = `Слишком много запросов. Пожалуйста, подождите${sec} перед следующим сканированием.`;
+            desc = `Слишком частые клики. Пожалуйста, подождите${sec} перед следующим сканированием.`;
         } else if (errLower.includes('access denied') || errLower.includes('deposit required')) {
             title = '⚠️ Доступ ограничен';
             desc = 'Для использования бота необходима регистрация на Pocket Option и внесение депозита.';
@@ -262,27 +281,26 @@ export function renderError(rawError, debugText) {
         } else if (errLower.includes('pocketid')) {
             title = '⚠️ Ошибка профиля';
             desc = 'Не указан Pocket Option ID.';
-        } else if (errLower.includes('api key') || errLower.includes('apikey')) {
-            title = '⚠️ Сбой конфигурации';
-            desc = 'Ошибка авторизации потока котировок на сервере.';
-        } else if (errLower.includes('plan') || errLower.includes('subscription') || errLower.includes('tier')) {
-            title = '⚠️ Ограничение доступа';
-            desc = 'Данный инструмент или таймфрейм временно недоступен. Попробуйте выбрать другую валютную пару.';
         } else if (errLower.includes('fetch') || errLower.includes('network') || errLower.includes('failed') || errLower.includes('connect')) {
             title = '⚠️ Ошибка соединения';
             desc = 'Не удалось подключиться к серверу. Пожалуйста, проверьте интернет-соединение.';
         } else {
             title = '⚠️ Сбой операции';
-            desc = rawError;
-            desc = desc.replace(/failed/gi, 'ошибка');
-            desc = desc.replace(/error/gi, 'сбой');
-            desc = desc.replace(/internal server error/gi, 'Внутренняя ошибка сервера');
+            desc = String(rawError)
+                .replace(/failed/gi, 'ошибка')
+                .replace(/error/gi, 'сбой')
+                .replace(/internal server error/gi, 'Внутренняя ошибка сервера');
         }
     }
 
     function escapeHtml(str) {
         if (!str) return '';
-        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
 
     const safeTitle = escapeHtml(title);
@@ -308,6 +326,7 @@ export function renderError(rawError, debugText) {
         });
     }
 }
+
 export function updateTrafficLight(status) {
     const tl = document.getElementById('trafficLight');
     if (!tl) return;
@@ -323,17 +342,20 @@ export function updateTrafficLight(status) {
     }
 }
 
-
-// --- AI Animated Chart ---
+// --- AI Animated Chart (Performance & Memory Safe) ---
 let aiChartAnimationId = null;
 let aiChartData = [];
 let aiChartPhase = 0;
+let hideChartTimer = null;
 
 export function showAiChart(asset, tf) {
+    if (hideChartTimer) {
+        clearTimeout(hideChartTimer);
+        hideChartTimer = null;
+    }
     const container = document.getElementById('aiChartContainer');
     if (container) {
         container.style.display = 'block';
-        // force reflow
         void container.offsetWidth;
         container.classList.add('active');
         
@@ -352,30 +374,36 @@ export function updateAiChartData(ohlcArray) {
 
 export function hideAiChart() {
     const container = document.getElementById('aiChartContainer');
-    if (container) {
-        container.classList.remove('active');
-        setTimeout(() => {
-            container.style.display = 'none';
-            if (aiChartAnimationId) {
-                cancelAnimationFrame(aiChartAnimationId);
-                aiChartAnimationId = null;
-            }
-        }, 400);
-    }
+    if (!container) return;
+    container.classList.remove('active');
+    
+    if (hideChartTimer) clearTimeout(hideChartTimer);
+    hideChartTimer = setTimeout(() => {
+        container.style.display = 'none';
+        if (aiChartAnimationId) {
+            cancelAnimationFrame(aiChartAnimationId);
+            aiChartAnimationId = null;
+        }
+        hideChartTimer = null;
+    }, 400);
 }
 
 function renderAiChartLoop() {
     const canvas = document.getElementById('aiChartCanvas');
-    if (!canvas) return;
+    if (!canvas) {
+        aiChartAnimationId = null;
+        return;
+    }
     const ctx = canvas.getContext('2d');
     
-    const rect = canvas.parentElement.getBoundingClientRect();
-    if(rect.width === 0) {
+    const rect = canvas.parentElement ? canvas.parentElement.getBoundingClientRect() : null;
+    if (!rect || rect.width === 0) {
         aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
         return;
     }
     
-    const dpr = window.devicePixelRatio || 1;
+    // Cap DPR at 2.0 to protect mobile battery and GPU rasterization
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const expectedW = Math.floor(rect.width * dpr);
     const expectedH = Math.floor(rect.height * dpr);
     if (canvas.width !== expectedW || canvas.height !== expectedH) {
@@ -402,82 +430,28 @@ function renderAiChartLoop() {
     aiChartPhase += 0.018;
     
     if (aiChartData.length > 0) {
-        const paddingY = Math.floor(h * 0.25); // huge padding so candles are confined to the center and not overly tall
+        const paddingY = Math.floor(h * 0.25);
         const paddingX = 15;
         const count = aiChartData.length;
         const spacing = (w - paddingX * 2) / count;
         
-        // Thinner, realistic candles
         let candleWidth = Math.max(3, Math.floor(spacing * 0.5));
         if (candleWidth % 2 === 0) candleWidth += 1;
         
         let minP = Infinity, maxP = -Infinity;
-        aiChartData.forEach(c => {
+        for (let i = 0; i < count; i++) {
+            const c = aiChartData[i];
             const trueLow = Math.min(c.low, c.open, c.close);
             const trueHigh = Math.max(c.high, c.open, c.close);
             if (trueLow < minP) minP = trueLow;
             if (trueHigh > maxP) maxP = trueHigh;
-        });
+        }
         const range = maxP - minP || 1;
         const scaleY = (h - paddingY * 2) / range;
         
-        // --- Build bottom-contour points from candles (one Y per candle) ---
-        const contourPts = aiChartData.map((c, i) => {
-            const trueLow = Math.min(c.low, c.open, c.close);
-            return {
-                x: paddingX + i * spacing + spacing / 2,
-                y: paddingY + (maxP - trueLow) * scaleY
-            };
-        });
-        
-        const waveOffset = 25; 
-        const waveDrift = 3;  
-        
-        const wavePoints = [];
-        for (let px = 0; px <= w; px += 3) {
-            let segY = h - paddingY; 
-            if (contourPts.length >= 2) {
-                const clampedPx = Math.max(contourPts[0].x, Math.min(px, contourPts[contourPts.length - 1].x));
-                let ci = 0;
-                for (let k = 0; k < contourPts.length - 1; k++) {
-                    if (clampedPx >= contourPts[k].x && clampedPx <= contourPts[k + 1].x) { ci = k; break; }
-                }
-                const p0 = contourPts[Math.max(0, ci - 1)];
-                const p1 = contourPts[ci];
-                const p2 = contourPts[Math.min(contourPts.length - 1, ci + 1)];
-                const p3 = contourPts[Math.min(contourPts.length - 1, ci + 2)];
-                const t = p1.x === p2.x ? 0 : (clampedPx - p1.x) / (p2.x - p1.x);
-                const t2 = t * t, t3 = t2 * t;
-                segY = 0.5 * ((2 * p1.y) +
-                    (-p0.y + p2.y) * t +
-                    (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 +
-                    (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3);
-            }
-            const wy = segY + waveOffset + Math.sin(px * 0.015 - aiChartPhase) * waveDrift;
-            wavePoints.push({ x: px, y: wy });
-        }
-        
-        ctx.beginPath();
-        wavePoints.forEach((p, idx) => {
-            if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-        });
-        
-        const lineGrad = ctx.createLinearGradient(0, 0, w, 0);
-        lineGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
-        lineGrad.addColorStop(0.1, 'rgba(184, 41, 255, 0.6)');
-        lineGrad.addColorStop(0.9, 'rgba(184, 41, 255, 0.6)');
-        lineGrad.addColorStop(1, 'rgba(184, 41, 255, 0)');
-        
-        ctx.strokeStyle = lineGrad;
-        ctx.lineWidth = 1;
-        ctx.lineJoin = 'round';
-        ctx.shadowColor = 'rgba(184, 41, 255, 0.7)';
-        ctx.shadowBlur = 3;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-        
-        // --- Candles (drawn on top of waves) ---
-        aiChartData.forEach((c, i) => {
+        // Candles (drawn crisp and fast without heavy shadowBlur)
+        for (let i = 0; i < count; i++) {
+            const c = aiChartData[i];
             const isBull = c.close >= c.open;
             const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
             
@@ -488,31 +462,22 @@ function renderAiChartLoop() {
             const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
             const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
             let bodyH = Math.abs(c.close - c.open) * scaleY;
-            if (bodyH < 2) bodyH = 2; // minimum height 2px for readability
+            if (bodyH < 2) bodyH = 2;
             
             const color = isBull ? '#00b3ff' : '#9b5de5'; 
-            const glowColor = isBull ? 'rgba(0,179,255,0.7)' : 'rgba(155,93,229,0.7)';
             
-            // 1. Draw Wick (Solid line, crisp)
+            // 1. Draw Wick
             ctx.strokeStyle = color;
             ctx.lineWidth = 1; 
-            ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 5;
             ctx.beginPath();
             ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
             ctx.lineTo(cx, Math.floor(yLow) + 0.5);
             ctx.stroke();
-            ctx.shadowBlur = 0;
             
-            // 2. Draw Solid Opaque Body (Sharp rectangles)
+            // 2. Draw Solid Body
             ctx.fillStyle = color;
-            ctx.shadowColor = glowColor;
-            ctx.shadowBlur = 6;
-            
             ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
-            
-            ctx.shadowBlur = 0;
-        });
+        }
     }
 
     ctx.restore();
@@ -590,7 +555,7 @@ export function updateAiCopilot(data, onActionCallback) {
         card.classList.add('state-golden');
     } else if (advice.status === 'CIRCUIT_BREAKER' || advice.status === 'NOISE_GUARD' || advice.status === 'CONFLICT' || advice.status === 'NEWS_RISK' || psycho.speedPenalty >= 25) {
         card.classList.add('state-danger');
-    } else if (advice.status === 'WAIT') {
+    } else if (advice.status === 'WAIT' || advice.status === 'CAUTION') {
         card.classList.add('state-caution');
     }
 
@@ -606,7 +571,7 @@ export function updateAiCopilot(data, onActionCallback) {
     const msgEl = document.getElementById('copilotMessage');
     if (msgEl) {
         if (psycho.speedPenalty >= 25) {
-            msgEl.innerText = `Ты делаешь частые запросы с интервалом менее 12 сек. Вход на эмоциях без паузы приводит к сливу в 78% случаев. ${advice.message}`;
+            msgEl.innerText = `Ты делаешь частые запросы с интервалом менее 12 сек. Вход на эмоциях без паузы приводит к сливу в 78% случаев. ${advice.message || ''}`;
         } else {
             msgEl.innerText = advice.message || '';
         }
@@ -631,15 +596,12 @@ export function updateAiCopilot(data, onActionCallback) {
 
         if (actionLabel) actionLabel.innerText = btnText;
 
-        const newBtn = actionBtn.cloneNode(true);
-        actionBtn.parentNode.replaceChild(newBtn, actionBtn);
-        newBtn.addEventListener('click', () => {
+        actionBtn.onclick = () => {
             if (typeof onActionCallback === 'function') {
                 onActionCallback({ asset: targetAsset, tf: targetTf });
             }
-        });
+        };
     } else if (actionWrap) {
         actionWrap.style.display = 'none';
     }
 }
-

@@ -60,7 +60,7 @@ public class MarketAnalysisOrchestrator(
         return value;
     }
 
-    public async Task<AnalysisResponseDto> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null)
+    public async Task<AnalysisResponseDto> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null, MiniAppController.OhlcCandle[]? preloadedCandles = null)
     {
         using var timer = ValutaMetrics.PipelineDuration.NewTimer();
         var sw = Stopwatch.StartNew();
@@ -87,9 +87,11 @@ public class MarketAnalysisOrchestrator(
         int limit = (tfLower.StartsWith("s") || tfLower.StartsWith("m1") || tfLower.StartsWith("m5")) ? 160 : 200;
         int fetchLimit = limit + 1; // +1 so stripping the unclosed live candle leaves a full 160 closed-candle window
 
-        // 2. Fetch Data (Locals only, no class fields)
+        // 2. Fetch Data (Locals only, no class fields - fast-path uses preloaded candles)
         var fetchSw = Stopwatch.StartNew();
-        var candles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, tfLower, cleanAsset, fetchLimit);
+        var candles = (preloadedCandles != null && preloadedCandles.Length > 0)
+            ? preloadedCandles
+            : await _fetcher.FetchOhlcWithFallbackAsync(symbol, tfLower, cleanAsset, fetchLimit);
         fetchSw.Stop();
 
         if (candles == null || candles.Length == 0)
@@ -395,9 +397,9 @@ public class MarketAnalysisOrchestrator(
         bool isGoldenSetup = mtfResult.IsGoldenSetup && (!isSubminute || noiseAudit.IsTradeableImpulse);
 
         bool isCooldownActive = false;
-        if (isS5 && _lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var lastRealTime))
+        if (_lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var lastRealTime))
         {
-            isCooldownActive = (DateTime.UtcNow - lastRealTime).TotalSeconds < 20.0;
+            isCooldownActive = (DateTime.UtcNow - lastRealTime).TotalSeconds < (isS5 ? 20.0 : 10.0);
         }
 
         bool isExhaustedOnS5 = false;
@@ -413,7 +415,8 @@ public class MarketAnalysisOrchestrator(
         bool canExecuteReal = isDirectional 
             && consensus.Probability >= requiredProb 
             && !isCbHalted
-            && (!isS5 || (htfAligned && !isCooldownActive && !isExhaustedOnS5));
+            && !isCooldownActive
+            && (!isS5 || (htfAligned && !isExhaustedOnS5));
 
         // Throttled shadow logging: only when DatasetCollectionMode is true or Circuit Breaker is actively halting,
         // and throttled to at most 1 write per minute per asset/tf to avoid 140,000+ row/day DB saturation.
@@ -432,9 +435,9 @@ public class MarketAnalysisOrchestrator(
                     // PUT: freshRealPrice < currentLivePrice means selling at a lower/worse price.
                     bool isAdverse = (consensus.FinalDirection == "BUY" && freshRealPrice > currentLivePrice) ||
                                      (consensus.FinalDirection == "PUT" && freshRealPrice < currentLivePrice);
-                    double slippageBps = Math.Abs(freshRealPrice - currentLivePrice) / currentLivePrice * 10000.0;
+                    double slippageBps = currentLivePrice > 0 ? (Math.Abs(freshRealPrice - currentLivePrice) / currentLivePrice * 10000.0) : double.PositiveInfinity;
 
-                    if (isAdverse && slippageBps > 1.5)
+                    if (isAdverse && (double.IsNaN(slippageBps) || double.IsInfinity(slippageBps) || slippageBps > 1.5))
                     {
                         _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: adverse slippage {SlippageBps:F2} bps exceeds 1.5 bps threshold (signal: {CurrentPrice}, fresh: {FreshPrice}, dir: {Dir})",
                             cleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice, consensus.FinalDirection);
@@ -700,7 +703,7 @@ public class MarketAnalysisOrchestrator(
             uiMarketSession = uiMarketSession,
             uiMarketPhase = uiMarketPhase,
             uiMarketEntropy = uiMarketEntropy,
-            direction = isRiskBlocked ? "NEUTRAL" : ((consensus.FinalDirection is "BUY" or "PUT") ? consensus.FinalDirection : ((state.VelocityBpsPerSec >= 0 || taResult.score >= 0) ? "BUY" : "PUT")),
+            direction = isRiskBlocked ? "NEUTRAL" : (consensus.FinalDirection is "BUY" or "PUT" ? consensus.FinalDirection : "NEUTRAL"),
             probability = isRiskBlocked ? 0 : Math.Clamp(consensus.Probability, 50, 92),
             duration = timeout.TimeoutText,
             expiryCandles = timeout.TimeoutCandles,

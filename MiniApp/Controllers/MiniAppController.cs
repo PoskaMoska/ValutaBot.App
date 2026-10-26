@@ -101,7 +101,7 @@ public static partial class MiniAppController
         builder.Services.AddSingleton<IMathEngine>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IMarketAnalyzer>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
         builder.Services.AddSingleton<IRiskGatekeeper>(sp => sp.GetRequiredService<TechnicalAnalysisEngine>());
-        // AutoCalibrationEngine � Regime-Aware Signal Weight Engine (minute+ TFs only)
+        // AutoCalibrationEngine  Regime-Aware Signal Weight Engine (minute+ TFs only)
         builder.Services.AddSingleton<AutoCalibrationEngine>();
         builder.Services.AddSingleton<IAutoCalibrationEngine>(sp => sp.GetRequiredService<AutoCalibrationEngine>());
         
@@ -147,7 +147,7 @@ public static partial class MiniAppController
         builder.Services.AddHostedService<HistoricalCandleAccumulatorService>();
         builder.Services.AddHostedService<ValutaBot.MiniApp.Services.DataRetentionService>(); // Accumulates live m1 candles into historical_candles for weekend OTC proxy
         builder.Services.AddHostedService<ValutaBot.App.MiniApp.Services.SelfDiagnosticService>(); // Post-deploy self-scanner
-builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerService>(); // Dual-engine architecture (fast subminute, slow m1)
+        builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerService>(); // Dual-engine architecture (fast subminute, slow m1)
         builder.Services.AddHostedService<ValutaBot.MiniApp.Services.TrialReminderBackgroundService>(); // 3-day trial reminders & funnel
 
         builder.Services.AddHttpClient("MLPythonService", client => 
@@ -202,20 +202,17 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
                 return RateLimitPartition.GetTokenBucketLimiter(fingerprint, _ =>
                     new TokenBucketRateLimiterOptions
                     {
-                        TokenLimit = 10000,
+                        TokenLimit = 120,
                         QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                         QueueLimit = 0,
-                        ReplenishmentPeriod = TimeSpan.FromSeconds(2),
-                        TokensPerPeriod = 10000,
+                        ReplenishmentPeriod = TimeSpan.FromSeconds(10),
+                        TokensPerPeriod = 60,
                         AutoReplenishment = true
                     });
             });
         });
 
         // Launch Real-Time WebSocket stream for major CME proxy forex streams (0ms latency)
-        // Added USDCAD, USDCHF, USDJPY to ensure all 6 active ML pairs are accumulated in the DB
-        // FIX: Removed 'isWeekend' check so the stream always starts. If booted on a weekend, 
-        // it simply idles until Monday morning when ticks resume.
         string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
         if (!PriceFeed.UsePocketOption)
         {
@@ -283,9 +280,19 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
 
         RegisterRoutes(app);
 
-        // Gracefully flush all in-memory ticks before Kestrel and hosted services stop
+        // SRE-FIX: Gracefully close broker WebSocket and flush in-memory ticks before Kestrel stops
         app.Lifetime.ApplicationStopping.Register(() =>
         {
+            try
+            {
+                Console.WriteLine("[Shutdown] Application stopping: stopping PocketOption WebSocket stream...");
+                PocketOptionWebSocketStream.StopStream();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Shutdown] Error stopping PocketOption stream: {ex.Message}");
+            }
+
             try
             {
                 Console.WriteLine("[TickCollector] Application stopping: performing final tick flush to DB...");
@@ -379,8 +386,3 @@ builder.Services.AddHostedService<ValutaBot.MiniApp.Services.AutoTradingScannerS
         return Task.FromResult<object>(new { value = 50, classification = "Neutral" });
     }
 }
-
-
-
-
-

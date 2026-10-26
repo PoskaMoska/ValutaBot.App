@@ -536,6 +536,22 @@ class DualStreamPatchBrain(nn.Module):
             even_std = G_dummy[:s1].std(dim=0, keepdim=True).clamp(min=1e-4)
             self.cell_even_std.data.copy_(even_std)
 
+            # Compute global prior vectors across all pairs for each timeframe to prevent cell overfitting
+            W_global = torch.zeros(5, 48, dtype=torch.float32, device=self.cell_expert_weights.device)
+            for ti, tsec in enumerate(tf_list):
+                mk1_g = (tfs[:s1] == tsec) & (y[:s1] > 0)
+                mk2_g = (tfs[s1:s2] == tsec) & (y[s1:s2] > 0)
+                mk3_g = (tfs[s2:] == tsec) & (y[s2:] > 0)
+                if mk1_g.sum() > 15 and mk2_g.sum() > 10:
+                    cg1 = (F_odd_n[:s1][mk1_g] * y_signed[:s1][mk1_g, None]).mean(dim=0)
+                    cg2 = (F_odd_n[s1:s2][mk2_g] * y_signed[s1:s2][mk2_g, None]).mean(dim=0)
+                    cg3 = (F_odd_n[s2:][mk3_g] * y_signed[s2:][mk3_g, None]).mean(dim=0) if mk3_g.sum() > 5 else cg2
+                    inv_g = (cg1 * cg2 > 0) & (cg2 * cg3 > 0)
+                    wg = torch.where(inv_g, (cg1 + cg2 + cg3) / 3.0, torch.zeros_like(cg1))
+                    if torch.norm(wg) > 1e-6:
+                        wg = wg / torch.norm(wg) * 0.35
+                    W_global[ti] = wg
+
             for aid in range(6):
                 for ti, tsec in enumerate(tf_list):
                     cell_mask = (aids == aid) & (tfs == tsec)
@@ -543,12 +559,17 @@ class DualStreamPatchBrain(nn.Module):
                     mk2 = (aids[s1:s2] == aid) & (tfs[s1:s2] == tsec) & (y[s1:s2] > 0)
                     mk3 = (aids[s2:] == aid) & (tfs[s2:] == tsec) & (y[s2:] > 0)
 
-                    if mk1.sum() > 10 and mk2.sum() > 5 and mk3.sum() > 5:
+                    n_train_cell = int(mk1.sum().item() + mk2.sum().item())
+                    if mk1.sum() > 8 and mk2.sum() > 4:
                         c1 = (F_odd_n[:s1][mk1] * y_signed[:s1][mk1, None]).mean(dim=0)
                         c2 = (F_odd_n[s1:s2][mk2] * y_signed[s1:s2][mk2, None]).mean(dim=0)
-                        c3 = (F_odd_n[s2:][mk3] * y_signed[s2:][mk3, None]).mean(dim=0)
+                        c3 = (F_odd_n[s2:][mk3] * y_signed[s2:][mk3, None]).mean(dim=0) if mk3.sum() > 3 else c2
                         inv = (c1 * c2 > 0) & (c2 * c3 > 0)
-                        w = torch.where(inv, (c1 + c2 + c3) / 3.0, torch.zeros_like(c1))
+                        w_local = torch.where(inv, (c1 + c2 + c3) / 3.0, torch.zeros_like(c1))
+
+                        # Empirical Bayes / James-Stein shrinkage towards global prior across all pairs
+                        shrink = n_train_cell / (n_train_cell + 30.0)
+                        w = shrink * w_local + (1.0 - shrink) * W_global[ti]
                         if torch.norm(w) > 1e-6:
                             w = w / torch.norm(w) * 0.35
                         W_cell[aid, ti] = w.to(self.cell_expert_weights.device)
@@ -559,8 +580,11 @@ class DualStreamPatchBrain(nn.Module):
                         best_hyper = [0.50, 0.35, 0.35, 0.25]
                         best_final_s_params = None
 
-                        mk_ev = (aids[s1:] == aid) & (tfs[s1:] == tsec) & (y[s1:] > 0)
-                        yc = (y[s1:][mk_ev] == 1).numpy()
+                        # Evaluate solely on validation fold [s2:] to prevent over-optimizing train
+                        mk_ev = (aids[s2:] == aid) & (tfs[s2:] == tsec) & (y[s2:] > 0)
+                        if mk_ev.sum() < 5:
+                            mk_ev = (aids[s1:] == aid) & (tfs[s1:] == tsec) & (y[s1:] > 0)
+                        yc = (y[s2:][mk_ev[:len(y[s2:])]] == 1).numpy() if len(mk_ev) == len(y[s2:]) else (y[s1:][mk_ev] == 1).numpy()
                         n_ev = int(mk_ev.sum().item())
 
                         for alpha in [0.0, 0.16, 0.50, 0.85, 1.0]:
@@ -572,14 +596,14 @@ class DualStreamPatchBrain(nn.Module):
                             hit = ((d_sign * y_signed) > 0).float() - 0.5
                             gc1 = (G_cell_n[:s1][mk1] * hit[:s1][mk1, None]).mean(dim=0)
                             gc2 = (G_cell_n[s1:s2][mk2] * hit[s1:s2][mk2, None]).mean(dim=0)
-                            gc3 = (G_cell_n[s2:][mk3] * hit[s2:][mk3, None]).mean(dim=0)
+                            gc3 = (G_cell_n[s2:][mk3] * hit[s2:][mk3, None]).mean(dim=0) if mk3.sum() > 3 else gc2
                             ginv = (gc1 * gc2 > 0) & (gc2 * gc3 > 0)
                             gw = torch.where(ginv, (gc1 + gc2 + gc3) / 3.0, torch.zeros_like(gc1))
                             if torch.norm(gw) > 1e-6:
                                 gw = gw / torch.norm(gw)
 
-                            G_cell_n_ev = G_cell_n[s1:][mk_ev]
-                            dir_s_ev = dir_s[s1:][mk_ev]
+                            G_cell_n_ev = G_cell_n[s2:][mk_ev] if len(G_cell_n[s2:]) == len(mk_ev) else G_cell_n[s1:][mk_ev]
+                            dir_s_ev = dir_s[s2:][mk_ev] if len(dir_s[s2:]) == len(mk_ev) else dir_s[s1:][mk_ev]
 
                             for g_scale in [0.0, 0.35, 0.70]:
                                 gate_mult_ev = torch.exp(torch.clamp(G_cell_n_ev @ gw, -1.5, 1.5) * g_scale)
@@ -610,6 +634,9 @@ class DualStreamPatchBrain(nn.Module):
 
                         GW_cell[aid, ti] = best_gw.to(self.cell_gate_weights.device)
                         Hyper_cell[aid, ti] = torch.tensor(best_hyper, dtype=torch.float32, device=self.cell_hyper.device)
+                    else:
+                        # Fallback to global prior for sparse cells
+                        W_cell[aid, ti] = W_global[ti]
 
             self.cell_expert_weights.data.copy_(W_cell)
             self.cell_gate_weights.data.copy_(GW_cell)

@@ -180,9 +180,11 @@ FROM outcome_data;");
         public static async Task SaveTradeOutcomeAsync(TradeOutcomeRecord outcome, string? pendingTradeIdToDelete = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            try
+            for (int attempt = 1; attempt <= 2; attempt++)
             {
-                using var conn = DbConnectionFactory.GetConnection();
+                try
+                {
+                    using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                     INSERT INTO trade_outcomes 
                     (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
@@ -313,12 +315,20 @@ FROM outcome_data;");
                     outcome.MlTelemetry,
                     outcome.SmcTelemetry
                 });
+                return;
             }
             catch (Exception ex)
             {
+                if (attempt == 1 && (ex is Npgsql.NpgsqlException || ex is System.IO.IOException))
+                {
+                    BotLogger.Warn($"[TradeRepository] Transient DB issue on save outcome ({ex.Message}), retrying...");
+                    await Task.Delay(150);
+                    continue;
+                }
                 BotLogger.Error("[PostgreSQL DB] Failed to save trade outcome record", ex);
             }
         }
+    }
 
         private static string TimestampToIso(object? value) => value switch
         {
@@ -379,8 +389,10 @@ FROM outcome_data;");
         public static async Task SavePendingTradeAsync(SignalTracker.PredictionRecord record)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            using var conn = DbConnectionFactory.GetConnection();
-            await conn.ExecuteAsync(@"
+            try
+            {
+                using var conn = DbConnectionFactory.GetConnection();
+                await conn.ExecuteAsync(@"
                 INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
                 VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, @TaTelemetry::jsonb, @MlTelemetry::jsonb, @SmcTelemetry::jsonb)
                 ON CONFLICT (id) DO NOTHING", 
@@ -426,6 +438,11 @@ FROM outcome_data;");
                     record.MlTelemetry,
                     record.SmcTelemetry
                 });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Error($"[TradeRepository] Failed to save pending trade {record.Id}: {ex.Message}");
+            }
         }
 
         public static async Task<List<SignalTracker.PredictionRecord>> GetPendingTradesToVerifyAsync(DateTime upTo)

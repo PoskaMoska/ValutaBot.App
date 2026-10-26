@@ -88,11 +88,13 @@ public partial class TelegramBotService
 
     private static string GetCustomWebAppUrl(string baseUrl, long chatId, string botToken)
     {
+        long authDate = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string dataToSign = $"{chatId}:{authDate}";
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(botToken));
-        byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(chatId.ToString()));
+        byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(dataToSign));
         string sign = Convert.ToHexString(hash).ToLowerInvariant();
         string separator = baseUrl.Contains("?") ? "&" : "?";
-        return $"{baseUrl}{separator}custom_user_id={chatId}&custom_user_sign={sign}";
+        return $"{baseUrl}{separator}custom_user_id={chatId}&custom_user_sign={sign}&auth_date={authDate}";
     }
 
     internal static async Task SendUserWelcome(string token, long chatId, string webAppUrl)

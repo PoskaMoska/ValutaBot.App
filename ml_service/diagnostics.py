@@ -168,8 +168,8 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
             COUNT(*) FILTER (WHERE direction = 'PUT') AS put_cnt,
             COUNT(*) FILTER (WHERE was_win = false) AS loss_cnt,
             COUNT(*) FILTER (WHERE was_win = false AND COALESCE(max_favorable_bps, 0) <= 1e-4) AS zero_mfe_loss_cnt,
-            COUNT(*) FILTER (WHERE pnl_bps > 1e-4) AS gt_up_cnt,
-            COUNT(*) FILTER (WHERE pnl_bps < -1e-4) AS gt_down_cnt
+            COUNT(*) FILTER (WHERE (direction = 'BUY' AND pnl_bps > 0.3) OR (direction = 'PUT' AND pnl_bps < -0.3)) AS gt_up_cnt,
+            COUNT(*) FILTER (WHERE (direction = 'BUY' AND pnl_bps < -0.3) OR (direction = 'PUT' AND pnl_bps > 0.3)) AS gt_down_cnt
         FROM trade_outcomes
         WHERE created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz
           AND direction IN ('BUY', 'PUT')

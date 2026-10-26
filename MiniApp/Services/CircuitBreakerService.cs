@@ -42,6 +42,7 @@ namespace ValutaBot.MiniApp.Services
         private DateTime? _lastCooldownExpiredUtc;
         private string _haltReason = string.Empty;
         private DateTime _cacheLoadedAt = DateTime.MinValue;
+        private int _isRefreshingCache = 0;
 
         // Per-Symbol/Timeframe Shadow Quarantine (isolates toxic pairs without halting profitable pairs)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime QuarantinedUntil, string Reason)> _symbolQuarantine =
@@ -102,9 +103,13 @@ namespace ValutaBot.MiniApp.Services
             {
                 // Refresh CB halt state from DB if cache is stale
                 var cacheStale = (DateTime.UtcNow - _cacheLoadedAt).TotalSeconds > _settings.CircuitBreakerDbCacheTtlSeconds;
-                if (cacheStale)
+                if (cacheStale && Interlocked.CompareExchange(ref _isRefreshingCache, 1, 0) == 0)
                 {
-                    _ = Task.Run(async () => await RefreshCacheFromDbAsync());
+                    _ = Task.Run(async () =>
+                    {
+                        try { await RefreshCacheFromDbAsync(); }
+                        finally { Interlocked.Exchange(ref _isRefreshingCache, 0); }
+                    });
                 }
 
                 // 1. ABSOLUTE PRIORITY: if system is halted (memory or DB), trading is ALWAYS forbidden!
@@ -214,7 +219,7 @@ namespace ValutaBot.MiniApp.Services
             {
                 DateTime? sinceUtc = _symbolQuarantineWatermarks.TryGetValue(key, out var wm) ? wm : null;
                 var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(asset, timeframe, 12, sinceUtc);
-                if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 4) return;
+                if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 2) return;
 
                 int consecutiveLosses = 0;
                 foreach (bool win in recentAssetOutcomes)
@@ -226,7 +231,7 @@ namespace ValutaBot.MiniApp.Services
                 bool shouldQuarantine = false;
                 string qReason = string.Empty;
 
-                if (consecutiveLosses >= 4)
+                if (consecutiveLosses >= 2)
                 {
                     shouldQuarantine = true;
                     qReason = $"{consecutiveLosses} consecutive losses on {key}";
@@ -407,9 +412,13 @@ namespace ValutaBot.MiniApp.Services
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // background refresh failure -> will retry on next IsHalted() call
+                BotLogger.Warn($"[CircuitBreaker] Background refresh from DB failed: {ex.Message}");
+                lock (_lock)
+                {
+                    _cacheLoadedAt = DateTime.UtcNow.AddSeconds(-_settings.CircuitBreakerDbCacheTtlSeconds + 5);
+                }
             }
         }
 

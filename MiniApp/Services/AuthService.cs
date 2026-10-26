@@ -13,11 +13,21 @@ public static class AuthService
     {
         var remoteIp = context.Connection.RemoteIpAddress;
         bool isProxiedExternal = context.Request.Headers.ContainsKey("X-Forwarded-For");
-        bool isLocalOrTestServer = !isProxiedExternal && (
-            (remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp)) ||
-            (remoteIp == null && context.Request.Headers.ContainsKey("X-Test-Bypass"))
+
+        bool isProductionCloud = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_ENVIRONMENT"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_PROJECT_ID"))
+            || string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Production", StringComparison.OrdinalIgnoreCase);
+
+        // SRE-FIX: In production cloud environments, bypass is strictly prohibited.
+        // Test/local bypass is ONLY permitted in local development or unit test runners.
+        bool isLocalOrTestRunner = !isProductionCloud && !isProxiedExternal && (
+            (remoteIp == null || System.Net.IPAddress.IsLoopback(remoteIp)) &&
+            (context.Request.Headers.TryGetValue("X-Test-Bypass", out var bypassVal) && bypassVal == "true"
+             || Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Development"
+             || (remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp)))
         );
-        if (isLocalOrTestServer)
+
+        if (isLocalOrTestRunner)
         {
             context.Items["userId"] = 123456789L; // Mock user ID for DB settings
             return (true, null);
@@ -71,21 +81,40 @@ public static class AuthService
             return (false, 0, "Empty authorization token");
         }
 
-        // ─── Standard Telegram InitData Validation ───
+        // ─── Custom WebApp Signature Validation (with TTL and Clock Skew tolerance) ───
         if (initData.Contains("custom_user_id=") && initData.Contains("custom_user_sign="))
         {
             var parsed = HttpUtility.ParseQueryString(initData);
             if (long.TryParse(parsed["custom_user_id"], out tgUserId))
             {
                 string providedSign = parsed["custom_user_sign"] ?? "";
-                using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(botToken));
-                byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(tgUserId.ToString()));
-                string expectedSign = Convert.ToHexString(hash).ToLowerInvariant();
+                string? authDateStr = parsed["auth_date"];
 
-                if (providedSign.Length != expectedSign.Length ||
-                    !CryptographicOperations.FixedTimeEquals(
-                        Encoding.UTF8.GetBytes(providedSign.ToLowerInvariant()),
-                        Encoding.UTF8.GetBytes(expectedSign)))
+                byte[] expectedHash;
+                using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(botToken));
+
+                if (!string.IsNullOrEmpty(authDateStr) && long.TryParse(authDateStr, out long authDateEpoch))
+                {
+                    var authTime = DateTimeOffset.FromUnixTimeSeconds(authDateEpoch).UtcDateTime;
+                    var now = DateTime.UtcNow;
+                    // SRE-FIX: Verify TTL and clock-skew tolerance (5 min future, 24h past)
+                    if (authTime > now.AddMinutes(5) || (now - authTime).TotalHours > 24)
+                    {
+                        return (false, 0, "Custom authorization token expired or invalid timestamp");
+                    }
+                    expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{tgUserId}:{authDateEpoch}"));
+                }
+                else
+                {
+                    // Fallback for legacy links without auth_date
+                    expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(tgUserId.ToString()));
+                }
+
+                string expectedSign = Convert.ToHexString(expectedHash).ToLowerInvariant();
+                byte[] provBytes = Encoding.UTF8.GetBytes(providedSign.ToLowerInvariant());
+                byte[] expBytes = Encoding.UTF8.GetBytes(expectedSign);
+
+                if (provBytes.Length != expBytes.Length || !CryptographicOperations.FixedTimeEquals(provBytes, expBytes))
                 {
                     return (false, 0, "Invalid custom authorization signature");
                 }
@@ -102,7 +131,6 @@ public static class AuthService
 
         return (true, tgUserId, null);
     }
-
 
     public static string SanitizeAsset(string asset)
     {

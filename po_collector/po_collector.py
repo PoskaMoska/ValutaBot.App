@@ -314,7 +314,8 @@ async def collect(args, store):
                     state = load_initial_state(store) or state
                     continue
 
-                started = time.time(); store.last_tick = 0
+                MAX_BROWSER_LIFETIME_SEC = 2700  # SRE-FIX: 45m rotation to prevent Chromium OOM
+                started = browser_started_at = time.time(); store.last_tick = 0
                 last_flush = last_report = last_state = time.time()
                 while not stop.is_set():
                     await asyncio.sleep(1)
@@ -325,6 +326,9 @@ async def collect(args, store):
                     if now - ref > STALE_SEC:
                         log(f"No ticks for {int(now - ref)} s -> restarting browser")
                         store.heartbeat("STALE")
+                        break
+                    if now - browser_started_at >= MAX_BROWSER_LIFETIME_SEC:
+                        log("Scheduled 45m proactive browser rotation to prevent Chromium RAM leak. Gracefully cycling...")
                         break
                     if now - last_report >= 60:
                         store.heartbeat("OK" if store.last_tick else "WAITING")
