@@ -41,6 +41,12 @@ export function getAuthHeader() {
     return getCustomInitData();
 }
 
+// Network Status Tracking
+export let isNetworkOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+export function setNetworkOnlineState(isOnline) {
+    isNetworkOnline = Boolean(isOnline);
+}
+
 // Active Asset & Timeframe selection
 export let currentAsset = (typeof window !== 'undefined' && window.currentAsset) ? window.currentAsset : 'EUR/USD OTC';
 export let currentTf = (typeof window !== 'undefined' && window.currentTf) ? window.currentTf : 'm1';

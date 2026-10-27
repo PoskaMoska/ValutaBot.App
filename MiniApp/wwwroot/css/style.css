@@ -916,6 +916,20 @@
             color: #ff1744 !important;
             text-shadow: 0 0 8px rgba(255,23,68,0.4);
         }
+        .network-alert-banner {
+            display: none;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #fbbf24;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.35);
+            padding: 8px 14px;
+            border-radius: 12px;
+            margin: 6px 0 8px 0;
+        }
         @keyframes pulse {
             0% { opacity: 0.3; }
             50% { opacity: 1; }

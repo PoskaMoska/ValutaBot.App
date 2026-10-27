@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -84,6 +84,10 @@ namespace ValutaBot.MiniApp
                             _buffer[lastIdx] = candle;
                             return;
                         }
+                        if (candle.Timestamp < _buffer[lastIdx].Timestamp)
+                        {
+                            return; // Ignore stale/out-of-order historical candle
+                        }
                     }
 
                     if (_count == _capacity)
@@ -104,7 +108,8 @@ namespace ValutaBot.MiniApp
             {
                 lock (_lock)
                 {
-                    foreach (var c in candles)
+                    var sorted = candles.OrderBy(c => c.Timestamp);
+                    foreach (var c in sorted)
                     {
                         if (_count > 0)
                         {
@@ -113,6 +118,10 @@ namespace ValutaBot.MiniApp
                             {
                                 _buffer[lastIdx] = c;
                                 continue;
+                            }
+                            if (c.Timestamp < _buffer[lastIdx].Timestamp)
+                            {
+                                continue; // Ignore out-of-order candle
                             }
                         }
 
@@ -463,7 +472,7 @@ namespace ValutaBot.MiniApp
                     };
 
                     MiniAppController.OhlcCandle? liveCandle = null;
-                    if (tDict != null && tDict.TryGetValue(cleanAsset, out var live) && live.Open.HasValue)
+                    if (tDict != null && tDict.TryGetValue(cleanAsset, out var live))
                     {
                         lock (live)
                         {
@@ -511,27 +520,39 @@ namespace ValutaBot.MiniApp
                     "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, "m1" => _m1, "1min" => _m1, _ => null
                 };
 
-                CandleAccumulator? liveAcc = null;
-                if (targetDict != null && targetDict.TryGetValue(cleanAsset, out var acc) && acc.Open.HasValue)
+                DateTime? liveOpenTime = null;
+                MiniAppController.OhlcCandle? liveLastClosed = null;
+                MiniAppController.OhlcCandle? currentLiveCandle = null;
+
+                if (targetDict != null && targetDict.TryGetValue(cleanAsset, out var acc))
                 {
-                    liveAcc = acc;
+                    lock (acc)
+                    {
+                        if (acc.Open.HasValue)
+                        {
+                            liveOpenTime = acc.OpenTime.ToUniversalTime();
+                            liveLastClosed = acc.LastClosed;
+                            currentLiveCandle = new MiniAppController.OhlcCandle(
+                                acc.Open.Value, acc.High, acc.Low, acc.Close, acc.TickCount, acc.OpenTime);
+                        }
+                    }
                 }
 
                 MiniAppController.OhlcCandle? missedClosed = null;
-                if (liveAcc != null)
+                if (liveOpenTime.HasValue)
                 {
-                    DateTime liveOpenTime = liveAcc.OpenTime.ToUniversalTime();
+                    long openTicks = liveOpenTime.Value.Ticks;
                     records.RemoveAll(r =>
                     {
                         DateTime dbTime = r.OpenTime is string s
                             ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal)
                             : Convert.ToDateTime(r.OpenTime).ToUniversalTime();
-                        return dbTime.Ticks == liveOpenTime.Ticks;
+                        return dbTime.Ticks == openTicks;
                     });
 
-                    if (liveAcc.LastClosed != null)
+                    if (liveLastClosed != null)
                     {
-                        long lastClosedTicks = liveAcc.LastClosed.Timestamp.ToUniversalTime().Ticks;
+                        long lastClosedTicks = liveLastClosed.Timestamp.ToUniversalTime().Ticks;
                         bool found = false;
                         foreach (var r in records)
                         {
@@ -540,16 +561,16 @@ namespace ValutaBot.MiniApp
                                 : Convert.ToDateTime(r.OpenTime).ToUniversalTime();
                             if (dbTime.Ticks == lastClosedTicks) { found = true; break; }
                         }
-                        if (!found) missedClosed = liveAcc.LastClosed;
+                        if (!found) missedClosed = liveLastClosed;
                     }
                 }
 
-                int totalCount = records.Count + (liveAcc != null ? 1 : 0) + (missedClosed != null ? 1 : 0);
+                int totalCount = records.Count + (currentLiveCandle != null ? 1 : 0) + (missedClosed != null ? 1 : 0);
                 int resultSize = Math.Min(limit, totalCount);
                 var result = new MiniAppController.OhlcCandle[resultSize];
                 
                 int resultIdx = 0;
-                int dbRecordsToTake = Math.Min(records.Count, resultSize - (liveAcc != null ? 1 : 0) - (missedClosed != null ? 1 : 0));
+                int dbRecordsToTake = Math.Min(records.Count, resultSize - (currentLiveCandle != null ? 1 : 0) - (missedClosed != null ? 1 : 0));
                 
                 for (int i = dbRecordsToTake - 1; i >= 0; i--)
                 {
@@ -571,16 +592,9 @@ namespace ValutaBot.MiniApp
                 {
                     result[resultIdx++] = missedClosed;
                 }
-                if (liveAcc != null && resultIdx < resultSize)
+                if (currentLiveCandle != null && resultIdx < resultSize)
                 {
-                    lock (liveAcc)
-                    {
-                        if (liveAcc.Open.HasValue)
-                        {
-                            result[resultIdx++] = new MiniAppController.OhlcCandle(
-                                liveAcc.Open.Value, liveAcc.High, liveAcc.Low, liveAcc.Close, liveAcc.TickCount, liveAcc.OpenTime);
-                        }
-                    }
+                    result[resultIdx++] = currentLiveCandle;
                 }
 
                 if (resultIdx < resultSize)
@@ -674,7 +688,13 @@ namespace ValutaBot.MiniApp
 
             lock (acc)
             {
-                if (acc.OpenTime != default && openTime < acc.OpenTime) return; // late tick: never rewind the live candle
+                if (acc.OpenTime != default && openTime < acc.OpenTime)
+                {
+                    if ((acc.OpenTime - openTime) > TimeSpan.FromMinutes(5))
+                        acc.Reset(openTime); // DST/timezone jump backwards >5m: reset accumulator
+                    else
+                        return; // late tick: never rewind the live candle
+                }
                 if (acc.OpenTime != openTime && acc.OpenTime != default)
                 {
                     acc.Reset(openTime);

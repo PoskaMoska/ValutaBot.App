@@ -1,7 +1,7 @@
-import { initPriceWebSocket, closePriceWebSocket, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261026_audit_v1';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction } from './state.js?v=20261026_audit_v1';
+import { initPriceWebSocket, closePriceWebSocket, resetWebSocketBackoff, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261028_audit_v2';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261028_audit_v2';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight } from './ui.js?v=20261026_audit_v1';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner } from './ui.js?v=20261028_audit_v2';
 
 // 1. Telegram WebApp Lifecycle & Viewport Stabilization
 if (tg) {
@@ -223,18 +223,29 @@ document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
         closePriceWebSocket();
     } else {
-        syncTime();
-        initPriceWebSocket();
+        if (navigator.onLine) {
+            hideNetworkBanner();
+            resetWebSocketBackoff();
+            syncTime();
+            initPriceWebSocket();
+        } else {
+            showNetworkBanner('Нет интернет-соединения');
+        }
     }
 });
 
 // Network Reconnect Recovery
 window.addEventListener('online', () => {
+    setNetworkOnlineState(true);
+    hideNetworkBanner();
+    resetWebSocketBackoff();
     syncTime();
     initPriceWebSocket();
 });
 
 window.addEventListener('offline', () => {
+    setNetworkOnlineState(false);
+    showNetworkBanner('Нет интернет-соединения');
     closePriceWebSocket();
 });
 

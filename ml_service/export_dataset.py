@@ -232,7 +232,7 @@ def extract_macro_vector(row_dict, feat_obj):
     hr_raw = row_dict.get("hour_utc")
     hr = float(hr_raw if hr_raw is not None else macro.get("HourUtc", 12.0))
     dow_raw = row_dict.get("day_of_week")
-    dow = float(dow_raw if (dow_raw is not None and dow_raw > 0) else macro.get("DayOfWeek", 2.0))
+    dow = float(dow_raw if dow_raw is not None else macro.get("DayOfWeek", 2.0))
     hr_sin = math.sin(2 * math.pi * hr / 24.0)
     hr_cos = math.cos(2 * math.pi * hr / 24.0)
     dow_sin = math.sin(2 * math.pi * dow / 7.0)
@@ -261,11 +261,11 @@ def extract_macro_vector(row_dict, feat_obj):
     )
     has_swp = _signed_smc(
         smc.get("SweepDirection") or row_dict.get("smc_swp_dir"),
-        bool(smc.get("HasLiquiditySweep"))
+        bool(row_dict.get("smc_has_swp") or smc.get("HasLiquiditySweep"))
     )
     has_bos = _signed_smc(
         smc.get("BosDirection") or row_dict.get("smc_bos_dir"),
-        bool(smc.get("HasBos"))
+        bool(str(row_dict.get("smc_bos_dir") or "NONE").upper() not in ("NONE", "") or smc.get("HasBos"))
     )
     
     # 23. Asset ID
@@ -337,8 +337,9 @@ class SubminuteCandleStore:
                     SELECT asset, interval, open_time, {o_col}, {h_col}, {l_col}, {c_col}, volume
                     FROM {tbl}
                     WHERE asset LIKE '%%_PO'
+                      AND open_time >= to_char((%s::timestamptz - INTERVAL '3 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS')
                     ORDER BY open_time ASC
-                """)
+                """, (self.min_date,))
                 for asset, interval, ot, op, hi, lo, cl, vol in cur.fetchall():
                     clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
                     iv = interval.lower().strip()
@@ -388,9 +389,24 @@ class SubminuteCandleStore:
         # Strict Anti-Leakage: a candle is ONLY valid if it was 100% closed BEFORE created_at_dt.
         # open_time + candle_duration <= created_at_dt  ==>  open_time <= created_at_dt - candle_duration
         dur_sec = TF_SECONDS.get(iv, 60)
-        from datetime import timedelta
+        from datetime import timedelta, timezone
+        dt_obj = None
         if hasattr(created_at_dt, "timestamp"):
-            cutoff_dt = created_at_dt - timedelta(seconds=dur_sec)
+            dt_obj = created_at_dt
+        elif isinstance(created_at_dt, str) and len(created_at_dt) >= 19:
+            try:
+                s = created_at_dt.strip().replace("Z", "+00:00")
+                dt_obj = datetime.fromisoformat(s)
+            except Exception:
+                try:
+                    dt_obj = datetime.strptime(created_at_dt[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    dt_obj = None
+
+        if dt_obj is not None:
+            if dt_obj.tzinfo is not None:
+                dt_obj = dt_obj.astimezone(timezone.utc).replace(tzinfo=None)
+            cutoff_dt = dt_obj - timedelta(seconds=dur_sec)
             iso_cut = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
         else:
             iso_cut = str(created_at_dt)[:19].replace("T", " ")
@@ -453,6 +469,8 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
                 max_favorable_bps, max_adverse_bps
             FROM trade_outcomes
             WHERE features_json IS NOT NULL
+              AND was_win IS NOT NULL
+              AND entry_price > 0 AND exit_price > 0
             UNION ALL
             SELECT 
                 id, asset, timeframe, direction, 
@@ -464,6 +482,8 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
                 max_favorable_bps, max_adverse_bps
             FROM trade_outcomes_archive_20261008
             WHERE features_json IS NOT NULL
+              AND was_win IS NOT NULL
+              AND entry_price > 0 AND exit_price > 0
             ORDER BY created_at ASC
         """
         params = ()
@@ -492,6 +512,7 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
                 max_favorable_bps, max_adverse_bps
             FROM trade_outcomes
             WHERE features_json IS NOT NULL
+              AND was_win IS NOT NULL
               AND entry_price > 0 AND exit_price > 0
               AND created_at >= %s::timestamptz
               {hf_filter}
@@ -604,6 +625,9 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
         # 4. Target Label
         direction = str(row_dict.get("direction") or "")
         was_win = row_dict.get("was_win")
+        if was_win is None:
+            skipped_count += 1
+            continue
         pnl = _safe_float(row_dict.get("pnl_bps"))
         en_p = _safe_float(row_dict.get("entry_price"))
         ex_p = _safe_float(row_dict.get("exit_price"))

@@ -455,14 +455,14 @@ def train_model(
         if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
             model.macro_encoder[0].weight.data[:, 22] = 0.0
         if is_dual_stream and hasattr(model, "calibrate_cell_experts"):
-            print("[*] Pre-calibrating 30 microstructure cell experts & sniper gates (Train + Val only, zero test leak)...")
-            s1_calib = int(idx_train * 0.60)
-            s2_calib = idx_train
+            print("[*] Pre-calibrating 30 microstructure cell experts & sniper gates (strictly on Train split, zero Val/Test leak)...")
+            s1_calib = int(idx_train * 0.50)
+            s2_calib = int(idx_train * 0.80)
             model.calibrate_cell_experts(
-                torch.tensor(X_candles[:idx_val], dtype=torch.float32),
-                torch.tensor(X_mtf[:idx_val], dtype=torch.float32),
-                torch.tensor(X_macro[:idx_val], dtype=torch.float32),
-                torch.tensor(y[:idx_val], dtype=torch.long),
+                torch.tensor(X_candles[:idx_train], dtype=torch.float32),
+                torch.tensor(X_mtf[:idx_train], dtype=torch.float32),
+                torch.tensor(X_macro[:idx_train], dtype=torch.float32),
+                torch.tensor(y[:idx_train], dtype=torch.long),
                 s1_calib,
                 s2_calib
             )
@@ -626,14 +626,14 @@ def train_model(
         if hasattr(model, "macro_encoder") and model.macro_encoder[0].weight.shape[1] > 22:
             model.macro_encoder[0].weight.data[:, 22] = 0.0
         if is_dual_stream and hasattr(model, "calibrate_cell_experts"):
-            print("[*] Re-calibrating microstructure cell experts on best checkpoint weights (zero test leak)...")
-            s1_calib = int(idx_train * 0.60)
-            s2_calib = idx_train
+            print("[*] Re-calibrating microstructure cell experts on best checkpoint weights (strictly on Train split, zero Val/Test leak)...")
+            s1_calib = int(idx_train * 0.50)
+            s2_calib = int(idx_train * 0.80)
             model.calibrate_cell_experts(
-                torch.tensor(X_candles[:idx_val], dtype=torch.float32),
-                torch.tensor(X_mtf[:idx_val], dtype=torch.float32),
-                torch.tensor(X_macro[:idx_val], dtype=torch.float32),
-                torch.tensor(y[:idx_val], dtype=torch.long),
+                torch.tensor(X_candles[:idx_train], dtype=torch.float32),
+                torch.tensor(X_mtf[:idx_train], dtype=torch.float32),
+                torch.tensor(X_macro[:idx_train], dtype=torch.float32),
+                torch.tensor(y[:idx_train], dtype=torch.long),
                 s1_calib,
                 s2_calib
             )

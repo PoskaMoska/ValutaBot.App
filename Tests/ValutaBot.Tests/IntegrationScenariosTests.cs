@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -22,8 +22,10 @@ namespace ValutaBot.Tests
             => new TechnicalAnalysisEngine.GatekeeperResult(true, "", 0.0001, 25.0);
     }
 
-    public class IntegrationScenariosTests
+    [Collection("MLPythonServiceState")]
+    public class IntegrationScenariosTests : IDisposable
     {
+        public void Dispose() => ValutaBot.MiniApp.MLPythonService.SetFactory(null);
         [Fact]
         public async Task PerfectStorm_ForexWeekday_ShouldGenerateFinalSignal()
         {
@@ -38,7 +40,7 @@ namespace ValutaBot.Tests
                 .ReturnsAsync(new HttpResponseMessage
                 {
                     StatusCode = HttpStatusCode.OK,
-                    Content = new StringContent("{\"probability\":0.88,\"direction\":\"BUY\"}")
+                    Content = new StringContent("{\"confidence\":0.88,\"raw_confidence\":0.88,\"probability\":0.88,\"direction\":\"BUY\",\"model_version\":\"PatchTST_v2\"}")
                 });
 
             var httpClient = new HttpClient(mockMessageHandler.Object);

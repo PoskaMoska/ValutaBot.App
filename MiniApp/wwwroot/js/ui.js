@@ -1,4 +1,4 @@
-import { lastPriceVal } from './state.js?v=20261026_audit_v1';
+import { lastPriceVal } from './state.js?v=20261028_audit_v2';
 
 let priceFlashTimeout = null;
 
@@ -327,7 +327,10 @@ export function renderError(rawError, debugText) {
     }
 }
 
+let lastTrafficStatus = null;
 export function updateTrafficLight(status) {
+    if (status === lastTrafficStatus) return;
+    lastTrafficStatus = status;
     const tl = document.getElementById('trafficLight');
     if (!tl) return;
     if (status === 'action') {
@@ -342,11 +345,42 @@ export function updateTrafficLight(status) {
     }
 }
 
-// --- AI Animated Chart (Performance & Memory Safe) ---
+export function showNetworkBanner(text) {
+    const banner = document.getElementById('networkAlert');
+    const txt = document.getElementById('networkAlertText');
+    if (banner && txt) {
+        txt.innerText = text;
+        banner.style.display = 'flex';
+    }
+}
+
+export function hideNetworkBanner() {
+    const banner = document.getElementById('networkAlert');
+    if (banner) {
+        banner.style.display = 'none';
+    }
+}
+
+// --- AI Animated Chart (Performance & Memory Safe, Zero Reflow inside rAF) ---
 let aiChartAnimationId = null;
 let aiChartData = [];
 let aiChartPhase = 0;
 let hideChartTimer = null;
+let cachedCanvasW = 0;
+let cachedCanvasH = 0;
+
+function updateCanvasDimensions() {
+    const canvas = document.getElementById('aiChartCanvas');
+    if (!canvas || !canvas.parentElement) return;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cachedCanvasW = rect.width;
+    cachedCanvasH = rect.height;
+    if (cachedCanvasW > 0 && cachedCanvasH > 0) {
+        canvas.width = Math.floor(cachedCanvasW * dpr);
+        canvas.height = Math.floor(cachedCanvasH * dpr);
+    }
+}
 
 export function showAiChart(asset, tf) {
     if (hideChartTimer) {
@@ -360,6 +394,7 @@ export function showAiChart(asset, tf) {
         container.classList.add('active');
         
         aiChartData = [];
+        updateCanvasDimensions();
         if (!aiChartAnimationId) {
             renderAiChartLoop();
         }
@@ -385,7 +420,7 @@ export function hideAiChart() {
             aiChartAnimationId = null;
         }
         hideChartTimer = null;
-    }, 400);
+    }, 350);
 }
 
 function renderAiChartLoop() {
@@ -394,28 +429,21 @@ function renderAiChartLoop() {
         aiChartAnimationId = null;
         return;
     }
+    if (cachedCanvasW === 0 || cachedCanvasH === 0) {
+        updateCanvasDimensions();
+        if (cachedCanvasW === 0 || cachedCanvasH === 0) {
+            aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
+            return;
+        }
+    }
     const ctx = canvas.getContext('2d');
-    
-    const rect = canvas.parentElement ? canvas.parentElement.getBoundingClientRect() : null;
-    if (!rect || rect.width === 0) {
-        aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
-        return;
-    }
-    
-    // Cap DPR at 2.0 to protect mobile battery and GPU rasterization
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const expectedW = Math.floor(rect.width * dpr);
-    const expectedH = Math.floor(rect.height * dpr);
-    if (canvas.width !== expectedW || canvas.height !== expectedH) {
-        canvas.width = expectedW;
-        canvas.height = expectedH;
-    }
     
     ctx.save();
     ctx.scale(dpr, dpr);
     
-    const w = rect.width;
-    const h = rect.height;
+    const w = cachedCanvasW;
+    const h = cachedCanvasH;
     
     ctx.fillStyle = '#0b0d1f';
     ctx.fillRect(0, 0, w, h);
@@ -441,8 +469,12 @@ function renderAiChartLoop() {
         let minP = Infinity, maxP = -Infinity;
         for (let i = 0; i < count; i++) {
             const c = aiChartData[i];
-            const trueLow = Math.min(c.low, c.open, c.close);
-            const trueHigh = Math.max(c.high, c.open, c.close);
+            const low = Number(c.low ?? c.l);
+            const high = Number(c.high ?? c.h);
+            const open = Number(c.open ?? c.o);
+            const close = Number(c.close ?? c.c);
+            const trueLow = Math.min(low, open, close);
+            const trueHigh = Math.max(high, open, close);
             if (trueLow < minP) minP = trueLow;
             if (trueHigh > maxP) maxP = trueHigh;
         }
@@ -452,16 +484,20 @@ function renderAiChartLoop() {
         // Candles (drawn crisp and fast without heavy shadowBlur)
         for (let i = 0; i < count; i++) {
             const c = aiChartData[i];
-            const isBull = c.close >= c.open;
+            const open = Number(c.open ?? c.o);
+            const close = Number(c.close ?? c.c);
+            const high = Number(c.high ?? c.h);
+            const low = Number(c.low ?? c.l);
+            const isBull = close >= open;
             const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
             
             const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
             const x = Math.floor(cx - candleWidth / 2);
             
-            const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
-            const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
-            const yTop  = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
-            let bodyH = Math.abs(c.close - c.open) * scaleY;
+            const yHigh = paddingY + (maxP - high) * scaleY + swayY;
+            const yLow  = paddingY + (maxP - low)  * scaleY + swayY;
+            const yTop  = paddingY + (maxP - Math.max(open, close)) * scaleY + swayY;
+            let bodyH = Math.abs(close - open) * scaleY;
             if (bodyH < 2) bodyH = 2;
             
             const color = isBull ? '#00b3ff' : '#9b5de5'; 
@@ -482,6 +518,12 @@ function renderAiChartLoop() {
 
     ctx.restore();
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
+}
+
+if (typeof window !== 'undefined') {
+    window.addEventListener('resize', () => {
+        if (aiChartAnimationId) updateCanvasDimensions();
+    });
 }
 
 // Session psychometrics tracker

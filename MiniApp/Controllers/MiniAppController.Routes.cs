@@ -47,12 +47,15 @@ public static partial class MiniAppController
             return Results.Ok(new { t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
         });
 
-        // Sentry verification test endpoint (captures a test event in Sentry)
-        app.MapGet("/api/sentry-test", () =>
+        // Sentry verification test endpoint (protected against unauthorized quota exhaustion)
+        app.MapGet("/api/sentry-test", async (HttpContext context) =>
         {
+            if (!await HasInternalSecretOrAuthAsync(context))
+                return Results.Json(new { error = "Unauthorized" }, statusCode: 401);
+
             var eventId = Sentry.SentrySdk.CaptureMessage("ValutaBot Sentry Production Verification Test", Sentry.SentryLevel.Info);
             return Results.Ok(new { status = "Event emitted to Sentry", eventId = eventId.ToString() });
-        });
+        }).RequireRateLimiting("Global");
 
         // Health endpoint for Railway and external uptime probes
         app.MapGet("/api/health", async (HttpContext context) =>
@@ -340,13 +343,16 @@ public static partial class MiniAppController
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
         app.MapGet("/api/stats/dataset-audit", async (HttpContext context) =>
         {
+            if (!await HasInternalSecretOrAuthAsync(context))
+                return Results.Json(new { error = "Unauthorized" }, statusCode: 401);
+
             try
             {
                 var mlUrl = Environment.GetEnvironmentVariable("ML_SERVICE_URL") ?? "http://localhost:8765";
                 if (HttpFactory != null)
                 {
                     var hc = HttpFactory.CreateClient();
-                    hc.Timeout = TimeSpan.FromSeconds(30);
+                    hc.Timeout = TimeSpan.FromSeconds(15);
                     var resp = await hc.GetAsync($"{mlUrl.TrimEnd('/')}/diagnostics/audit?notify=false");
                     if (resp.IsSuccessStatusCode)
                     {
@@ -360,11 +366,14 @@ public static partial class MiniAppController
             {
                 return Results.Json(new { error = ex.Message }, statusCode: 500);
             }
-        });
+        }).RequireRateLimiting("Global");
 
         // Autonomous Chaos Engineering & Fuzzing Audit Endpoints
-        app.MapGet("/api/chaos/report", (ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
+        app.MapGet("/api/chaos/report", async (HttpContext context, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
+            if (!await HasInternalSecretOrAuthAsync(context))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+
             var rep = chaos.GetLatestReport();
             return rep != null ? Results.Json(rep) : Results.Json(new { status = "NO_REPORT_YET", message = "Run POST /api/chaos/run to execute initial audit." });
         });
@@ -407,11 +416,19 @@ public static partial class MiniAppController
             return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages, TradingLogicQuality" });
         });
 
-        app.MapGet("/api/admin/clock-skew", () =>
-            Results.Json(new { snapshot = ValutaBot.MiniApp.Services.ClockSkewMonitor.GetLatest(), utcNow = DateTime.UtcNow }));
-
-        app.MapGet("/api/admin/db-stats", async () =>
+        app.MapGet("/api/admin/clock-skew", async (HttpContext context) =>
         {
+            if (!await HasInternalSecretOrAuthAsync(context))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+            return Results.Json(new { snapshot = ValutaBot.MiniApp.Services.ClockSkewMonitor.GetLatest(), utcNow = DateTime.UtcNow });
+        });
+
+        app.MapGet("/api/admin/db-stats", async (HttpContext context) =>
+        {
+            if (!await HasInternalSecretOrAuthAsync(context))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+
             try
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
@@ -559,5 +576,21 @@ public static partial class MiniAppController
 
             return Results.Ok(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
+    }
+
+    private static async Task<bool> HasInternalSecretOrAuthAsync(HttpContext context)
+    {
+        string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
+        string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
+        if (!string.IsNullOrEmpty(providedSecret) &&
+            CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(providedSecret),
+                Encoding.UTF8.GetBytes(expectedSecret)))
+        {
+            return true;
+        }
+
+        var (isAuthorized, _) = await AuthService.IsRequestAuthorized(context);
+        return isAuthorized;
     }
 }

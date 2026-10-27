@@ -296,7 +296,8 @@ public static partial class MiniAppController
             try
             {
                 Console.WriteLine("[TickCollector] Application stopping: performing final tick flush to DB...");
-                RealtimeTickCollector.StopAsync(CancellationToken.None).GetAwaiter().GetResult();
+                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                RealtimeTickCollector.StopAsync(shutdownCts.Token).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {

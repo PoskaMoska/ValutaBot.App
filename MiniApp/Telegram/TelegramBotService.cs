@@ -193,7 +193,7 @@ public partial class TelegramBotService : BackgroundService
                                 {
                                     Console.WriteLine($"[TG Bot] HandleMessage error ({chatId}): {ex.Message}");
                                 }
-                            }, stoppingToken);
+                            });
                         }
                         else if (update.TryGetProperty("callback_query", out var callbackQuery))
                         {
@@ -214,12 +214,14 @@ public partial class TelegramBotService : BackgroundService
                             }
 
                             // SECURITY: Anti-Spam Rate Limiter for Callbacks
-                            if (UserLastActivity.TryGetValue(chatId, out _))
+                            if (UserLastActivity.TryGetValue($"cb_{chatId}", out _))
                             {
                                 BotLogger.Warn($"[Anti-Spam 🛡️] Dropped flood callback from {chatId}");
+                                // SRE-FIX: Dismiss Telegram inline button loading spinner even when rate-limited
+                                _ = AnswerCallbackQuery(token, queryId, "⏳ Пожалуйста, подождите секунду...");
                                 continue;
                             }
-                            UserLastActivity.Set(chatId, true, TimeSpan.FromSeconds(1));
+                            UserLastActivity.Set($"cb_{chatId}", true, TimeSpan.FromSeconds(1));
 
                             _ = Task.Run(async () =>
                             {
@@ -228,7 +230,7 @@ public partial class TelegramBotService : BackgroundService
                                 {
                                     Console.WriteLine($"[TG Bot] HandleCallback error ({chatId}): {ex.Message}");
                                 }
-                            }, stoppingToken);
+                            });
                         }
                     }
                 }
@@ -248,16 +250,65 @@ public partial class TelegramBotService : BackgroundService
         }
     }
 
+    internal static async Task<HttpResponseMessage> PostTelegramJsonWithRetryAsync(string url, string jsonPayload, CancellationToken ct = default)
+    {
+        var client = MiniAppController.HttpFactory!.CreateClient("Telegram");
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+            var resp = await client.PostAsync(url, content, ct);
+            if ((int)resp.StatusCode == 429 && attempt < 3)
+            {
+                int delaySec = 5;
+                if (resp.Headers.RetryAfter?.Delta.HasValue == true)
+                {
+                    delaySec = Math.Max(1, (int)resp.Headers.RetryAfter.Delta.Value.TotalSeconds);
+                }
+                else
+                {
+                    try
+                    {
+                        var errJson = await resp.Content.ReadAsStringAsync(ct);
+                        using var doc = JsonDocument.Parse(errJson);
+                        if (doc.RootElement.TryGetProperty("parameters", out var p) &&
+                            p.TryGetProperty("retry_after", out var ra))
+                        {
+                            delaySec = Math.Max(1, ra.GetInt32());
+                        }
+                    }
+                    catch { }
+                }
+                resp.Dispose();
+                BotLogger.Warn($"[TG Bot API] 429 Rate Limit on outbound call. Backing off for {delaySec}s (Attempt {attempt}/3)");
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 30)), ct);
+                continue;
+            }
+            return resp;
+        }
+        return new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+    }
+
     internal static async Task SendMessage(string token, long chatId, string text)
     {
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
-        try
+        for (int attempt = 1; attempt <= 2; attempt++)
         {
-            await client.SendTextMessageAsync(chatId, text, parseMode: ParseMode.Html);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[TG Bot] sendMessage SDK exception: {ex.Message}");
+            try
+            {
+                await client.SendTextMessageAsync(chatId, text, parseMode: ParseMode.Html);
+                return;
+            }
+            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429 && attempt == 1)
+            {
+                int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 30);
+                BotLogger.Warn($"[TG Bot] sendMessage 429 rate-limited. Retrying after {retrySec}s...");
+                await Task.Delay(TimeSpan.FromSeconds(retrySec));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TG Bot] sendMessage SDK exception: {ex.Message}");
+                return;
+            }
         }
     }
 
@@ -267,8 +318,7 @@ public partial class TelegramBotService : BackgroundService
         {
             var payload = new { chat_id = chatId, text, parse_mode = "HTML", reply_markup = keyboard };
             var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await MiniAppController.HttpFactory!.CreateClient("Telegram").PostAsync($"https://api.telegram.org/bot{token}/sendMessage", content);
+            using var resp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/sendMessage", json);
             if (!resp.IsSuccessStatusCode)
             {
                 var err = await resp.Content.ReadAsStringAsync();
@@ -284,13 +334,24 @@ public partial class TelegramBotService : BackgroundService
     internal static async Task EditMessageText(string token, long chatId, int messageId, string text)
     {
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
-        try
+        for (int attempt = 1; attempt <= 2; attempt++)
         {
-            await client.EditMessageTextAsync(chatId, messageId, text, parseMode: ParseMode.Html);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[TG Bot] editMessageText SDK exception: {ex.Message}");
+            try
+            {
+                await client.EditMessageTextAsync(chatId, messageId, text, parseMode: ParseMode.Html);
+                return;
+            }
+            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429 && attempt == 1)
+            {
+                int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 30);
+                BotLogger.Warn($"[TG Bot] editMessageText 429 rate-limited. Retrying after {retrySec}s...");
+                await Task.Delay(TimeSpan.FromSeconds(retrySec));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TG Bot] editMessageText SDK exception: {ex.Message}");
+                return;
+            }
         }
     }
 
@@ -300,8 +361,7 @@ public partial class TelegramBotService : BackgroundService
         {
             var payload = new { chat_id = chatId, message_id = messageId, text, parse_mode = "HTML", reply_markup = keyboard };
             var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var resp = await MiniAppController.HttpFactory!.CreateClient("Telegram").PostAsync($"https://api.telegram.org/bot{token}/editMessageText", content);
+            using var resp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/editMessageText", json);
             if (!resp.IsSuccessStatusCode)
             {
                 var err = await resp.Content.ReadAsStringAsync();

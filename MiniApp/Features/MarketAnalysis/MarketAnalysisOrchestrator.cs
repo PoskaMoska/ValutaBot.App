@@ -1,4 +1,4 @@
-using ValutaBot.Core;
+﻿using ValutaBot.Core;
 using Prometheus;
 using System;
 using System.Collections.Generic;
@@ -80,7 +80,7 @@ public class MarketAnalysisOrchestrator(
         // 1. Sanitize (Immutable Step)
         string cleanAsset = AssetSanitizer.Sanitize(asset);
         DayOfWeek day = DateTime.UtcNow.DayOfWeek;
-        string? symbol = AssetSanitizer.MapSymbolByDayOfWeek(cleanAsset, day);
+        string? symbol = PriceFeed.UsePocketOption ? null : AssetSanitizer.MapSymbolByDayOfWeek(cleanAsset, day);
         bool isForex = AssetSanitizer.IsForexAsset(cleanAsset);
         
         string tfLower = TimeframeNormalizer.Normalize(timeframe);
@@ -183,7 +183,7 @@ public class MarketAnalysisOrchestrator(
 
             double sma20 = last20.Average(c => c.Close);
             double stdev20 = Math.Sqrt(last20.Average(c => Math.Pow(c.Close - sma20, 2)));
-            bbSqueeze = (stdev20 * 4) / sma20 < 0.0005; // 5 bps bandwidth
+            bbSqueeze = sma20 > 1e-6 && (stdev20 * 4.0) / sma20 < 0.0005; // 5 bps bandwidth
 
             int streak = 0;
             bool? upTrend = null;
@@ -399,7 +399,9 @@ public class MarketAnalysisOrchestrator(
         bool isCooldownActive = false;
         if (_lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var lastRealTime))
         {
-            isCooldownActive = (DateTime.UtcNow - lastRealTime).TotalSeconds < (isS5 ? 20.0 : 10.0);
+            int tradeDurationSecs = Math.Max(targetHorizon * intervalSecs, intervalSecs);
+            double requiredCooldownSecs = isS5 ? 20.0 : Math.Max(tradeDurationSecs + 2.0, 15.0);
+            isCooldownActive = (DateTime.UtcNow - lastRealTime).TotalSeconds < requiredCooldownSecs;
         }
 
         bool isExhaustedOnS5 = false;
@@ -461,8 +463,26 @@ public class MarketAnalysisOrchestrator(
 
             if (canExecuteReal)
             {
-                _lastRealTradeTimeByAsset[cleanAsset] = DateTime.UtcNow;
-                _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
+                var nowUtc = DateTime.UtcNow;
+                int tradeDurSecs = Math.Max(targetHorizon * intervalSecs, intervalSecs);
+                double reqCooldown = isS5 ? 20.0 : Math.Max(tradeDurSecs + 2.0, 15.0);
+
+                if (!_lastRealTradeTimeByAsset.TryAdd(cleanAsset, nowUtc))
+                {
+                    if (_lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var prevTime) &&
+                        (nowUtc - prevTime).TotalSeconds < reqCooldown)
+                    {
+                        _logger.LogWarning("[Orchestrator] Concurrency guard: Asset {Asset} trade claimed by concurrent worker. Aborting live execution.", cleanAsset);
+                        canExecuteReal = false;
+                    }
+                    else
+                    {
+                        _lastRealTradeTimeByAsset[cleanAsset] = nowUtc;
+                    }
+                }
+                if (canExecuteReal)
+                {
+                    _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
                 _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
                     smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                     effectiveMarketRegime,
@@ -476,6 +496,12 @@ public class MarketAnalysisOrchestrator(
                     priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
                 dbSw.Stop();
                 traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
+                }
+                else
+                {
+                    dbSw.Stop();
+                    traceLines.Add($"[8. Cooldown Guard]  Asset {cleanAsset} is claimed by concurrent worker -> {dbSw.ElapsedMilliseconds}ms");
+                }
             }
         }
         else if (allowShadowRecord)
@@ -512,7 +538,7 @@ public class MarketAnalysisOrchestrator(
 
             if (isPeriodicSampleDue)
             {
-                _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
+                    _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
                 _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, shadowFeaturesJson,
                     "NONE", false, false, 1.0, "NEUTRAL", effectiveMarketRegime, state.VelocityRegime ?? "UNKNOWN", mainAtr, mainAdx, taResult.rsiVal, false, minutesToNews ?? -1, "", "", 0.0, priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
                 traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения ({consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");

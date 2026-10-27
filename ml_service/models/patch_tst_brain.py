@@ -482,8 +482,8 @@ class DualStreamPatchBrain(nn.Module):
 
         alpha_blend = self.cell_hyper[aid_idx, tf_idx, 0]  # [B]
         g_scale = self.cell_hyper[aid_idx, tf_idx, 1]      # [B]
-        tau = self.cell_hyper[aid_idx, tf_idx, 2]          # [B]
-        cell_p85 = self.cell_hyper[aid_idx, tf_idx, 3].clamp(min=1e-4)  # [B]
+        tau = self.cell_hyper[aid_idx, tf_idx, 2].clamp(min=0.10)  # [B]
+        cell_p85 = self.cell_hyper[aid_idx, tf_idx, 3].clamp(min=0.05)  # [B]
 
         dir_s = (1.0 - alpha_blend) * base_tf_score + alpha_blend * cd
 
@@ -497,9 +497,9 @@ class DualStreamPatchBrain(nn.Module):
         sat_s = dir_s / (1.0 + (dir_s / tau) ** 4)
         final_s = sat_s * gate_mult
 
-        # Calibrated uniform probability scale across all 30 cells
-        s_norm = final_s / cell_p85
-        alpha_dir = 0.20 * s_norm + 0.14 * (s_norm ** 3)
+        # Calibrated uniform probability scale across all 30 cells (clamped against cubic explosion)
+        s_norm = torch.clamp(final_s / cell_p85, -4.0, 4.0)
+        alpha_dir = torch.clamp(0.20 * s_norm + 0.14 * (s_norm ** 3), -3.0, 3.0)
         sniper_gate = gate_mult / (1.0 + (dir_s / tau) ** 4)
 
         return alpha_dir, sniper_gate
@@ -630,7 +630,7 @@ class DualStreamPatchBrain(nn.Module):
                             b_final_s = (b_dir_s / (1.0 + (b_dir_s / b_tau) ** 4)) * b_gmult
                             val_cell_abs = np.abs(b_final_s[:s2][cell_mask[:s2]].numpy())
                             p85 = float(np.percentile(val_cell_abs, 85)) if len(val_cell_abs) > 10 else 0.25
-                            best_hyper[3] = max(p85, 1e-4)
+                            best_hyper[3] = max(p85, 0.05)
 
                         GW_cell[aid, ti] = best_gw.to(self.cell_gate_weights.device)
                         Hyper_cell[aid, ti] = torch.tensor(best_hyper, dtype=torch.float32, device=self.cell_hyper.device)

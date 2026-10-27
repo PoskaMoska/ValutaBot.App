@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -167,6 +167,25 @@ namespace ValutaBot.MiniApp.Services
         public bool IsSymbolQuarantined(string asset, string timeframe, out string? reason)
         {
             reason = null;
+            string cleanAsset = AssetSanitizer.Sanitize(asset);
+
+            // 1. Check Pair-level quarantine (highest priority: protects all timeframes of toxic asset)
+            if (_symbolQuarantine.TryGetValue(cleanAsset, out var qPair))
+            {
+                if (DateTime.UtcNow < qPair.QuarantinedUntil)
+                {
+                    var remain = (qPair.QuarantinedUntil - DateTime.UtcNow).TotalMinutes;
+                    reason = $"PAIR_QUARANTINE ({cleanAsset}: resumes in {remain:F0}m — {qPair.Reason})";
+                    return true;
+                }
+
+                _symbolQuarantineWatermarks[cleanAsset] = DateTime.UtcNow;
+                _symbolQuarantine.TryRemove(cleanAsset, out _);
+                _shadowRecoveryStreak.TryRemove(cleanAsset, out _);
+                BotLogger.Info($"[CircuitBreaker] Pair-level quarantine expired for {cleanAsset}. Resuming live trading.");
+            }
+
+            // 2. Check Timeframe-specific quarantine
             string key = GetSymbolKey(asset, timeframe);
             if (_symbolQuarantine.TryGetValue(key, out var q))
             {
@@ -189,9 +208,31 @@ namespace ValutaBot.MiniApp.Services
         {
             if (latestWasWin == null) return;
             string key = GetSymbolKey(asset, timeframe);
+            string cleanAsset = AssetSanitizer.Sanitize(asset);
 
             if (isShadow)
             {
+                // Shadow healing for pair-level quarantine
+                if (_symbolQuarantine.TryGetValue(cleanAsset, out var activePairQ) && DateTime.UtcNow < activePairQ.QuarantinedUntil)
+                {
+                    if (latestWasWin == true)
+                    {
+                        int streak = _shadowRecoveryStreak.AddOrUpdate(cleanAsset, 1, (_, c) => c + 1);
+                        if (streak >= 2)
+                        {
+                            _symbolQuarantineWatermarks[cleanAsset] = DateTime.UtcNow;
+                            _symbolQuarantine.TryRemove(cleanAsset, out _);
+                            _shadowRecoveryStreak.TryRemove(cleanAsset, out _);
+                            BotLogger.Info($"[CircuitBreaker] Early self-healing recovery for pair {cleanAsset}: 2 consecutive SHADOW wins! Lifting pair quarantine.");
+                        }
+                    }
+                    else
+                    {
+                        _shadowRecoveryStreak[cleanAsset] = 0;
+                    }
+                }
+
+                // Shadow healing for timeframe-specific quarantine
                 if (_symbolQuarantine.TryGetValue(key, out var activeQ) && DateTime.UtcNow < activeQ.QuarantinedUntil)
                 {
                     if (latestWasWin == true)
@@ -252,7 +293,18 @@ namespace ValutaBot.MiniApp.Services
                     var until = DateTime.UtcNow.AddMinutes(30);
                     _symbolQuarantine[key] = (until, qReason);
                     _shadowRecoveryStreak[key] = 0;
-                    BotLogger.Warn($"[CircuitBreaker] PER-SYMBOL QUARANTINE activated for {key} (30m or 2 shadow wins). Reason: {qReason}");
+
+                    // If 2+ consecutive losses, quarantine the entire asset pair across all timeframes
+                    if (consecutiveLosses >= 2)
+                    {
+                        _symbolQuarantine[cleanAsset] = (until, qReason);
+                        _shadowRecoveryStreak[cleanAsset] = 0;
+                        BotLogger.Warn($"[CircuitBreaker] PAIR-LEVEL QUARANTINE activated for {cleanAsset} across all timeframes (30m). Reason: {qReason}");
+                    }
+                    else
+                    {
+                        BotLogger.Warn($"[CircuitBreaker] PER-SYMBOL QUARANTINE activated for {key} (30m or 2 shadow wins). Reason: {qReason}");
+                    }
                 }
             }
             catch (Exception ex)
@@ -260,7 +312,6 @@ namespace ValutaBot.MiniApp.Services
                 BotLogger.Warn($"[CircuitBreaker] CheckSymbolStateAsync failed for {key}: {ex.Message}");
             }
         }
-
         public async Task CheckStateAsync(CancellationToken ct = default)
         {
             // ── Autonomous bypass: don't activate CB while still building the dataset ──
@@ -338,33 +389,23 @@ namespace ValutaBot.MiniApp.Services
                 if (_haltedUntil.HasValue && DateTime.UtcNow < _haltedUntil.Value)
                     return;
                 newHaltUntil = DateTime.UtcNow.AddMinutes(_settings.CircuitBreakerCooldownMinutes);
+                _haltedUntil = newHaltUntil;
+                _haltReason = reason;
+                _cacheLoadedAt = DateTime.UtcNow;
             }
 
             BotLogger.Warn($"[CircuitBreaker] TRADING HALTED for {_settings.CircuitBreakerCooldownMinutes}m. Reason: {reason}");
 
-            // Persist to DB first (write-through), then update memory state
+            // Persist to DB (write-through)
             try
             {
                 await EnsureTableAsync(ct);
                 await WriteHaltToDbAsync(newHaltUntil, reason, ct);
-
-                lock (_lock)
-                {
-                    _haltedUntil = newHaltUntil;
-                    _haltReason = reason;
-                    _cacheLoadedAt = DateTime.UtcNow;
-                }
             }
             catch (Exception ex)
             {
-                // Non-fatal: halt is active in memory, but DB write failed. On restart, InitializeAsync will re-evaluate.
+                // Non-fatal: halt is already active in memory, but DB write failed.
                 BotLogger.Warn($"[CircuitBreaker] Failed to persist halt to DB (halt IS active in memory): {ex.Message}");
-                lock (_lock)
-                {
-                    _haltedUntil = newHaltUntil;
-                    _haltReason = reason;
-                    _cacheLoadedAt = DateTime.UtcNow;
-                }
             }
         }
 

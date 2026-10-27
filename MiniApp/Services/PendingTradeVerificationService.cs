@@ -11,6 +11,7 @@ namespace ValutaBot.MiniApp;
 public class PendingTradeVerificationService : BackgroundService
 {
     private static readonly TimeSpan _checkInterval = TimeSpan.FromSeconds(5);
+    private static readonly SemaphoreSlim _verificationSemaphore = new(20);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -20,6 +21,7 @@ public class PendingTradeVerificationService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await SweepExpiredTradesAsync(stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Sweep error: {ex.Message}"); }
             await Task.Delay(_checkInterval, stoppingToken);
         }
@@ -37,7 +39,6 @@ public class PendingTradeVerificationService : BackgroundService
 
         if (expired.Count == 0) return;
 
-        var semaphore = new SemaphoreSlim(20);
         var tasks = new List<Task>();
 
         foreach (var record in expired)
@@ -46,10 +47,11 @@ public class PendingTradeVerificationService : BackgroundService
             
             tasks.Add(Task.Run(async () =>
             {
-                await semaphore.WaitAsync(ct).ConfigureAwait(false);
-                try { await VerifyTradeAsync(record); }
+                await _verificationSemaphore.WaitAsync(ct).ConfigureAwait(false);
+                try { await VerifyTradeAsync(record, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
                 catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Failed to verify {record.Id}: {ex.Message}"); }
-                finally { semaphore.Release(); }
+                finally { _verificationSemaphore.Release(); }
             }, ct));
         }
         
@@ -57,8 +59,16 @@ public class PendingTradeVerificationService : BackgroundService
         catch (OperationCanceledException) { }
     }
 
-    private static async Task VerifyTradeAsync(SignalTracker.PredictionRecord record)
+    private static async Task VerifyTradeAsync(SignalTracker.PredictionRecord record, CancellationToken ct = default)
     {
+        // 1. ПЕРВООЧЕРЕДНАЯ ВАЛИДАЦИЯ EntryPrice (исключает деление на 0 в MFE/MAE и PnL)
+        if (record.EntryPrice <= 1e-8 || double.IsNaN(record.EntryPrice) || double.IsInfinity(record.EntryPrice))
+        {
+            BotLogger.Warn($"[PendingVerifier] Invalid EntryPrice {record.EntryPrice} for trade {record.Id} — discarding.");
+            await TradeRepository.DeletePendingTradeAsync(record.Id);
+            return;
+        }
+
         double? exitPrice = null;
         string verifyInterval = "s5"; 
         
@@ -71,8 +81,8 @@ public class PendingTradeVerificationService : BackgroundService
         {
             // Settle on the SAME feed the signal was built from: "EURUSD_PO" in Pocket Option mode, "EURUSD" for Tiingo.
             string cleanAsset = PriceFeed.CandleKey(record.Asset);
-            using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
-            await conn.OpenAsync();
+            await using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
+            await conn.OpenAsync(ct);
             
             // Physical duration expiry: verifyUtc is the exact moment the contract expires.
             DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();
@@ -84,7 +94,7 @@ public class PendingTradeVerificationService : BackgroundService
             DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20) ? createdBucket : targetGrid.AddSeconds(-20);
 
             // Locate the enclosing candle [open_time, open_time + 5s) covering verifyUtc
-            exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
+            exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
                 SELECT close_price
                 FROM subminute_candles
                 WHERE asset = @Asset AND interval = @Interval
@@ -96,12 +106,12 @@ public class PendingTradeVerificationService : BackgroundService
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
                 VerifyAt = verifyUtc
-            });
+            }, cancellationToken: ct));
 
-            if (!exitPrice.HasValue || exitPrice.Value <= 0)
+            if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
             {
                 // Fallback: nearest candle on or before verifyUtc within allowed window
-                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
+                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
                     SELECT close_price
                     FROM subminute_candles
                     WHERE asset = @Asset AND interval = @Interval
@@ -114,15 +124,15 @@ public class PendingTradeVerificationService : BackgroundService
                     Interval = verifyInterval, 
                     VerifyAt = verifyUtc,
                     MinAllowed = minAllowedSub
-                });
+                }, cancellationToken: ct));
             }
 
             // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m).
             // Not in PO mode: historical_candles holds Tiingo prices, which must never settle an OTC trade.
-            if (!PriceFeed.UsePocketOption && (!exitPrice.HasValue || exitPrice.Value <= 0))
+            if (!PriceFeed.UsePocketOption && (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value)))
             {
                 DateTime minAllowedHist = verifyUtc.AddSeconds(-120);
-                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(@"
+                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
                     SELECT 
                         CASE 
                             WHEN open_time = @VerifyAt THEN ""open"" 
@@ -137,15 +147,15 @@ public class PendingTradeVerificationService : BackgroundService
                     Asset = cleanAsset, 
                     VerifyAt = verifyUtc.ToString("O"),
                     MinAllowedTime = minAllowedHist.ToString("O")
-                });
+                }, cancellationToken: ct));
             }
 
             // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] using timestamptz comparison
-            if (exitPrice.HasValue && exitPrice.Value > 0)
+            if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))
             {
                 try
                 {
-                    var exc = await conn.QueryFirstOrDefaultAsync<(double? max_high, double? min_low)>(@"
+                    var exc = await conn.QueryFirstOrDefaultAsync<(double? max_high, double? min_low)>(new CommandDefinition(@"
                         SELECT MAX(high_price) as max_high, MIN(low_price) as min_low
                         FROM subminute_candles
                         WHERE asset = @Asset
@@ -157,26 +167,21 @@ public class PendingTradeVerificationService : BackgroundService
                         Interval = verifyInterval, 
                         CreatedBucket = createdBucket.ToString("o"), 
                         TargetGrid = targetGrid.ToString("o") 
-                    });
+                    }, cancellationToken: ct));
 
                     double exitVal = exitPrice.Value;
-                    double maxH = exc.max_high ?? exitVal;
-                    double minL = exc.min_low ?? exitVal;
-
-                    if (maxH < exitVal) maxH = exitVal;
-                    if (minL > exitVal) minL = exitVal;
-                    if (maxH < record.EntryPrice) maxH = record.EntryPrice;
-                    if (minL > record.EntryPrice) minL = record.EntryPrice;
+                    double maxH = Math.Max(exc.max_high ?? exitVal, Math.Max(exitVal, record.EntryPrice));
+                    double minL = Math.Min(exc.min_low ?? exitVal, Math.Min(exitVal, record.EntryPrice));
 
                     if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY"))
                     {
-                        record.MaxFavorableBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000, 2);
-                        record.MaxAdverseBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000, 2);
+                        record.MaxFavorableBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000.0, 2);
+                        record.MaxAdverseBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000.0, 2);
                     }
                     else if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("PUT"))
                     {
-                        record.MaxFavorableBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000, 2);
-                        record.MaxAdverseBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000, 2);
+                        record.MaxFavorableBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000.0, 2);
+                        record.MaxAdverseBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000.0, 2);
                     }
                 }
                 catch (Exception exMfe)
@@ -190,7 +195,7 @@ public class PendingTradeVerificationService : BackgroundService
              BotLogger.Warn($"[PendingVerifier] DB fetch failed: {ex.Message}");
         }
 
-        if (!exitPrice.HasValue || exitPrice.Value <= 0)
+        if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
         {
             if (secondsOverdue >= 120)
             {
@@ -239,15 +244,6 @@ public class PendingTradeVerificationService : BackgroundService
             return;
         }
 
-        if (record.EntryPrice <= 0 || double.IsNaN(record.EntryPrice))
-        {
-            BotLogger.Warn($"[PendingVerifier] Invalid EntryPrice {record.EntryPrice} for trade {record.Id} — discarding.");
-            await TradeRepository.DeletePendingTradeAsync(record.Id);
-            return;
-        }
-
-        double rawPriceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
-
         // Guard: NEUTRAL / SHADOW_NEUTRAL сигнал не несёт обучающей информации
         if (record.Direction is "NEUTRAL" or "SHADOW_NEUTRAL")
         {
@@ -256,6 +252,7 @@ public class PendingTradeVerificationService : BackgroundService
             return;
         }
 
+        double rawPriceDiff = (exitPrice.Value - record.EntryPrice) / record.EntryPrice;
         bool isExactDoji = Math.Abs(rawPriceDiff) < 1e-8; // entry == exit
         
         record.ExitPrice = exitPrice.Value;
@@ -277,7 +274,7 @@ public class PendingTradeVerificationService : BackgroundService
             // BUY: Profit when Exit > Entry
             // PUT: Profit when Exit < Entry (rawPriceDiff is negative, so pnl = -rawPriceDiff * 10000)
             double effectivePnlDiff = isPut ? -rawPriceDiff : rawPriceDiff;
-            record.PnlBps = Math.Round(effectivePnlDiff * 10000, 2);
+            record.PnlBps = Math.Round(effectivePnlDiff * 10000.0, 2);
         }
 
         await TradeOutcomeTracker.OnTradeVerifiedAsync(record);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -278,6 +278,10 @@ public class AutoTradingScannerService : BackgroundService
                     _logger.LogWarning($"[AutoScanner-Fast] Stale candles for {pair}/{tf}: last={lastCandleTime:HH:mm:ss}, refTime={refTime:HH:mm:ss} (age {(refTime - lastCandleTime).TotalSeconds:F1}s > limit {maxCandleAgeSec:F1}s). Skipping.");
                 }
             }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {

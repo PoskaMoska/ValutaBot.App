@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,8 +15,10 @@ using Xunit;
 
 namespace ValutaBot.Tests.Engines;
 
-public class ChaosAuditServiceTests
+[Collection("MLPythonServiceState")]
+public class ChaosAuditServiceTests : IDisposable
 {
+    public void Dispose() => ValutaBot.MiniApp.MLPythonService.SetFactory(null);
     private readonly IServiceProvider _serviceProvider;
 
     public ChaosAuditServiceTests()

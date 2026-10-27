@@ -122,6 +122,19 @@
                 <span class='time' id='candleTime'>--</span>
             </div>
 
+            <!-- Оффлайн / Реконнект баннер -->
+            <div id='networkAlert' class='network-alert-banner' style='display:none;'>
+                <span class='net-icon'>⚡</span>
+                <span id='networkAlertText'>Нет подключения к сети</span>
+            </div>
+
+            <!-- Контейнер тиковой цены (субминутные таймфреймы) -->
+            <div class='live-price-container' id='livePriceContainer' style='display:none;'>
+                <span class='live-price-dot'>●</span>
+                <span class='live-price-label'>Live Price:</span>
+                <span class='live-price-value' id='livePriceValue'>--</span>
+            </div>
+
             <button class='btn-analyze' id='btnGet'>ПОЛУЧИТЬ АНАЛИЗ</button>
             <div id='errorDisplay' class='error-box' style='display:none'></div>
 
@@ -289,6 +302,6 @@
         </div>
     </div>
     
-    <script type="module" src="/js/main.js?v=20261026_audit_v1"></script>
+    <script type="module" src="/js/main.js?v=20261028_audit_v2"></script>
 </body>
 </html>

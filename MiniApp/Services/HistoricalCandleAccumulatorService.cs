@@ -27,7 +27,9 @@ public class HistoricalCandleAccumulatorService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var now = DateTime.UtcNow;
+            var now = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+                ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+                : DateTime.UtcNow;
             var targetMinute = TruncateToMinute(now).AddMinutes(1);
             var delay = targetMinute.AddSeconds(5) - now; // Wake up at 05 seconds past the minute to ensure s5 are flushed
             
@@ -41,13 +43,16 @@ public class HistoricalCandleAccumulatorService : BackgroundService
 
             try
             {
-                now = DateTime.UtcNow;
+                now = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+                    ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+                    : DateTime.UtcNow;
                 // OTC/PO trades 24/7; Forex is Mon-Fri market hours only
                 bool isWeekday = PriceFeed.UsePocketOption || (now.DayOfWeek >= DayOfWeek.Monday && now.DayOfWeek <= DayOfWeek.Friday);
                 bool isMarketOpen = PriceFeed.UsePocketOption || !(now.DayOfWeek == DayOfWeek.Friday && now.Hour >= 22);
 
                 if (isWeekday && isMarketOpen)
                 {
+                    await RealtimeTickCollector.FlushAsync(stoppingToken);
                     await FlushAndSaveAsync(TruncateToMinute(now).AddMinutes(-1));
                 }
             }

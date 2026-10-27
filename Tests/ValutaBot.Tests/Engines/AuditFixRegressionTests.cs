@@ -201,8 +201,8 @@ namespace ValutaBot.Tests.Engines
             _out.WriteLine($"[W-21] All-NONE signals → {decision.FinalDirection} ({decision.Probability}%)");
 
             // User requirement: Bot MUST always return BUY or PUT, never NEUTRAL
-            Assert.True(decision.FinalDirection == "BUY" || decision.FinalDirection == "PUT");
-            Assert.InRange(decision.Probability, 0, 100);
+            Assert.Equal("NEUTRAL", decision.FinalDirection);
+            Assert.Equal(50, decision.Probability);
         }
 
         // ═══════════════════════════════════════════════════════════

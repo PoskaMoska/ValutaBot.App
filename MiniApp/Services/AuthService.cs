@@ -90,25 +90,22 @@ public static class AuthService
                 string providedSign = parsed["custom_user_sign"] ?? "";
                 string? authDateStr = parsed["auth_date"];
 
-                byte[] expectedHash;
-                using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(botToken));
+                // SRE-SECURITY FIX: Require auth_date strictly; timeless tokens without auth_date are rejected.
+                if (string.IsNullOrEmpty(authDateStr) || !long.TryParse(authDateStr, out long authDateEpoch))
+                {
+                    return (false, 0, "Missing or invalid auth_date: Timeless tokens are strictly rejected.");
+                }
 
-                if (!string.IsNullOrEmpty(authDateStr) && long.TryParse(authDateStr, out long authDateEpoch))
+                var authTime = DateTimeOffset.FromUnixTimeSeconds(authDateEpoch).UtcDateTime;
+                var now = DateTime.UtcNow;
+                // SRE-FIX: Verify TTL and clock-skew tolerance (5 min future, 24h past)
+                if (authTime > now.AddMinutes(5) || (now - authTime).TotalHours > 24)
                 {
-                    var authTime = DateTimeOffset.FromUnixTimeSeconds(authDateEpoch).UtcDateTime;
-                    var now = DateTime.UtcNow;
-                    // SRE-FIX: Verify TTL and clock-skew tolerance (5 min future, 24h past)
-                    if (authTime > now.AddMinutes(5) || (now - authTime).TotalHours > 24)
-                    {
-                        return (false, 0, "Custom authorization token expired or invalid timestamp");
-                    }
-                    expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{tgUserId}:{authDateEpoch}"));
+                    return (false, 0, "Custom authorization token expired or invalid timestamp");
                 }
-                else
-                {
-                    // Fallback for legacy links without auth_date
-                    expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(tgUserId.ToString()));
-                }
+
+                using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(botToken));
+                byte[] expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{tgUserId}:{authDateEpoch}"));
 
                 string expectedSign = Convert.ToHexString(expectedHash).ToLowerInvariant();
                 byte[] provBytes = Encoding.UTF8.GetBytes(providedSign.ToLowerInvariant());

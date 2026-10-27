@@ -49,13 +49,13 @@ namespace ValutaBot.App.MiniApp.Data
             builder.TcpKeepAlive = true;          // Low-level SO_KEEPALIVE on the OS socket
             builder.KeepAlive = 15;               // Application keepalive probe every 15s (before proxy's 60s idle timeout)
             builder.ConnectionLifetime = 300;     // Rotate pooled connections every 5m
-            builder.ConnectionIdleLifetime = 25;  // Evict idle connections after 25s so proxy cannot sever them silently
+            builder.ConnectionIdleLifetime = 20;  // Evict idle connections after 20s so proxy cannot sever them silently
             builder.Timeout = 10;                 // 10s connection timeout
             builder.CommandTimeout = 30;
 
-            // Connection pool bounds to prevent 53300: sorry, too many clients on Railway
+            // Connection pool bounds: MinPoolSize = 0 ensures idle sockets are closed before Railway 60s TCP proxy timeout
             builder.MaxPoolSize = 30;
-            builder.MinPoolSize = 3;
+            builder.MinPoolSize = 0;
 
             return builder.ToString();
         }
@@ -84,7 +84,18 @@ namespace ValutaBot.App.MiniApp.Data
         {
             if (_dataSource == null)
             {
-                GetConnection(); // trigger initialization
+                lock (_initLock)
+                {
+                    if (_dataSource == null)
+                    {
+                        string connStr = GetConnectionString();
+                        if (!string.IsNullOrEmpty(connStr))
+                        {
+                            var dataSourceBuilder = new NpgsqlDataSourceBuilder(connStr);
+                            _dataSource = dataSourceBuilder.Build();
+                        }
+                    }
+                }
             }
             if (_dataSource != null)
             {
@@ -301,8 +312,10 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN
                         ALTER TABLE trade_outcomes SET (
                             autovacuum_vacuum_scale_factor = 0.05,
-                            autovacuum_vacuum_cost_limit = 1500,
-                            autovacuum_vacuum_cost_delay = 2
+                            autovacuum_vacuum_cost_limit = 2000,
+                            autovacuum_vacuum_cost_delay = 2,
+                            toast.autovacuum_vacuum_scale_factor = 0.05,
+                            toast.autovacuum_vacuum_cost_limit = 2000
                         );
                     EXCEPTION WHEN others THEN END;
                     BEGIN

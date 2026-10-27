@@ -37,8 +37,8 @@ public class DataRetentionService : BackgroundService
     private const double MaxVolumeCapacityMb = 5120.0; // Railway 5 GB starter volume (5 * 1024 MB)
     private const double GreenThresholdMb    = 1600.0; // Safe operational zone (~2.8 GB physical disk with WAL)
     private const double YellowThresholdMb   = 2400.0; // Importance sampling + 24h shadow window (~3.6 GB physical disk)
-    private const double RedThresholdMb      = 3000.0; // High-frequency cleanup every 15 min (~4.2 GB physical disk)
-    private const double EmergencyThresholdMb= 3300.0; // Critical purge before physical disk exceeds 90% (leaving 600 MB WAL/temp buffer)
+    private const double RedThresholdMb      = 2700.0; // High-frequency cleanup every 15 min (~4.1 GB physical disk with WAL)
+    private const double EmergencyThresholdMb= 2950.0; // Critical purge before physical disk exceeds 90% (leaving safe WAL/temp buffer)
 
     private static StorageTelemetry? _latestTelemetry;
     private static bool _tableTuningApplied = false;
@@ -149,9 +149,9 @@ public class DataRetentionService : BackgroundService
 
             case StorageZone.Red:
             default:
-                // Red includes both RedThreshold and Emergency — Emergency already handled above
-                subminuteRetention = TimeSpan.FromDays(2);
-                shadowRetention = TimeSpan.FromHours(12);
+                // Preserve 4-day ML training window for PO subminute candles; reclaim disk via shadow/JSON pruning
+                subminuteRetention = TimeSpan.FromDays(4);
+                shadowRetention = TimeSpan.FromHours(6);
                 doImportanceSampling = true;
                 doRedZonePruning = true;
                 break;
@@ -274,12 +274,12 @@ public class DataRetentionService : BackgroundService
                 AND created_at::timestamptz < NOW() - INTERVAL '6 hours'",
             new { });
 
-        // Step 2: Aggressively delete old subminute candles chunked (keep only 24h for live analysis)
-        int emergencySubDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (Emergency: >24h)",
+        // Step 2: Delete subminute candles older than 4 days (preserve ML invariant of 4 days)
+        int emergencySubDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (Emergency: >4d)",
             @"DELETE FROM subminute_candles
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
-                  WHERE open_time::timestamptz < NOW() - INTERVAL '24 hours'
+                  WHERE open_time::timestamptz < NOW() - INTERVAL '96 hours'
                   LIMIT 10000
               )", new { });
 
@@ -325,8 +325,10 @@ public class DataRetentionService : BackgroundService
             await conn.ExecuteAsync(@"
                 ALTER TABLE trade_outcomes SET (
                     autovacuum_vacuum_scale_factor = 0.05,
-                    autovacuum_vacuum_cost_limit = 1500,
-                    autovacuum_vacuum_cost_delay = 2
+                    autovacuum_vacuum_cost_limit = 2000,
+                    autovacuum_vacuum_cost_delay = 2,
+                    toast.autovacuum_vacuum_scale_factor = 0.05,
+                    toast.autovacuum_vacuum_cost_limit = 2000
                 );
                 ALTER TABLE subminute_candles SET (
                     fillfactor = 80,

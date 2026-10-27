@@ -43,8 +43,6 @@ public static class PocketOptionWebSocketStream
     private const int MaxBackoffMs = 60_000;
     public static double ServerTimeOffsetSec { get; set; } = 7200.0; // Pocket Option server time is UTC+2 (auto-adjusted on DST)
 
-    private readonly record struct PoTickRow(string Asset, double Ts, double Price, long RecvMs);
-
     private const string DefaultTradingUrl = "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket";
     private const string TryDemoTradingUrl = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket";
     private const string AlphanumericChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -95,10 +93,6 @@ public static class PocketOptionWebSocketStream
 
     // Watermark per candle asset key (e.g. EURUSD_PO) to prevent duplicate volume while backfilling reconnect gaps
     private static readonly ConcurrentDictionary<string, double> _lastCandleSrvTs = new(StringComparer.OrdinalIgnoreCase);
-
-    // Queue for batching tick inserts into PostgreSQL
-    private static readonly BlockingCollection<PoTickRow> _tickDbQueue =
-        new(new ConcurrentQueue<PoTickRow>(), 50_000);
 
     public static bool IsConnected => _webSocket?.State == WebSocketState.Open;
     public static long TotalTicksIngested => Interlocked.Read(ref _totalTicksIngested);

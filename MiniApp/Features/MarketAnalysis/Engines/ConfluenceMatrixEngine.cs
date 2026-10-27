@@ -346,13 +346,14 @@ public class ConfluenceMatrixEngine(
 
         // Properly signed P(BUY) in [0, 1]: > 0.5 for BUY, < 0.5 for PUT
         double rawProb;
-        if (mlSignal.RawConfidence.HasValue && !double.IsNaN(mlSignal.RawConfidence.Value))
+        if (mlSignal.RawConfidence.HasValue && !double.IsNaN(mlSignal.RawConfidence.Value) && !double.IsInfinity(mlSignal.RawConfidence.Value))
         {
             rawProb = Math.Clamp(mlSignal.RawConfidence.Value, 0.01, 0.99);
         }
         else
         {
-            double directionalConf = Math.Clamp(mlSignal.Confidence, 0.5, 0.99);
+            double conf = double.IsNaN(mlSignal.Confidence) || double.IsInfinity(mlSignal.Confidence) ? 0.5 : mlSignal.Confidence;
+            double directionalConf = Math.Clamp(conf, 0.5, 0.99);
             rawProb = mlSignal.Direction == "BUY" ? directionalConf : (mlSignal.Direction == "PUT" ? (1.0 - directionalConf) : 0.5);
     
     
@@ -361,6 +362,7 @@ public class ConfluenceMatrixEngine(
 
 
         double mlScore = (rawProb - 0.5) * 2.0; // Smooth signed scaling [-1.0, +1.0] (+ for BUY, - for PUT)
+        if (double.IsNaN(mlScore) || double.IsInfinity(mlScore)) mlScore = 0.0;
 
         bool isNeuralBrain = !string.IsNullOrEmpty(mlSignal.ModelVersion) &&
                              (mlSignal.ModelVersion.Contains("patch_tst", StringComparison.OrdinalIgnoreCase) ||
@@ -421,9 +423,19 @@ public class ConfluenceMatrixEngine(
         else
         {
             // Fallback (если ML временно недоступен или выдал NEUTRAL)
-            finalDir = (stateSignal.VelocityBpsPerSec >= 0 || taSignal.Score >= 0) ? "BUY" : "PUT";
-            finalProbPct = (int)Math.Clamp(Math.Round((0.50 + Math.Abs(taScore) * 0.25) * 100.0), 50, 92);
-            safetyNotes.Add("ℹ️ Резервный режим: ML сигнал нейтрален или на калибровке (Fallback Engine)");
+            // Архитектурный инвариант: при пустом стакане, нулевых тиках или |taScore| <= 0.15 — строго NEUTRAL (50%)
+            if (Math.Abs(taScore) <= 0.15)
+            {
+                finalDir = "NEUTRAL";
+                finalProbPct = 50;
+                safetyNotes.Add("ℹ️ Консенсус нейтрален: |TA score| <= 0.15 (Нейтральный рынок, BUY-байас исключен)");
+            }
+            else
+            {
+                finalDir = taScore > 0 ? "BUY" : "PUT";
+                finalProbPct = (int)Math.Clamp(Math.Round((0.50 + Math.Abs(taScore) * 0.25) * 100.0), 50, 92);
+                safetyNotes.Add("ℹ️ Резервный режим: ML сигнал нейтрален или на калибровке (Fallback Engine)");
+            }
         }
 
         var coPilot = new System.Text.StringBuilder();
@@ -462,7 +474,7 @@ public class ConfluenceMatrixEngine(
             FinalDirection: finalDir,
             Probability: finalProbPct,
             CombinedReasoningText: consensusReasoning,
-            FinalTotalScore: (finalDir == "BUY" ? 1.0 : -1.0) * ((finalProbPct - 50.0) / 50.0),
+            FinalTotalScore: finalDir == "NEUTRAL" ? 0.0 : (finalDir == "BUY" ? 1.0 : -1.0) * ((finalProbPct - 50.0) / 50.0),
             RecommendedExpiryText: "",
             TaScore: normTa,
             OfScore: ofScore,

@@ -463,31 +463,37 @@ class PatchTSTPredictor:
             p_buy_cond = p_buy / p_dir_sum
             p_put_cond = p_put / p_dir_sum
 
-            if p_buy >= p_put:
-                direction = "BUY"
-                raw_dir_prob = p_buy_cond
+            # Flat-market / zero-drift tie-break guard: return HOLD instead of biasing towards BUY
+            if abs(p_buy - p_put) < 1e-4 or abs(p_buy_cond - 0.5) < 1e-4:
+                direction = "HOLD"
+                calibrated_prob = 0.50
+                raw_prob = 0.50
             else:
-                direction = "PUT"
-                raw_dir_prob = p_put_cond
+                if p_buy > p_put:
+                    direction = "BUY"
+                    raw_dir_prob = p_buy_cond
+                else:
+                    direction = "PUT"
+                    raw_dir_prob = p_put_cond
 
-            # Calibrated confidence:
-            # In binary options, raw_dir_prob (p_buy_cond or p_put_cond) directly reflects binary directional confidence.
-            # Flat chop (HOLD) dampens directional confidence proportionally:
-            # When p_hold is high, flat movement indicates high risk of expiry tie/loss on Pocket Option.
-            chop_penalty = max(0.20, 1.0 - p_hold * 0.75)
-            calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * chop_penalty
+                # Calibrated confidence:
+                # In binary options, raw_dir_prob (p_buy_cond or p_put_cond) directly reflects binary directional confidence.
+                # Flat chop (HOLD) dampens directional confidence proportionally:
+                # When p_hold is high, flat movement indicates high risk of expiry tie/loss on Pocket Option.
+                chop_penalty = max(0.20, 1.0 - p_hold * 0.75)
+                calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * chop_penalty
 
-            # S5 Micro-Regime Dampener:
-            # 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
-            # Dampen confidence into [50% - 65%] so s5 does not claim false certainty on pure high-frequency tick noise,
-            # while allowing genuine high-conviction momentum trades (>=58%) to execute.
-            if str(interval).lower() == "s5":
-                calibrated_prob = min(0.57, 0.50 + (calibrated_prob - 0.50) * 0.80)
+                # S5 Micro-Regime Dampener:
+                # 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
+                # Dampen confidence into [50% - 65%] so s5 does not claim false certainty on pure high-frequency tick noise,
+                # while allowing genuine high-conviction momentum trades (>=58%) to execute.
+                if str(interval).lower() == "s5":
+                    calibrated_prob = min(0.57, 0.50 + (calibrated_prob - 0.50) * 0.80)
 
-            # Safety floor at 50% (never below chance), ceiling at 92%
-            calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
-            # Signed P(BUY) in [0, 1] (>0.5 for BUY, <0.5 for PUT) so C# mlScore = (rawProb - 0.5)*2 has the right sign
-            raw_prob = round(float(p_buy_cond), 4)
+                # Safety floor at 50% (never below chance), ceiling at 92%
+                calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
+                # Signed P(BUY) in [0, 1] (>0.5 for BUY, <0.5 for PUT) so C# mlScore = (rawProb - 0.5)*2 has the right sign
+                raw_prob = round(float(p_buy_cond), 4)
 
             arch_tag = self._arch_tag
             log.info(

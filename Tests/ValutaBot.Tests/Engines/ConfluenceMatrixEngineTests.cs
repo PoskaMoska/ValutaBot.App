@@ -69,7 +69,8 @@ namespace ValutaBot.Tests.Engines
             var decision = await _engine.EvaluateMatrixAsync("EURUSD", "m5", false, 1.0, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult);
 
             // Assert
-            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.Equal("NEUTRAL", decision.FinalDirection);
+            Assert.Equal(0.0, decision.FinalTotalScore);
             Assert.Equal(50, decision.Probability);
         }
 
