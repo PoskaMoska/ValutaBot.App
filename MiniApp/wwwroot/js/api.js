@@ -360,14 +360,17 @@ export async function executeAnalysis() {
 
         if (resDir) {
             if (data.direction === 'BUY') {
+                resDir.innerHTML = 'ВВЕРХ';
                 resDir.innerText = 'ВВЕРХ';
                 resDir.style.color = '#00e676';
                 if (sphere) sphere.classList.add('buy-signal');
             } else if (data.direction === 'PUT') {
+                resDir.innerHTML = 'ВНИЗ';
                 resDir.innerText = 'ВНИЗ';
                 resDir.style.color = '#ff1744';
                 if (sphere) sphere.classList.add('put-signal');
             } else {
+                resDir.innerHTML = 'НЕЙТРАЛЬНО';
                 resDir.innerText = 'НЕЙТРАЛЬНО';
                 resDir.style.color = 'var(--dim)';
                 if (sphere) sphere.classList.add('neutral-signal');

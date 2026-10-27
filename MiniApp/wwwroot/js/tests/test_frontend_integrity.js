@@ -97,7 +97,7 @@ function assertEq(testName, actual, expected) {
 function getVal(document, id) {
     const el = document.getElementById(id);
     if (!el) return '';
-    if (id === 'resDir') return String(el.innerHTML).trim();
+    if (id === 'resDir') return String(el.innerText || el.innerHTML || '').trim();
     if (el.innerText !== undefined) return String(el.innerText).trim();
     return String(el.textContent || el.innerHTML || '').trim();
 }
