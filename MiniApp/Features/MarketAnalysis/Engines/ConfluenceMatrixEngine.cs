@@ -384,6 +384,7 @@ public class ConfluenceMatrixEngine(
         int finalProbPct;
 
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
+        bool isMlExplicitHold = isNeuralBrain && mlSignal != null && mlSignal.Direction is "HOLD" or "NEUTRAL";
 
         if (hasMlVerdict)
         {
@@ -394,10 +395,10 @@ public class ConfluenceMatrixEngine(
 
             // S5 Micro-Timeframe Noise Calibration:
             // 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
-            // Cap confidence to 57% so s5 does not trigger false certainty on single-tick bursts.
+            // Cap confidence to 59% so s5 blocks false certainty on single-tick bursts while allowing genuine >=58% setups.
             if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
             {
-                finalProbPct = Math.Min(57, finalProbPct);
+                finalProbPct = Math.Min(59, finalProbPct);
             }
 
             // Circuit Breaker risk dampener (C# риск-менеджмент серий потерь)
@@ -419,6 +420,13 @@ public class ConfluenceMatrixEngine(
                 finalProbPct = Math.Max(50, (int)Math.Round(finalProbPct * conflictPenalty));
                 safetyNotes.Add("⚠️ MTF Conflict: Противоречие со старшим таймфреймом");
             }
+        }
+        else if (isMlExplicitHold)
+        {
+            // Neural Brain is online and explicitly commanded HOLD / flat market: never override with legacy TA fallback
+            finalDir = "NEUTRAL";
+            finalProbPct = 50;
+            safetyNotes.Add($"ℹ️ Neural Brain ({mlSignal!.ModelVersion}): HOLD (flat market, entry blocked)");
         }
         else
         {

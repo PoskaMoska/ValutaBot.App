@@ -109,6 +109,23 @@ namespace ValutaBot.Tests.Engines
             Assert.True(decisionBear.MlProb < 0.5, $"Expected MlProb < 0.5 for PUT, got {decisionBear.MlProb}");
             Assert.True(decisionBear.MlScoreRaw < 0.0, $"Expected MlScoreRaw < 0 for PUT, got {decisionBear.MlScoreRaw}");
         }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_NeuralBrainExplicitHold_DoesNotFallbackToLegacyTa()
+        {
+            var taSignal = new TaSignal(2.0, 90.0, 70, 100, 2.5, 10);
+            var smcSignal = new SmcSignal("BULLISH_BOS", "BULLISH_SWEEP", "BULLISH_OB", "BULLISH_FVG", "Strong bullish");
+            var ofSignal = new OrderflowSignal(1.5, "Strong buying");
+            var mlSignal = new MlSignal("HOLD", 0.50, 0.625, "patch_tst_v4", 1, 0.50);
+            var stateSignal = new StateSignal("TREND_BULLISH", 10.0, 0.8);
+            var mtfResult = new ConfluenceMatrixResult(1.0, true, 15, "Golden", "MTF", new Dictionary<string, string>(), "BUY");
+
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s15", true, 1.0, taSignal, smcSignal, ofSignal, mlSignal, stateSignal, mtfResult);
+
+            Assert.Equal("NEUTRAL", decision.FinalDirection);
+            Assert.Equal(50, decision.Probability);
+            Assert.Equal(0.0, decision.FinalTotalScore);
+        }
     }
 }
 

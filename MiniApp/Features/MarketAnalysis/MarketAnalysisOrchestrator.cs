@@ -147,9 +147,7 @@ public class MarketAnalysisOrchestrator(
         // 6. Engines (Parallel)
         var engSw = Stopwatch.StartNew();
         bool isSubminute = tfLower.StartsWith("s");
-        var smcTask = isSubminute
-            ? Task.FromResult(new SmcEngine.SmcAnalysisResult(false, "NONE", false, "NONE", 0, 0, 0, false, "NONE", 0, false, false, "NONE"))
-            : Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
+        var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
         
         // TA Scoring (align ADX/ATR period with sub-minute vs minute timeframe: 7 for s5-s30, 14 for m1+)
         var taSw = Stopwatch.StartNew();
@@ -204,12 +202,8 @@ public class MarketAnalysisOrchestrator(
         }
 
         int? minutesToNews = -1;
-        var dayAnchors = isSubminute
-            ? new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.DayLevelAnchors(currentLivePrice, currentLivePrice, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-            : await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
-        var dxyMetrics = isSubminute
-            ? new ValutaBot.MiniApp.Features.MarketAnalysis.Engines.DollarBasketMetrics(0.0, 0.0, 1.0)
-            : ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
+        var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
+        var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
         double liveSpreadBps = 0.0;
         if (!PriceFeed.UsePocketOption)
             TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out liveSpreadBps);
@@ -392,7 +386,7 @@ public class MarketAnalysisOrchestrator(
         bool isCbHalted = isGlobalCbHalted || isSymbolQuarantined;
         string sampleKey = $"{cleanAsset}_{timeframe}";
 
-        int requiredProb = 57;
+        int requiredProb = 58;
         bool htfAligned = mtfResult.DominantDirection == consensus.FinalDirection && isDirectional;
         bool isGoldenSetup = mtfResult.IsGoldenSetup && (!isSubminute || noiseAudit.IsTradeableImpulse);
 
@@ -414,10 +408,13 @@ public class MarketAnalysisOrchestrator(
                 isExhaustedOnS5 = true;
         }
 
+        bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (mlPrediction != null && mlDir is "BUY" or "PUT");
         bool canExecuteReal = isDirectional 
+            && hasLiveNeuralSignal
             && consensus.Probability >= requiredProb 
             && !isCbHalted
             && !isCooldownActive
+            && (!isSubminute || noiseAudit.IsTradeableImpulse)
             && (!isS5 || (htfAligned && !isExhaustedOnS5));
 
         // Throttled shadow logging: only when DatasetCollectionMode is true or Circuit Breaker is actively halting,
