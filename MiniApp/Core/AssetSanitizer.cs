@@ -1,26 +1,35 @@
+using System;
+using System.Collections.Frozen;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
+
 namespace ValutaBot.MiniApp;
 
 /// <summary>
 /// Handles asset ticker normalization, Cyrillic OTC conversion, and exchange symbol mapping.
 /// </summary>
-public static class AssetSanitizer
+public static partial class AssetSanitizer
 {
+    [GeneratedRegex(@"[^A-Z0-9]")]
+    private static partial Regex NonAlphanumericRegex();
+
+    private static readonly FrozenSet<string> _forexPrefixes3 = new[]
+    {
+        "EUR", "GBP", "AUD", "NZD", "USD", "JPY", "CHF", "CAD", "XAU", "XAG", "WTI"
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// Clean and normalize user-provided asset names (e.g. "EUR/USD OTC" or "EUR/USD ОТС" -> "EURUSD").
     /// </summary>
     public static string Sanitize(string? asset)
     {
         if (string.IsNullOrWhiteSpace(asset)) return "EURUSD";
-        return System.Text.RegularExpressions.Regex.Replace(asset.ToUpperInvariant().Replace("OTC", "").Replace("\u041E\u0422\u0421", "").Replace("\u041E\u0422\u041A", ""), @"[^A-Z0-9]", "");
+        string stripped = asset.ToUpperInvariant()
+            .Replace("OTC", "")
+            .Replace("\u041E\u0422\u0421", "")
+            .Replace("\u041E\u0422\u041A", "");
+        return NonAlphanumericRegex().Replace(stripped, "");
     }
-
-
-
-
-
-
-
-
 
     /// <summary>
     /// Determines if a sanitized asset is a forex/commodity pair (not crypto).
@@ -28,14 +37,14 @@ public static class AssetSanitizer
     /// </summary>
     public static bool IsForexAsset(string cleanAsset)
     {
-        // Forex pairs, commodities — YES
-        if (cleanAsset.StartsWith("EUR") || cleanAsset.StartsWith("GBP") ||
-            cleanAsset.StartsWith("AUD") || cleanAsset.StartsWith("NZD") ||
-            cleanAsset.StartsWith("USD") || cleanAsset.StartsWith("JPY") ||
-            cleanAsset.StartsWith("CHF") || cleanAsset.StartsWith("CAD") ||
-            cleanAsset.StartsWith("XAU") || cleanAsset.StartsWith("XAG") ||
-            cleanAsset.StartsWith("GOLD") || cleanAsset.StartsWith("SILVER") ||
-            cleanAsset.StartsWith("BRENT") || cleanAsset.StartsWith("WTI"))
+        if (string.IsNullOrEmpty(cleanAsset)) return false;
+
+        if (cleanAsset.Length >= 3 && _forexPrefixes3.Contains(cleanAsset[..3]))
+            return true;
+
+        if (cleanAsset.StartsWith("GOLD", StringComparison.OrdinalIgnoreCase) ||
+            cleanAsset.StartsWith("SILVER", StringComparison.OrdinalIgnoreCase) ||
+            cleanAsset.StartsWith("BRENT", StringComparison.OrdinalIgnoreCase))
             return true;
 
         // Default: if it does not start with a known fiat/commodity base, treat as Crypto

@@ -9,12 +9,18 @@ namespace ValutaBot.App.MiniApp.Data
     public static class DbConnectionFactory
     {
         private static volatile NpgsqlDataSource? _dataSource;
+        private static volatile string? _cachedRawEnv;
+        private static volatile string? _cachedConnectionString;
         private static readonly object _initLock = new();
 
         public static string GetConnectionString()
         {
             var envVar = Environment.GetEnvironmentVariable("DATABASE_URL") ?? "";
             if (string.IsNullOrEmpty(envVar)) return "";
+            if (_cachedConnectionString != null && _cachedRawEnv == envVar)
+            {
+                return _cachedConnectionString;
+            }
 
             NpgsqlConnectionStringBuilder builder;
             if (envVar.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) || 
@@ -46,18 +52,22 @@ namespace ValutaBot.App.MiniApp.Data
             }
 
             // TCP Keepalive & Socket options optimized for Railway cloud proxy
-            builder.TcpKeepAlive = true;          // Low-level SO_KEEPALIVE on the OS socket
-            builder.KeepAlive = 15;               // Application keepalive probe every 15s (before proxy's 60s idle timeout)
-            builder.ConnectionLifetime = 300;     // Rotate pooled connections every 5m
-            builder.ConnectionIdleLifetime = 20;  // Evict idle connections after 20s so proxy cannot sever them silently
-            builder.Timeout = 10;                 // 10s connection timeout
+            builder.TcpKeepAlive = true;              // Low-level SO_KEEPALIVE on the OS socket
+            builder.KeepAlive = 15;                   // Application keepalive probe every 15s (before proxy's 60s idle timeout)
+            builder.ConnectionLifetime = 300;         // Rotate pooled connections every 5m
+            builder.ConnectionIdleLifetime = 20;      // Evict idle connections after 20s so proxy cannot sever them silently
+            builder.ConnectionPruningInterval = 5;    // Prune every 5s (default 10s) so idle sockets never exceed 25s
+            builder.Timeout = 10;                     // 10s connection timeout
             builder.CommandTimeout = 30;
 
             // Connection pool bounds: MinPoolSize = 0 ensures idle sockets are closed before Railway 60s TCP proxy timeout
             builder.MaxPoolSize = 30;
             builder.MinPoolSize = 0;
 
-            return builder.ToString();
+            string built = builder.ToString();
+            _cachedRawEnv = envVar;
+            _cachedConnectionString = built;
+            return built;
         }
 
         public static NpgsqlConnection GetConnection() 
@@ -242,6 +252,7 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN ALTER TABLE pending_trades ADD COLUMN rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
                     BEGIN ALTER TABLE pending_trades ADD COLUMN minutes_to_news INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
+                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN features_json TEXT; EXCEPTION WHEN duplicate_column THEN END;
                 END $$;
 
                 CREATE TABLE IF NOT EXISTS subminute_candles (
@@ -279,17 +290,19 @@ namespace ValutaBot.App.MiniApp.Data
                     UNIQUE(asset, interval, open_time)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf ON trade_outcomes(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_dir ON trade_outcomes(created_at DESC, direction);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_at ON trade_outcomes(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_at ON trade_outcomes(verified_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified ON trade_outcomes(asset, timeframe, verified_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes(created_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_uncompacted_json ON trade_outcomes(created_at) WHERE features_json IS NOT NULL AND octet_length(features_json) > 2500;
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_ml_export ON trade_outcomes(created_at ASC) WHERE features_json IS NOT NULL AND was_win IS NOT NULL AND entry_price > 0 AND exit_price > 0;
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
-                CREATE INDEX IF NOT EXISTS idx_subminute_candles_lookup ON subminute_candles(asset, interval, open_time DESC);
+                DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf;
+                DROP INDEX IF EXISTS idx_trade_outcomes_created_at;
+                DROP INDEX IF EXISTS idx_trade_outcomes_verified_at;
+                DROP INDEX IF EXISTS idx_subminute_candles_lookup;
                 DROP INDEX IF EXISTS idx_hist_candles_asset;
                 DROP TABLE IF EXISTS neutral_signals;
                 DROP INDEX IF EXISTS idx_subminute_candles_opentime_tz;
@@ -305,16 +318,18 @@ namespace ValutaBot.App.MiniApp.Data
                         ALTER TABLE subminute_candles SET (
                             fillfactor = 80,
                             autovacuum_vacuum_scale_factor = 0.02,
+                            autovacuum_analyze_scale_factor = 0.01,
                             autovacuum_vacuum_cost_limit = 2000,
                             autovacuum_vacuum_cost_delay = 2
                         );
                     EXCEPTION WHEN others THEN END;
                     BEGIN
                         ALTER TABLE trade_outcomes SET (
-                            autovacuum_vacuum_scale_factor = 0.05,
+                            autovacuum_vacuum_scale_factor = 0.03,
+                            autovacuum_analyze_scale_factor = 0.02,
                             autovacuum_vacuum_cost_limit = 2000,
                             autovacuum_vacuum_cost_delay = 2,
-                            toast.autovacuum_vacuum_scale_factor = 0.05,
+                            toast.autovacuum_vacuum_scale_factor = 0.03,
                             toast.autovacuum_vacuum_cost_limit = 2000
                         );
                     EXCEPTION WHEN others THEN END;

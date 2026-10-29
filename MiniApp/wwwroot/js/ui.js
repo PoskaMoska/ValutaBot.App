@@ -99,11 +99,14 @@ export function parseMd(text) {
 
 export function renderMiniChart(containerId, values, color) {
     const container = document.getElementById(containerId);
-    if (!container) return;
-    const max = Math.max(...values, 1);
-    container.innerHTML = values.map(v => {
-        const h = Math.max(4, (v / max) * 38);
-        return `<div class='res-chart-bar ${color}' style='height:${h}px'></div>`;
+    if (!container || !Array.isArray(values)) return;
+    const safeValues = values.map(Number).filter(Number.isFinite);
+    if (!safeValues.length) return;
+    const safeColor = String(color || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const max = Math.max(...safeValues, 1);
+    container.innerHTML = safeValues.map(v => {
+        const h = Math.max(4, (v / max) * 38).toFixed(1);
+        return `<div class='res-chart-bar ${safeColor}' style='height:${h}px'></div>`;
     }).join('');
 }
 
@@ -150,31 +153,32 @@ export function renderDirSvg(direction) {
 
 export function renderSparklinePrediction(containerId, normalizedPrices, direction, projFrac) {
     const container = document.getElementById(containerId);
-    if (!container) return;
-
+    if (!container || !Array.isArray(normalizedPrices)) return;
     const width = 100;
     const height = 40;
     const count = normalizedPrices.length;
     if (count === 0) return;
     
-    // History 75% of width
+    const denom = Math.max(1, count - 1);
     const points = normalizedPrices.map((v, i) => {
-        const x = (i / (count - 1)) * (width * 0.75); 
-        const y = height - (v * height * 0.8 + height * 0.1); 
+        const safeV = Number.isFinite(Number(v)) ? Number(v) : 0.5;
+        const x = ((i / denom) * (width * 0.75)).toFixed(1);
+        const y = (height - (safeV * height * 0.8 + height * 0.1)).toFixed(1);
         return `${x},${y}`;
     });
     
-    const pathD = `M ${points.join(' L ')}`;
+    const pathD = count === 1
+        ? `M 0,${points[0].split(',')[1]} L ${width * 0.75},${points[0].split(',')[1]}`
+        : `M ${points.join(' L ')}`;
     const lastX = width * 0.75;
-    const lastY = height - (normalizedPrices[count - 1] * height * 0.8 + height * 0.1);
+    const lastVal = Number.isFinite(Number(normalizedPrices[count - 1])) ? Number(normalizedPrices[count - 1]) : 0.5;
+    const lastY = height - (lastVal * height * 0.8 + height * 0.1);
     
     const predX = width - 2;
     let predY = lastY;
     let predColor = 'var(--dim)';
-
     const hasProj = Number.isFinite(projFrac) && projFrac > 0;
     const dashLen = hasProj ? Math.min(height - 8, Math.max(3, projFrac * height)) : null;
-
     if (direction === 'BUY') {
         predY = dashLen != null ? Math.max(4, lastY - dashLen) : 5;
         predColor = '#10b981';
@@ -183,7 +187,7 @@ export function renderSparklinePrediction(containerId, normalizedPrices, directi
         predColor = '#ef4444';
     }
     
-    const svgHtml = `
+    container.innerHTML = `
         <svg viewBox="0 0 ${width} ${height}" style="width:100%; height:100%; overflow:visible;">
             <path d="${pathD}" stroke="#8b5cf6" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
             <line x1="${lastX}" y1="${lastY}" x2="${predX}" y2="${predY}" stroke="${predColor}" stroke-width="2.5" stroke-dasharray="3,3" stroke-linecap="round"/>
@@ -191,7 +195,6 @@ export function renderSparklinePrediction(containerId, normalizedPrices, directi
             <circle cx="${predX}" cy="${predY}" r="3" fill="${predColor}" />
         </svg>
     `;
-    container.innerHTML = svgHtml;
 }
 
 const sbStatuses = ['ЗАГРУЗКА ДАННЫХ', 'ПОЛУЧЕНИЕ ЦЕНЫ', 'АНАЛИЗ РЫНКА'];
@@ -248,42 +251,43 @@ export function pricesToBars(prices, count) {
 export function renderError(rawError, debugText) {
     const errDisp = document.getElementById('errorDisplay');
     if (!errDisp) return;
-
     let title = '⚠️ Ошибка';
     let desc = 'Произошла непредвиденная ошибка при обработке запроса.';
-
     if (rawError) {
         const errLower = String(rawError).toLowerCase();
         
         if (errLower.includes('circuit_breaker') || errLower.includes('предохранитель')) {
             title = '⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ';
             desc = 'Сработал защитный предохранитель депозита (Circuit Breaker). Пожалуйста, подождите или смените актив.';
-        } else if (errLower.includes('502') || errLower.includes('503') || errLower.includes('bad gateway') || errLower.includes('unexpected token') || errLower.includes('сервер вернул статус')) {
-            title = '⚠️ Сервер перезагружается';
-            desc = 'Сервер ValutaBot на Railway обновляется или временно недоступен. Попробуйте через 10-15 секунд.';
-        } else if (errLower.includes('run out of api credits') || errLower.includes('api credits')) {
-            title = '⚠️ Лимит запросов исчерпан';
-            desc = 'Превышен лимит запросов к внешнему потоку данных. Пожалуйста, повторите попытку чуть позже.';
         } else if (errLower.includes('too many requests') || errLower.includes('rate limit') || errLower.includes('429')) {
             title = '⚠️ Превышен лимит запросов';
             const match = String(rawError).match(/(\d+)s/);
             const sec = match ? ` на ${match[1]} сек.` : '';
             desc = `Слишком частые клики. Пожалуйста, подождите${sec} перед следующим сканированием.`;
+        } else if (errLower.includes('signature') || errLower.includes('initdata') || errLower.includes('unauthorized') || errLower.includes('401') || errLower.includes('403')) {
+            title = '⚠️ Ошибка авторизации';
+            desc = 'Пожалуйста, перезапустите бота через Telegram, чтобы обновить сессию.';
         } else if (errLower.includes('access denied') || errLower.includes('deposit required')) {
             title = '⚠️ Доступ ограничен';
             desc = 'Для использования бота необходима регистрация на Pocket Option и внесение депозита.';
-        } else if (errLower.includes('signature') || errLower.includes('initdata') || errLower.includes('unauthorized') || errLower.includes('401')) {
-            title = '⚠️ Ошибка авторизации';
-            desc = 'Пожалуйста, перезапустите бота через Telegram, чтобы обновить сессию.';
+        } else if (errLower.includes('502') || errLower.includes('503') || errLower.includes('504') || errLower.includes('bad gateway') || errLower.includes('service unavailable') || errLower.includes('недоступен')) {
+            title = '⚠️ Сервер перезагружается';
+            desc = 'Сервер ValutaBot на Railway обновляется или временно недоступен. Попробуйте через 10–15 секунд.';
+        } else if (errLower.includes('500') || errLower.includes('internal server error') || errLower.includes('пустой ответ')) {
+            title = '⚠️ Внутренняя ошибка сервера (500)';
+            desc = 'На сервере произошел сбой при расчете сигнала. Повторите попытку через несколько секунд или смените актив.';
+        } else if (errLower.includes('run out of api credits') || errLower.includes('api credits')) {
+            title = '⚠️ Лимит запросов исчерпан';
+            desc = 'Превышен лимит запросов к внешнему потоку данных. Пожалуйста, повторите попытку чуть позже.';
         } else if (errLower.includes('asset and timeframe')) {
             title = '⚠️ Неверные параметры';
             desc = 'Необходимо выбрать валютную пару и таймфрейм.';
         } else if (errLower.includes('pocketid')) {
             title = '⚠️ Ошибка профиля';
             desc = 'Не указан Pocket Option ID.';
-        } else if (errLower.includes('fetch') || errLower.includes('network') || errLower.includes('failed') || errLower.includes('connect')) {
+        } else if (errLower.includes('fetch') || errLower.includes('network') || errLower.includes('failed') || errLower.includes('connect') || errLower.includes('18с')) {
             title = '⚠️ Ошибка соединения';
-            desc = 'Не удалось подключиться к серверу. Пожалуйста, проверьте интернет-соединение.';
+            desc = 'Не удалось получить ответ от сервера. Проверьте интернет-соединение (4G/Wi-Fi).';
         } else {
             title = '⚠️ Сбой операции';
             desc = String(rawError)
@@ -292,7 +296,6 @@ export function renderError(rawError, debugText) {
                 .replace(/internal server error/gi, 'Внутренняя ошибка сервера');
         }
     }
-
     function escapeHtml(str) {
         if (!str) return '';
         return String(str)
@@ -302,28 +305,22 @@ export function renderError(rawError, debugText) {
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
     }
-
-    const safeTitle = escapeHtml(title);
-    const safeDesc = escapeHtml(desc);
-    const safeDebug = escapeHtml(debugText);
-
     errDisp.innerHTML = `
-        <div class="error-header">${safeTitle}</div>
-        <div class="error-desc">${safeDesc}</div>
+        <div class="error-header">${escapeHtml(title)}</div>
+        <div class="error-desc">${escapeHtml(desc)}</div>
         <div class="error-debug-toggle" id="errorDebugToggle">▸ Детали отладки</div>
-        <div class="error-debug-content" id="errorDebugContent" style="display: none;">${safeDebug}</div>
+        <div class="error-debug-content" id="errorDebugContent" style="display: none;">${escapeHtml(debugText)}</div>
     `;
     errDisp.style.display = 'block';
-
     const debugToggleBtn = document.getElementById('errorDebugToggle');
     if (debugToggleBtn) {
-        debugToggleBtn.addEventListener('click', () => {
+        debugToggleBtn.onclick = () => {
             const content = document.getElementById('errorDebugContent');
             if (!content) return;
             const isHidden = content.style.display === 'none';
             content.style.display = isHidden ? 'block' : 'none';
-            debugToggleBtn.innerText = isHidden ? '▾ Скрыть детали' : '▸ Детали отладки';
-        });
+            debugToggleBtn.textContent = isHidden ? '▾ Скрыть детали' : '▸ Детали отладки';
+        };
     }
 }
 
@@ -361,13 +358,15 @@ export function hideNetworkBanner() {
     }
 }
 
-// --- AI Animated Chart (Performance & Memory Safe, Zero Reflow inside rAF) ---
+// --- AI Animated Chart (Cached Gradient + Immediate rAF Stop + Resize rAF Guard) ---
 let aiChartAnimationId = null;
 let aiChartData = [];
 let aiChartPhase = 0;
 let hideChartTimer = null;
 let cachedCanvasW = 0;
 let cachedCanvasH = 0;
+let cachedFloorGrad = null;
+let resizeRafId = null;
 
 function updateCanvasDimensions() {
     const canvas = document.getElementById('aiChartCanvas');
@@ -376,9 +375,16 @@ function updateCanvasDimensions() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     cachedCanvasW = rect.width;
     cachedCanvasH = rect.height;
+    cachedFloorGrad = null;
     if (cachedCanvasW > 0 && cachedCanvasH > 0) {
         canvas.width = Math.floor(cachedCanvasW * dpr);
         canvas.height = Math.floor(cachedCanvasH * dpr);
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            cachedFloorGrad = ctx.createLinearGradient(0, cachedCanvasH * 0.6, 0, cachedCanvasH);
+            cachedFloorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
+            cachedFloorGrad.addColorStop(1, 'rgba(184, 41, 255, 0.15)');
+        }
     }
 }
 
@@ -411,19 +417,23 @@ export function hideAiChart() {
     const container = document.getElementById('aiChartContainer');
     if (!container) return;
     container.classList.remove('active');
-    
+    // Stop rAF immediately so main thread is free for result cards & flash animation
+    if (aiChartAnimationId) {
+        cancelAnimationFrame(aiChartAnimationId);
+        aiChartAnimationId = null;
+    }
     if (hideChartTimer) clearTimeout(hideChartTimer);
     hideChartTimer = setTimeout(() => {
         container.style.display = 'none';
-        if (aiChartAnimationId) {
-            cancelAnimationFrame(aiChartAnimationId);
-            aiChartAnimationId = null;
-        }
         hideChartTimer = null;
     }, 350);
 }
 
 function renderAiChartLoop() {
+    if (document.hidden) {
+        aiChartAnimationId = null;
+        return;
+    }
     const canvas = document.getElementById('aiChartCanvas');
     if (!canvas) {
         aiChartAnimationId = null;
@@ -448,12 +458,10 @@ function renderAiChartLoop() {
     ctx.fillStyle = '#0b0d1f';
     ctx.fillRect(0, 0, w, h);
     
-    // Deep Floor reflection
-    const floorGrad = ctx.createLinearGradient(0, h * 0.6, 0, h);
-    floorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
-    floorGrad.addColorStop(1, 'rgba(184, 41, 255, 0.15)');
-    ctx.fillStyle = floorGrad;
-    ctx.fillRect(0, h * 0.6, w, h * 0.4);
+    if (cachedFloorGrad) {
+        ctx.fillStyle = cachedFloorGrad;
+        ctx.fillRect(0, h * 0.6, w, h * 0.4);
+    }
     
     aiChartPhase += 0.018;
     
@@ -522,8 +530,12 @@ function renderAiChartLoop() {
 
 if (typeof window !== 'undefined') {
     window.addEventListener('resize', () => {
-        if (aiChartAnimationId) updateCanvasDimensions();
-    });
+        if (!aiChartAnimationId || resizeRafId) return;
+        resizeRafId = requestAnimationFrame(() => {
+            resizeRafId = null;
+            if (aiChartAnimationId) updateCanvasDimensions();
+        });
+    }, { passive: true });
 }
 
 // Session psychometrics tracker

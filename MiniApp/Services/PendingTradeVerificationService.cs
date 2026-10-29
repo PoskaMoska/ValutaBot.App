@@ -93,35 +93,61 @@ public class PendingTradeVerificationService : BackgroundService
             if (targetGrid <= createdBucket) targetGrid = createdBucket.AddSeconds(5);
             DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20) ? createdBucket : targetGrid.AddSeconds(-20);
 
-            // Locate the enclosing candle [open_time, open_time + 5s) covering verifyUtc
+            string minIsoPrimary = createdBucket.AddSeconds(-5).ToString("yyyy-MM-ddTHH:mm:ss");
+            string maxIsoPrimary = verifyUtc.AddMilliseconds(1500).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
+
+            // Locate the s5 candle that closed at the contract expiry boundary (open_time + 5s <= VerifyAt + 1.5s entry tolerance)
+            // Two-stage Index-Only Seek on UNIQUE(asset, interval, open_time) + exact timestamptz filter on 5 candidates
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
                 SELECT close_price
-                FROM subminute_candles
-                WHERE asset = @Asset AND interval = @Interval
-                  AND open_time::timestamptz < @VerifyAt
-                  AND open_time::timestamptz + INTERVAL '5 seconds' >= @VerifyAt
+                FROM (
+                    SELECT close_price, open_time
+                    FROM subminute_candles
+                    WHERE asset = @Asset AND interval = @Interval
+                      AND open_time >= @MinIso
+                      AND open_time <= @MaxIso
+                    ORDER BY open_time DESC
+                    LIMIT 5
+                ) sub
+                WHERE open_time::timestamptz + INTERVAL '5 seconds' <= @VerifyAt + INTERVAL '1500 milliseconds'
+                  AND open_time::timestamptz >= @MinAllowed
                 ORDER BY open_time DESC
                 LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
-                VerifyAt = verifyUtc
+                MinIso = minIsoPrimary,
+                MaxIso = maxIsoPrimary,
+                VerifyAt = verifyUtc,
+                MinAllowed = createdBucket
             }, cancellationToken: ct));
 
             if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
             {
+                string minIsoFallback = minAllowedSub.AddSeconds(-5).ToString("yyyy-MM-ddTHH:mm:ss");
+                string maxIsoFallback = verifyUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
+
                 // Fallback: nearest candle on or before verifyUtc within allowed window
                 exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
                     SELECT close_price
-                    FROM subminute_candles
-                    WHERE asset = @Asset AND interval = @Interval
-                      AND open_time::timestamptz < @VerifyAt
+                    FROM (
+                        SELECT close_price, open_time
+                        FROM subminute_candles
+                        WHERE asset = @Asset AND interval = @Interval
+                          AND open_time >= @MinIso
+                          AND open_time <= @MaxIso
+                        ORDER BY open_time DESC
+                        LIMIT 5
+                    ) sub
+                    WHERE open_time::timestamptz < @VerifyAt
                       AND open_time::timestamptz >= @MinAllowed
                     ORDER BY open_time DESC
                     LIMIT 1
                 ", new { 
                     Asset = cleanAsset, 
                     Interval = verifyInterval, 
+                    MinIso = minIsoFallback,
+                    MaxIso = maxIsoFallback,
                     VerifyAt = verifyUtc,
                     MinAllowed = minAllowedSub
                 }, cancellationToken: ct));
@@ -150,7 +176,7 @@ public class PendingTradeVerificationService : BackgroundService
                 }, cancellationToken: ct));
             }
 
-            // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] using timestamptz comparison
+            // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] via Index Seek on UNIQUE(asset, interval, open_time)
             if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))
             {
                 try
@@ -160,13 +186,13 @@ public class PendingTradeVerificationService : BackgroundService
                         FROM subminute_candles
                         WHERE asset = @Asset
                           AND interval = @Interval
-                          AND open_time::timestamptz >= @CreatedBucket::timestamptz
-                          AND open_time::timestamptz <= @TargetGrid::timestamptz
+                          AND open_time >= @CreatedIso
+                          AND open_time <= @TargetIso
                     ", new { 
                         Asset = cleanAsset, 
                         Interval = verifyInterval, 
-                        CreatedBucket = createdBucket.ToString("o"), 
-                        TargetGrid = targetGrid.ToString("o") 
+                        CreatedIso = createdBucket.ToString("yyyy-MM-ddTHH:mm:ss"), 
+                        TargetIso = targetGrid.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ") 
                     }, cancellationToken: ct));
 
                     double exitVal = exitPrice.Value;

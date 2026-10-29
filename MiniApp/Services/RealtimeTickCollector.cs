@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -201,6 +201,16 @@ namespace ValutaBot.MiniApp
             return Task.CompletedTask;
         }
 
+        public static void ResetAllAccumulatorsAndRingBuffers()
+        {
+            _s5.Clear();
+            _s10.Clear();
+            _s15.Clear();
+            _s30.Clear();
+            _m1.Clear();
+            _ringBuffers.Clear();
+        }
+
         public static void Initialize()
         {
             InitializeAsync().GetAwaiter().GetResult();
@@ -363,38 +373,34 @@ namespace ValutaBot.MiniApp
             {
                 while (!token.IsCancellationRequested && await _tickChannel.Reader.WaitToReadAsync(token))
                 {
-                    if (buffer.Count == 0)
+                    if (buffer.Count == 0 && _tickChannel.Reader.Count < 200)
                     {
-                        // Adaptive Micro-Batching:
-                        // Read any immediately available ticks from the channel
-                        while (buffer.Count < 500 && _tickChannel.Reader.TryRead(out var tick))
+                        // Wait for micro-batching window while keeping ticks inside _tickChannel so FlushAsync() can drain them immediately
+                        try { await Task.Delay(250, token); } catch (OperationCanceledException) { }
+                    }
+
+                    bool wroteAny = false;
+                    bool success = false;
+                    await _dbWriteLock.WaitAsync(token);
+                    try
+                    {
+                        while (buffer.Count < 8000 && _tickChannel.Reader.TryRead(out var tick))
                         {
                             buffer.Add(tick);
                         }
-
-                        // If fewer than 200 ticks, wait up to 1000ms (reduced from 3000ms for 3x less crash/SIGKILL exposure)
-                        if (buffer.Count < 200)
+                        if (buffer.Count > 0)
                         {
-                            try { await Task.Delay(1000, token); } catch (OperationCanceledException) { }
-                            while (buffer.Count < 8000 && _tickChannel.Reader.TryRead(out var tick))
-                            {
-                                buffer.Add(tick);
-                            }
-                        }
-                    }
-
-                    if (buffer.Count > 0)
-                    {
-                        bool success = false;
-                        await _dbWriteLock.WaitAsync(token);
-                        try
-                        {
+                            wroteAny = true;
                             success = await WriteBatchInternalAsync(buffer, token);
                         }
-                        finally
-                        {
-                            _dbWriteLock.Release();
-                        }
+                    }
+                    finally
+                    {
+                        _dbWriteLock.Release();
+                    }
+
+                    if (wroteAny)
+                    {
 
                         if (success)
                         {

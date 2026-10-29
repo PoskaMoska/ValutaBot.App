@@ -258,7 +258,11 @@ namespace ValutaBot.MiniApp.Services
 
             try
             {
-                DateTime? sinceUtc = _symbolQuarantineWatermarks.TryGetValue(key, out var wm) ? wm : null;
+                DateTime? keyWm = _symbolQuarantineWatermarks.TryGetValue(key, out var wm1) ? wm1 : null;
+                DateTime? pairWm = _symbolQuarantineWatermarks.TryGetValue(cleanAsset, out var wm2) ? wm2 : null;
+                DateTime? sinceUtc = (keyWm.HasValue && pairWm.HasValue)
+                    ? (keyWm.Value > pairWm.Value ? keyWm.Value : pairWm.Value)
+                    : (keyWm ?? pairWm);
                 var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(asset, timeframe, 12, sinceUtc);
                 if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 2) return;
 

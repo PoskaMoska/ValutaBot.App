@@ -1,3 +1,6 @@
+using System.Collections.Frozen;
+using System.Collections.Generic;
+
 namespace ValutaBot.MiniApp;
 
 /// <summary>
@@ -6,6 +9,24 @@ namespace ValutaBot.MiniApp;
 /// </summary>
 public static class TimeframeNormalizer
 {
+    private static readonly FrozenDictionary<string, int> _standardSeconds = new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase)
+    {
+        ["s3"] = 3,
+        ["s5"] = 5,
+        ["s10"] = 10,
+        ["s15"] = 15,
+        ["s30"] = 30,
+        ["m1"] = 60,
+        ["m2"] = 120,
+        ["m3"] = 180,
+        ["m5"] = 300,
+        ["m15"] = 900,
+        ["m30"] = 1800,
+        ["h1"] = 3600,
+        ["h4"] = 14400,
+        ["d1"] = 86400
+    }.ToFrozenDictionary(System.StringComparer.OrdinalIgnoreCase);
+
     public static string Normalize(string? timeframe)
     {
         if (string.IsNullOrWhiteSpace(timeframe)) return "m1";
@@ -59,6 +80,11 @@ public static class TimeframeNormalizer
     public static int ToSeconds(string? timeframe)
     {
         string norm = Normalize(timeframe);
+        if (_standardSeconds.TryGetValue(norm, out int sec))
+        {
+            return sec;
+        }
+
         if (norm.StartsWith("s") && int.TryParse(norm[1..], out int s)) return s;
         if (norm.StartsWith("m") && int.TryParse(norm[1..], out int m)) return m * 60;
         if (norm.StartsWith("h") && int.TryParse(norm[1..], out int h)) return h * 3600;

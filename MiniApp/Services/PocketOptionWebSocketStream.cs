@@ -97,28 +97,36 @@ public static class PocketOptionWebSocketStream
     public static bool IsConnected => _webSocket?.State == WebSocketState.Open;
     public static long TotalTicksIngested => Interlocked.Read(ref _totalTicksIngested);
     public static string Status { get; private set; } = "IDLE";
+    private sealed record BrokerClockAnchor(long BrokerUtcTicks, long LocalStopwatchTimestamp);
+    private static volatile BrokerClockAnchor? _clockAnchor;
+
     public static DateTime LastTickUtc => _lastTickTime;
-    public static DateTime LastBrokerTickUtc { get; private set; } = DateTime.MinValue;
+    public static DateTime LastBrokerTickUtc =>
+        _clockAnchor is { } a ? new DateTime(a.BrokerUtcTicks, DateTimeKind.Utc) : DateTime.MinValue;
     public static int ConsecutiveAuthFailures => Volatile.Read(ref _consecutiveAuthFailures);
+
+    public static void ResetClockAndWatermarksOnDstShift()
+    {
+        _clockAnchor = null;
+        _lastCandleSrvTs.Clear();
+    }
 
     /// <summary>
     /// Returns the current extrapolated Pocket Option broker time in UTC.
-    /// Uses high-resolution local clock delta since the last broker tick to maintain sub-millisecond continuity.
+    /// Uses monotonic hardware Stopwatch delta since the last broker tick to maintain sub-millisecond continuity.
     /// Falls back to DateTime.UtcNow if no broker ticks have been received yet.
     /// </summary>
     public static DateTime GetBrokerTimeUtc()
     {
-        var lastBroker = LastBrokerTickUtc;
-        var lastLocal = _lastTickTime;
-        if (lastBroker != DateTime.MinValue && lastLocal != DateTime.MinValue)
+        var anchor = _clockAnchor;
+        if (anchor != null)
         {
-            var elapsed = DateTime.UtcNow - lastLocal;
-            // Bound elapsed delta to 10s in case stream stalled
-            if (elapsed.TotalSeconds >= 0 && elapsed.TotalSeconds <= 10.0)
+            double elapsedSec = System.Diagnostics.Stopwatch.GetElapsedTime(anchor.LocalStopwatchTimestamp).TotalSeconds;
+            if (elapsedSec >= 0 && elapsedSec <= 10.0)
             {
-                return lastBroker + elapsed;
+                return new DateTime(anchor.BrokerUtcTicks + (long)(elapsedSec * TimeSpan.TicksPerSecond), DateTimeKind.Utc);
             }
-            return lastBroker;
+            return new DateTime(anchor.BrokerUtcTicks, DateTimeKind.Utc);
         }
         return DateTime.UtcNow;
     }
@@ -520,6 +528,8 @@ public static class PocketOptionWebSocketStream
                 }
                 finally
                 {
+                    _livePrices.Clear();
+                    _lastTickTicksBySymbol.Clear();
                     try { ws.Dispose(); } catch { }
                     if (ReferenceEquals(_webSocket, ws)) _webSocket = null;
                 }
@@ -672,8 +682,7 @@ public static class PocketOptionWebSocketStream
             {
                 if (pendingEvent == "updateStream")
                 {
-                    string json = Encoding.UTF8.GetString(binary);
-                    ParseUpdateStreamJson(json);
+                    ParseUpdateStreamUtf8(binary);
                 }
                 else if (pendingEvent == "updateHistoryNewFast")
                 {
@@ -748,6 +757,32 @@ public static class PocketOptionWebSocketStream
         }
     }
 
+    private static void ParseUpdateStreamUtf8(ReadOnlyMemory<byte> utf8Json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(utf8Json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return;
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Array && item.GetArrayLength() >= 3)
+                {
+                    string asset = item[0].GetString() ?? "";
+                    double srvTs = item[1].GetDouble();
+                    double price = item[2].GetDouble();
+                    if (!string.IsNullOrEmpty(asset) && price > 0)
+                    {
+                        HandleTick(asset, srvTs, price);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PO WS] Error parsing updateStream UTF8 frame: {ex.Message}");
+        }
+    }
+
     private static void ParseUpdateStreamJson(string json)
     {
         try
@@ -810,13 +845,12 @@ public static class PocketOptionWebSocketStream
 
     private static bool TryAdvanceCandleWatermark(string candleKey, double srvTs, bool isBackfill = false)
     {
-        if (isBackfill) return true;
         while (true)
         {
             if (_lastCandleSrvTs.TryGetValue(candleKey, out double prevTs))
             {
                 if (srvTs < prevTs) return false;
-                if (srvTs == prevTs) return true;
+                if (srvTs == prevTs) return !isBackfill;
                 if (_lastCandleSrvTs.TryUpdate(candleKey, srvTs, prevTs)) return true;
             }
             else
@@ -843,11 +877,17 @@ public static class PocketOptionWebSocketStream
 
         if (!isBackfill)
         {
-            _livePrices[baseAsset] = (price, DateTime.UtcNow.Ticks);
-            _lastTickTicksBySymbol[baseAsset] = DateTime.UtcNow.Ticks;
-            LastBrokerTickUtc = new DateTime(tickTimeUtc, DateTimeKind.Utc);
-            _lastMessageTime = DateTime.UtcNow;
-            _lastTickTime = DateTime.UtcNow;
+            long nowUtcTicks = DateTime.UtcNow.Ticks;
+            long swNow = System.Diagnostics.Stopwatch.GetTimestamp();
+            _livePrices[baseAsset] = (price, nowUtcTicks);
+            _lastTickTicksBySymbol[baseAsset] = nowUtcTicks;
+            var prevAnchor = _clockAnchor;
+            if (prevAnchor == null || tickTimeUtc >= prevAnchor.BrokerUtcTicks || (prevAnchor.BrokerUtcTicks - tickTimeUtc) > TimeSpan.FromMinutes(5).Ticks)
+            {
+                _clockAnchor = new BrokerClockAnchor(tickTimeUtc, swNow);
+            }
+            _lastMessageTime = new DateTime(nowUtcTicks, DateTimeKind.Utc);
+            _lastTickTime = new DateTime(nowUtcTicks, DateTimeKind.Utc);
             ValutaBot.MiniApp.Services.ClockSkewMonitor.Record(tickTimeUtc);
             ValutaMetrics.WebSocketTicksTotal.WithLabels(candleKey).Inc();
             // Macro context gets PO prices only when PO is the active feed (Tiingo then stays out of it).

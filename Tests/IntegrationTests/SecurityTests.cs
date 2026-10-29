@@ -77,5 +77,78 @@ namespace IntegrationTests
             
             Assert.True(isAuthorized);
         }
+
+        // 4. Custom InitData HMAC & AuthDate Compatibility Tests
+        [Fact]
+        public void ValidateInitData_LegacyCustomTokenWithoutAuthDate_Succeeds()
+        {
+            string botToken = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
+            long userId = 987654321L;
+
+            using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(botToken));
+            string sign = Convert.ToHexString(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(userId.ToString()))).ToLowerInvariant();
+
+            string initData = $"custom_user_id={userId}&custom_user_sign={sign}";
+
+            var (ok, validatedUserId, error) = AuthService.ValidateInitData(initData, botToken);
+
+            Assert.True(ok);
+            Assert.Equal(userId, validatedUserId);
+            Assert.Null(error);
+        }
+
+        [Fact]
+        public void ValidateInitData_LegacyCustomTokenInvalidSign_Fails()
+        {
+            string botToken = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
+            long userId = 987654321L;
+            string fakeSign = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+            string initData = $"custom_user_id={userId}&custom_user_sign={fakeSign}";
+
+            var (ok, validatedUserId, error) = AuthService.ValidateInitData(initData, botToken);
+
+            Assert.False(ok);
+            Assert.Equal(0, validatedUserId);
+            Assert.Equal("Invalid custom authorization signature", error);
+        }
+
+        [Fact]
+        public void ValidateInitData_ModernCustomTokenWithValidAuthDate_Succeeds()
+        {
+            string botToken = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
+            long userId = 987654321L;
+            long authDate = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(botToken));
+            string sign = Convert.ToHexString(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes($"{userId}:{authDate}"))).ToLowerInvariant();
+
+            string initData = $"custom_user_id={userId}&custom_user_sign={sign}&auth_date={authDate}";
+
+            var (ok, validatedUserId, error) = AuthService.ValidateInitData(initData, botToken);
+
+            Assert.True(ok);
+            Assert.Equal(userId, validatedUserId);
+            Assert.Null(error);
+        }
+
+        [Fact]
+        public void ValidateInitData_ModernCustomTokenWithExpiredAuthDate_Fails()
+        {
+            string botToken = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
+            long userId = 987654321L;
+            long oldAuthDate = DateTimeOffset.UtcNow.AddHours(-25).ToUnixTimeSeconds();
+
+            using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes(botToken));
+            string sign = Convert.ToHexString(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes($"{userId}:{oldAuthDate}"))).ToLowerInvariant();
+
+            string initData = $"custom_user_id={userId}&custom_user_sign={sign}&auth_date={oldAuthDate}";
+
+            var (ok, validatedUserId, error) = AuthService.ValidateInitData(initData, botToken);
+
+            Assert.False(ok);
+            Assert.Equal(0, validatedUserId);
+            Assert.Equal("Custom authorization token expired or invalid timestamp", error);
+        }
     }
 }

@@ -195,11 +195,12 @@ public static partial class MiniAppController
 
             options.AddPolicy("Global", context =>
             {
-                string ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown_ip";
-                string initData = context.Request.Headers["X-Telegram-Init-Data"].ToString();
-                string fingerprint = $"{ip}|{initData}";
+                string forwardedFor = context.Request.Headers["X-Forwarded-For"].FirstOrDefault()?.Split(',')[0].Trim() ?? "";
+                string ip = !string.IsNullOrEmpty(forwardedFor)
+                    ? forwardedFor
+                    : (context.Connection.RemoteIpAddress?.ToString() ?? "unknown_ip");
                 
-                return RateLimitPartition.GetTokenBucketLimiter(fingerprint, _ =>
+                return RateLimitPartition.GetTokenBucketLimiter(ip, _ =>
                     new TokenBucketRateLimiterOptions
                     {
                         TokenLimit = 120,
@@ -257,17 +258,27 @@ public static partial class MiniAppController
             await next();
         });
 
-        // SECURITY: Metrics endpoint authentication challenge for Grafana Cloud
+        // SECURITY: Metrics endpoint authentication with constant-time token verification for Prometheus / Grafana Cloud
         app.Use(async (context, next) =>
         {
-            if (context.Request.Path == "/metrics")
+            if (context.Request.Path.StartsWithSegments("/metrics", StringComparison.OrdinalIgnoreCase))
             {
-                string? auth = context.Request.Headers.Authorization;
-                if (string.IsNullOrWhiteSpace(auth))
+                string expectedToken = Environment.GetEnvironmentVariable("METRICS_BEARER_TOKEN")
+                                    ?? Environment.GetEnvironmentVariable("INTERNAL_API_SECRET")
+                                    ?? _internalApiSecretFallback;
+                string authHeader = context.Request.Headers.Authorization.ToString();
+                string providedToken = authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+                    ? authHeader["Bearer ".Length..].Trim()
+                    : authHeader.Trim();
+
+                byte[] expBytes = Encoding.UTF8.GetBytes(expectedToken);
+                byte[] provBytes = Encoding.UTF8.GetBytes(providedToken);
+                if (provBytes.Length == 0 || expBytes.Length != provBytes.Length ||
+                    !CryptographicOperations.FixedTimeEquals(provBytes, expBytes))
                 {
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    context.Response.Headers.Append("WWW-Authenticate", "Basic realm=\"Metrics\", Bearer realm=\"Metrics\"");
-                    await context.Response.WriteAsync("Unauthorized: Metrics endpoint requires Basic or Bearer authentication.");
+                    context.Response.Headers.Append("WWW-Authenticate", "Bearer realm=\"Metrics\"");
+                    await context.Response.WriteAsync("Unauthorized: Invalid or missing Metrics Bearer token.");
                     return;
                 }
             }

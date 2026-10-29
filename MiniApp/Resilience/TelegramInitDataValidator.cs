@@ -14,7 +14,7 @@ public static class TelegramInitDataValidator
     {
         if (string.IsNullOrEmpty(value)) return "";
         string decoded = value;
-        while (true)
+        for (int i = 0; i < 3; i++)
         {
             string next = HttpUtility.UrlDecode(decoded);
             if (next == decoded) break;

@@ -202,13 +202,16 @@ def build_macro_vector_live(
     tf_sec = float(TF_SECONDS.get(tf_str, 5)) / 60.0
 
     def _signed_smc(dir_str: str, has_flag: bool) -> float:
+        if not has_flag and not dir_str:
+            return 0.0
         s = str(dir_str or "").upper()
         if "BULL" in s:
             return 1.0
         if "BEAR" in s:
             return -1.0
-        return 1.0 if has_flag else 0.0
+        return 0.0
 
+    bos_raw = str(smc.get("smc_bos_dir") or smc.get("BosDirection") or "NONE").upper()
     has_ob = _signed_smc(
         smc.get("smc_ob_type") or smc.get("OrderBlockType") or "",
         bool(smc.get("smc_has_ob") or smc.get("HasOrderBlock"))
@@ -222,8 +225,8 @@ def build_macro_vector_live(
         bool(smc.get("smc_has_swp") or smc.get("HasLiquiditySweep"))
     )
     has_bos = _signed_smc(
-        smc.get("smc_bos_dir") or smc.get("BosDirection") or "",
-        bool(smc.get("smc_bos_dir", "NONE") not in ("NONE", "") or smc.get("HasBos"))
+        bos_raw,
+        bool(bos_raw not in ("NONE", "", "NULL") or smc.get("HasBos"))
     )
 
     asset_clean = (
@@ -253,10 +256,11 @@ def build_macro_vector_live(
         return np.array(base_23, dtype=np.float32)
 
     # Extended 31 features
-    ta_score = float(ta.get("Score", 0.0))
-    micro_vel = float(ta.get("MicroVel", 0.0)) / 20.0
-    hma_slope = float(ta.get("HmaSlope", 0.0)) / 10.0
-    vol_ratio = min(3.0, float(ta.get("VolRatio", 1.0))) / 3.0
+    ta_score = _safe_float(ta.get("Score"), 0.0)
+    micro_vel = _safe_float(ta.get("MicroVel"), 0.0) / 20.0
+    hma_slope = _safe_float(ta.get("HmaSlope"), 0.0) / 10.0
+    vol_raw = ta.get("VolRatio") if ta.get("VolRatio") is not None else ta.get("VolStrengthVal", 1.0)
+    vol_ratio = min(3.0, max(0.0, _safe_float(vol_raw, 1.0))) / 3.0
     bb_sq = float(1.0 if macro.get("BbSqueeze") else 0.0)
     price_pos = min(1.0, max(0.0, float(macro.get("PricePositionPct", 0.5))))
     trend_mat = float(macro.get("TrendMaturity", 0.0)) / 100.0

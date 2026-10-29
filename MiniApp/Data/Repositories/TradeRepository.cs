@@ -462,10 +462,10 @@ FROM outcome_data;");
                        price_entropy as ""PriceEntropy"", trend_maturity as ""TrendMaturity"", price_position_pct as ""PricePositionPct"", bb_squeeze as ""BbSqueeze"",
                        ta_telemetry::text as ""TaTelemetry"", ml_telemetry::text as ""MlTelemetry"", smc_telemetry::text as ""SmcTelemetry""
                 FROM pending_trades 
-                WHERE verify_at <= @UpToStr
-                ORDER BY verify_at ASC
+                WHERE verify_at::timestamptz <= @UpToUtc
+                ORDER BY verify_at::timestamptz ASC
                 LIMIT @Limit", 
-                new { UpToStr = upTo.ToString("o"), Limit = limit });
+                new { UpToUtc = upTo.ToUniversalTime(), Limit = limit });
 
             return rows.Select(r => new SignalTracker.PredictionRecord
             {

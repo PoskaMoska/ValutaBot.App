@@ -1,4 +1,4 @@
-﻿using ValutaBot.Core;
+using ValutaBot.Core;
 using Prometheus;
 using System;
 using System.Collections.Generic;
@@ -9,6 +9,7 @@ using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using ValutaBot.App.MiniApp.Services;
 using ValutaBot.App.MiniApp.Models;
+using ValutaBot.MiniApp.Features.MarketAnalysis.Engines;
 
 namespace ValutaBot.MiniApp.Features.MarketAnalysis;
 
@@ -23,9 +24,9 @@ public class MarketAnalysisOrchestrator(
     ILogger<MarketAnalysisOrchestrator> logger
 ) : IMarketAnalysisOrchestrator
 {
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastSampleTimeByAssetTf = new();
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastRealTradeTimeByAsset = new();
+    private static readonly ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
+    private static readonly ConcurrentDictionary<string, DateTime> _lastSampleTimeByAssetTf = new();
+    private static readonly ConcurrentDictionary<string, DateTime> _lastRealTradeTimeByAsset = new();
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     
     private readonly MarketDataFetcher _fetcher = fetcher;
@@ -37,10 +38,82 @@ public class MarketAnalysisOrchestrator(
     private readonly TradingBotSettings _settings = settings.Value;
     private readonly ILogger<MarketAnalysisOrchestrator> _logger = logger;
 
-    /// <summary>
-    /// Extracts the ML regime token (TREND/FLAT/CHAOS/ALL) from a model version such as
-    /// "patch-tst-v3-USDJPY_s10_TREND-1790964297". Returns "UNKNOWN" if it cannot be parsed.
-    /// </summary>
+    #region Pipeline DTO Records
+
+    private sealed record PreparedCandleData(
+        string CleanAsset,
+        string? Symbol,
+        bool IsForex,
+        string TfLower,
+        int Limit,
+        int IntervalSecs,
+        MiniAppController.OhlcCandle[] RawCandles,
+        MiniAppController.OhlcCandle[] ClosedCandles,
+        double[] MainPrices,
+        double[] ClosedPrices,
+        double[] ClosedVolumes,
+        double CurrentLivePrice,
+        string DataHash,
+        string? HigherTf,
+        MiniAppController.OhlcCandle[] ClosedHigherCandles
+    );
+
+    private sealed record SensorsAndFeatures(
+        TechnicalAnalysisEngine.GatekeeperResult Gatekeeper,
+        bool IsRiskBlocked,
+        ContinuousStateResult State,
+        SmcEngine.SmcAnalysisResult SmcResult,
+        TaScoringDetail TaDetail,
+        (double score, double confidence, double rsiVal, double hmaVal, double volStrengthVal, double atrVal) TaResult,
+        double MainAtr,
+        double MainAdx,
+        double PriceEntropy,
+        int TrendMaturity,
+        double PricePositionPct,
+        bool BbSqueeze,
+        int? MinutesToNews,
+        DayLevelAnchors DayAnchors,
+        DollarBasketMetrics DxyMetrics,
+        double LiveSpreadBps,
+        object MacroPayload
+    );
+
+    private sealed record NeuralBrainOutcome(
+        MLPythonService.MLPythonPrediction? Prediction,
+        string Direction,
+        double Confidence,
+        double RawConfidence
+    );
+
+    private sealed record MatrixConsensusOutcome(
+        ConsensusDecision Consensus,
+        SubminuteNoiseGatekeeper.NoiseAuditResult NoiseAudit,
+        ConfluenceMatrixResult MtfResult,
+        double ConflictPenalty,
+        TaSignal TaSignal,
+        SmcSignal SmcSignal,
+        MlSignal MlSignal,
+        StateSignal StateSignal,
+        string EffectiveMarketRegime,
+        TradeTimeoutEngine.TimeoutResult Timeout
+    );
+
+    private sealed record ExecutionOutcome(
+        double ExecutedLivePrice,
+        bool IsGoldenSetup,
+        bool IsSubminute,
+        bool IsS5,
+        bool IsDirectional,
+        bool IsCbHalted,
+        bool IsExhaustedOnS5,
+        bool HtfAligned,
+        bool IsCooldownActive
+    );
+
+    #endregion
+
+    #region Helper Utilities
+
     private static string ExtractMlRegime(string? modelVersion)
     {
         if (string.IsNullOrWhiteSpace(modelVersion)) return "UNKNOWN";
@@ -52,7 +125,7 @@ public class MarketAnalysisOrchestrator(
         return "UNKNOWN";
     }
 
-    private double GetSafeLimit(double value)
+    private static double GetSafeLimit(double value)
     {
         if (double.IsNaN(value) || double.IsInfinity(value)) return 0;
         if (value > 1e6) return 1e6;
@@ -60,24 +133,64 @@ public class MarketAnalysisOrchestrator(
         return value;
     }
 
-    public async Task<AnalysisResponseDto> ExecuteAnalysisAsync(string asset, string timeframe, ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null, MiniAppController.OhlcCandle[]? preloadedCandles = null)
+    private static string ComputeHash(MiniAppController.OhlcCandle[] cands)
+    {
+        long sumBits = 0;
+        foreach (var c in cands) sumBits ^= BitConverter.DoubleToInt64Bits(c.Close);
+        return sumBits.ToString("X8").Substring(0, 8);
+    }
+
+    #endregion
+
+    #region Main Pipeline Entrypoint
+
+    public async Task<AnalysisResponseDto> ExecuteAnalysisAsync(
+        string asset,
+        string timeframe,
+        ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null,
+        MiniAppController.OhlcCandle[]? preloadedCandles = null)
     {
         using var timer = ValutaMetrics.PipelineDuration.NewTimer();
         var sw = Stopwatch.StartNew();
         string traceId = Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
         var traceLines = new List<string>();
 
-        // Local helper for Data Integrity hash
-        string ComputeHash(MiniAppController.OhlcCandle[] cands)
-        {
-            long sumBits = 0;
-            foreach (var c in cands) sumBits ^= BitConverter.DoubleToInt64Bits(c.Close);
-            return sumBits.ToString("X8").Substring(0, 8);
-        }
-
         _logger.LogInformation("[TRACE {TraceId}] Analysis started for Asset: {Asset}, TF: {Timeframe}", traceId, asset, timeframe);
 
-        // 1. Sanitize (Immutable Step)
+        // Stage 1: Fetch and Prepare Closed Candle Windows
+        var prepared = await FetchAndPrepareCandlesAsync(asset, timeframe, preloadedCandles, traceId, traceLines);
+
+        // Stage 2: Technical, SMC & Mathematical Sensors
+        var sensors = await ComputeSensorsAndFeaturesAsync(prepared, timeframe, traceId, traceLines);
+
+        // Stage 3: Dual-Stream Neural Brain / PatchTST Inference
+        var mlOutcome = await QueryNeuralBrainAsync(prepared, sensors, traceId, traceLines);
+
+        // Stage 4: Matrix & Multi-Timeframe Consensus Evaluation
+        var consensusOutcome = await EvaluateConsensusAndMatrixAsync(prepared, timeframe, sensors, mlOutcome, traceId, traceLines);
+
+        // Stage 5: Execution Guards, Cooldowns & Trade Recording (Real / Shadow / Hold)
+        var execOutcome = await EvaluateExecutionAndRecordTradeAsync(prepared, timeframe, sensors, mlOutcome, consensusOutcome, traceLines);
+
+        // Stage 6: Pipeline Trace Console Logging
+        sw.Stop();
+        LogPipelineTrace(traceId, prepared.CleanAsset, timeframe, traceLines, consensusOutcome.Consensus, sw.ElapsedMilliseconds);
+
+        // Stage 7: Assemble Final Response DTO
+        return await BuildResponseDtoAsync(prepared, timeframe, sensors, mlOutcome, consensusOutcome, execOutcome);
+    }
+
+    #endregion
+
+    #region Pipeline Stage 1: Fetch and Prepare Candles
+
+    private async Task<PreparedCandleData> FetchAndPrepareCandlesAsync(
+        string asset,
+        string timeframe,
+        MiniAppController.OhlcCandle[]? preloadedCandles,
+        string traceId,
+        List<string> traceLines)
+    {
         string cleanAsset = AssetSanitizer.Sanitize(asset);
         DayOfWeek day = DateTime.UtcNow.DayOfWeek;
         string? symbol = PriceFeed.UsePocketOption ? null : AssetSanitizer.MapSymbolByDayOfWeek(cleanAsset, day);
@@ -85,9 +198,8 @@ public class MarketAnalysisOrchestrator(
         
         string tfLower = TimeframeNormalizer.Normalize(timeframe);
         int limit = (tfLower.StartsWith("s") || tfLower.StartsWith("m1") || tfLower.StartsWith("m5")) ? 160 : 200;
-        int fetchLimit = limit + 1; // +1 so stripping the unclosed live candle leaves a full 160 closed-candle window
+        int fetchLimit = limit + 1; // +1 so stripping unclosed candle leaves a full 160 closed-candle window
 
-        // 2. Fetch Data (Locals only, no class fields - fast-path uses preloaded candles)
         var fetchSw = Stopwatch.StartNew();
         var candles = (preloadedCandles != null && preloadedCandles.Length > 0)
             ? preloadedCandles
@@ -105,7 +217,6 @@ public class MarketAnalysisOrchestrator(
         string dataHash = ComputeHash(candles);
         traceLines.Add($"[1. Источник Данных] {candles.Length} свечей. Live Цена: {currentLivePrice} | Массив Hash: [{dataHash}] -> {fetchSw.ElapsedMilliseconds}ms");
 
-        // Prepare closed candles (cap at `limit` after dropping forming candle)
         int intervalSecs = _fetcher.TimeframeSeconds(timeframe);
         DateTime referenceNowUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
@@ -117,77 +228,104 @@ public class MarketAnalysisOrchestrator(
         double[] closedPrices = closedCandles.Select(c => c.Close).ToArray();
         double[] closedVolumes = closedCandles.Select(c => c.Volume).ToArray();
 
-        // 3. Risk Gatekeeper
+        string? higherTf = _fetcher.HigherTf(timeframe);
+        MiniAppController.OhlcCandle[]? higherCandles = null;
+        if (higherTf != null)
+        {
+            higherCandles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, higherTf, cleanAsset, 100);
+        }
+        var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1 && higherTf != null) 
+            ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= referenceNowUtc) 
+                ? higherCandles 
+                : higherCandles.Take(higherCandles.Length - 1).ToArray())
+            : [];
+
+        return new PreparedCandleData(
+            cleanAsset,
+            symbol,
+            isForex,
+            tfLower,
+            limit,
+            intervalSecs,
+            candles,
+            closedCandles,
+            mainPrices,
+            closedPrices,
+            closedVolumes,
+            currentLivePrice,
+            dataHash,
+            higherTf,
+            closedHigherCandles
+        );
+    }
+
+    #endregion
+
+    #region Pipeline Stage 2: Technical & Math Sensors
+
+    private async Task<SensorsAndFeatures> ComputeSensorsAndFeaturesAsync(
+        PreparedCandleData prep,
+        string timeframe,
+        string traceId,
+        List<string> traceLines)
+    {
+        // 1. Risk Gatekeeper
         var gatekeeperSw = Stopwatch.StartNew();
-        var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(cleanAsset, timeframe, mainPrices, candles);
+        var gatekeeper = _riskGatekeeper.ValidateMarketGatekeeper(prep.CleanAsset, timeframe, prep.MainPrices, prep.RawCandles);
         gatekeeperSw.Stop();
         
         bool isRiskBlocked = !gatekeeper.IsTradeable;
         if (isRiskBlocked)
         {
-            ValutaMetrics.GatekeeperBlocksTotal.WithLabels(cleanAsset, timeframe, string.IsNullOrEmpty(gatekeeper.Reason) ? "UNKNOWN" : gatekeeper.Reason).Inc();
+            ValutaMetrics.GatekeeperBlocksTotal.WithLabels(prep.CleanAsset, timeframe, string.IsNullOrEmpty(gatekeeper.Reason) ? "UNKNOWN" : gatekeeper.Reason).Inc();
             _logger.LogWarning("[TRACE {TraceId}] Risk Gatekeeper blocked trade: {Reason}", traceId, gatekeeper.Reason);
-            // DO NOT THROW. We need to compute features to save negative (HOLD) samples!
         }
         traceLines.Add($"[2. Gatekeeper]      Риск-контроль пройден ({(string.IsNullOrEmpty(gatekeeper.Reason) ? "Волатильность в норме" : gatekeeper.Reason)}) -> {gatekeeperSw.ElapsedMilliseconds}ms");
 
-        // 4. Continuous State
-        var state = ContinuousStateEngine.EvaluateContinuousState(closedPrices, cleanAsset, timeframe, isAlreadyClosed: true);
-        
-        // 5. Higher TF Data
-        string? higherTf = _fetcher.HigherTf(timeframe);
-        MiniAppController.OhlcCandle[]? higherCandles = null;
-        if (higherTf != null) {
-            higherCandles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, higherTf, cleanAsset, 100);
-        }
-        var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1 && higherTf != null) 
-            ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= referenceNowUtc) ? higherCandles : higherCandles.Take(higherCandles.Length - 1).ToArray())
-            : [];
+        // 2. Continuous State
+        var state = ContinuousStateEngine.EvaluateContinuousState(prep.ClosedPrices, prep.CleanAsset, timeframe, isAlreadyClosed: true);
 
-        // 6. Engines (Parallel)
+        // 3. SMC & TA Scoring in Parallel
         var engSw = Stopwatch.StartNew();
-        bool isSubminute = tfLower.StartsWith("s");
-        var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(cleanAsset, timeframe, closedCandles, closedCandles.Length > 0 ? closedCandles[^1].Close : currentLivePrice));
+        var smcTask = Task.Run(() => SmcEngine.AnalyzeSmcStructure(prep.CleanAsset, timeframe, prep.ClosedCandles, prep.ClosedCandles.Length > 0 ? prep.ClosedCandles[^1].Close : prep.CurrentLivePrice));
         
-        // TA Scoring (align ADX/ATR period with sub-minute vs minute timeframe: 7 for s5-s30, 14 for m1+)
         var taSw = Stopwatch.StartNew();
-        int adxAtrPeriod = tfLower.StartsWith("s") ? 7 : 14;
-        var (mainAdx, mainPdi, mainMdi) = closedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(cleanAsset, timeframe, closedCandles, adxAtrPeriod) : (20.0, 0.0, 0.0);
-        double mainAtr = closedCandles.Length > 0 ? _mathEngine.ComputeAtr(cleanAsset, timeframe, closedCandles, adxAtrPeriod) : 0;
-        var taDetail = _marketAnalyzer.ScoreTimeframeDetailed(cleanAsset, timeframe, closedPrices, closedVolumes, candles: closedCandles, adxOverride: mainAdx, atrOverride: mainAtr, isForex: isForex, pdiOverride: mainPdi, mdiOverride: mainMdi);
+        int adxAtrPeriod = prep.TfLower.StartsWith("s") ? 7 : 14;
+        var (mainAdx, mainPdi, mainMdi) = prep.ClosedCandles.Length > 0 ? _mathEngine.ComputeTrueAdx(prep.CleanAsset, timeframe, prep.ClosedCandles, adxAtrPeriod) : (20.0, 0.0, 0.0);
+        double mainAtr = prep.ClosedCandles.Length > 0 ? _mathEngine.ComputeAtr(prep.CleanAsset, timeframe, prep.ClosedCandles, adxAtrPeriod) : 0;
+        var taDetail = _marketAnalyzer.ScoreTimeframeDetailed(prep.CleanAsset, timeframe, prep.ClosedPrices, prep.ClosedVolumes, candles: prep.ClosedCandles, adxOverride: mainAdx, atrOverride: mainAtr, isForex: prep.IsForex, pdiOverride: mainPdi, mdiOverride: mainMdi);
         var taResult = (score: taDetail.Score, confidence: taDetail.Confidence, rsiVal: taDetail.RsiVal, hmaVal: taDetail.HmaVal, volStrengthVal: taDetail.VolStrengthVal, atrVal: taDetail.AtrVal);
         taSw.Stop();
         traceLines.Add($"[3. Расчеты TA]      Индикаторы, ADX ({mainAdx:F1}) и ATR вычислены -> {taSw.ElapsedMilliseconds}ms");
 
-        await smcTask;
         var smcResult = await smcTask;
         engSw.Stop();
         traceLines.Add($"[4. Структура]       Анализ структуры завершен -> {engSw.ElapsedMilliseconds}ms");
 
-        // Macro & Mathematical Sensors (Computed BEFORE Neural Brain so live inference receives real PriceEntropy & context)
+        // 4. Macro & Mathematical Sensors
         double priceEntropy = 0.0;
         int trendMaturity = 0;
         double pricePositionPct = 0.5;
         bool bbSqueeze = false;
 
-        if (closedCandles.Length >= 20)
+        if (prep.ClosedCandles.Length >= 20)
         {
-            var last20 = closedCandles.Skip(closedCandles.Length - 20).ToList();
+            var last20 = prep.ClosedCandles.Skip(prep.ClosedCandles.Length - 20).ToList();
             double maxHigh = last20.Max(c => c.High);
             double minLow = last20.Min(c => c.Low);
             if (maxHigh > minLow) {
-                pricePositionPct = Math.Clamp((currentLivePrice - minLow) / (maxHigh - minLow), 0.0, 1.0);
+                pricePositionPct = Math.Clamp((prep.CurrentLivePrice - minLow) / (maxHigh - minLow), 0.0, 1.0);
             }
 
             double sma20 = last20.Average(c => c.Close);
             double stdev20 = Math.Sqrt(last20.Average(c => Math.Pow(c.Close - sma20, 2)));
-            bbSqueeze = sma20 > 1e-6 && (stdev20 * 4.0) / sma20 < 0.0005; // 5 bps bandwidth
+            bbSqueeze = sma20 > 1e-6 && (stdev20 * 4.0) / sma20 < 0.0005;
 
             int streak = 0;
             bool? upTrend = null;
-            for (int i = closedCandles.Length - 1; i >= 1; i--) {
-                bool isUp = closedCandles[i].Close > closedCandles[i-1].Close;
-                bool isDown = closedCandles[i].Close < closedCandles[i-1].Close;
+            for (int i = prep.ClosedCandles.Length - 1; i >= 1; i--) {
+                bool isUp = prep.ClosedCandles[i].Close > prep.ClosedCandles[i-1].Close;
+                bool isDown = prep.ClosedCandles[i].Close < prep.ClosedCandles[i-1].Close;
                 if (upTrend == null) {
                     if (isUp) upTrend = true;
                     else if (isDown) upTrend = false;
@@ -202,11 +340,11 @@ public class MarketAnalysisOrchestrator(
         }
 
         int? minutesToNews = -1;
-        var dayAnchors = await ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.GetDayLevelAnchorsAsync(cleanAsset, currentLivePrice);
-        var dxyMetrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
+        var dayAnchors = await MacroContextEngine.GetDayLevelAnchorsAsync(prep.CleanAsset, prep.CurrentLivePrice);
+        var dxyMetrics = MacroContextEngine.ComputeDollarBasketMetrics();
         double liveSpreadBps = 0.0;
         if (!PriceFeed.UsePocketOption)
-            TiingoWebSocketStream.TryGetSpreadBps(cleanAsset, out liveSpreadBps);
+            TiingoWebSocketStream.TryGetSpreadBps(prep.CleanAsset, out liveSpreadBps);
 
         var macroPayload = new {
             DayRangePositionPct = dayAnchors.DayRangePositionPct,
@@ -227,7 +365,7 @@ public class MarketAnalysisOrchestrator(
             Rsi = taDetail.RsiVal,
             HourUtc = DateTime.UtcNow.Hour,
             DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
-            TickCountLastCandle = closedCandles.Length > 0 ? closedCandles[^1].Volume : 0,
+            TickCountLastCandle = prep.ClosedCandles.Length > 0 ? prep.ClosedCandles[^1].Volume : 0,
             Ta = new {
                 Score = taDetail.Score,
                 MicroVel = taDetail.MicroVel,
@@ -236,9 +374,42 @@ public class MarketAnalysisOrchestrator(
             }
         };
 
-        // ML (Dual-Stream Neural Brain / PatchTST)
+        return new SensorsAndFeatures(
+            gatekeeper,
+            isRiskBlocked,
+            state,
+            smcResult,
+            taDetail,
+            taResult,
+            mainAtr,
+            mainAdx,
+            priceEntropy,
+            trendMaturity,
+            pricePositionPct,
+            bbSqueeze,
+            minutesToNews,
+            dayAnchors,
+            dxyMetrics,
+            liveSpreadBps,
+            macroPayload
+        );
+    }
+
+    #endregion
+
+    #region Pipeline Stage 3: Neural Brain ML Inference
+
+    private async Task<NeuralBrainOutcome> QueryNeuralBrainAsync(
+        PreparedCandleData prep,
+        SensorsAndFeatures sensors,
+        string traceId,
+        List<string> traceLines)
+    {
         var mlSw = Stopwatch.StartNew();
-        var mlPrediction = _settings.EnableMachineLearning ? await MLPythonService.PredictAsync(cleanAsset, timeframe, closedCandles, isForex, closedHigherCandles, smcResult, macroPayload) : null;
+        var mlPrediction = _settings.EnableMachineLearning 
+            ? await MLPythonService.PredictAsync(prep.CleanAsset, prep.TfLower, prep.ClosedCandles, prep.IsForex, prep.ClosedHigherCandles, sensors.SmcResult, sensors.MacroPayload) 
+            : null;
+        
         string mlDir = "NEUTRAL";
         double mlConf = 0.5;
         if (mlPrediction != null) {
@@ -248,198 +419,227 @@ public class MarketAnalysisOrchestrator(
         mlSw.Stop();
         ValutaMetrics.MlDuration.Observe(mlSw.Elapsed.TotalSeconds);
         double mlRawProb = mlPrediction?.RawConfidence ?? 0.5;
-        double mlScoreDebug = (mlRawProb - 0.5) * 2.0;
+
         _logger.LogInformation("[TRACE {TraceId}] Neural Brain: Verdict={Dir} Conf={Conf:F4} (RawConf={RawConf:F4}) | Model={Version}",
             traceId, mlDir, mlConf, mlRawProb, mlPrediction?.ModelVersion ?? "null");
+
         if (mlPrediction != null) {
-            string hasOb = smcResult.OrderBlockType != null ? "Yes" : "No";
+            string hasOb = sensors.SmcResult.OrderBlockType != null ? "Yes" : "No";
             string mlTrace = mlPrediction.TopFeatures != null && mlPrediction.TopFeatures.Count >= 3 
-                ? $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {mlDir} ({mlConf*100:F1}%) | Explainer: {mlPrediction.TopFeatures[0]}, {mlPrediction.TopFeatures[1]}, {mlPrediction.TopFeatures[2]}" 
-                : $"Scenario (BOS={smcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {mlDir} ({mlConf*100:F1}%)";
+                ? $"Scenario (BOS={sensors.SmcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {mlDir} ({mlConf*100:F1}%) | Explainer: {mlPrediction.TopFeatures[0]}, {mlPrediction.TopFeatures[1]}, {mlPrediction.TopFeatures[2]}" 
+                : $"Scenario (BOS={sensors.SmcResult.BosDirection ?? "None"}, OB={hasOb}). Verdict: {mlDir} ({mlConf*100:F1}%)";
             traceLines.Add($"[5. PREDICT ML] {mlTrace} -> {mlSw.ElapsedMilliseconds}ms");
         } else {
             traceLines.Add($"[5. PREDICT ML] Neural Brain offline (conf: {mlConf:F2}) -> {mlSw.ElapsedMilliseconds}ms");
         }
-        
-        // 7. Matrix & Consensus
+
+        return new NeuralBrainOutcome(mlPrediction, mlDir, mlConf, mlRawProb);
+    }
+
+    #endregion
+
+    #region Pipeline Stage 4: Matrix & Multi-Timeframe Consensus
+
+    private async Task<MatrixConsensusOutcome> EvaluateConsensusAndMatrixAsync(
+        PreparedCandleData prep,
+        string timeframe,
+        SensorsAndFeatures sensors,
+        NeuralBrainOutcome ml,
+        string traceId,
+        List<string> traceLines)
+    {
         var matrixSw = Stopwatch.StartNew();
         double conflictPenalty = 1.0;
-        if (closedHigherCandles.Length > 0 && higherTf != null) {
-            var hAdx = _mathEngine.ComputeTrueAdx(cleanAsset, higherTf, closedHigherCandles);
-            var hAtr = _mathEngine.ComputeAtr(cleanAsset, higherTf, closedHigherCandles);
-            var hResult = _marketAnalyzer.ScoreTimeframe(cleanAsset, higherTf, closedHigherCandles.Select(c=>c.Close).ToArray(), closedHigherCandles.Select(c=>c.Volume).ToArray(), candles: closedHigherCandles, adxOverride: hAdx.adx, atrOverride: hAtr, isForex: isForex);
-            conflictPenalty *= (taResult.score * hResult.score < -0.01) ? 0.7 : 1.0;
+        if (prep.ClosedHigherCandles.Length > 0 && prep.HigherTf != null) {
+            var hAdx = _mathEngine.ComputeTrueAdx(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles);
+            var hAtr = _mathEngine.ComputeAtr(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles);
+            var hResult = _marketAnalyzer.ScoreTimeframe(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles.Select(c=>c.Close).ToArray(), prep.ClosedHigherCandles.Select(c=>c.Volume).ToArray(), candles: prep.ClosedHigherCandles, adxOverride: hAdx.adx, atrOverride: hAtr, isForex: prep.IsForex);
+            conflictPenalty *= (sensors.TaResult.score * hResult.score < -0.01) ? 0.7 : 1.0;
         }
 
-        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(cleanAsset, timeframe, isForex, symbol, closedCandles, closedPrices, closedVolumes, closedHigherCandles, closedHigherCandles.Select(c=>c.Close).ToArray(), closedHigherCandles.Select(c=>c.Volume).ToArray());
+        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(prep.CleanAsset, timeframe, prep.IsForex, prep.Symbol, prep.ClosedCandles, prep.ClosedPrices, prep.ClosedVolumes, prep.ClosedHigherCandles, prep.ClosedHigherCandles.Select(c=>c.Close).ToArray(), prep.ClosedHigherCandles.Select(c=>c.Volume).ToArray());
         
-        var taSignal = new TaSignal(taResult.score, taResult.confidence, taResult.rsiVal, taResult.hmaVal, taResult.volStrengthVal, mainAtr, mainAdx);
-        var smcSignal = new SmcSignal(smcResult.BosDirection ?? "", smcResult.SweepDirection ?? "", smcResult.OrderBlockType ?? "", smcResult.FvgType ?? "", "");
-        var mlSignal = new MlSignal(mlDir, mlConf, mlPrediction?.Accuracy, mlPrediction?.ModelVersion ?? "offline", mlPrediction?.HorizonCandles, mlPrediction?.RawConfidence);
-        var stateSignal = new StateSignal(state.VelocityRegime, state.VelocityBpsPerSec, state.MomentumContribution);
+        var taSignal = new TaSignal(sensors.TaResult.score, sensors.TaResult.confidence, sensors.TaResult.rsiVal, sensors.TaResult.hmaVal, sensors.TaResult.volStrengthVal, sensors.MainAtr, sensors.MainAdx);
+        var smcSignal = new SmcSignal(sensors.SmcResult.BosDirection ?? "", sensors.SmcResult.SweepDirection ?? "", sensors.SmcResult.OrderBlockType ?? "", sensors.SmcResult.FvgType ?? "", "");
+        var mlSignal = new MlSignal(ml.Direction, ml.Confidence, ml.Prediction?.Accuracy, ml.Prediction?.ModelVersion ?? "offline", ml.Prediction?.HorizonCandles, ml.Prediction?.RawConfidence);
+        var stateSignal = new StateSignal(sensors.State.VelocityRegime, sensors.State.VelocityBpsPerSec, sensors.State.MomentumContribution);
 
-        var consensus = await _cmEngine.EvaluateMatrixAsync(cleanAsset, timeframe, tfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(cleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(mainPrices));
+        var consensus = await _cmEngine.EvaluateMatrixAsync(prep.CleanAsset, timeframe, prep.TfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(prep.CleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(prep.MainPrices));
         
-        // News calendar decoupled (Pocket Option OTC is 24/7 algorithmic feed unaffected by FX calendar)
-
         matrixSw.Stop();
-        traceLines.Add($"[6. Риск-контроль]    Нейросеть и фильтры сведены (Фаза: {state.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
+        traceLines.Add($"[6. Риск-контроль]    Нейросеть и фильтры сведены (Фаза: {sensors.State.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
 
-        var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(closedCandles, timeframe);
+        var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(prep.ClosedCandles, timeframe);
         traceLines.Add($"[6.8 Noise Gate]     {noiseAudit.RegimeDescription} (TR: {noiseAudit.LocalAtrBps:F2} bps, Порог: {noiseAudit.NoiseFloorBps:F1} bps, Z: {noiseAudit.ZScore:F2})");
 
-        // 8. Final Formatting & Data Integrity
         var dbSw = Stopwatch.StartNew();
-        var timeout = _timeoutEngine.CalculateTimeout(cleanAsset, timeframe, mainAtr, 1.0, smcResult, currentLivePrice, state, isForex);
+        var timeout = _timeoutEngine.CalculateTimeout(prep.CleanAsset, timeframe, sensors.MainAtr, 1.0, sensors.SmcResult, prep.CurrentLivePrice, sensors.State, prep.IsForex);
 
-        string finalHash = ComputeHash(candles);
-        if (finalHash == dataHash) {
+        string finalHash = ComputeHash(prep.RawCandles);
+        if (finalHash == prep.DataHash) {
             traceLines.Add($"[7. Data Integrity]  Проверка: Hash [{finalHash}] совпадает. Искажений нет. -> {dbSw.ElapsedMilliseconds}ms");
         } else {
-            traceLines.Add($"[7. Data Integrity]  [ВНИМАНИЕ! ДАННЫЕ ИСКАЖЕНЫ] Ожидался {dataHash}, получен {finalHash} -> {dbSw.ElapsedMilliseconds}ms");
+            traceLines.Add($"[7. Data Integrity]  [ВНИМАНИЕ! ДАННЫЕ ИСКАЖЕНЫ] Ожидался {prep.DataHash}, получен {finalHash} -> {dbSw.ElapsedMilliseconds}ms");
         }
 
-        // FIX: Передаём направления каждого источника для per-source калибровки
-        var sourceDirections = new Dictionary<string, string>
-        {
-            ["TechAnalysis"] = DirectionExtensions.FromScore(consensus.TaScore).ToSignal(),
-            ["SMC"]          = DirectionExtensions.FromScore(consensus.SmcScore).ToSignal(),
-            ["NeuralBrain"]    = mlDir,
-            ["LIGHTGBM"]       = mlDir,
-        };
-
-        // RECORD (Fire and forget) ONLY IF CONFIDENCE IS HIGH ENOUGH
-        int targetHorizon = timeout.TimeoutCandles;
-        if (isRiskBlocked)
+        if (sensors.IsRiskBlocked)
         {
              consensus = consensus with { 
                  Probability = 0, 
                  FinalDirection = "NEUTRAL",
-                 CombinedReasoningText = consensus.CombinedReasoningText + $"\n⚠️ Предупреждение риск-контроля: {gatekeeper.Reason}" 
+                 CombinedReasoningText = consensus.CombinedReasoningText + $"\n⚠️ Предупреждение риск-контроля: {sensors.Gatekeeper.Reason}" 
              };
         }
 
-        string? taTelemetry = null;
-        string? mlTelemetry = null;
-        string? smcTelemetry = null;
+        string effectiveMarketRegime = !string.IsNullOrEmpty(sensors.TaDetail.Regime) && sensors.TaDetail.Regime != "UNKNOWN"
+            ? sensors.TaDetail.Regime
+            : (sensors.State.VelocityRegime ?? ExtractMlRegime(ml.Prediction?.ModelVersion));
 
-        string effectiveMarketRegime = !string.IsNullOrEmpty(taDetail.Regime) && taDetail.Regime != "UNKNOWN"
-            ? taDetail.Regime
-            : (state.VelocityRegime ?? ExtractMlRegime(mlPrediction?.ModelVersion));
+        return new MatrixConsensusOutcome(
+            consensus,
+            noiseAudit,
+            mtfResult,
+            conflictPenalty,
+            taSignal,
+            smcSignal,
+            mlSignal,
+            stateSignal,
+            effectiveMarketRegime,
+            timeout
+        );
+    }
+
+    #endregion
+
+    #region Pipeline Stage 5: Execution Guards & Trade Recording
+
+    private async Task<ExecutionOutcome> EvaluateExecutionAndRecordTradeAsync(
+        PreparedCandleData prep,
+        string timeframe,
+        SensorsAndFeatures sensors,
+        NeuralBrainOutcome ml,
+        MatrixConsensusOutcome cm,
+        List<string> traceLines)
+    {
+        var dbSw = Stopwatch.StartNew();
+        int targetHorizon = cm.Timeout.TimeoutCandles;
+
+        var sourceDirections = new Dictionary<string, string>
+        {
+            ["TechAnalysis"] = DirectionExtensions.FromScore(cm.Consensus.TaScore).ToSignal(),
+            ["SMC"]          = DirectionExtensions.FromScore(cm.Consensus.SmcScore).ToSignal(),
+            ["NeuralBrain"]  = ml.Direction,
+            ["LIGHTGBM"]     = ml.Direction,
+        };
 
         var mlFeatures = new {
-            Candles = closedCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-            MtfCandles = closedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-            Smc = smcResult,
-            Ta = taDetail,
+            Candles = prep.ClosedCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+            MtfCandles = prep.ClosedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
+            Smc = sensors.SmcResult,
+            Ta = sensors.TaDetail,
             MacroContext = new {
-                MinutesToNews = minutesToNews ?? -1,
-                MarketRegime = effectiveMarketRegime,
-                VelocityRegime = state.VelocityRegime ?? "UNKNOWN",
-                Atr = mainAtr,
-                Adx = mainAdx,
-                Rsi = taDetail.RsiVal,
-                PriceEntropy = priceEntropy,
-                TrendMaturity = trendMaturity,
-                PricePositionPct = pricePositionPct,
-                BbSqueeze = bbSqueeze,
+                MinutesToNews = sensors.MinutesToNews ?? -1,
+                MarketRegime = cm.EffectiveMarketRegime,
+                VelocityRegime = sensors.State.VelocityRegime ?? "UNKNOWN",
+                Atr = sensors.MainAtr,
+                Adx = sensors.MainAdx,
+                Rsi = sensors.TaDetail.RsiVal,
+                PriceEntropy = sensors.PriceEntropy,
+                TrendMaturity = sensors.TrendMaturity,
+                PricePositionPct = sensors.PricePositionPct,
+                BbSqueeze = sensors.BbSqueeze,
                 HourUtc = DateTime.UtcNow.Hour,
                 DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
                 Session = TradeOutcomeTracker.ComputeSession(DateTime.UtcNow),
-                // V3 SOTA Deep Learning Anchors
-                DayRangePositionPct = dayAnchors.DayRangePositionPct,
-                DistToDayHighBps = dayAnchors.DistToDayHighBps,
-                DistToDayLowBps = dayAnchors.DistToDayLowBps,
-                AsianHigh = dayAnchors.AsianHigh,
-                AsianLow = dayAnchors.AsianLow,
-                DistToAsianHighBps = dayAnchors.DistToAsianHighBps,
-                DistToAsianLowBps = dayAnchors.DistToAsianLowBps,
-                DxyMomentum1mBps = dxyMetrics.DxyMomentum1mBps,
-                DxyMomentum5mBps = dxyMetrics.DxyMomentum5mBps,
-                BasketSyncScore = dxyMetrics.BasketSyncScore,
-                SpreadBps = liveSpreadBps,
-                TickCountLastCandle = closedCandles.Length > 0 ? closedCandles[^1].Volume : 0
+                DayRangePositionPct = sensors.DayAnchors.DayRangePositionPct,
+                DistToDayHighBps = sensors.DayAnchors.DistToDayHighBps,
+                DistToDayLowBps = sensors.DayAnchors.DistToDayLowBps,
+                AsianHigh = sensors.DayAnchors.AsianHigh,
+                AsianLow = sensors.DayAnchors.AsianLow,
+                DistToAsianHighBps = sensors.DayAnchors.DistToAsianHighBps,
+                DistToAsianLowBps = sensors.DayAnchors.DistToAsianLowBps,
+                DxyMomentum1mBps = sensors.DxyMetrics.DxyMomentum1mBps,
+                DxyMomentum5mBps = sensors.DxyMetrics.DxyMomentum5mBps,
+                BasketSyncScore = sensors.DxyMetrics.BasketSyncScore,
+                SpreadBps = sensors.LiveSpreadBps,
+                TickCountLastCandle = prep.ClosedCandles.Length > 0 ? prep.ClosedCandles[^1].Volume : 0
             },
             NeuralBrain = new {
-                Prob = consensus.MlProb,
-                Score = consensus.MlScoreRaw,
-                FinalProb = consensus.Probability
+                Prob = cm.Consensus.MlProb,
+                Score = cm.Consensus.MlScoreRaw,
+                FinalProb = cm.Consensus.Probability
             }
         };
         string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
 
-        // Compact JSON for SHADOW/HOLD background records: omits heavy 160-candle arrays (which are already stored in subminute_candles)
-        // Reduces row size from 18 KB to 0.8 KB (95.5% reduction), preventing PostgreSQL volume saturation.
         var shadowMlFeatures = new {
-            Smc = smcResult,
-            Ta = taDetail,
+            Smc = sensors.SmcResult,
+            Ta = sensors.TaDetail,
             MacroContext = mlFeatures.MacroContext,
             NeuralBrain = mlFeatures.NeuralBrain
         };
         string shadowFeaturesJson = System.Text.Json.JsonSerializer.Serialize(shadowMlFeatures);
 
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
-        bool isDirectional = consensus.FinalDirection is "BUY" or "PUT";
+        bool isSubminute = prep.TfLower.StartsWith("s");
+        bool isDirectional = cm.Consensus.FinalDirection is "BUY" or "PUT";
         bool isGlobalCbHalted = TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true;
         bool isSymbolQuarantined = TradeOutcomeTracker.CircuitBreaker != null
-            && TradeOutcomeTracker.CircuitBreaker.IsSymbolQuarantined(cleanAsset, timeframe, out _);
+            && TradeOutcomeTracker.CircuitBreaker.IsSymbolQuarantined(prep.CleanAsset, timeframe, out _);
         bool isCbHalted = isGlobalCbHalted || isSymbolQuarantined;
-        string sampleKey = $"{cleanAsset}_{timeframe}";
+        string sampleKey = $"{prep.CleanAsset}_{timeframe}";
 
         int requiredProb = 58;
-        bool htfAligned = mtfResult.DominantDirection == consensus.FinalDirection && isDirectional;
-        bool isGoldenSetup = mtfResult.IsGoldenSetup && (!isSubminute || noiseAudit.IsTradeableImpulse);
+        bool htfAligned = cm.MtfResult.DominantDirection == cm.Consensus.FinalDirection && isDirectional;
+        bool isGoldenSetup = cm.MtfResult.IsGoldenSetup && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse);
 
         bool isCooldownActive = false;
-        if (_lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var lastRealTime))
+        if (_lastRealTradeTimeByAsset.TryGetValue(prep.CleanAsset, out var lastRealTime))
         {
-            int tradeDurationSecs = Math.Max(targetHorizon * intervalSecs, intervalSecs);
+            int tradeDurationSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
             double requiredCooldownSecs = isS5 ? 20.0 : Math.Max(tradeDurationSecs + 2.0, 15.0);
             isCooldownActive = (DateTime.UtcNow - lastRealTime).TotalSeconds < requiredCooldownSecs;
         }
 
         bool isExhaustedOnS5 = false;
-        if (isS5 && closedCandles != null && closedCandles.Length >= 3)
+        if (isS5 && prep.ClosedCandles != null && prep.ClosedCandles.Length >= 3)
         {
-            var last3 = closedCandles.TakeLast(3).ToArray();
-            if (consensus.FinalDirection == "BUY" && last3.All(c => c.Close > c.Open) && taResult.rsiVal >= 64.0)
+            var last3 = prep.ClosedCandles.TakeLast(3).ToArray();
+            if (cm.Consensus.FinalDirection == "BUY" && last3.All(c => c.Close > c.Open) && sensors.TaResult.rsiVal >= 64.0)
                 isExhaustedOnS5 = true;
-            else if (consensus.FinalDirection == "PUT" && last3.All(c => c.Close < c.Open) && taResult.rsiVal <= 36.0)
+            else if (cm.Consensus.FinalDirection == "PUT" && last3.All(c => c.Close < c.Open) && sensors.TaResult.rsiVal <= 36.0)
                 isExhaustedOnS5 = true;
         }
 
-        bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (mlPrediction != null && mlDir is "BUY" or "PUT");
+        bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (ml.Prediction != null && ml.Direction is "BUY" or "PUT");
         bool canExecuteReal = isDirectional 
             && hasLiveNeuralSignal
-            && consensus.Probability >= requiredProb 
+            && cm.Consensus.Probability >= requiredProb 
             && !isCbHalted
             && !isCooldownActive
-            && (!isSubminute || noiseAudit.IsTradeableImpulse)
+            && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse)
             && (!isS5 || (htfAligned && !isExhaustedOnS5));
 
-        // Throttled shadow logging: only when DatasetCollectionMode is true or Circuit Breaker is actively halting,
-        // and throttled to at most 1 write per minute per asset/tf to avoid 140,000+ row/day DB saturation.
         bool allowShadowRecord = isDirectional
             && (_settings.DatasetCollectionMode || isCbHalted)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
+
+        double currentLivePrice = prep.CurrentLivePrice;
 
         if (canExecuteReal)
         {
             if (PriceFeed.UsePocketOption)
             {
-                if (PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshRealPrice, maxAgeSeconds: 1.5) && freshRealPrice > 0)
+                if (PocketOptionWebSocketStream.TryGetLivePrice(prep.CleanAsset, out double freshRealPrice, maxAgeSeconds: 1.5) && freshRealPrice > 0)
                 {
-                    // Asymmetric Slippage Gate: only block adverse slippage
-                    // BUY: freshRealPrice > currentLivePrice means buying at a higher/worse price.
-                    // PUT: freshRealPrice < currentLivePrice means selling at a lower/worse price.
-                    bool isAdverse = (consensus.FinalDirection == "BUY" && freshRealPrice > currentLivePrice) ||
-                                     (consensus.FinalDirection == "PUT" && freshRealPrice < currentLivePrice);
+                    bool isAdverse = (cm.Consensus.FinalDirection == "BUY" && freshRealPrice > currentLivePrice) ||
+                                     (cm.Consensus.FinalDirection == "PUT" && freshRealPrice < currentLivePrice);
                     double slippageBps = currentLivePrice > 0 ? (Math.Abs(freshRealPrice - currentLivePrice) / currentLivePrice * 10000.0) : double.PositiveInfinity;
 
                     if (isAdverse && (double.IsNaN(slippageBps) || double.IsInfinity(slippageBps) || slippageBps > 1.5))
                     {
                         _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: adverse slippage {SlippageBps:F2} bps exceeds 1.5 bps threshold (signal: {CurrentPrice}, fresh: {FreshPrice}, dir: {Dir})",
-                            cleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice, consensus.FinalDirection);
+                            prep.CleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice, cm.Consensus.FinalDirection);
                         traceLines.Add($"[8. SlippageGate]    [ОТКЛОНЕНО] Неблагоприятное проскальзывание {slippageBps:F2} bps превышает лимит 1.5 bps -> 0ms");
                         canExecuteReal = false;
                     }
@@ -450,10 +650,24 @@ public class MarketAnalysisOrchestrator(
                 }
                 else
                 {
-                    // Fail-Closed: If broker live price is stale (>1.5s) or unavailable, abort trade for capital preservation
                     _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: live price feed is stale (>1.5s) or unavailable. Trade aborted.",
-                        cleanAsset, timeframe);
+                        prep.CleanAsset, timeframe);
                     traceLines.Add("[8. SlippageGate]    [ОТКЛОНЕНО] Поток котировок брокера устарел (>1.5с) или недоступен -> 0ms");
+                    canExecuteReal = false;
+                }
+            }
+
+            if (canExecuteReal && PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue && prep.IntervalSecs > 0)
+            {
+                DateTime execRefTime = PocketOptionWebSocketStream.GetBrokerTimeUtc();
+                long bucketTicks = TimeSpan.FromSeconds(prep.IntervalSecs).Ticks;
+                DateTime barOpen = new DateTime(execRefTime.Ticks - (execRefTime.Ticks % bucketTicks), DateTimeKind.Utc);
+                double elapsedAfterMl = (execRefTime - barOpen).TotalSeconds;
+                double maxExecElapsed = prep.IntervalSecs switch { 5 => 2.2, 10 => 3.5, 15 => 4.5, _ => 6.0 };
+                if (elapsedAfterMl > maxExecElapsed)
+                {
+                    _logger.LogWarning("[ExpiryGuard] Aborted {Asset}/{Timeframe} after ML inference: +{Elapsed:F2}s into candle exceeds {Max:F1}s limit.",
+                        prep.CleanAsset, timeframe, elapsedAfterMl, maxExecElapsed);
                     canExecuteReal = false;
                 }
             }
@@ -461,94 +675,123 @@ public class MarketAnalysisOrchestrator(
             if (canExecuteReal)
             {
                 var nowUtc = DateTime.UtcNow;
-                int tradeDurSecs = Math.Max(targetHorizon * intervalSecs, intervalSecs);
+                int tradeDurSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
                 double reqCooldown = isS5 ? 20.0 : Math.Max(tradeDurSecs + 2.0, 15.0);
 
-                if (!_lastRealTradeTimeByAsset.TryAdd(cleanAsset, nowUtc))
+                while (true)
                 {
-                    if (_lastRealTradeTimeByAsset.TryGetValue(cleanAsset, out var prevTime) &&
-                        (nowUtc - prevTime).TotalSeconds < reqCooldown)
+                    if (_lastRealTradeTimeByAsset.TryGetValue(prep.CleanAsset, out var prevTime))
                     {
-                        _logger.LogWarning("[Orchestrator] Concurrency guard: Asset {Asset} trade claimed by concurrent worker. Aborting live execution.", cleanAsset);
-                        canExecuteReal = false;
+                        if ((nowUtc - prevTime).TotalSeconds < reqCooldown)
+                        {
+                            _logger.LogWarning("[Orchestrator] Concurrency guard: Asset {Asset} trade claimed by concurrent worker. Aborting live execution.", prep.CleanAsset);
+                            canExecuteReal = false;
+                            break;
+                        }
+                        if (_lastRealTradeTimeByAsset.TryUpdate(prep.CleanAsset, nowUtc, prevTime))
+                        {
+                            break;
+                        }
                     }
-                    else
+                    else if (_lastRealTradeTimeByAsset.TryAdd(prep.CleanAsset, nowUtc))
                     {
-                        _lastRealTradeTimeByAsset[cleanAsset] = nowUtc;
+                        break;
                     }
                 }
+
                 if (canExecuteReal)
                 {
                     _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
-                _ = SignalTracker.RecordPredictionAsync(consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, featuresJson,
-                    smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                    effectiveMarketRegime,
-                    state.VelocityRegime ?? "UNKNOWN",
-                    mainAtr, mainAdx, taResult.rsiVal,
-                    htfAligned,
-                    minutesToNews ?? -1,
-                    consensus.CombinedReasoningText ?? "",
-                    mlPrediction?.ModelVersion ?? "",
-                    mlPrediction?.Accuracy ?? 0.0,
-                    priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
-                dbSw.Stop();
-                traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
+                    _ = SignalTracker.RecordPredictionAsync(cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, featuresJson,
+                        sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", 1.0, "NEUTRAL",
+                        cm.EffectiveMarketRegime,
+                        sensors.State.VelocityRegime ?? "UNKNOWN",
+                        sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal,
+                        htfAligned,
+                        sensors.MinutesToNews ?? -1,
+                        cm.Consensus.CombinedReasoningText ?? "",
+                        ml.Prediction?.ModelVersion ?? "",
+                        ml.Prediction?.Accuracy ?? 0.0,
+                        sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
+                    dbSw.Stop();
+                    traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {cm.Consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
                 }
                 else
                 {
                     dbSw.Stop();
-                    traceLines.Add($"[8. Cooldown Guard]  Asset {cleanAsset} is claimed by concurrent worker -> {dbSw.ElapsedMilliseconds}ms");
+                    traceLines.Add($"[8. Cooldown Guard]  Asset {prep.CleanAsset} is claimed by concurrent worker -> {dbSw.ElapsedMilliseconds}ms");
                 }
             }
         }
         else if (allowShadowRecord)
         {
             _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
-            if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double freshShadowPrice) && freshShadowPrice > 0)
+            if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(prep.CleanAsset, out double freshShadowPrice) && freshShadowPrice > 0)
                 currentLivePrice = freshShadowPrice;
-            _ = SignalTracker.RecordPredictionAsync("SHADOW_" + consensus.FinalDirection, cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, shadowFeaturesJson,
-                smcResult.BosDirection ?? "NONE", smcResult.OrderBlockType != "NONE", smcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                effectiveMarketRegime,
-                state.VelocityRegime ?? "UNKNOWN",
-                mainAtr, mainAdx, taResult.rsiVal,
+            
+            _ = SignalTracker.RecordPredictionAsync("SHADOW_" + cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
+                sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", 1.0, "NEUTRAL",
+                cm.EffectiveMarketRegime,
+                sensors.State.VelocityRegime ?? "UNKNOWN",
+                sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal,
                 htfAligned,
-                minutesToNews ?? -1,
-                consensus.CombinedReasoningText ?? "",
-                mlPrediction?.ModelVersion ?? "",
-                mlPrediction?.Accuracy ?? 0.0,
-                priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
+                sensors.MinutesToNews ?? -1,
+                cm.Consensus.CombinedReasoningText ?? "",
+                ml.Prediction?.ModelVersion ?? "",
+                ml.Prediction?.Accuracy ?? 0.0,
+                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
             dbSw.Stop();
             string shadowReason = isGlobalCbHalted ? ", Global CB halt guard" : (isSymbolQuarantined ? ", Per-symbol quarantine guard" 
                 : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard" 
                 : (isS5 && !htfAligned ? ", S5 HTF divergence guard" 
                 : (isS5 && isCooldownActive ? ", S5 cooldown guard" 
-                : (isS5 && consensus.Probability < 58 ? ", S5 prob threshold guard" : "")))));
-            traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
+                : (isS5 && cm.Consensus.Probability < 58 ? ", S5 prob threshold guard" : "")))));
+            traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {cm.Consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else
         {
             dbSw.Stop();
-            
-            // Background HOLD sampling: ONLY when DatasetCollectionMode is explicitly active
             bool isPeriodicSampleDue = _settings.DatasetCollectionMode && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastTime) 
                                        || (DateTime.UtcNow - lastTime).TotalMinutes >= 5.0);
 
             if (isPeriodicSampleDue)
             {
-                    _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
-                _ = SignalTracker.RecordPredictionAsync("HOLD", cleanAsset, timeframe, currentLivePrice, targetHorizon, _fetcher.TimeframeSeconds(timeframe), isForex, sourceDirections, consensus.Probability, consensus.TaScore, consensus.SmcScore, consensus.MlProb, consensus.MlScoreRaw, shadowFeaturesJson,
-                    "NONE", false, false, 1.0, "NEUTRAL", effectiveMarketRegime, state.VelocityRegime ?? "UNKNOWN", mainAtr, mainAdx, taResult.rsiVal, false, minutesToNews ?? -1, "", "", 0.0, priceEntropy, trendMaturity, pricePositionPct, bbSqueeze, taTelemetry, mlTelemetry, smcTelemetry);
-                traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения ({consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");
+                _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
+                _ = SignalTracker.RecordPredictionAsync("HOLD", prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
+                    "NONE", false, false, 1.0, "NEUTRAL", cm.EffectiveMarketRegime, sensors.State.VelocityRegime ?? "UNKNOWN", sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal, false, sensors.MinutesToNews ?? -1, "", "", 0.0, sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
+                traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения ({cm.Consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");
             }
             else
             {
-                traceLines.Add($"[8. База данных]     ПРОПУСК: Сигнал не прошел критерии входа ({consensus.Probability}%). Ожидаем >= {requiredProb}% -> {dbSw.ElapsedMilliseconds}ms");
+                traceLines.Add($"[8. База данных]     ПРОПУСК: Сигнал не прошел критерии входа ({cm.Consensus.Probability}%). Ожидаем >= {requiredProb}% -> {dbSw.ElapsedMilliseconds}ms");
             }
         }
 
-        sw.Stop();
-        
-        // Print Pipeline Trace Block
+        return new ExecutionOutcome(
+            currentLivePrice,
+            isGoldenSetup,
+            isSubminute,
+            isS5,
+            isDirectional,
+            isCbHalted,
+            isExhaustedOnS5,
+            htfAligned,
+            isCooldownActive
+        );
+    }
+
+    #endregion
+
+    #region Pipeline Stage 6: Console Trace Logging
+
+    private static void LogPipelineTrace(
+        string traceId,
+        string cleanAsset,
+        string timeframe,
+        List<string> traceLines,
+        ConsensusDecision consensus,
+        long elapsedMs)
+    {
         var sbTrace = new System.Text.StringBuilder();
         sbTrace.AppendLine("=================================================");
         sbTrace.AppendLine($"[PIPELINE TRACE: {traceId}] Запрос сигнала: {cleanAsset} {timeframe}");
@@ -556,15 +799,28 @@ public class MarketAnalysisOrchestrator(
             sbTrace.AppendLine(line);
         }
         sbTrace.AppendLine("-------------------------------------------------");
-        sbTrace.AppendLine($"ИТОГ: Время: {sw.ElapsedMilliseconds}ms | Результат: {consensus.FinalDirection} {consensus.Probability}%");
+        sbTrace.AppendLine($"ИТОГ: Время: {elapsedMs}ms | Результат: {consensus.FinalDirection} {consensus.Probability}%");
         sbTrace.AppendLine("=================================================");
         Console.WriteLine(sbTrace.ToString());
+    }
 
+    #endregion
+
+    #region Pipeline Stage 7: Assemble Response DTO
+
+    private async Task<AnalysisResponseDto> BuildResponseDtoAsync(
+        PreparedCandleData prep,
+        string timeframe,
+        SensorsAndFeatures sensors,
+        NeuralBrainOutcome ml,
+        MatrixConsensusOutcome cm,
+        ExecutionOutcome exec)
+    {
         var stats = await SignalTracker.GetOverallStatsAsync();
-        var assetStats = await SignalTracker.GetStatsAsync(cleanAsset, timeframe);
+        var assetStats = await SignalTracker.GetStatsAsync(prep.CleanAsset, timeframe);
 
         string uiMarketSession = "ВНЕБИРЖЕВАЯ (OTC)";
-        if (!cleanAsset.Contains("BTC") && !cleanAsset.Contains("ETH") && !cleanAsset.Contains("SOL"))
+        if (!prep.CleanAsset.Contains("BTC") && !prep.CleanAsset.Contains("ETH") && !prep.CleanAsset.Contains("SOL"))
         {
             int h = DateTime.UtcNow.Hour;
             if (h >= 21 || h < 2) uiMarketSession = "Ночь (Тихий рынок)";
@@ -579,40 +835,39 @@ public class MarketAnalysisOrchestrator(
         }
 
         string uiMarketPhase = "Боковик (Флэт)";
-        string regime = state.VelocityRegime ?? "";
+        string regime = sensors.State.VelocityRegime ?? "";
         if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс";
         else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс";
         else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Коррекция)";
-        else if (taResult.rsiVal >= 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Сброс)" : "Бычий тренд (Пологий)";
-        else if (taResult.rsiVal <= 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Пологий)";
-        else if (taResult.rsiVal >= 54) uiMarketPhase = "Умеренный рост";
-        else if (taResult.rsiVal <= 46) uiMarketPhase = "Умеренное падение";
+        else if (sensors.TaResult.rsiVal >= 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Сброс)" : "Бычий тренд (Пологий)";
+        else if (sensors.TaResult.rsiVal <= 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Пологий)";
+        else if (sensors.TaResult.rsiVal >= 54) uiMarketPhase = "Умеренный рост";
+        else if (sensors.TaResult.rsiVal <= 46) uiMarketPhase = "Умеренное падение";
         else uiMarketPhase = "Истинный Флэт";
 
         string uiMarketEntropy = "В норме (Безопасно)";
-        double vel = Math.Abs(state.VelocityBpsPerSec);
-        bool isSub = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
-        double dangerVel = isSub ? 0.3 : 3.0; 
-        double deadVel   = isSub ? 0.02 : 0.1;
+        double vel = Math.Abs(sensors.State.VelocityBpsPerSec);
+        double dangerVel = exec.IsSubminute ? 0.3 : 3.0; 
+        double deadVel   = exec.IsSubminute ? 0.02 : 0.1;
 
         if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
         else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
 
         string uiSmcDirection = 
-            (smcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
-            (smcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 
-            (smcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : 
-            (smcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : 
-            (smcSignal.OrderBlockType ?? "").Contains("BULLISH") ? "BUY" : 
-            (smcSignal.OrderBlockType ?? "").Contains("BEARISH") ? "PUT" : 
-            (smcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
-            (smcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
+            (cm.SmcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
+            (cm.SmcSignal.SweepDirection ?? "").Contains("BEARISH") ? "PUT" : 
+            (cm.SmcSignal.BosDirection ?? "").Contains("BULLISH") ? "BUY" : 
+            (cm.SmcSignal.BosDirection ?? "").Contains("BEARISH") ? "PUT" : 
+            (cm.SmcSignal.OrderBlockType ?? "").Contains("BULLISH") ? "BUY" : 
+            (cm.SmcSignal.OrderBlockType ?? "").Contains("BEARISH") ? "PUT" : 
+            (cm.SmcSignal.FvgType ?? "").Contains("BULLISH") ? "BUY" : 
+            (cm.SmcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
             "NEUTRAL";
-        int uiSmcConfidence = uiSmcDirection == "NEUTRAL" ? 50 : 50 + (int)Math.Clamp(Math.Max(5, Math.Abs(consensus.SmcScore * 15.0)), 5, 15);
+        int uiSmcConfidence = uiSmcDirection == "NEUTRAL" ? 50 : 50 + (int)Math.Clamp(Math.Max(5, Math.Abs(cm.Consensus.SmcScore * 15.0)), 5, 15);
 
-        // ── AI Copilot Tactical Synthesis ──
+        // Copilot Tactical Advice
         CopilotAdviceDto copilotAdvice;
-        if (isCbHalted)
+        if (exec.IsCbHalted)
         {
             copilotAdvice = new CopilotAdviceDto
             {
@@ -622,41 +877,41 @@ public class MarketAnalysisOrchestrator(
                 QualityScore = 35
             };
         }
-        else if (isGoldenSetup && isDirectional && consensus.Probability >= 57)
+        else if (exec.IsGoldenSetup && exec.IsDirectional && cm.Consensus.Probability >= 57)
         {
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "GOLDEN",
                 Title = "⭐ Снайперский импульс (Golden Setup)",
-                Message = $"Все 3 уровня анализа синхронны: нейросеть ({mlPrediction?.ModelVersion ?? "Neural Brain"}), контекст старшего ТФ и импульс волатильности ({noiseAudit.LocalAtrBps:F1} bps) подтверждают {consensus.FinalDirection}. Порог шума преодолен.",
+                Message = $"Все 3 уровня анализа синхронны: нейросеть ({ml.Prediction?.ModelVersion ?? "Neural Brain"}), контекст старшего ТФ и импульс волатильности ({cm.NoiseAudit.LocalAtrBps:F1} bps) подтверждают {cm.Consensus.FinalDirection}. Порог шума преодолен.",
                 QualityScore = 96
             };
         }
-        else if (isSubminute && !noiseAudit.IsTradeableImpulse)
+        else if (exec.IsSubminute && !cm.NoiseAudit.IsTradeableImpulse)
         {
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "CAUTION",
-                Title = $"⚡ Вход в консолидации ({consensus.FinalDirection})",
-                Message = $"Амплитуда свечей ({noiseAudit.LocalAtrBps:F2} bps) ниже порога шума брокера ({noiseAudit.NoiseFloorBps:F1} bps). Направление — {consensus.FinalDirection} ({consensus.Probability}%). Ожидайте смену свечи для входа.",
-                RecommendedAsset = cleanAsset,
+                Title = $"⚡ Вход в консолидации ({cm.Consensus.FinalDirection})",
+                Message = $"Амплитуда свечей ({cm.NoiseAudit.LocalAtrBps:F2} bps) ниже порога шума брокера ({cm.NoiseAudit.NoiseFloorBps:F1} bps). Направление — {cm.Consensus.FinalDirection} ({cm.Consensus.Probability}%). Ожидайте смену свечи для входа.",
+                RecommendedAsset = prep.CleanAsset,
                 RecommendedTf = timeframe.ToUpper(),
-                QualityScore = Math.Min(65, consensus.Probability)
+                QualityScore = Math.Min(65, cm.Consensus.Probability)
             };
         }
-        else if (conflictPenalty < 1.0)
+        else if (cm.ConflictPenalty < 1.0)
         {
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "CONFLICT",
                 Title = "⚠️ Конфликт таймфреймов",
                 Message = $"На {timeframe} локальный импульс спорит со старшим трендом. Опасность ложного пробоя повышена.",
-                RecommendedAsset = cleanAsset,
+                RecommendedAsset = prep.CleanAsset,
                 RecommendedTf = "M1",
                 QualityScore = 55
             };
         }
-        else if (isSub && vel >= dangerVel)
+        else if (exec.IsSubminute && vel >= dangerVel)
         {
             copilotAdvice = new CopilotAdviceDto
             {
@@ -668,24 +923,24 @@ public class MarketAnalysisOrchestrator(
                 QualityScore = 50
             };
         }
-        else if (minutesToNews.HasValue && minutesToNews.Value >= 0 && minutesToNews.Value <= 15)
+        else if (sensors.MinutesToNews.HasValue && sensors.MinutesToNews.Value >= 0 && sensors.MinutesToNews.Value <= 15)
         {
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "NEWS_RISK",
                 Title = "📰 Высокая новостная волатильность",
-                Message = $"Через {minutesToNews.Value} мин выходит важная макро-новость. Спреды расширены, крупные игроки сокращают ликвидность.",
+                Message = $"Через {sensors.MinutesToNews.Value} мин выходит важная макро-новость. Спреды расширены, крупные игроки сокращают ликвидность.",
                 QualityScore = 48
             };
         }
-        else if (!isDirectional || consensus.Probability <= 52)
+        else if (!exec.IsDirectional || cm.Consensus.Probability <= 52)
         {
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "CAUTION",
-                Title = $"⚡ Вход в консолидации ({consensus.FinalDirection})",
-                Message = $"Рынок в стадии накопления ({uiMarketPhase}). Ожидайте смену свечи для входа {consensus.FinalDirection} ({consensus.Probability}%).",
-                RecommendedAsset = cleanAsset,
+                Title = $"⚡ Вход в консолидации ({cm.Consensus.FinalDirection})",
+                Message = $"Рынок в стадии накопления ({uiMarketPhase}). Ожидайте смену свечи для входа {cm.Consensus.FinalDirection} ({cm.Consensus.Probability}%).",
+                RecommendedAsset = prep.CleanAsset,
                 RecommendedTf = timeframe.ToUpper(),
                 QualityScore = 65
             };
@@ -695,68 +950,66 @@ public class MarketAnalysisOrchestrator(
             copilotAdvice = new CopilotAdviceDto
             {
                 Status = "NORMAL",
-                Title = $"🎯 Системный тренд ({consensus.FinalDirection})",
-                Message = $"Структура рынка устойчивая ({uiMarketPhase}). Математическое ожидание подтверждено нейросетью ({consensus.Probability}%).",
-                QualityScore = (int)Math.Clamp(consensus.Probability + 25, 75, 92)
+                Title = $"🎯 Системный тренд ({cm.Consensus.FinalDirection})",
+                Message = $"Структура рынка устойчивая ({uiMarketPhase}). Математическое ожидание подтверждено нейросетью ({cm.Consensus.Probability}%).",
+                QualityScore = (int)Math.Clamp(cm.Consensus.Probability + 25, 75, 92)
             };
         }
 
-        int tfSec = _fetcher.TimeframeSeconds(timeframe);
-        if (tfSec > 0 && isSubminute && copilotAdvice != null && isDirectional)
+        int tfSec = prep.IntervalSecs;
+        if (tfSec > 0 && exec.IsSubminute && copilotAdvice != null && exec.IsDirectional)
         {
             long nowUnixSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             long nextCandleBoundary = (nowUnixSec - (nowUnixSec % tfSec)) + tfSec;
             double secRemaining = Math.Max(0.1, nextCandleBoundary - (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0));
             string timingAlert = secRemaining > 1.2
-                ? $"⏱ ВХОД НА СМЕНЕ СВЕЧИ: через {secRemaining:F1} сек (в {DateTimeOffset.FromUnixTimeSeconds(nextCandleBoundary).UtcDateTime:HH:mm:ss} UTC). Приготовьтесь нажать {consensus.FinalDirection}!"
-                : $"⚡ ВХОД СЕЙЧАС: новая свеча открыта! Нажимайте {consensus.FinalDirection} немедленно!";
+                ? $"⏱ ВХОД НА СМЕНЕ СВЕЧИ: через {secRemaining:F1} сек (в {DateTimeOffset.FromUnixTimeSeconds(nextCandleBoundary).UtcDateTime:HH:mm:ss} UTC). Приготовьтесь нажать {cm.Consensus.FinalDirection}!"
+                : $"⚡ ВХОД СЕЙЧАС: новая свеча открыта! Нажимайте {cm.Consensus.FinalDirection} немедленно!";
             copilotAdvice = copilotAdvice with { Message = timingAlert + "\n\n" + copilotAdvice.Message };
         }
 
         ValutaMetrics.PredictionsTotal.WithLabels(
-            cleanAsset,
+            prep.CleanAsset,
             timeframe,
-            consensus.FinalDirection ?? "UNKNOWN",
-            mlPrediction?.ModelVersion ?? "NONE"
+            cm.Consensus.FinalDirection ?? "UNKNOWN",
+            ml.Prediction?.ModelVersion ?? "NONE"
         ).Inc();
 
         return new AnalysisResponseDto
         {
-            tfConflict = conflictPenalty < 1.0,
+            tfConflict = cm.ConflictPenalty < 1.0,
             uiMarketSession = uiMarketSession,
             uiMarketPhase = uiMarketPhase,
             uiMarketEntropy = uiMarketEntropy,
-            direction = isRiskBlocked ? "NEUTRAL" : (consensus.FinalDirection is "BUY" or "PUT" ? consensus.FinalDirection : "NEUTRAL"),
-            probability = isRiskBlocked ? 0 : Math.Clamp(consensus.Probability, 50, 92),
-            duration = timeout.TimeoutText,
-            expiryCandles = timeout.TimeoutCandles,
-            adaptiveReasoning = consensus.CombinedReasoningText ?? string.Empty,
-            taDirection = consensus.TaScore > 0.02 ? "BUY" : consensus.TaScore < -0.02 ? "PUT" : "NEUTRAL",
-            taConfidence = 50 + (int)Math.Clamp(Math.Abs(consensus.TaScore * 15.0), 0, 15),
+            direction = sensors.IsRiskBlocked ? "NEUTRAL" : (cm.Consensus.FinalDirection is "BUY" or "PUT" ? cm.Consensus.FinalDirection : "NEUTRAL"),
+            probability = sensors.IsRiskBlocked ? 0 : Math.Clamp(cm.Consensus.Probability, 50, 92),
+            duration = cm.Timeout.TimeoutText,
+            expiryCandles = cm.Timeout.TimeoutCandles,
+            adaptiveReasoning = cm.Consensus.CombinedReasoningText ?? string.Empty,
+            taDirection = cm.Consensus.TaScore > 0.02 ? "BUY" : cm.Consensus.TaScore < -0.02 ? "PUT" : "NEUTRAL",
+            taConfidence = 50 + (int)Math.Clamp(Math.Abs(cm.Consensus.TaScore * 15.0), 0, 15),
             ofDirection = "NEUTRAL",
             ofConfidence = 0,
             smcDirection = uiSmcDirection,
             smcConfidence = uiSmcConfidence,
-            lgbmDirection = mlSignal.Direction,
-            lgbmConfidence = (int)Math.Clamp(Math.Round(mlSignal.Confidence * 100), 50, 99),
+            lgbmDirection = cm.MlSignal.Direction,
+            lgbmConfidence = (int)Math.Clamp(Math.Round(cm.MlSignal.Confidence * 100), 50, 99),
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
             signalsVerifiedAsset = assetStats.Verified,
-            // TA indicators for UI display (resRsi, resEma, resVol elements)
-            rsi = Math.Round(GetSafeLimit(taResult.rsiVal), 1),
-            ema = Math.Round(GetSafeLimit(taResult.hmaVal), isForex ? 5 : 2),
-            volumeStrength = Math.Round(GetSafeLimit(taResult.volStrengthVal), 2),
-            atr = Math.Round(GetSafeLimit(mainAtr), isForex ? 5 : 2),
-            chartData = mainPrices,
-            chartOhlc = candles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
-            goldenSetup = isGoldenSetup,
-            confluenceLabel = mtfResult.ConfluenceLabel,
-            confluenceRatio = mtfResult.ConfluenceRatio,
-            lgbmModelVersion = mlPrediction?.ModelVersion ?? "offline",
+            rsi = Math.Round(GetSafeLimit(sensors.TaResult.rsiVal), 1),
+            ema = Math.Round(GetSafeLimit(sensors.TaResult.hmaVal), prep.IsForex ? 5 : 2),
+            volumeStrength = Math.Round(GetSafeLimit(sensors.TaResult.volStrengthVal), 2),
+            atr = Math.Round(GetSafeLimit(sensors.MainAtr), prep.IsForex ? 5 : 2),
+            chartData = prep.MainPrices,
+            chartOhlc = prep.RawCandles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
+            goldenSetup = exec.IsGoldenSetup,
+            confluenceLabel = cm.MtfResult.ConfluenceLabel,
+            confluenceRatio = cm.MtfResult.ConfluenceRatio,
+            lgbmModelVersion = ml.Prediction?.ModelVersion ?? "offline",
             copilotAdvice = copilotAdvice
         };
     }
+
+    #endregion
 }
-
-
-

@@ -103,7 +103,7 @@ public static class LatencyProbe
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var resp = await client.GetAsync(new Uri(PingTarget));
                 sw.Stop();
-                if (resp.Headers.Date.HasValue)
+                if (resp.Headers.Date.HasValue && (!PriceFeed.UsePocketOption || PocketOptionWebSocketStream.LastBrokerTickUtc == DateTime.MinValue))
                 {
                     var drift = DateTime.UtcNow - resp.Headers.Date.Value.UtcDateTime;
                     ValutaBot.MiniApp.Services.ClockSkewMonitor.RecordHttpDrift(drift);

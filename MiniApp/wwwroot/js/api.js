@@ -17,13 +17,22 @@ import {
 
 function resolveAuthData() {
     try {
-        if (typeof getAuthHeader === 'function') return getAuthHeader();
+        if (typeof getAuthHeader === 'function') {
+            const h = getAuthHeader();
+            if (h) return h;
+        }
     } catch (e) {}
     try {
-        if (typeof tg !== 'undefined' && tg && tg.initData) return tg.initData;
+        const webApp = tg || (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp);
+        if (webApp && webApp.initData) return webApp.initData;
         if (typeof getCustomInitData === 'function') return getCustomInitData();
     } catch (e) {}
     return '';
+}
+
+function getSafeLocationUrl() {
+    if (typeof window === 'undefined' || !window.location) return 'unknown';
+    return `${window.location.origin}${window.location.pathname}`;
 }
 
 import { 
@@ -63,9 +72,9 @@ const WS_WATCHDOG_TIMEOUT_MS = 12000;
 function resetWsWatchdog() {
     if (wsWatchdogTimer) clearTimeout(wsWatchdogTimer);
     wsWatchdogTimer = setTimeout(() => {
-        if (priceSocket && priceSocket.readyState === WebSocket.OPEN) {
-            console.warn('[WS] Watchdog triggered: no tick data in 12s, reconnecting zombie socket...');
-            try { priceSocket.close(); } catch (e) {}
+        if (priceSocket && (priceSocket.readyState === WebSocket.OPEN || priceSocket.readyState === WebSocket.CONNECTING)) {
+            console.warn('[WS] Watchdog triggered: socket stalled in state', priceSocket.readyState);
+            try { priceSocket.close(4000, 'Watchdog timeout'); } catch (e) {}
         }
     }, WS_WATCHDOG_TIMEOUT_MS);
 }
@@ -85,10 +94,28 @@ export function resetWebSocketBackoff() {
     }
 }
 
+function scheduleWsReconnect(valEl) {
+    if (document.hidden) return;
+    reconnectAttempts++;
+    const baseDelay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 15000);
+    const jitter = Math.floor(Math.random() * 800);
+    const finalDelay = baseDelay + jitter;
+    if (valEl) valEl.innerText = 'ПЕРЕПОДКЛЮЧЕНИЕ...';
+    if (reconnectAttempts >= 2) {
+        showNetworkBanner(`Переподключение к потоку котировок (попытка ${reconnectAttempts})...`);
+    }
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = setTimeout(() => {
+        if (!document.hidden && (typeof navigator === 'undefined' || navigator.onLine)) {
+            initPriceWebSocket();
+        }
+    }, finalDelay);
+}
+
 export function initPriceWebSocket() {
     closePriceWebSocket();
 
-    const isSecondsTf = currentTf && currentTf.startsWith('s');
+    const isSecondsTf = Boolean(currentTf && currentTf.startsWith('s'));
     const livePriceContainer = document.getElementById('livePriceContainer');
     
     if (!isSecondsTf) {
@@ -116,13 +143,18 @@ export function initPriceWebSocket() {
         const sock = new WebSocket(wsUrl);
         setPriceSocket(sock);
 
+        // Start watchdog immediately to guard against blackholed TCP SYN handshakes
+        resetWsWatchdog();
+
         sock.onopen = function() {
+            if (priceSocket !== sock) return;
             reconnectAttempts = 0;
             hideNetworkBanner();
             resetWsWatchdog();
         };
 
         sock.onmessage = function(event) {
+            if (priceSocket !== sock) return;
             resetWsWatchdog();
             try {
                 const data = JSON.parse(event.data);
@@ -139,22 +171,10 @@ export function initPriceWebSocket() {
         };
 
         sock.onclose = function(e) {
+            if (priceSocket !== sock) return;
             clearWsWatchdog();
             if (e.code === 1000 || document.hidden) return;
-
-            reconnectAttempts++;
-            const baseDelay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 15000);
-            const jitter = Math.floor(Math.random() * 800);
-            const finalDelay = baseDelay + jitter;
-
-            if (valEl) valEl.innerText = 'ПЕРЕПОДКЛЮЧЕНИЕ...';
-
-            clearTimeout(reconnectTimeout);
-            reconnectTimeout = setTimeout(() => {
-                if (!document.hidden && (typeof navigator === 'undefined' || navigator.onLine)) {
-                    initPriceWebSocket();
-                }
-            }, finalDelay);
+            scheduleWsReconnect(valEl);
         };
 
         sock.onerror = function(err) {
@@ -162,6 +182,7 @@ export function initPriceWebSocket() {
         };
     } catch (err) {
         console.warn('Failed to create WebSocket:', err);
+        scheduleWsReconnect(valEl);
     }
 }
 
@@ -180,7 +201,7 @@ export function closePriceWebSocket() {
             if (priceSocket.readyState === WebSocket.OPEN || priceSocket.readyState === WebSocket.CONNECTING) {
                 priceSocket.close(1000);
             }
-        } catch(e) {}
+        } catch (e) {}
         setPriceSocket(null);
     }
     setLastPriceVal(0);
@@ -188,26 +209,25 @@ export function closePriceWebSocket() {
 
 export async function syncTime() {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
     try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-
         const r = await fetch('/api/time', {
             headers: {
                 'X-Telegram-Init-Data': resolveAuthData()
             },
             signal: controller.signal
         });
-        clearTimeout(timeoutId);
-
         if (r.ok) {
             const d = await r.json();
-            if (d && d.t) {
-                setTimeOffset(d.t - Date.now());
+            if (d && Number.isFinite(Number(d.t))) {
+                setTimeOffset(Number(d.t) - Date.now());
             }
         }
-    } catch(e) { 
-        setTimeOffset(0); 
+    } catch (e) {
+        // Preserve previous valid timeOffset on transient 4G drops instead of resetting to 0
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
@@ -249,7 +269,7 @@ export async function executeAnalysis() {
     chartOhlcAbortController = new AbortController();
 
     // Fetch early OHLC for the animated chart during the analysis phase
-    fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}`, {
+    fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${encodeURIComponent(currentTf)}`, {
         headers: {
             'X-Telegram-Init-Data': resolveAuthData()
         },
@@ -257,7 +277,7 @@ export async function executeAnalysis() {
     })
         .then(r => r.ok ? r.json() : [])
         .then(ohlc => {
-            if (ohlc && ohlc.length) {
+            if (Array.isArray(ohlc) && ohlc.length) {
                 updateAiChartData(ohlc);
             }
         })
@@ -268,7 +288,7 @@ export async function executeAnalysis() {
     const timeoutId = setTimeout(() => controller.abort(), 18000); // 18s fail-safe timeout
 
     try {
-        const res = await fetch(`/api/analyze?asset=${encodeURIComponent(currentAsset)}&timeframe=${currentTf}&_=${Date.now()}`, {
+        const res = await fetch(`/api/analyze?asset=${encodeURIComponent(currentAsset)}&timeframe=${encodeURIComponent(currentTf)}&_=${Date.now()}`, {
             headers: {
                 'X-Telegram-Init-Data': resolveAuthData()
             },
@@ -278,15 +298,21 @@ export async function executeAnalysis() {
         clearTimeout(timeoutId);
 
         if (!res.ok) {
-            let errorText = `Сервер вернул статус ${res.status} (${res.statusText || 'Error'})`;
+            let errorText = `HTTP_${res.status}: ${res.statusText || 'Error'}`;
             try {
                 const errData = await res.json();
-                if (errData.error) errorText = errData.error;
-                else if (errData.detail) errorText = errData.detail;
-                else if (errData.title) errorText = `${errData.title} (HTTP ${res.status})`;
+                if (errData && errData.error) errorText = `${errData.error} (HTTP ${res.status})`;
+                else if (errData && errData.detail) errorText = `${errData.detail} (HTTP ${res.status})`;
+                else if (errData && errData.title) errorText = `${errData.title} (HTTP ${res.status})`;
             } catch (_) {
-                if (res.status === 502 || res.status === 503) {
-                    errorText = 'Сервер обновляется или временно недоступен (502/503)';
+                if (res.status === 502 || res.status === 503 || res.status === 504) {
+                    errorText = `Сервер обновляется или временно недоступен (HTTP ${res.status})`;
+                } else if (res.status === 500) {
+                    errorText = 'Internal Server Error (HTTP 500)';
+                } else if (res.status === 401 || res.status === 403) {
+                    errorText = `Unauthorized (HTTP ${res.status})`;
+                } else if (res.status === 429) {
+                    errorText = 'Too many requests (HTTP 429)';
                 }
             }
             throw new Error(errorText);
@@ -296,7 +322,7 @@ export async function executeAnalysis() {
             ? (res.headers.get('content-type') || '')
             : 'application/json';
         if (contentType && !contentType.includes('application/json')) {
-            throw new Error(`Сервер вернул статус ${res.status} (${res.statusText || 'Неверный ответ'})`);
+            throw new Error(`Некорректный формат ответа прокси (HTTP ${res.status})`);
         }
 
         const rawData = await res.json();
@@ -327,7 +353,8 @@ export async function executeAnalysis() {
 
         // 2. Generic Error Check
         if (data.error) {
-            const debugMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${window.location.href}`;
+            const safeLoc = getSafeLocationUrl();
+            const debugMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${safeLoc}`;
             renderError(data.error, debugMsg);
             return;
         }
@@ -612,11 +639,22 @@ export async function executeAnalysis() {
         stopStatusBar();
         if (sphere) sphere.classList.remove('analyzing');
 
-        const errorMsg = e.name === 'AbortError' ? 'Превышен лимит времени ответа сервера (18с)' : (e.message || 'Ошибка обработки анализа');
-        const catchMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${window.location.href}`;
+        const isAuthError = Boolean(e && e.message && (e.message.includes('HTTP 401') || e.message.includes('HTTP_401') || e.message.includes('auth_date') || e.message.includes('authorization') || e.message.includes('Access Denied')));
+        let errorMsg;
+        if (e.name === 'AbortError') {
+            errorMsg = 'Превышен лимит времени ответа сервера (18с)';
+        } else if (e instanceof TypeError && (e.message.includes('fetch') || e.message.includes('NetworkError') || e.message.includes('Failed to fetch'))) {
+            errorMsg = 'Сетевая ошибка: проверьте интернет-соединение или доступ к серверу';
+        } else if (isAuthError) {
+            errorMsg = 'Сессия устарела или доступ не авторизован. Перезапустите бота командой /start в Telegram.';
+        } else {
+            errorMsg = e.message || 'Ошибка обработки анализа';
+        }
+        const safeLoc = getSafeLocationUrl();
+        const catchMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${safeLoc}`;
         renderError(errorMsg, catchMsg);
         
-        if (window.Sentry) {
+        if (window.Sentry && !isAuthError) {
             Sentry.captureException(e, {
                 extra: {
                     asset: currentAsset,

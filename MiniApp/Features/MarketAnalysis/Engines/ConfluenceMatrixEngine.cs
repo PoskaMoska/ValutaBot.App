@@ -24,6 +24,17 @@ public class ConfluenceMatrixEngine(
     // 4D Matrix — fetch mode (always makes 3 HTTP requests)
     // Named distinctly from the smart-reuse overload to make fallback behavior explicit.
     // Only called directly when no pre-loaded candles are available.
+    private MiniAppController.OhlcCandle[] StripUnclosedCandle(MiniAppController.OhlcCandle[] candles, string tf)
+    {
+        if (candles == null || candles.Length <= 1) return candles ?? Array.Empty<MiniAppController.OhlcCandle>();
+        int intervalSecs = fetcher.TimeframeSeconds(tf);
+        DateTime refNow = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+            : DateTime.UtcNow;
+        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= refNow;
+        return isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
+    }
+
     private async Task<ConfluenceMatrixResult> Evaluate4DMatrixFetchAsync(
         string asset,
         string primaryTimeframe,
@@ -45,9 +56,9 @@ public class ConfluenceMatrixEngine(
             var macroCandles   = await macroTask;
             
             // Drop unclosed candles to prevent Train-Serve Skew
-            if (microCandles.Length > 1) microCandles = microCandles.Take(microCandles.Length - 1).ToArray();
-            if (primaryCandles.Length > 1) primaryCandles = primaryCandles.Take(primaryCandles.Length - 1).ToArray();
-            if (macroCandles.Length > 1) macroCandles = macroCandles.Take(macroCandles.Length - 1).ToArray();
+            microCandles   = StripUnclosedCandle(microCandles, microTf);
+            primaryCandles = StripUnclosedCandle(primaryCandles, primaryTf);
+            macroCandles   = StripUnclosedCandle(macroCandles, macroTf);
 
             string dirMicro   = ScoreDirectionFromCandles(microCandles, microCandles.Select(c => c.Close).ToArray(), microCandles.Select(c => c.Volume).ToArray(), microTf, asset);
             string dirPrimary = ScoreDirectionFromCandles(primaryCandles, primaryCandles.Select(c => c.Close).ToArray(), primaryCandles.Select(c => c.Volume).ToArray(), primaryTf, asset);
@@ -230,9 +241,7 @@ public class ConfluenceMatrixEngine(
                     // Fetch missing TF
                     var candlesRaw = await fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, targetTf, asset, 50);
                     // Drop the unclosed live candle, just like TA and ML do, to prevent massive indicators skew.
-                    if (candlesRaw.Length > 1) {
-                        candlesRaw = candlesRaw.Take(candlesRaw.Length - 1).ToArray();
-                    }
+                    candlesRaw = StripUnclosedCandle(candlesRaw, targetTf);
                     var pricesRaw = candlesRaw.Select(c => c.Close).ToArray();
                     var volsRaw = candlesRaw.Select(c => c.Volume).ToArray();
                     return ScoreDirectionFromCandles(candlesRaw, pricesRaw, volsRaw, targetTf, asset);
@@ -390,7 +399,9 @@ public class ConfluenceMatrixEngine(
         {
             // Pure Neural Decision
             finalDir = mlSignal!.Direction;
-            double neuralConf = mlSignal.Confidence > 0 ? mlSignal.Confidence : 0.50;
+            double neuralConf = (mlSignal.Confidence > 0 && !double.IsNaN(mlSignal.Confidence) && !double.IsInfinity(mlSignal.Confidence))
+                ? Math.Clamp(mlSignal.Confidence, 0.50, 0.99)
+                : 0.50;
             finalProbPct = (int)Math.Clamp(Math.Round(neuralConf * 100.0), 50, 92);
 
             // S5 Micro-Timeframe Noise Calibration:

@@ -14,10 +14,25 @@ namespace ValutaBot.MiniApp;
 
 public static partial class MiniAppController
 {
+    private sealed record CachedHealth(DateTime ExpiresUtc, object Payload);
+    private static volatile CachedHealth? _cachedHealthResult;
+
     public static void RegisterRoutes(WebApplication app)
     {
         // Prometheus /metrics endpoint for Grafana, Railway, and external APM scrapers
         app.MapMetrics();
+
+        // Register domain route groups
+        RegisterCoreAndHealthRoutes(app);
+        RegisterAnalysisRoutes(app);
+        RegisterStatsRoutes(app);
+        RegisterAdminAndChaosRoutes(app);
+    }
+
+    #region Domain Group 1: Core & Health Endpoints
+
+    private static void RegisterCoreAndHealthRoutes(WebApplication app)
+    {
         app.MapGet("/", async (HttpContext context) =>
         {
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -57,9 +72,15 @@ public static partial class MiniAppController
             return Results.Ok(new { status = "Event emitted to Sentry", eventId = eventId.ToString() });
         }).RequireRateLimiting("Global");
 
-        // Health endpoint for Railway and external uptime probes
+        // Health endpoint for Railway and external uptime probes (with 3s in-memory cache to prevent DB connection pool exhaustion)
         app.MapGet("/api/health", async (HttpContext context) =>
         {
+            var cached = _cachedHealthResult;
+            if (cached != null && DateTime.UtcNow < cached.ExpiresUtc)
+            {
+                return Results.Ok(cached.Payload);
+            }
+
             string dbStatus = "Unknown";
             string mlStatus = "Unknown";
 
@@ -101,9 +122,79 @@ public static partial class MiniAppController
                 ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
             }
 
-            return Results.Ok(new { status = "Healthy", db = dbStatus, ml = mlStatus });
+            var payload = new { status = "Healthy", db = dbStatus, ml = mlStatus };
+            _cachedHealthResult = new CachedHealth(DateTime.UtcNow.AddSeconds(3), payload);
+            return Results.Ok(payload);
         });
 
+        app.MapGet("/api/fear-greed", async Task<IResult> (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
+            if (!isAuthorized)
+                return Results.Json(new { error = authError }, statusCode: 401);
+
+            var fng = await GetFearGreedIndex();
+            return Results.Json(fng);
+        });
+
+        /* Postback Endpoint */
+        app.MapGet("/api/postback", async Task<IResult> (HttpContext context) =>
+        {
+            var query = context.Request.Query;
+            
+            // SRE-FIX: Fail-closed verification with constant-time comparison
+            string? expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET");
+            if (string.IsNullOrWhiteSpace(expectedSecret))
+            {
+                BotLogger.Error("[Security] POSTBACK_SECRET is not configured on server. Postback rejected.");
+                return Results.Problem("Postback endpoint is misconfigured.", statusCode: StatusCodes.Status500InternalServerError);
+            }
+
+            string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
+            byte[] expBytes = Encoding.UTF8.GetBytes(expectedSecret);
+            byte[] provBytes = Encoding.UTF8.GetBytes(providedSecret);
+
+            if (expBytes.Length != provBytes.Length || !CryptographicOperations.FixedTimeEquals(expBytes, provBytes))
+            {
+                BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
+                return Results.Unauthorized();
+            }
+
+            string pocketId = query.TryGetValue("pocketId", out var pVal) ? pVal.ToString().Trim() : "";
+            string status = query.TryGetValue("status", out var sVal) ? sVal.ToString().Trim().ToLower() : "";
+            
+            double deposit = 0;
+            if (query.TryGetValue("deposit", out var dVal))
+            {
+                double.TryParse(dVal.ToString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out deposit);
+            }
+
+            long chatId = 0;
+            if (query.TryGetValue("chatId", out var cVal))
+            {
+                long.TryParse(cVal.ToString(), out chatId);
+            }
+
+            if (string.IsNullOrEmpty(pocketId))
+            {
+                return Results.BadRequest(new { success = false, error = "pocketId is required" });
+            }
+
+            BotLogger.Info($"[Postback] Verified Postback: pocketId={pocketId}, chatId={chatId}, status={status}, deposit={deposit}");
+
+            await TelegramBotService.ProcessPostback(chatId, pocketId, status, deposit);
+
+            return Results.Ok(new { success = true, message = "Postback processed successfully" });
+        });
+    }
+
+    #endregion
+
+    #region Domain Group 2: Analysis & Realtime Data Endpoints
+
+    private static void RegisterAnalysisRoutes(WebApplication app)
+    {
         app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe) =>
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
@@ -258,8 +349,14 @@ public static partial class MiniAppController
             BotLogger.Info($"[PO Vacuum] Captured raw tick: {body}");
             return Results.Ok();
         });
+    }
 
-        // SRE-FIX: Protected against DoS and unauthorized access via AuthService and Global Rate Limiter
+    #endregion
+
+    #region Domain Group 3: Stats & Metrics Endpoints
+
+    private static void RegisterStatsRoutes(WebApplication app)
+    {
         app.MapGet("/api/stats/overnight", async (HttpContext context) =>
         {
             var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
@@ -307,7 +404,6 @@ public static partial class MiniAppController
             return Results.Json(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
         
-        // SRE-FIX: Protected against DoS and data scraping
         app.MapGet("/api/stats/ml", async (HttpContext context) =>
         {
             var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
@@ -341,6 +437,7 @@ public static partial class MiniAppController
         }).RequireRateLimiting("Global");
 
         app.MapGet("/api/stats", (Delegate)HandleGetStats).RequireRateLimiting("Global");
+        
         app.MapGet("/api/stats/dataset-audit", async (HttpContext context) =>
         {
             if (!await HasInternalSecretOrAuthAsync(context))
@@ -368,6 +465,15 @@ public static partial class MiniAppController
             }
         }).RequireRateLimiting("Global");
 
+        app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
+    }
+
+    #endregion
+
+    #region Domain Group 4: Admin, Chaos & Internal Endpoints
+
+    private static void RegisterAdminAndChaosRoutes(WebApplication app)
+    {
         // Autonomous Chaos Engineering & Fuzzing Audit Endpoints
         app.MapGet("/api/chaos/report", async (HttpContext context, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
@@ -378,7 +484,6 @@ public static partial class MiniAppController
             return rep != null ? Results.Json(rep) : Results.Json(new { status = "NO_REPORT_YET", message = "Run POST /api/chaos/run to execute initial audit." });
         });
 
-        // SRE-FIX: Protected with X-Internal-Secret to prevent external invocation of chaos faults
         app.MapPost("/api/chaos/run", async (HttpContext context, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
@@ -395,7 +500,6 @@ public static partial class MiniAppController
             return Results.Json(report);
         });
 
-        // SRE-FIX: Protected with X-Internal-Secret
         app.MapPost("/api/chaos/run/{category}", async (HttpContext context, string category, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
@@ -442,7 +546,6 @@ public static partial class MiniAppController
             }
         });
 
-        // SRE-FIX: Protected with X-Internal-Secret against unauthorized VACUUM FULL table locks
         app.MapPost("/api/admin/db-maintenance", async (HttpContext context, bool? full) =>
         {
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
@@ -466,16 +569,24 @@ public static partial class MiniAppController
             }
         });
 
-        app.MapGet("/api/signal-stats", (Delegate)HandleGetSignalStats).RequireRateLimiting("Global");
-
-        // Internal endpoint for ML service -> Telegram admin notifications
+        // Internal endpoint for ML service -> Telegram admin notifications (Constant-time secret comparison + Rate Limiting)
         app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
         {
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
-            if (!context.Request.Headers.TryGetValue("X-Internal-Secret", out var providedSecret) || providedSecret != expectedSecret)
+            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
+            byte[] expBytes = Encoding.UTF8.GetBytes(expectedSecret);
+            byte[] provBytes = Encoding.UTF8.GetBytes(providedSecret);
+
+            if (provBytes.Length == 0 || expBytes.Length != provBytes.Length ||
+                !CryptographicOperations.FixedTimeEquals(provBytes, expBytes))
             {
                 BotLogger.Warn($"[Security] Blocked unauthorized access to /notify-admins from {context.Connection.RemoteIpAddress}");
                 return Results.Json(new { error = "Forbidden" }, statusCode: 403);
+            }
+
+            if (context.Request.ContentLength.HasValue && context.Request.ContentLength.Value > 65536)
+            {
+                return Results.Json(new { error = "Payload too large" }, statusCode: 413);
             }
 
             try
@@ -495,68 +606,7 @@ public static partial class MiniAppController
                 BotLogger.Error("[InternalNotify] Error", ex);
                 return Results.Json(new { error = ex.Message }, statusCode: 500);
             }
-        });
-
-        app.MapGet("/api/fear-greed", async Task<IResult> (HttpContext context) =>
-        {
-            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
-
-            var fng = await GetFearGreedIndex();
-            return Results.Json(fng);
-        });
-
-        /* Postback Endpoint */
-        app.MapGet("/api/postback", async Task<IResult> (HttpContext context) =>
-        {
-            var query = context.Request.Query;
-            
-            // SRE-FIX: Fail-closed verification with constant-time comparison
-            string? expectedSecret = Environment.GetEnvironmentVariable("POSTBACK_SECRET");
-            if (string.IsNullOrWhiteSpace(expectedSecret))
-            {
-                BotLogger.Error("[Security] POSTBACK_SECRET is not configured on server. Postback rejected.");
-                return Results.Problem("Postback endpoint is misconfigured.", statusCode: StatusCodes.Status500InternalServerError);
-            }
-
-            string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
-            byte[] expBytes = Encoding.UTF8.GetBytes(expectedSecret);
-            byte[] provBytes = Encoding.UTF8.GetBytes(providedSecret);
-
-            if (expBytes.Length != provBytes.Length || !CryptographicOperations.FixedTimeEquals(expBytes, provBytes))
-            {
-                BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
-                return Results.Unauthorized();
-            }
-
-            string pocketId = query.TryGetValue("pocketId", out var pVal) ? pVal.ToString().Trim() : "";
-            string status = query.TryGetValue("status", out var sVal) ? sVal.ToString().Trim().ToLower() : "";
-            
-            double deposit = 0;
-            if (query.TryGetValue("deposit", out var dVal))
-            {
-                double.TryParse(dVal.ToString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out deposit);
-            }
-
-            long chatId = 0;
-            if (query.TryGetValue("chatId", out var cVal))
-            {
-                long.TryParse(cVal.ToString(), out chatId);
-            }
-
-            if (string.IsNullOrEmpty(pocketId))
-            {
-                return Results.BadRequest(new { success = false, error = "pocketId is required" });
-            }
-
-            BotLogger.Info($"[Postback] Verified Postback: pocketId={pocketId}, chatId={chatId}, status={status}, deposit={deposit}");
-
-            await TelegramBotService.ProcessPostback(chatId, pocketId, status, deposit);
-
-            return Results.Ok(new { success = true, message = "Postback processed successfully" });
-        });
+        }).RequireRateLimiting("Global");
 
         /* Admin MetaLearner Endpoints (Deprecated) */
         app.MapPost("/api/admin/reset-meta-weights", async (HttpContext context) =>
@@ -577,6 +627,8 @@ public static partial class MiniAppController
             return Results.Ok(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
     }
+
+    #endregion
 
     private static async Task<bool> HasInternalSecretOrAuthAsync(HttpContext context)
     {

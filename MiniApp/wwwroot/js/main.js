@@ -39,13 +39,23 @@ function getTopAssets() {
     } catch(e) { return []; }
 }
 
+function escapeAttr(str) {
+    return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 function renderAssets(arr) {
     const top = getTopAssets();
     const majors = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
     return arr.map(a => {
+        const safeA = escapeAttr(a);
         const star = top.indexOf(a) !== -1 ? '<span class="top-star">★</span>' : '';
         const cls = majors.indexOf(a) !== -1 ? 'asset-item major' : 'asset-item';
-        return `<div class="${cls}" data-asset="${a}">${a}${star}</div>`;
+        return `<div class="${cls}" data-asset="${safeA}">${safeA}${star}</div>`;
     }).join('');
 }
 
@@ -110,6 +120,7 @@ function setTf(el) {
     resetSignalKey();
 }
 
+let copilotExecTimer = null;
 export function applyCopilotRecommendation(rec) {
     if (!rec) return;
     if (rec.asset) {
@@ -120,7 +131,7 @@ export function applyCopilotRecommendation(rec) {
         } else {
             setCurrentAsset(rec.asset);
             const selEl = document.getElementById('selectedAsset');
-            if (selEl) selEl.innerText = rec.asset;
+            if (selEl) selEl.textContent = rec.asset;
             throttledWsSwitch();
             resetSignalKey();
         }
@@ -134,12 +145,14 @@ export function applyCopilotRecommendation(rec) {
         } else {
             setCurrentTf(rec.tf);
             const selEl = document.getElementById('selectedTf');
-            if (selEl) selEl.innerText = tfUpper;
+            if (selEl) selEl.textContent = tfUpper;
             throttledWsSwitch();
             resetSignalKey();
         }
     }
-    setTimeout(() => {
+    if (copilotExecTimer) clearTimeout(copilotExecTimer);
+    copilotExecTimer = setTimeout(() => {
+        copilotExecTimer = null;
         executeAnalysis();
     }, 250);
 }
@@ -254,17 +267,26 @@ function getTfSeconds() {
     return map[currentTf] || 60;
 }
 
-function updateCountdown() {
-    if (document.hidden) return; // Do not calculate countdown when tab is minimized
+let cachedCandleTimeEl = null;
+let lastCandleClass = '';
+let lastCandleText = '';
 
+function updateCountdown() {
+    if (document.hidden) return;
+    if (!cachedCandleTimeEl) {
+        cachedCandleTimeEl = document.getElementById('candleTime');
+        if (!cachedCandleTimeEl) return;
+    }
     const tfSec = getTfSeconds();
     const now = Math.floor((Date.now() + timeOffset) / 1000);
     const remaining = tfSec - (now % tfSec);
     const mins = Math.floor(remaining / 60);
     const secs = remaining % 60;
-    const el = document.getElementById('candleTime');
-    if (!el) return;
-    el.innerText = `${mins}:${secs.toString().padStart(2,'0')}`;
+    const nextText = `${mins}:${secs.toString().padStart(2, '0')}`;
+    if (nextText !== lastCandleText) {
+        cachedCandleTimeEl.textContent = nextText;
+        lastCandleText = nextText;
+    }
     
     let greenThresh = 3;
     let yellowThresh = 10;
@@ -278,16 +300,19 @@ function updateCountdown() {
     } else if (tfSec <= 30) {
         greenThresh = 2; yellowThresh = 6;
     }
-
+    let nextClass = 'time';
     if (remaining <= greenThresh) {
-        el.className = 'time critical';
+        nextClass = 'time critical';
         updateTrafficLight('action');
     } else if (remaining <= yellowThresh) {
-        el.className = 'time warning';
+        nextClass = 'time warning';
         updateTrafficLight('prepare');
     } else {
-        el.className = 'time';
         updateTrafficLight('wait');
+    }
+    if (nextClass !== lastCandleClass) {
+        cachedCandleTimeEl.className = nextClass;
+        lastCandleClass = nextClass;
     }
 }
 

@@ -168,7 +168,7 @@ public class DataRetentionService : BackgroundService
             @"DELETE FROM subminute_candles
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
-                  WHERE asset LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz
+                  WHERE asset LIKE '%_PO' AND open_time < @cutoff
                   LIMIT 10000
               )", new { cutoff = subCutoff });
 
@@ -176,14 +176,14 @@ public class DataRetentionService : BackgroundService
             @"DELETE FROM subminute_candles
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
-                  WHERE asset NOT LIKE '%_PO' AND open_time::timestamptz < @cutoff::timestamptz
+                  WHERE asset NOT LIKE '%_PO' AND open_time < @cutoff
                   LIMIT 10000
               )", new { cutoff = legacySubCutoff });
 
         int histDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles",
-            "DELETE FROM historical_candles WHERE open_time::timestamptz < @cutoff::timestamptz", new { cutoff = histCutoff });
+            "DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff = histCutoff });
         int pendingDeleted = await ExecuteSafeDeleteAsync(conn, "pending_trades",
-            "DELETE FROM pending_trades WHERE verify_at::timestamptz < @cutoff::timestamptz", new { cutoff = stalePendingCutoff });
+            "DELETE FROM pending_trades WHERE verify_at < @cutoff", new { cutoff = stalePendingCutoff });
 
         // 6. Importance Sampling and Pruning for trade_outcomes
         int shadowDeleted = 0;
@@ -215,6 +215,8 @@ public class DataRetentionService : BackgroundService
                 @"WITH targets AS (
                       SELECT ctid FROM trade_outcomes
                       WHERE features_json IS NOT NULL
+                        AND octet_length(features_json) > 2500
+                        AND created_at < NOW() - INTERVAL '24 hours'
                         AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
                       LIMIT 2000
                   )
@@ -279,15 +281,16 @@ public class DataRetentionService : BackgroundService
             @"DELETE FROM subminute_candles
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
-                  WHERE open_time::timestamptz < NOW() - INTERVAL '96 hours'
+                  WHERE open_time < @cutoff
                   LIMIT 10000
-              )", new { });
+              )", new { cutoff = DateTime.UtcNow.AddHours(-96).ToString("yyyy-MM-ddTHH:mm:ssZ") });
 
         // Step 3: Compact ALL features_json immediately (not just old ones)
         int emergencyCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: JSON Compaction ALL)",
             @"WITH targets AS (
                   SELECT ctid FROM trade_outcomes
                   WHERE features_json IS NOT NULL
+                    AND octet_length(features_json) > 2500
                     AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
                   LIMIT 5000
               )
@@ -298,8 +301,8 @@ public class DataRetentionService : BackgroundService
 
         // Step 4: Delete old historical candles aggressively
         int emergencyHistDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles (Emergency: >7d)",
-            "DELETE FROM historical_candles WHERE open_time::timestamptz < NOW() - INTERVAL '7 days'",
-            new { });
+            "DELETE FROM historical_candles WHERE open_time < @cutoff",
+            new { cutoff = DateTime.UtcNow.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ") });
 
         BotLogger.Warn($"[SmartStorageGovernor] Emergency purge complete: {emergencyShadowDeleted} shadow/hold, {emergencySubDeleted} subminute candles, {emergencyCompacted} JSON compacted, {emergencyHistDeleted} historical.");
 
@@ -324,15 +327,17 @@ public class DataRetentionService : BackgroundService
             // fillfactor=80 on subminute_candles enables HOT updates for high-frequency ticks.
             await conn.ExecuteAsync(@"
                 ALTER TABLE trade_outcomes SET (
-                    autovacuum_vacuum_scale_factor = 0.05,
+                    autovacuum_vacuum_scale_factor = 0.03,
+                    autovacuum_analyze_scale_factor = 0.02,
                     autovacuum_vacuum_cost_limit = 2000,
                     autovacuum_vacuum_cost_delay = 2,
-                    toast.autovacuum_vacuum_scale_factor = 0.05,
+                    toast.autovacuum_vacuum_scale_factor = 0.03,
                     toast.autovacuum_vacuum_cost_limit = 2000
                 );
                 ALTER TABLE subminute_candles SET (
                     fillfactor = 80,
                     autovacuum_vacuum_scale_factor = 0.02,
+                    autovacuum_analyze_scale_factor = 0.01,
                     autovacuum_vacuum_cost_limit = 2000,
                     autovacuum_vacuum_cost_delay = 2
                 );

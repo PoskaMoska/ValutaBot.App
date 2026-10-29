@@ -123,6 +123,7 @@ public partial class TelegramBotService : BackgroundService
         }
 
         long offset = 0;
+        var inFlightHandlers = new ConcurrentDictionary<Task, byte>();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -186,7 +187,7 @@ public partial class TelegramBotService : BackgroundService
                             }
                             UserLastActivity.Set(chatId, true, TimeSpan.FromSeconds(1));
 
-                            _ = Task.Run(async () =>
+                            var msgTask = Task.Run(async () =>
                             {
                                 try { await HandleMessage(token, chatId, text, username, _webAppUrl); }
                                 catch (Exception ex)
@@ -194,6 +195,8 @@ public partial class TelegramBotService : BackgroundService
                                     Console.WriteLine($"[TG Bot] HandleMessage error ({chatId}): {ex.Message}");
                                 }
                             });
+                            inFlightHandlers.TryAdd(msgTask, 0);
+                            _ = msgTask.ContinueWith(t => inFlightHandlers.TryRemove(t, out _), TaskContinuationOptions.ExecuteSynchronously);
                         }
                         else if (update.TryGetProperty("callback_query", out var callbackQuery))
                         {
@@ -223,7 +226,7 @@ public partial class TelegramBotService : BackgroundService
                             }
                             UserLastActivity.Set($"cb_{chatId}", true, TimeSpan.FromSeconds(1));
 
-                            _ = Task.Run(async () =>
+                            var cbTask = Task.Run(async () =>
                             {
                                 try { await HandleCallback(token, queryId, chatId, data, messageId, username, _webAppUrl); }
                                 catch (Exception ex)
@@ -231,6 +234,8 @@ public partial class TelegramBotService : BackgroundService
                                     Console.WriteLine($"[TG Bot] HandleCallback error ({chatId}): {ex.Message}");
                                 }
                             });
+                            inFlightHandlers.TryAdd(cbTask, 0);
+                            _ = cbTask.ContinueWith(t => inFlightHandlers.TryRemove(t, out _), TaskContinuationOptions.ExecuteSynchronously);
                         }
                     }
                 }
@@ -247,6 +252,12 @@ public partial class TelegramBotService : BackgroundService
                     BotLogger.Error($"[TG Bot] Error in polling loop: {ex.Message}", ex);
                 await Task.Delay(5000, stoppingToken);
             }
+        }
+
+        if (!inFlightHandlers.IsEmpty)
+        {
+            BotLogger.Info($"[TG Bot] Graceful Shutdown: waiting up to 5s for {inFlightHandlers.Count} in-flight Telegram handlers...");
+            await Task.WhenAny(Task.WhenAll(inFlightHandlers.Keys), Task.Delay(TimeSpan.FromSeconds(5)));
         }
     }
 

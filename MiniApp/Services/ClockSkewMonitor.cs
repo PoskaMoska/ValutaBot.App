@@ -98,6 +98,8 @@ public static class ClockSkewMonitor
                         double oldOffset = PocketOptionWebSocketStream.ServerTimeOffsetSec;
                         double newOffset = oldOffset + (hoursShift * 3600.0);
                         PocketOptionWebSocketStream.ServerTimeOffsetSec = newOffset;
+                        PocketOptionWebSocketStream.ResetClockAndWatermarksOnDstShift();
+                        RealtimeTickCollector.ResetAllAccumulatorsAndRingBuffers();
                         BotLogger.Warn($"[ClockSkew] Auto-adjusted ServerTimeOffsetSec from {oldOffset}s to {newOffset}s due to {hoursShift:F0}h timezone/DST drift.");
                         Array.Clear(_ring, 0, _ring.Length);
                         _count = 0;

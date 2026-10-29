@@ -46,38 +46,56 @@ from models.sequence_brain import SequenceBrain
 from models.patch_tst_brain import DualStreamPatchBrain
 
 
-class FocalLoss(nn.Module):
+class PayoutAsymmetricFocalLoss(nn.Module):
     """
-    Multi-class Focal Loss with optional class weighting (alpha) and label smoothing.
-    Addresses class imbalance (HOLD dominance) while regularizing overconfident logits.
+    Multi-class Focal Loss tailored for Binary Options Payout Asymmetry (e.g., +85% payout vs -100% loss).
+    1. Applies Focal modulation (1 - p_t)^gamma to focus on hard regime transitions.
+    2. Penalizes Wrong-Direction predictions (predicting BUY when PUT or vice versa)
+       proportionally to the binary option loss-to-payout ratio (1 / 0.85 ~= 1.18x),
+       while keeping HOLD weight suppressed so p_hold does not artificially squash live confidence.
     """
-    def __init__(self, alpha=None, gamma=2.0, label_smoothing=0.05):
+    def __init__(self, alpha=None, gamma=1.5, label_smoothing=0.02, payout_ratio=0.85):
         super().__init__()
-        self.alpha = alpha  # tensor of shape [C]
+        self.alpha = alpha  # tensor of shape [3]: [w_hold, w_buy, w_put]
         self.gamma = gamma
         self.label_smoothing = label_smoothing
+        self.adverse_loss_mult = 1.0 / max(0.50, payout_ratio)  # ~1.1765x loss penalty
 
-    def forward(self, inputs, targets):
-        # inputs: [B, C], targets: [B]
-        num_classes = inputs.size(-1)
-        log_p = F.log_softmax(inputs, dim=-1)
+    def forward(self, inputs, targets, sample_weights=None):
+        # Compute in FP32 to prevent log_softmax / exp underflow under AMP autocast
+        inputs_fp32 = inputs.float()
+        num_classes = inputs_fp32.size(-1)
+        log_p = F.log_softmax(inputs_fp32, dim=-1)
         p = torch.exp(log_p)
 
-        # Focal modulation factor: (1 - p_t)^gamma
-        focal_weight = (1.0 - p) ** self.gamma
-
+        focal_weight = (1.0 - p).clamp(min=1e-6) ** self.gamma
         if self.alpha is not None:
-            focal_weight = focal_weight * self.alpha.unsqueeze(0)
+            focal_weight = focal_weight * self.alpha.to(inputs_fp32.device).unsqueeze(0)
 
-        # Label smoothing target distribution
-        one_hot = torch.zeros_like(inputs).scatter_(1, targets.unsqueeze(1), 1.0)
+        one_hot = torch.zeros_like(inputs_fp32).scatter_(1, targets.unsqueeze(1), 1.0)
         if self.label_smoothing > 0.0:
             targets_smooth = one_hot * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
         else:
             targets_smooth = one_hot
 
-        loss = - (targets_smooth * focal_weight * log_p).sum(dim=-1)
+        ce_focal = -(targets_smooth * focal_weight * log_p).sum(dim=-1)
+
+        # Asymmetric binary option EV penalty on opposite directional predictions:
+        # - If true target is BUY (1), penalize P(PUT) (index 2) by adverse_loss_mult
+        # - If true target is PUT (2), penalize P(BUY) (index 1) by adverse_loss_mult
+        wrong_dir_prob = torch.where(
+            targets == 1, p[:, 2],
+            torch.where(targets == 2, p[:, 1], torch.zeros_like(p[:, 0]))
+        )
+        asymmetric_ev_penalty = 0.25 * self.adverse_loss_mult * wrong_dir_prob
+        loss = ce_focal + asymmetric_ev_penalty
+
+        if sample_weights is not None:
+            loss = loss * sample_weights.float()
         return loss.mean()
+
+
+FocalLoss = PayoutAsymmetricFocalLoss
 
 
 class TemperatureScaler(nn.Module):
@@ -105,24 +123,27 @@ def calibrate_temperature(val_logits, val_labels, max_iter=50):
     Prevents overconfidence while preserving genuine high conviction (60-80%),
     without artificially squashing predictions to 58%.
     """
-    val_logits = val_logits.detach()
+    val_logits = val_logits.detach().float()
     if not isinstance(val_labels, torch.Tensor):
         val_labels = torch.tensor(val_labels)
     val_labels = val_labels.detach().long()
 
-    # Filter out invalid labels if any
-    mask = (val_labels >= 0) & (val_labels < val_logits.shape[-1])
+    # Filter out invalid labels and non-finite logits
+    finite_mask = torch.isfinite(val_logits).all(dim=-1)
+    mask = (val_labels >= 0) & (val_labels < val_logits.shape[-1]) & finite_mask
     val_logits = val_logits[mask]
     val_labels = val_labels[mask]
 
-    if len(val_labels) < 50:
+    if len(val_labels) < 50 or float(val_logits.std().item()) < 1e-5:
         return 1.0
 
     scaler = TemperatureScaler(init_temp=1.0).to(val_logits.device)
-    optimizer = torch.optim.LBFGS(scaler.parameters(), lr=0.05, max_iter=max_iter)
+    optimizer = torch.optim.LBFGS(scaler.parameters(), lr=0.05, max_iter=max_iter, line_search_fn="strong_wolfe")
 
     def eval_nll():
         optimizer.zero_grad()
+        # Clamp log_temp inside closure so exp(log_temp) never overflows/underflows during line search
+        scaler.log_temp.data.clamp_(math.log(0.5), math.log(3.0))
         scaled = scaler(val_logits)
         loss = F.cross_entropy(scaled, val_labels)
         loss.backward()
@@ -131,6 +152,8 @@ def calibrate_temperature(val_logits, val_labels, max_iter=50):
     try:
         optimizer.step(eval_nll)
         t = float(scaler.temperature.item())
+        if math.isnan(t) or math.isinf(t):
+            return 1.0
         return max(0.5, min(3.0, t))
     except Exception:
         return 1.0
@@ -364,22 +387,25 @@ def train_model(
     print(f"    X_macro:       {X_macro.shape} (Features: {macro_features})")
     print(f"    y:             {y.shape}")
 
-    # 3-Way Chronological Split (Train 70% / Val 15% / Test 15%) strictly respecting temporal causality
+    # 3-Way Chronological Split with Purge/Embargo buffer (up to 160 bars) strictly preventing overlapping window leakage
+    embargo = min(seq_len, max(1, int(N * 0.005)))
     idx_train = int(N * 0.70)
+    idx_val_start = min(N, idx_train + embargo)
     idx_val = int(N * 0.85)
+    idx_test_start = min(N, idx_val + embargo)
     train_count = idx_train
-    val_count = idx_val - idx_train
-    test_count = N - idx_val
-    print(f"[+] Splitting: Train = {train_count:,} (70%), Val = {val_count:,} (15%), Test = {test_count:,} (15% untouched)")
+    val_count = idx_val - idx_val_start
+    test_count = N - idx_test_start
+    print(f"[+] Splitting (Embargo={embargo}): Train = {train_count:,} (70%), Val = {val_count:,} (15%), Test = {test_count:,} (15% untouched)")
 
-    train_xc, val_xc, test_xc = X_candles[:idx_train], X_candles[idx_train:idx_val], X_candles[idx_val:]
-    train_mtf, val_mtf, test_mtf = X_mtf[:idx_train], X_mtf[idx_train:idx_val], X_mtf[idx_val:]
-    test_asset_ids = X_macro[idx_val:, 22].copy() if X_macro.shape[1] > 22 else np.zeros(test_count)
-    val_asset_ids = X_macro[idx_train:idx_val, 22].copy() if X_macro.shape[1] > 22 else np.zeros(val_count)
+    train_xc, val_xc, test_xc = X_candles[:idx_train], X_candles[idx_val_start:idx_val], X_candles[idx_test_start:]
+    train_mtf, val_mtf, test_mtf = X_mtf[:idx_train], X_mtf[idx_val_start:idx_val], X_candles[idx_test_start:] if X_mtf is None else X_mtf[idx_test_start:]
+    test_asset_ids = X_macro[idx_test_start:, 22].copy() if X_macro.shape[1] > 22 else np.zeros(len(test_xc))
+    val_asset_ids = X_macro[idx_val_start:idx_val, 22].copy() if X_macro.shape[1] > 22 else np.zeros(len(val_xc))
     X_macro = X_macro.copy()
-    train_xm, val_xm, test_xm = X_macro[:idx_train], X_macro[idx_train:idx_val], X_macro[idx_val:]
-    train_y, val_y, test_y = y[:idx_train], y[idx_train:idx_val], y[idx_val:]
-    train_pnl, val_pnl, test_pnl = y_pnl[:idx_train], y_pnl[idx_train:idx_val], y_pnl[idx_val:]
+    train_xm, val_xm, test_xm = X_macro[:idx_train], X_macro[idx_val_start:idx_val], X_macro[idx_test_start:]
+    train_y, val_y, test_y = y[:idx_train], y[idx_val_start:idx_val], y[idx_test_start:]
+    train_pnl, val_pnl, test_pnl = y_pnl[:idx_train], y_pnl[idx_val_start:idx_val], y_pnl[idx_test_start:]
 
     # Class balance weights: suppress flat HOLD class (0.05); weight directional BUY/PUT with payout asymmetry (1.18x)
     class_counts = np.bincount(train_y, minlength=3)
@@ -469,7 +495,12 @@ def train_model(
             print("[+] Microstructure cell calibration complete.")
 
     alpha_tensor = torch.tensor(weights, dtype=torch.float32).to(device)
-    criterion_cls_none = nn.CrossEntropyLoss(weight=alpha_tensor, label_smoothing=label_smoothing, reduction="none")
+    criterion_cls = PayoutAsymmetricFocalLoss(
+        alpha=alpha_tensor,
+        gamma=1.5,
+        label_smoothing=label_smoothing,
+        payout_ratio=0.85
+    )
     criterion_pnl = nn.SmoothL1Loss()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay_start)
@@ -519,12 +550,12 @@ def train_model(
                 if is_dual_stream:
                     logits, aux_pnl = model(batch_xc, batch_mtf, batch_xm)
                     with torch.no_grad():
-                        sniper_g = model.compute_sniper_gate(batch_xc, batch_mtf, batch_xm)
-                        sniper_w = torch.clamp(sniper_g / (sniper_g.mean() + 1e-6), 0.25, 3.5) ** 2
-                    loss_cls = (criterion_cls_none(logits, batch_y) * sniper_w).mean()
+                        sniper_g = model.compute_sniper_gate(batch_xc, batch_mtf, batch_xm).float()
+                        sniper_w = torch.clamp(sniper_g / (sniper_g.mean() + 1e-4), 0.25, 3.5) ** 2
+                    loss_cls = criterion_cls(logits, batch_y, sample_weights=sniper_w)
                 else:
                     logits, aux_pnl = model(batch_xc, batch_xm)
-                    loss_cls = criterion_cls_none(logits, batch_y).mean()
+                    loss_cls = criterion_cls(logits, batch_y)
 
                 loss_reg = criterion_pnl(aux_pnl, batch_pnl / 10.0)
                 total_loss = (loss_cls + 0.1 * loss_reg) / grad_accum

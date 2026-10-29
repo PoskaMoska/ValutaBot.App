@@ -242,15 +242,18 @@ def extract_macro_vector(row_dict, feat_obj):
     tf_str = (row_dict.get("timeframe") or "s5").lower()
     tf_sec = float(TF_SECONDS.get(tf_str, 5)) / 60.0
     
-    # 19-22. Signed SMC Directional Sensors (+1.0 Bullish, -1.0 Bearish, 0.0 None)
+    # 19-22. Signed SMC Directional Sensors (+1.0 Bullish, -1.0 Bearish, 0.0 None/Unsigned)
     def _signed_smc(dir_str, has_flag):
+        if not has_flag and not dir_str:
+            return 0.0
         s = str(dir_str or "").upper()
         if "BULL" in s:
             return 1.0
         if "BEAR" in s:
             return -1.0
-        return 1.0 if has_flag else 0.0
+        return 0.0
 
+    bos_raw = str(smc.get("BosDirection") or row_dict.get("smc_bos_dir") or "NONE").upper()
     has_ob = _signed_smc(
         smc.get("OrderBlockType") or row_dict.get("smc_ob_type"),
         bool(row_dict.get("smc_has_ob") or smc.get("HasOrderBlock"))
@@ -264,8 +267,8 @@ def extract_macro_vector(row_dict, feat_obj):
         bool(row_dict.get("smc_has_swp") or smc.get("HasLiquiditySweep"))
     )
     has_bos = _signed_smc(
-        smc.get("BosDirection") or row_dict.get("smc_bos_dir"),
-        bool(str(row_dict.get("smc_bos_dir") or "NONE").upper() not in ("NONE", "") or smc.get("HasBos"))
+        bos_raw,
+        bool(bos_raw not in ("NONE", "", "NULL") or smc.get("HasBos"))
     )
     
     # 23. Asset ID
@@ -282,11 +285,12 @@ def extract_macro_vector(row_dict, feat_obj):
     )
     asset_id = float(ASSET_MAP.get(asset_str, 6.0))
 
-    # 24-31. Enriched TA and Micro-Dynamics
-    ta_score = float(ta.get("Score", 0.0))
-    micro_vel = float(ta.get("MicroVel", 0.0)) / 20.0
-    hma_slope = float(ta.get("HmaSlope", 0.0)) / 10.0
-    vol_ratio = min(3.0, float(ta.get("VolRatio", 1.0))) / 3.0
+    # 24-31. Enriched TA and Micro-Dynamics (Fix Train-Serve Skew: C# serializes VolStrengthVal in DB and VolRatio in live payload)
+    ta_score = _safe_float(ta.get("Score"), 0.0)
+    micro_vel = _safe_float(ta.get("MicroVel"), 0.0) / 20.0
+    hma_slope = _safe_float(ta.get("HmaSlope"), 0.0) / 10.0
+    vol_raw = ta.get("VolRatio") if ta.get("VolRatio") is not None else ta.get("VolStrengthVal", 1.0)
+    vol_ratio = min(3.0, max(0.0, _safe_float(vol_raw, 1.0))) / 3.0
     bb_sq = float(1.0 if (macro.get("BbSqueeze") or row_dict.get("bb_squeeze")) else 0.0)
     price_pos = min(1.0, max(0.0, float(macro.get("PricePositionPct", row_dict.get("price_position_pct", 0.5) or 0.5))))
     trend_mat = float(macro.get("TrendMaturity", row_dict.get("trend_maturity", 0.0) or 0.0)) / 100.0
@@ -341,7 +345,16 @@ class SubminuteCandleStore:
                     ORDER BY open_time ASC
                 """, (self.min_date,))
                 for asset, interval, ot, op, hi, lo, cl, vol in cur.fetchall():
-                    clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
+                    clean_a = (
+                        asset.upper()
+                        .replace("_PO", "")
+                        .replace("_OTC", "")
+                        .replace(" OTC", "")
+                        .replace("/", "")
+                        .replace("-", "")
+                        .replace("_", "")
+                        .strip()
+                    )
                     iv = interval.lower().strip()
                     if iv in ("1min", "1m", "m1"):
                         iv = "m1"
@@ -356,7 +369,7 @@ class SubminuteCandleStore:
                         "High": _safe_float(hi, 1.0),
                         "Low": _safe_float(lo, 1.0),
                         "Close": _safe_float(cl, 1.0),
-                        "Volume": _safe_float(vol, 1.0)
+                        "Volume": _safe_float(vol, 0.0)
                     }))
             except Exception as tbl_err:
                 print(f"[-] Warning: Failed to load candles from {tbl}: {tbl_err}")
@@ -376,7 +389,16 @@ class SubminuteCandleStore:
 
     def get_candles_before(self, asset: str, timeframe: str, created_at_dt, count: int):
         self._ensure_loaded()
-        clean_a = asset.upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
+        clean_a = (
+            asset.upper()
+            .replace("_PO", "")
+            .replace("_OTC", "")
+            .replace(" OTC", "")
+            .replace("/", "")
+            .replace("-", "")
+            .replace("_", "")
+            .strip()
+        )
         iv = timeframe.lower().strip()
         if iv in ("1min", "1m", "m1"):
             iv = "m1"
@@ -403,13 +425,13 @@ class SubminuteCandleStore:
                 except Exception:
                     dt_obj = None
 
-        if dt_obj is not None:
-            if dt_obj.tzinfo is not None:
-                dt_obj = dt_obj.astimezone(timezone.utc).replace(tzinfo=None)
-            cutoff_dt = dt_obj - timedelta(seconds=dur_sec)
-            iso_cut = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            iso_cut = str(created_at_dt)[:19].replace("T", " ")
+        # Strict Anti-Leakage: NEVER fall back to unshifted created_at_dt; drop sample if timestamp cannot be parsed
+        if dt_obj is None:
+            return []
+        if dt_obj.tzinfo is not None:
+            dt_obj = dt_obj.astimezone(timezone.utc).replace(tzinfo=None)
+        cutoff_dt = dt_obj - timedelta(seconds=dur_sec)
+        iso_cut = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         idx = bisect.bisect_right(bucket[0], iso_cut)
         start = max(0, idx - count)
@@ -453,7 +475,13 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
     print(f"Connecting to database...")
     print("=" * 60)
     
-    conn = psycopg2.connect(db_url)
+    conn = psycopg2.connect(
+        db_url,
+        keepalives=1,
+        keepalives_idle=15,
+        keepalives_interval=5,
+        keepalives_count=3
+    )
     conn.autocommit = True  # Release oldest_xmin immediately so autovacuum is not blocked during dataset export
     cur = conn.cursor()
     
@@ -607,12 +635,24 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
             skipped_count += 1
             continue
 
-        # 2. Normalize MTF Candles Sequence
+        # 2. Normalize MTF Candles Sequence (Fix Train-Serve Skew: mtf_tf_sec = 60 if tf_sec_row < 60 else 300)
+        mtf_tf_sec = 60 if tf_sec_row < 60 else 300
         mtf_candles = feat_obj.get("MtfCandles") or feat_obj.get("mtf_candles") or []
         if not mtf_candles:
             htf = higher_tf_map.get(tf_str_row, "m1")
             mtf_candles = candle_store.get_candles_before(str(row_dict.get("asset") or ""), htf, row_dict.get("created_at"), seq_len_mtf)
-        mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf, channels=channels, tf_sec=max(60, tf_sec_row * 4)) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, channels), dtype=np.float32)
+        elif len(mtf_candles) > 1:
+            # Strip trailing unclosed MTF candle if its close time exceeds created_at
+            last_mtf_ts = mtf_candles[-1].get("Timestamp") or mtf_candles[-1].get("timestamp") or mtf_candles[-1].get("openTime")
+            created_dt = row_dict.get("created_at")
+            if isinstance(last_mtf_ts, str) and len(last_mtf_ts) >= 19 and hasattr(created_dt, "timestamp"):
+                try:
+                    mtf_open_ts = datetime.fromisoformat(last_mtf_ts.replace("Z", "+00:00")).timestamp()
+                    if mtf_open_ts + mtf_tf_sec > created_dt.timestamp():
+                        mtf_candles = mtf_candles[:-1]
+                except Exception:
+                    pass
+        mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf, channels=channels, tf_sec=mtf_tf_sec) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, channels), dtype=np.float32)
         if np.isnan(mtf_tensor).any() or np.isinf(mtf_tensor).any():
             mtf_tensor = np.zeros((seq_len_mtf, channels), dtype=np.float32)
             
@@ -631,7 +671,9 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
         pnl = _safe_float(row_dict.get("pnl_bps"))
         en_p = _safe_float(row_dict.get("entry_price"))
         ex_p = _safe_float(row_dict.get("exit_price"))
-        label, raw_pnl = determine_label(en_p, ex_p, direction, pnl, min_pnl_threshold=min_pnl_bps)
+        # Scale HOLD noise threshold with sqrt(timeframe) so m1 chop is not mislabeled as directional trend
+        effective_min_pnl = min_pnl_bps * math.sqrt(max(1.0, tf_sec_row / 5.0))
+        label, raw_pnl = determine_label(en_p, ex_p, direction, pnl, min_pnl_threshold=effective_min_pnl)
         
         mfe = _safe_float(row_dict.get("max_favorable_bps"))
         mae = _safe_float(row_dict.get("max_adverse_bps"))

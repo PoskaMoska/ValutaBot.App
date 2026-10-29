@@ -45,8 +45,9 @@ class PatchEmbedding(nn.Module):
         b, num_patches, c_dim, p_size = patches.shape
         patches = patches.permute(0, 1, 3, 2).contiguous().view(b, num_patches, -1)
 
-        # Preserve physical impulse amplitude across LayerNorm
-        amp = torch.tanh(patches.norm(dim=-1, keepdim=True) / 10.0)
+        # Preserve physical impulse amplitude across LayerNorm (eps=1e-6 prevents 0/0 NaN gradient on flat/zero-padded patches)
+        patch_norm = torch.sqrt((patches ** 2).sum(dim=-1, keepdim=True) + 1e-6)
+        amp = torch.tanh(patch_norm / 10.0)
         out = self.norm(self.proj(patches)) * (0.5 + amp)
         return out
 

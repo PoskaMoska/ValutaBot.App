@@ -30,8 +30,9 @@ public class HistoricalCandleAccumulatorService : BackgroundService
             var now = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
                 ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
                 : DateTime.UtcNow;
-            var targetMinute = TruncateToMinute(now).AddMinutes(1);
-            var delay = targetMinute.AddSeconds(5) - now; // Wake up at 05 seconds past the minute to ensure s5 are flushed
+            var targetClosedMinute = TruncateToMinute(now);
+            var wakeUpAt = targetClosedMinute.AddMinutes(1).AddSeconds(5);
+            var delay = wakeUpAt - now; // Wake up at 05 seconds past the minute to ensure s5 are flushed
             
             if (delay > TimeSpan.Zero) 
             {
@@ -53,7 +54,7 @@ public class HistoricalCandleAccumulatorService : BackgroundService
                 if (isWeekday && isMarketOpen)
                 {
                     await RealtimeTickCollector.FlushAsync(stoppingToken);
-                    await FlushAndSaveAsync(TruncateToMinute(now).AddMinutes(-1));
+                    await FlushAndSaveAsync(targetClosedMinute);
                 }
             }
             catch (Exception ex)
