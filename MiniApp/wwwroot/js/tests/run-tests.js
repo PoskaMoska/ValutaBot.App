@@ -105,6 +105,7 @@ const mockBackendResponse = {
 window.fetch = async (url) => {
     return {
         ok: true,
+        text: async () => JSON.stringify(mockBackendResponse),
         json: async () => mockBackendResponse
     };
 };

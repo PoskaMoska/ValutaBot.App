@@ -112,10 +112,11 @@ async function testScenario(name, mockPayload, assertionsFn) {
     window.fetch = async (url) => {
         await new Promise(r => setTimeout(r, 20));
         if (url.includes('/api/chart-ohlc')) {
-            return { ok: true, json: async () => [] };
+            return { ok: true, text: async () => "[]", json: async () => [] };
         }
         return {
             ok: true,
+            text: async () => JSON.stringify(mockPayload),
             json: async () => mockPayload
         };
     };

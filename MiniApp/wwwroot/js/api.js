@@ -363,7 +363,12 @@ export async function executeAnalysis() {
         if (!res.ok) {
             let errorText = `HTTP_${res.status}: ${res.statusText || 'Error'}`;
             try {
-                const errData = safeParseJson(await res.text());
+                let errData = null;
+                if (typeof res.text === 'function') {
+                    errData = safeParseJson(await res.text());
+                } else if (typeof res.json === 'function') {
+                    errData = await res.json();
+                }
                 if (errData && errData.error) errorText = `${errData.error} (HTTP ${res.status})`;
                 else if (errData && errData.detail) errorText = `${errData.detail} (HTTP ${res.status})`;
                 else if (errData && errData.title) errorText = `${errData.title} (HTTP ${res.status})`;
@@ -388,7 +393,14 @@ export async function executeAnalysis() {
             throw new Error(`Некорректный формат ответа прокси (HTTP ${res.status})`);
         }
 
-        const rawData = safeParseJson(await res.text());
+        let rawData = null;
+        if (typeof res.text === 'function') {
+            rawData = safeParseJson(await res.text());
+        } else if (typeof res.json === 'function') {
+            rawData = await res.json();
+        } else {
+            rawData = res;
+        }
         
         // SRE-FIX: Drop-in preservation of risk_management and ui_flags
         let data = rawData;
