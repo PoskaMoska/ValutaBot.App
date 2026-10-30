@@ -64,8 +64,32 @@ let reconnectTimeout = null;
 let reconnectAttempts = 0;
 let wsWatchdogTimer = null;
 let isAnalyzingInProgress = false;
+let runSeq = 0;
 let chartOhlcAbortController = null;
 let analyzeAbortController = null;
+
+// Resilient JSON parser: server may serialize NaN/Infinity tokens (AllowNamedFloatingPointLiterals)
+function safeParseJson(text) {
+    try { return JSON.parse(text); }
+    catch (e) {
+        const fixed = text.replace(/(:\s*|\[\s*|,\s*)-?(?:NaN|Infinity)(?=\s*[,}\]])/g, '$1null');
+        return JSON.parse(fixed);
+    }
+}
+const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+
+export function cancelAnalysis() {
+    runSeq++;
+    try { if (chartOhlcAbortController) chartOhlcAbortController.abort(); } catch (e) {}
+    try { if (analyzeAbortController) analyzeAbortController.abort(); } catch (e) {}
+    hideAiChart();
+    stopStatusBar();
+    const sphere = document.getElementById('mainSphere');
+    if (sphere) sphere.classList.remove('analyzing');
+    const btn = document.getElementById('btnGet');
+    if (btn) { btn.disabled = false; btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ'; }
+    isAnalyzingInProgress = false;
+}
 
 const MAX_RECONNECT_ATTEMPTS = 6;
 const WS_WATCHDOG_TIMEOUT_MS = 30000; // SRE-FIX: Relaxed to 30s to match Kestrel Keep-Alive
@@ -129,6 +153,7 @@ export function initPriceWebSocket() {
     
     if (!isSecondsTf) {
         if (livePriceContainer) livePriceContainer.style.display = 'none';
+        if (typeof navigator === 'undefined' || navigator.onLine) hideNetworkBanner();
         return;
     }
 
@@ -162,9 +187,10 @@ export function initPriceWebSocket() {
 
         sock.onopen = function() {
             if (priceSocket !== sock) return;
-            reconnectAttempts = 0;
             hideNetworkBanner();
             armWatchdog();
+            // Reset backoff only after connection stays stable for 5s
+            setTimeout(() => { if (priceSocket === sock) reconnectAttempts = 0; }, 5000);
         };
 
         sock.onmessage = function(event) {
@@ -206,7 +232,6 @@ export function closePriceWebSocket() {
         clearTimeout(reconnectTimeout);
         reconnectTimeout = null;
     }
-    hideNetworkBanner(); // SRE-FIX: Dismiss banner immediately when exiting subminute TF
     if (priceSocket) {
         try {
             priceSocket.onopen = null;
@@ -224,29 +249,34 @@ export function closePriceWebSocket() {
 
 export async function syncTime() {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const t0 = Date.now();
-    try {
-        const r = await fetch('/api/time', {
-            headers: {
-                'X-Telegram-Init-Data': resolveAuthData()
-            },
-            signal: controller.signal
-        });
-        if (r.ok) {
-            const d = await r.json();
-            const t1 = Date.now();
-            if (d && Number.isFinite(Number(d.t))) {
-                const rtt = t1 - t0;
-                setTimeOffset(Number(d.t) - (t0 + rtt / 2));
+    let best = null;
+    for (let i = 0; i < 3; i++) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        const p0 = performance.now();
+        const w0 = Date.now();
+        try {
+            const r = await fetch('/api/time', {
+                headers: { 'X-Telegram-Init-Data': resolveAuthData() },
+                signal: controller.signal
+            });
+            if (r.ok) {
+                const d = await r.json();
+                const rtt = performance.now() - p0;
+                const srv = num(d && d.t);
+                if (srv !== null) {
+                    const offset = srv - (w0 + rtt / 2);
+                    if (!best || rtt < best.rtt) best = { rtt, offset };
+                    if (rtt < 120) break;
+                }
             }
+        } catch (e) {
+            // Preserve previous valid timeOffset on transient 4G drops instead of resetting to 0
+        } finally {
+            clearTimeout(timeoutId);
         }
-    } catch (e) {
-        // Preserve previous valid timeOffset on transient 4G drops instead of resetting to 0
-    } finally {
-        clearTimeout(timeoutId);
     }
+    if (best) setTimeOffset(best.offset);
 }
 
 export async function executeAnalysis() {
@@ -280,8 +310,10 @@ export async function executeAnalysis() {
     };
 
     // Capture execution snapshot to resolve race conditions
+    const myRun = ++runSeq;
     const requestedAsset = currentAsset;
     const requestedTf = currentTf;
+    const isStale = () => myRun !== runSeq || currentAsset !== requestedAsset || currentTf !== requestedTf;
 
     if (sphere) {
         sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
@@ -303,9 +335,10 @@ export async function executeAnalysis() {
         },
         signal: chartOhlcAbortController.signal
     })
-        .then(r => r.ok ? r.json() : [])
+        .then(r => r.ok ? r.text() : '[]')
+        .then(txt => safeParseJson(txt))
         .then(ohlc => {
-            if (Array.isArray(ohlc) && ohlc.length && currentAsset === requestedAsset && currentTf === requestedTf) {
+            if (!isStale() && Array.isArray(ohlc) && ohlc.length) {
                 updateAiChartData(ohlc);
             }
         })
@@ -330,7 +363,7 @@ export async function executeAnalysis() {
         if (!res.ok) {
             let errorText = `HTTP_${res.status}: ${res.statusText || 'Error'}`;
             try {
-                const errData = await res.json();
+                const errData = safeParseJson(await res.text());
                 if (errData && errData.error) errorText = `${errData.error} (HTTP ${res.status})`;
                 else if (errData && errData.detail) errorText = `${errData.detail} (HTTP ${res.status})`;
                 else if (errData && errData.title) errorText = `${errData.title} (HTTP ${res.status})`;
@@ -355,7 +388,7 @@ export async function executeAnalysis() {
             throw new Error(`Некорректный формат ответа прокси (HTTP ${res.status})`);
         }
 
-        const rawData = await res.json();
+        const rawData = safeParseJson(await res.text());
         
         // SRE-FIX: Drop-in preservation of risk_management and ui_flags
         let data = rawData;
@@ -371,18 +404,15 @@ export async function executeAnalysis() {
         }
 
         // Guard against race condition: user switched asset while request was in-flight
-        if (currentAsset !== requestedAsset || currentTf !== requestedTf) {
-            console.log(`[API] Discarding response for ${requestedAsset} (user switched to ${currentAsset})`);
-            cleanupUi();
-            clearResults();
-            return;
-        }
+        if (isStale()) return;
 
         const elapsed = Date.now() - startTime;
         const remainingDelay = (currentTf && currentTf.toLowerCase().startsWith('s')) ? 0 : Math.max(0, 450 - elapsed);
         if (remainingDelay > 0) {
             await new Promise(resolve => setTimeout(resolve, remainingDelay));
         }
+
+        if (isStale()) return;
 
         cleanupUi();
         recordAnalysisPsychometrics();
@@ -502,7 +532,7 @@ export async function executeAnalysis() {
             if (rsiEl) {
                 const rsiNum = Number(data.rsi);
                 if (Number.isFinite(rsiNum)) {
-                    rsiEl.innerText = data.rsi;
+                    rsiEl.innerText = rsiNum.toFixed(1);
                     rsiEl.style.color = rsiNum > 70 ? '#ff1744' : rsiNum < 30 ? '#00e676' : 'var(--subtext)';
                 } else {
                     rsiEl.innerText = '--';
@@ -631,10 +661,11 @@ export async function executeAnalysis() {
         if (goldenBadge) goldenBadge.style.display = data.goldenSetup ? 'inline-block' : 'none';
         if (goldenBadgeMain) goldenBadgeMain.style.display = data.goldenSetup ? 'inline-block' : 'none';
         
+        const wrAsset = num(data.winRateAsset);
         const wrAssetEl = document.getElementById('winRateAsset');
         if (wrAssetEl) {
-            if (data.winRateAsset != null) {
-                const pct = Math.round(data.winRateAsset);
+            if (wrAsset !== null) {
+                const pct = Math.round(wrAsset);
                 wrAssetEl.innerText = pct + '%';
                 wrAssetEl.style.color = pct >= 55 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#f43f5e';
             } else {
@@ -642,10 +673,11 @@ export async function executeAnalysis() {
                 wrAssetEl.style.color = 'var(--subtext)';
             }
         }
+        const wrOverall = num(data.winRateOverall);
         const wrOverallEl = document.getElementById('winRateOverall');
         if (wrOverallEl) {
-            if (data.winRateOverall != null) {
-                const pct = Math.round(data.winRateOverall);
+            if (wrOverall !== null) {
+                const pct = Math.round(wrOverall);
                 wrOverallEl.innerText = pct + '%';
                 wrOverallEl.style.color = pct >= 55 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#f43f5e';
             } else {
@@ -654,8 +686,8 @@ export async function executeAnalysis() {
         }
         const sigCountEl = document.getElementById('signalsCount') || document.getElementById('signalCount');
         if (sigCountEl) {
-            const verified = data.signalsVerifiedAsset || data.signalsVerified || 0;
-            const pending = data.signalsPending || 0;
+            const verified = num(data.signalsVerifiedAsset) ?? num(data.signalsVerified) ?? 0;
+            const pending = num(data.signalsPending) ?? 0;
             sigCountEl.innerText = verified + (pending > 0 ? ' (+' + pending + ')' : '');
         }
 
@@ -689,10 +721,11 @@ export async function executeAnalysis() {
             }
         }
 
-        const probBars = pricesToBars(data.chartData, 20);
+        const cleanPrices = Array.isArray(data.chartData) ? data.chartData.map(Number).filter(Number.isFinite) : [];
+        const probBars = pricesToBars(cleanPrices, 20);
         let projFrac = null;
-        if (data.atr > 0 && data.chartData && data.chartData.length >= 2 && (data.expiryCandles | 0) > 0) {
-            const tailP = data.chartData.slice(-20);
+        if (num(data.atr) > 0 && cleanPrices.length >= 2 && (data.expiryCandles | 0) > 0) {
+            const tailP = cleanPrices.slice(-20);
             const spanP = Math.max(...tailP) - Math.min(...tailP);
             if (spanP > 1e-12) {
                 projFrac = Math.min(0.9, Math.max(0.05, (data.atr * Math.sqrt(data.expiryCandles)) / spanP * 0.8));
@@ -702,7 +735,7 @@ export async function executeAnalysis() {
 
         renderDirSvg(data.direction);
 
-        const durBars = pricesToBars(data.chartData, 8);
+        const durBars = pricesToBars(cleanPrices, 8);
         if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);
         else if (durBars.length) renderMiniChart('durChart', durBars, '');
 
@@ -716,6 +749,7 @@ export async function executeAnalysis() {
         switchResultTab('chart');
         flashResults();
     } catch(e) {
+        if (isStale()) return;
         cleanupUi();
         if (e.name === 'AbortError' && !timedOut) return; // Graceful exit on intentional abort
         if (e.name === 'AbortError' && timedOut) {
@@ -748,10 +782,12 @@ export async function executeAnalysis() {
         }
     } finally {
         clearTimeout(timeoutId);
-        if (btn) {
-            btn.disabled = false;
-            btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';
+        if (!isStale()) {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';
+            }
+            isAnalyzingInProgress = false;
         }
-        isAnalyzingInProgress = false;
     }
 }

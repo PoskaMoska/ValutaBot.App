@@ -1,4 +1,3 @@
-import copy
 """
 train_objective_dual_stream.py - Pure Multi-Timeframe Dual-Stream Neural Brain
 Trained on 52,768 high-conviction objective market samples from PostgreSQL.
@@ -12,6 +11,7 @@ Features:
 - Exports directly to ONNX (dual_stream_brain_v5.onnx) for 1ms in-process C# execution!
 """
 
+import copy
 import os
 import sys
 import numpy as np
@@ -100,17 +100,27 @@ def train_model():
     bridge_x = data["bridge_x"]
     labels = data["labels"]
 
+    if "epochs" in data:
+        order = np.argsort(data["epochs"], kind="stable")
+        macro_x = macro_x[order]
+        micro_x = micro_x[order]
+        bridge_x = bridge_x[order]
+        labels = labels[order]
+
     N = len(labels)
     print(f"Total samples: {N}")
 
-    # Chronological Train (80%) / Val (10%) / Test (10%)
+    # Chronological Train (80%) / Val (10%) / Test (10%) with 30-sample embargo gap to prevent window overlap leakage
+    embargo = 30 if N > 500 else 0
     train_n = int(0.80 * N)
-    val_n = int(0.10 * N)
+    val_start = min(N, train_n + embargo)
+    val_end = min(N, val_start + int(0.10 * N))
+    ts_start = min(N, val_end + embargo)
 
-    tr_macro, val_macro, ts_macro = macro_x[:train_n], macro_x[train_n:train_n+val_n], macro_x[train_n+val_n:]
-    tr_micro, val_micro, ts_micro = micro_x[:train_n], micro_x[train_n:train_n+val_n], micro_x[train_n+val_n:]
-    tr_bridge, val_bridge, ts_bridge = bridge_x[:train_n], bridge_x[train_n:train_n+val_n], bridge_x[train_n+val_n:]
-    tr_y, val_y, ts_y = labels[:train_n], labels[train_n:train_n+val_n], labels[train_n+val_n:]
+    tr_macro, val_macro, ts_macro = macro_x[:train_n], macro_x[val_start:val_end], macro_x[ts_start:]
+    tr_micro, val_micro, ts_micro = micro_x[:train_n], micro_x[val_start:val_end], micro_x[ts_start:]
+    tr_bridge, val_bridge, ts_bridge = bridge_x[:train_n], bridge_x[val_start:val_end], bridge_x[ts_start:]
+    tr_y, val_y, ts_y = labels[:train_n], labels[val_start:val_end], labels[ts_start:]
 
     print(f"Split sizes: Train={len(tr_y)}, Val={len(val_y)}, Test={len(ts_y)}")
 

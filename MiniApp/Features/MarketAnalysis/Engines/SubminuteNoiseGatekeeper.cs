@@ -87,9 +87,21 @@ public static class SubminuteNoiseGatekeeper
         double candleRange = lastCandle.High - lastCandle.Low;
         double candleRangeBps = (candleRange / currentPrice) * 10000.0;
 
-        // Детекция аномального ценового спайка (Spike / Outlier):
-        // Одиночная свеча размахом > 3.0x среднего True Range либо размах > 5x порога шума при высоком Z-score
-        bool isSpike = (avgTr > 1e-7 && candleRange > 3.0 * avgTr) ||
+        // D-7 fix: True Range последней свечи для spike detection.
+        // candleRange (H-L) занижает реальный размах при гэп-доджи (Open≈Close, но Low далеко от prevClose).
+        // Используем lastTr = max(H-L, |H-prevClose|, |L-prevClose|) для корректного сравнения с avgTr.
+        double lastTr = candleRange;
+        if (count >= 2)
+        {
+            double prevClose = candles[count - 2].Close;
+            lastTr = Math.Max(candleRange, Math.Max(Math.Abs(lastCandle.High - prevClose), Math.Abs(lastCandle.Low - prevClose)));
+        }
+
+        // Детекция аномального ценового спайка (Spike / Outlier) и гэп-доджи (D-7):
+        // Одиночная свеча с размахом > 3.0x среднего True Range, гэп-доджи (узкий H-L при прыжке TR > 3.0x avgTr),
+        // либо размах > 5x порога шума при высоком Z-score
+        bool isGapDojiSpike = candleRange < avgTr * 0.5 && lastTr > 3.0 * avgTr;
+        bool isSpike = (avgTr > 1e-7 && (candleRange > 3.0 * avgTr || isGapDojiSpike)) ||
                        (candleRangeBps > 5.0 * brokerNoiseFloorBps && Math.Abs(zScore) >= 2.2);
 
         // 5. Правило «Снайперского импульса»:

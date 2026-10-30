@@ -1,4 +1,4 @@
-import { initPriceWebSocket, closePriceWebSocket, resetWebSocketBackoff, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
+import { initPriceWebSocket, closePriceWebSocket, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
 import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261029_audit_v6';
 export { tg, getCustomInitData, currentAsset, currentTf };
 import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner } from './ui.js?v=20261029_audit_v6';
@@ -76,6 +76,8 @@ function toggleMenu(m) {
 
 let switchThrottleTimer = null;
 function throttledWsSwitch() {
+    cancelAnalysis();
+    updateCountdown();
     if (switchThrottleTimer) clearTimeout(switchThrottleTimer);
     switchThrottleTimer = setTimeout(() => {
         resetWebSocketBackoff();
@@ -294,14 +296,18 @@ function resumeLive() {
 initAssetGrid();
 syncTime().finally(updateCountdown);
 initPriceWebSocket();
-setInterval(updateCountdown, 1000);
-setTimeout(updateCountdown, 100);
+(function tickCountdown() {
+    updateCountdown();
+    const drift = (Date.now() + timeOffset) % 1000;
+    setTimeout(tickCountdown, 1000 - (drift >= 0 ? drift : drift + 1000) + 15);
+})();
 
 // Page Visibility API - Battery and Railway Resource Protection
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
         closePriceWebSocket();
     } else {
+        updateCountdown();
         if (navigator.onLine) {
             resumeLive();
         } else {
@@ -309,6 +315,11 @@ document.addEventListener('visibilitychange', () => {
         }
     }
 });
+
+window.addEventListener('pageshow', (e) => { if (e.persisted) resumeLive(); });
+if (navigator.connection && typeof navigator.connection.addEventListener === 'function') {
+    navigator.connection.addEventListener('change', () => { if (navigator.onLine) resumeLive(); });
+}
 
 // Network Reconnect Recovery
 window.addEventListener('online', () => {

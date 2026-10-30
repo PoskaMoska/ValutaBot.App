@@ -15,12 +15,6 @@ public static class SignalTracker
 {
     // Cooldown map using atomic CAS ticks to prevent duplicate trade entry races
     private static readonly ConcurrentDictionary<string, long> _cooldownExpirySw = new(StringComparer.OrdinalIgnoreCase);
-    internal static readonly ConcurrentDictionary<string, double> _livePrices = new();
-
-    public static void UpdateLivePrice(string asset, double price)
-    {
-        _livePrices[asset] = price;
-    }
 
     // ── Public Write API ───────────────────────────────────────────────────
 
@@ -48,7 +42,6 @@ public static class SignalTracker
         string reasoningText = "", string mlModelVersion = "", double mlModelAccuracy = 0.0,
         double priceEntropy = 0.0, int trendMaturity = 0, double pricePositionPct = 0.5, bool bbSqueeze = false, string? taTelemetry = null, string? mlTelemetry = null, string? smcTelemetry = null)
     {
-        if (!PriceFeed.UsePocketOption && MarketDataFetcher.IsWeekendNow()) { Console.WriteLine($"[Tracker] Weekend OTC mode active. Skipping recording for {asset}."); return; }
 
         // Hard Circuit Breaker Guard: Never record a live order when Circuit Breaker is active!
         bool isRealTrade = direction is "BUY" or "PUT";

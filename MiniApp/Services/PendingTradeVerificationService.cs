@@ -82,7 +82,7 @@ public class PendingTradeVerificationService : BackgroundService
 
         try
         {
-            // Settle on the SAME feed the signal was built from: "EURUSD_PO" in Pocket Option mode, "EURUSD" for Tiingo.
+            // Settle on Pocket Option OTC candle stream ("{ASSET}_PO").
             string cleanAsset = PriceFeed.CandleKey(record.Asset);
             await using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
             await conn.OpenAsync(ct);
@@ -156,28 +156,6 @@ public class PendingTradeVerificationService : BackgroundService
                 }, cancellationToken: ct));
             }
 
-            // If subminute is missing (e.g., scraper stopped), fallback to historical_candles (1m).
-            // Not in PO mode: historical_candles holds Tiingo prices, which must never settle an OTC trade.
-            if (!PriceFeed.UsePocketOption && (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value)))
-            {
-                DateTime minAllowedHist = verifyUtc.AddSeconds(-120);
-                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
-                    SELECT 
-                        CASE 
-                            WHEN open_time = @VerifyAt THEN ""open"" 
-                            ELSE ""close"" 
-                        END
-                    FROM historical_candles
-                    WHERE asset = @Asset
-                      AND open_time <= @VerifyAt
-                      AND open_time >= @MinAllowedTime
-                    ORDER BY open_time DESC LIMIT 1
-                ", new { 
-                    Asset = cleanAsset, 
-                    VerifyAt = verifyUtc.ToString("O"),
-                    MinAllowedTime = minAllowedHist.ToString("O")
-                }, cancellationToken: ct));
-            }
 
             // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] via Index Seek on UNIQUE(asset, interval, open_time)
             if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))

@@ -42,7 +42,7 @@ public partial class TelegramBotService : BackgroundService
 
     internal static void RegisterTgBlock(int seconds)
     {
-        int clampedSec = Math.Clamp(seconds, 1, 120);
+        int clampedSec = Math.Clamp(seconds, 1, 3600);
         long newBlockUntil = DateTime.UtcNow.AddSeconds(clampedSec).Ticks;
         while (true)
         {
@@ -97,28 +97,37 @@ public partial class TelegramBotService : BackgroundService
     public static async Task SendMessageToAdmins(string text)
     {
         string? token = TelegramNotifier.GetToken();
-        if (string.IsNullOrEmpty(token)) return;
+        if (string.IsNullOrEmpty(token) || string.IsNullOrWhiteSpace(text)) return;
 
-        var notifiedIds = new System.Collections.Generic.HashSet<long>();
+        string payloadText = text.Length > 3500 ? text[..3500] + "…" : text;
+        var adminIds = new System.Collections.Generic.HashSet<long>();
 
         try
         {
-            var dbAdmins = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.GetAdminChatIdsAsync();
-            foreach (var adminId in dbAdmins)
-            {
-                await SendMessage(token, adminId, text);
-                notifiedIds.Add(adminId);
-            }
+            foreach (var id in await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.GetAdminChatIdsAsync())
+                adminIds.Add(id);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[Admins] DB admin lookup failed, falling back to env: {ex.GetType().Name}");
+        }
 
         string envAdmin = Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? Environment.GetEnvironmentVariable("ADMIN_IDS") ?? "";
         foreach (var part in envAdmin.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
         {
-            if (long.TryParse(part, out long adminId) && !notifiedIds.Contains(adminId))
+            if (long.TryParse(part, out long adminId))
+                adminIds.Add(adminId);
+        }
+
+        foreach (var adminId in adminIds)
+        {
+            try
             {
-                await SendMessage(token, adminId, text);
-                notifiedIds.Add(adminId);
+                await SendMessage(token, adminId, payloadText);
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[Admins] Failed to deliver alert to {adminId}: {ex.GetType().Name}");
             }
         }
     }
@@ -179,23 +188,29 @@ public partial class TelegramBotService : BackgroundService
                     int backoffSeconds = 5;
                     if ((int)response.StatusCode == 429)
                     {
-                        try
+                        backoffSeconds = 30;
+                        if (response.Headers.RetryAfter?.Delta is { } d)
                         {
-                            var errJson = await response.Content.ReadAsStringAsync(stoppingToken);
-                            using var errDoc = JsonDocument.Parse(errJson);
-                            if (errDoc.RootElement.TryGetProperty("parameters", out var param) &&
-                                param.TryGetProperty("retry_after", out var retryAfter))
-                            {
-                                backoffSeconds = Math.Max(retryAfter.GetInt32(), 5);
-                            }
-                            else
-                            {
-                                backoffSeconds = 30;
-                            }
+                            backoffSeconds = Math.Max(1, (int)Math.Ceiling(d.TotalSeconds));
                         }
-                        catch { backoffSeconds = 30; }
+                        else
+                        {
+                            try
+                            {
+                                var errJson = await response.Content.ReadAsStringAsync(stoppingToken);
+                                using var errDoc = JsonDocument.Parse(errJson);
+                                if (errDoc.RootElement.TryGetProperty("parameters", out var param) &&
+                                    param.TryGetProperty("retry_after", out var retryAfter))
+                                {
+                                    backoffSeconds = Math.Max(1, retryAfter.GetInt32());
+                                }
+                            }
+                            catch { }
+                        }
 
-                        BotLogger.Warn($"[TG Bot] Rate Limited (429). Telegram instructed backoff of {backoffSeconds}s.");
+                        backoffSeconds += Random.Shared.Next(0, 3);
+                        RegisterTgBlock(backoffSeconds);
+                        BotLogger.Warn($"[TG Bot] Rate Limited (429). Global gate engaged for {backoffSeconds}s.");
                     }
 
                     await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), stoppingToken);
@@ -435,6 +450,7 @@ public partial class TelegramBotService : BackgroundService
 
     private static async Task AnswerCallbackQuery(string token, string callbackQueryId, string text)
     {
+        await WaitTgGateAsync();
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
         try
         {

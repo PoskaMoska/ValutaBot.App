@@ -8,7 +8,7 @@ namespace ValutaBot.MiniApp;
 /// <summary>
 /// Динамический измеритель задержки (RTT) до сервера рыночных данных.
 ///
-/// Периодически пингует Tiingo API и сохраняет скользящее среднее RTT.
+/// Периодически пингует PocketOption и сохраняет скользящее среднее RTT.
 /// Результат используется фронтендом для компенсации сетевой задержки при
 /// открытии опционной сделки (Pre-execution latency compensation).
 ///
@@ -75,17 +75,17 @@ public static class LatencyProbe
     }
 
     /// <summary>
-    /// Выполняет единичный замер RTT до Tiingo API.
+    /// Выполняет единичный замер RTT до PocketOption.
     /// Использует среднее из 3 последовательных запросов для стабилизации результата.
     ///
-    /// Проба выполняется к корневому эндпоинту https://api.tiingo.com — не требует ключа,
+    /// Проба выполняется к корневому эндпоинту https://pocketoption.com — не требует ключа,
     /// не расходует квоту. On failure: keeps the last known RTT instead of silently
     /// resetting to 200ms, so SendAtOffsetMs stays meaningful even during temporary
     /// network blips.
     /// </summary>
     public static async Task MeasureAsync(IHttpClientFactory? factory)
     {
-        string PingTarget = PriceFeed.UsePocketOption ? "https://pocketoption.com" : "https://api.tiingo.com"; // root — lightweight, no auth needed
+        const string PingTarget = "https://pocketoption.com"; // root — lightweight, no auth needed
         const int    Attempts   = 3;
         const int    TimeoutMs  = 2000;
 
@@ -122,7 +122,7 @@ public static class LatencyProbe
         {
             double measured = totalMs / succeeded;
             AddSample(measured);
-            BotLogger.Info($"[LatencyProbe] RTT to {(PriceFeed.UsePocketOption ? "PocketOption" : "Tiingo")}: {measured:F0}ms (avg of {succeeded}/{Attempts} probes). SendAtOffset: {SendAtOffsetMs}ms");
+            BotLogger.Info($"[LatencyProbe] RTT to {"PocketOption"}: {measured:F0}ms (avg of {succeeded}/{Attempts} probes). SendAtOffset: {SendAtOffsetMs}ms");
         }
         else
         {

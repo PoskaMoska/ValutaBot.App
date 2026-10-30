@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 
@@ -18,12 +20,12 @@ public sealed class DualStreamOnnxService : IDisposable
 
     private readonly InferenceSession? _session;
     private readonly bool _isLoaded;
-    private readonly object _inferenceLock = new();
+    private volatile bool _disposed;
 
-    public bool IsModelLoaded => _isLoaded;
+    public bool IsModelLoaded => _isLoaded && !_disposed;
     public string ModelPath { get; } = string.Empty;
 
-    public record OnnxPrediction(
+    public readonly record struct OnnxPrediction(
         string Direction,        // "BUY" | "PUT" | "NEUTRAL"
         double Probability,      // [0.50 .. 0.99]
         double RawProbability,   // [0.01 .. 0.99]
@@ -58,7 +60,7 @@ public sealed class DualStreamOnnxService : IDisposable
                 {
                     ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
                     GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-                    IntraOpNumThreads = 2
+                    IntraOpNumThreads = 1
                 };
 
                 _session = new InferenceSession(ModelPath, sessionOptions);
@@ -94,12 +96,6 @@ public sealed class DualStreamOnnxService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Evaluates in-process inference for the DualStream model:
-    /// macro: (1, 30, 5) float tensor
-    /// micro: (1, 30, 5) float tensor
-    /// bridge: (1, 4) float tensor
-    /// </summary>
     private static bool HasNonFinite(float[] data)
     {
         for (int i = 0; i < data.Length; i++)
@@ -109,16 +105,22 @@ public sealed class DualStreamOnnxService : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Evaluates in-process inference for the DualStream model:
+    /// macro: (1, 30, 5) float tensor
+    /// micro: (1, 30, 5) float tensor
+    /// bridge: (1, 4) float tensor
+    /// </summary>
     public OnnxPrediction Predict(float[] macroData, float[] microData, float[] bridgeData)
     {
-        if (!_isLoaded || _session == null || macroData == null || microData == null || bridgeData == null ||
+        if (_disposed || !_isLoaded || _session == null || macroData == null || microData == null || bridgeData == null ||
             macroData.Length != 150 || microData.Length != 150 || bridgeData.Length != 4 ||
             HasNonFinite(macroData) || HasNonFinite(microData) || HasNonFinite(bridgeData))
         {
             return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
         }
 
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long startSw = Stopwatch.GetTimestamp();
 
         try
         {
@@ -126,48 +128,39 @@ public sealed class DualStreamOnnxService : IDisposable
             var microTensor = new DenseTensor<float>(microData, new[] { 1, 30, 5 });
             var bridgeTensor = new DenseTensor<float>(bridgeData, new[] { 1, 4 });
 
-            var inputs = new List<NamedOnnxValue>
+            var inputs = new List<NamedOnnxValue>(3)
             {
                 NamedOnnxValue.CreateFromTensor("macro_x", macroTensor),
                 NamedOnnxValue.CreateFromTensor("micro_x", microTensor),
                 NamedOnnxValue.CreateFromTensor("bridge_x", bridgeTensor)
             };
 
-            IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results;
-            lock (_inferenceLock)
+            // InferenceSession.Run is thread-safe in ONNX Runtime; concurrent workers execute without lock contention
+            using var results = _session.Run(inputs);
+            var outputTensor = results.First().AsTensor<float>();
+            float logit = outputTensor.GetValue(0);
+            if (!float.IsFinite(logit))
             {
-                results = _session.Run(inputs);
+                BotLogger.Warn("[DualStreamOnnx] Model returned non-finite logit (NaN/Inf). Falling back to NEUTRAL.");
+                return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
             }
 
-            using (results)
+            // Numerically stable sigmoid:
+            double rawProb = logit >= 0
+                ? 1.0 / (1.0 + Math.Exp(-(double)logit))
+                : Math.Exp((double)logit) / (1.0 + Math.Exp((double)logit));
+            if (!double.IsFinite(rawProb))
             {
-                var outputTensor = results.First().AsTensor<float>();
-                float logit = outputTensor.GetValue(0);
-                if (!float.IsFinite(logit))
-                {
-                    BotLogger.Warn("[DualStreamOnnx] Model returned non-finite logit (NaN/Inf). Falling back to NEUTRAL.");
-                    return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
-                }
-
-                // Numerically stable sigmoid:
-                double rawProb = logit >= 0
-                    ? 1.0 / (1.0 + Math.Exp(-(double)logit))
-                    : Math.Exp((double)logit) / (1.0 + Math.Exp((double)logit));
-                if (!double.IsFinite(rawProb))
-                {
-                    return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
-                }
-                rawProb = Math.Clamp(rawProb, 0.01, 0.99);
-
-                string dir = rawProb >= 0.50 ? "BUY" : "PUT";
-                double directionalProb = dir == "BUY" ? rawProb : (1.0 - rawProb);
-                directionalProb = Math.Clamp(directionalProb, 0.50, 0.92);
-
-                sw.Stop();
-                long elapsedMicro = (long)(sw.Elapsed.TotalMilliseconds * 1000.0);
-
-                return new OnnxPrediction(dir, directionalProb, rawProb, elapsedMicro);
+                return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
             }
+            rawProb = Math.Clamp(rawProb, 0.01, 0.99);
+
+            string dir = rawProb >= 0.50 ? "BUY" : "PUT";
+            double directionalProb = dir == "BUY" ? rawProb : (1.0 - rawProb);
+            directionalProb = Math.Clamp(directionalProb, 0.50, 0.92);
+
+            long elapsedMicro = (long)(Stopwatch.GetElapsedTime(startSw).TotalMilliseconds * 1000.0);
+            return new OnnxPrediction(dir, directionalProb, rawProb, elapsedMicro);
         }
         catch (Exception ex)
         {
@@ -178,6 +171,8 @@ public sealed class DualStreamOnnxService : IDisposable
 
     public void Dispose()
     {
-        _session?.Dispose();
+        if (_disposed) return;
+        _disposed = true;
+        try { _session?.Dispose(); } catch { }
     }
 }

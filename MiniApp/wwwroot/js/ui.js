@@ -210,6 +210,7 @@ let sbTimer = null, sbFadeTimer = null, sbIdx = 0;
 export function startStatusBar() {
     const sb = document.getElementById('statusBar');
     if (!sb) return;
+    stopStatusBar();
     sb.classList.add('show');
     const title = document.getElementById('sbTitle');
     const sub = document.getElementById('sbSub');
@@ -217,7 +218,6 @@ export function startStatusBar() {
     if (sub) { sub.textContent = sbStatuses[0]; sub.className = 'sb-sub'; }
     sbIdx = 0;
 
-    stopStatusBar();
     sbTimer = setInterval(() => {
         const titleEl = document.getElementById('sbTitle');
         if (titleEl) {
@@ -292,7 +292,7 @@ export function renderError(rawError, debugText) {
         } else if (errLower.includes('pocketid')) {
             title = '⚠️ Ошибка профиля';
             desc = 'Не указан Pocket Option ID.';
-        } else if (errLower.includes('fetch') || errLower.includes('network') || errLower.includes('failed') || errLower.includes('connect') || errLower.includes('18с')) {
+        } else if (errLower.includes('fetch') || errLower.includes('network') || errLower.includes('failed') || errLower.includes('connect') || errLower.includes('14с') || errLower.includes('лимит времени') || errLower.includes('сетев')) {
             title = '⚠️ Ошибка соединения';
             desc = 'Не удалось получить ответ от сервера. Проверьте интернет-соединение (4G/Wi-Fi).';
         } else {

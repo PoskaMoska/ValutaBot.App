@@ -9,6 +9,7 @@ namespace ValutaBot.App.MiniApp.Data
     public static class DbConnectionFactory
     {
         private static volatile NpgsqlDataSource? _dataSource;
+        private static volatile NpgsqlDataSource? _maintDataSource;
         private static volatile string? _cachedRawEnv;
         private static volatile string? _cachedConnectionString;
         private static readonly object _initLock = new();
@@ -55,16 +56,17 @@ namespace ValutaBot.App.MiniApp.Data
             builder.TcpKeepAlive = true;
             builder.TcpKeepAliveTime = 10;
             builder.TcpKeepAliveInterval = 5;
-            builder.KeepAlive = 0;                    // Application keepalive probe every 10s (well before proxy's 60s idle timeout)
+            builder.KeepAlive = 10;                    // Application keepalive probe every 10s (well before proxy's 60s idle timeout)
             builder.ConnectionLifetime = 300;          // Rotate pooled connections every 5m
-            builder.ConnectionIdleLifetime = 15;       // Evict idle connections after 15s so proxy cannot sever them silently
-            builder.ConnectionPruningInterval = 3;     // Prune every 3s so idle sockets never linger
+            builder.ConnectionIdleLifetime = 30;       // Evict idle connections after 30s (below proxy ~60s timeout)
+            builder.ConnectionPruningInterval = 5;     // Prune every 5s
             builder.Timeout = 15;                      // 15s connection timeout
             builder.CommandTimeout = 30;
+            builder.Options = "-c idle_in_transaction_session_timeout=60000 -c lock_timeout=5000";
 
-            // Pool capacity 50 to prevent pool exhaustion under high concurrency
+            // Pool capacity 50 with warm minimum connections to avoid reconnect storms
             builder.MaxPoolSize = 50;
-            builder.MinPoolSize = 0;
+            builder.MinPoolSize = 2;
 
             string built = builder.ToString();
             _cachedRawEnv = envVar;
@@ -130,9 +132,51 @@ namespace ValutaBot.App.MiniApp.Data
             return conn;
         }
 
-                /// <summary>
+        public static ValueTask<NpgsqlConnection> OpenMaintenanceAsync(CancellationToken ct = default)
+        {
+            if (_maintDataSource == null)
+            {
+                lock (_initLock)
+                {
+                    if (_maintDataSource == null)
+                    {
+                        string baseConnStr = GetConnectionString();
+                        if (!string.IsNullOrEmpty(baseConnStr))
+                        {
+                            var b = new NpgsqlConnectionStringBuilder(baseConnStr)
+                            {
+                                ApplicationName = "valuta-maint",
+                                MaxPoolSize = 2,
+                                MinPoolSize = 0,
+                                CommandTimeout = 600,
+                                Options = "-c lock_timeout=3000 -c idle_in_transaction_session_timeout=120000"
+                            };
+                            _maintDataSource = new NpgsqlDataSourceBuilder(b.ToString()).Build();
+                        }
+                    }
+                }
+            }
+            if (_maintDataSource != null)
+            {
+                return _maintDataSource.OpenConnectionAsync(ct);
+            }
+            return OpenConnectionAsync(ct);
+        }
+
+        private static bool IsNetworkTransient(Exception ex) => ex switch
+        {
+            System.IO.IOException or System.Net.Sockets.SocketException or TimeoutException => true,
+            NpgsqlException { InnerException: System.IO.IOException or System.Net.Sockets.SocketException or TimeoutException } => true,
+            NpgsqlException ne and not PostgresException => ne.IsTransient,
+            _ => false
+        };
+
+        private static bool IsRetryableSql(Exception ex) =>
+            ex is PostgresException { SqlState: "40001" or "40P01" or "57P03" or "55P03" };
+
+        /// <summary>
         /// Executes an idempotent database operation with automatic transient retry.
-        /// Drops poisoned/stale socket connections from the pool on network severance.
+        /// Clears the connection pool ONLY on network/socket severance (never on SQL lock/deadlock errors).
         /// </summary>
         public static async Task<T> WithRetryAsync<T>(Func<NpgsqlConnection, Task<T>> action, CancellationToken ct = default)
         {
@@ -143,13 +187,36 @@ namespace ValutaBot.App.MiniApp.Data
                 {
                     return await action(conn);
                 }
-                catch (Exception ex) when (attempt < 3 && !ct.IsCancellationRequested &&
-                    (ex is System.IO.IOException ||
-                     (ex is NpgsqlException ne && (ne.IsTransient || ne.InnerException is System.IO.IOException))))
+                catch (Exception ex) when (attempt < 4 && !ct.IsCancellationRequested &&
+                    (IsNetworkTransient(ex) || IsRetryableSql(ex)))
                 {
-                    BotLogger.Warn($"[DbConnectionFactory] Transient DB error on attempt {attempt} ({ex.Message}). Clearing connection pool and retrying...");
-                    NpgsqlConnection.ClearPool(conn);
-                    await Task.Delay(100 * attempt, ct);
+                    bool isNet = IsNetworkTransient(ex);
+                    BotLogger.Warn($"[DbConnectionFactory] Transient DB error on attempt {attempt} ({ex.Message}, net={isNet}). Retrying...");
+                    if (isNet) NpgsqlConnection.ClearPool(conn);
+                    await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt + Random.Shared.Next(0, 100)), ct);
+                }
+            }
+        }
+
+        public static async Task<T> WithRetryAsync<T>(Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> action, CancellationToken ct = default)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                await using var conn = await OpenConnectionAsync(ct);
+                try
+                {
+                    await using var tx = await conn.BeginTransactionAsync(ct);
+                    var result = await action(conn, tx);
+                    await tx.CommitAsync(ct);
+                    return result;
+                }
+                catch (Exception ex) when (attempt < 4 && !ct.IsCancellationRequested &&
+                    (IsNetworkTransient(ex) || IsRetryableSql(ex)))
+                {
+                    bool isNet = IsNetworkTransient(ex);
+                    BotLogger.Warn($"[DbConnectionFactory] Transient transactional DB error on attempt {attempt} ({ex.Message}, net={isNet}). Retrying...");
+                    if (isNet) NpgsqlConnection.ClearPool(conn);
+                    await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt + Random.Shared.Next(0, 100)), ct);
                 }
             }
         }
@@ -167,8 +234,7 @@ namespace ValutaBot.App.MiniApp.Data
         {
             if (string.IsNullOrEmpty(GetConnectionString())) return;
 
-            using var conn = GetConnection();
-            await conn.OpenAsync();
+            await using var conn = await OpenMaintenanceAsync();
             
             await conn.ExecuteAsync(@"
                 CREATE TABLE IF NOT EXISTS allowed_users (
@@ -226,80 +292,80 @@ namespace ValutaBot.App.MiniApp.Data
 
                 DO $$
                 BEGIN
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_prob DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS of_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS smc_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ml_prob DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ml_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
                     -- Rich LightGBM features (migration-safe)
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_bos_dir TEXT NOT NULL DEFAULT 'NONE'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_has_ob BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_has_fvg BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_delta_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_state TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS smc_bos_dir TEXT NOT NULL DEFAULT 'NONE';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS smc_has_ob BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS smc_has_fvg BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS of_delta_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS of_state TEXT NOT NULL DEFAULT 'NEUTRAL';
                     -- Rich market context columns for analytics and ML feature engineering
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN market_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN velocity_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN atr_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN adx_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN minutes_to_news INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN session TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN day_of_week INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN hour_utc INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS market_regime TEXT NOT NULL DEFAULT 'UNKNOWN';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS velocity_regime TEXT NOT NULL DEFAULT 'UNKNOWN';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS atr_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS adx_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS minutes_to_news INTEGER NOT NULL DEFAULT -1;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS session TEXT NOT NULL DEFAULT 'UNKNOWN';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS day_of_week INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS hour_utc INTEGER NOT NULL DEFAULT 0;
                     -- Phase 1: Complete Decision Snapshot
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ta_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN smc_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN of_direction TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN conflict_count INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN confidence_bucket TEXT NOT NULL DEFAULT '50-60'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN was_close_call BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN consecutive_losses_before INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN seconds_since_last_trade INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN reasoning_text TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_model_version TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN ml_model_accuracy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN max_favorable_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN max_adverse_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ta_direction TEXT NOT NULL DEFAULT 'NEUTRAL';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ml_direction TEXT NOT NULL DEFAULT 'NEUTRAL';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS smc_direction TEXT NOT NULL DEFAULT 'NEUTRAL';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS of_direction TEXT NOT NULL DEFAULT 'NEUTRAL';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS conflict_count INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS confidence_bucket TEXT NOT NULL DEFAULT '50-60';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS was_close_call BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS consecutive_losses_before INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS seconds_since_last_trade INTEGER NOT NULL DEFAULT -1;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS reasoning_text TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ml_model_version TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ml_model_accuracy DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS max_favorable_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS max_adverse_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0;
                     -- pending_trades: reasoning + ml metadata for pipeline
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN reasoning_text TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN ml_model_version TEXT NOT NULL DEFAULT ''; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN ml_model_accuracy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS reasoning_text TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS ml_model_version TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS ml_model_accuracy DOUBLE PRECISION NOT NULL DEFAULT 0.0;
                     
                     -- Phase 3: Entropy and Market Phase context
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN price_entropy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN trend_maturity INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN price_position_pct DOUBLE PRECISION NOT NULL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN bb_squeeze BOOLEAN NOT NULL DEFAULT false; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS price_entropy DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS trend_maturity INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS price_position_pct DOUBLE PRECISION NOT NULL DEFAULT 0.5;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS bb_squeeze BOOLEAN NOT NULL DEFAULT false;
                     
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN price_entropy DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN trend_maturity INTEGER NOT NULL DEFAULT 0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN price_position_pct DOUBLE PRECISION NOT NULL DEFAULT 0.5; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN bb_squeeze BOOLEAN NOT NULL DEFAULT false; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN dynamic_horizon INT NOT NULL DEFAULT 3; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS price_entropy DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS trend_maturity INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS price_position_pct DOUBLE PRECISION NOT NULL DEFAULT 0.5;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS bb_squeeze BOOLEAN NOT NULL DEFAULT false;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS dynamic_horizon INT NOT NULL DEFAULT 3;
                     
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN of_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN smc_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN ml_prob DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN ml_score DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN smc_bos_dir TEXT NOT NULL DEFAULT 'NONE'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN smc_has_ob BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN smc_has_fvg BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN of_delta_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN of_state TEXT NOT NULL DEFAULT 'NEUTRAL'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN dynamic_horizon INTEGER NOT NULL DEFAULT 3; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS ta_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS of_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS smc_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS ml_prob DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS ml_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS smc_bos_dir TEXT NOT NULL DEFAULT 'NONE';
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS smc_has_ob BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS smc_has_fvg BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS of_delta_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS of_state TEXT NOT NULL DEFAULT 'NEUTRAL';
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS dynamic_horizon INTEGER NOT NULL DEFAULT 3;
                     -- Rich market context (pending_trades → trade_outcomes pipeline)
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN market_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN velocity_regime TEXT NOT NULL DEFAULT 'UNKNOWN'; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN atr_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN adx_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE pending_trades ADD COLUMN minutes_to_news INTEGER NOT NULL DEFAULT -1; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE trade_outcomes ADD COLUMN features_json TEXT; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS market_regime TEXT NOT NULL DEFAULT 'UNKNOWN';
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS velocity_regime TEXT NOT NULL DEFAULT 'UNKNOWN';
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS atr_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS adx_at_signal DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS minutes_to_news INTEGER NOT NULL DEFAULT -1;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS features_json TEXT;
                 END $$;
 
                 CREATE TABLE IF NOT EXISTS subminute_candles (
@@ -346,6 +412,7 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
+                CREATE INDEX IF NOT EXISTS idx_subminute_opentime_asset ON subminute_candles(open_time, asset);
                 DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf;
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_at;
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_at;
@@ -434,11 +501,11 @@ namespace ValutaBot.App.MiniApp.Data
                 -- 3-day Trial columns for registrations
                 DO $$
                 BEGIN
-                    BEGIN ALTER TABLE registrations ADD COLUMN trial_started_at TIMESTAMPTZ NULL; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE registrations ADD COLUMN trial_ends_at TIMESTAMPTZ NULL; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE registrations ADD COLUMN reminder_day2_sent BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE registrations ADD COLUMN reminder_day3_sent BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
-                    BEGIN ALTER TABLE registrations ADD COLUMN trial_expired_sent BOOLEAN NOT NULL DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN END;
+                    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS trial_started_at TIMESTAMPTZ NULL;
+                    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ NULL;
+                    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS reminder_day2_sent BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS reminder_day3_sent BOOLEAN NOT NULL DEFAULT FALSE;
+                    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS trial_expired_sent BOOLEAN NOT NULL DEFAULT FALSE;
                 END $$;
             ");
 

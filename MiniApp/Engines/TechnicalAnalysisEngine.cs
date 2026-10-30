@@ -362,7 +362,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         if (priceRange < deadMarketThreshold || zeroRangeCount >= maxZeroCandles)
         {
             BotLogger.Warn($"[Gatekeeper] Market is completely flat / frozen. PriceRange={priceRange}, ZeroRangeCandles={zeroRangeCount}/15. Aborting analysis.");
-            return new GatekeeperResult(false, "⚠️ Рынок в состоянии застоя (пустые или нулевые свечи).\n\nВозможные причины: нет живых тиков от Tiingo WebSocket для данной пары, рынок закрыт, или недостаточно данных для субминутного таймфрейма. Попробуйте позже или выберите другую пару.", atr, adx);
+            return new GatekeeperResult(false, "⚠️ Рынок в состоянии застоя (пустые или нулевые свечи).\n\nВозможные причины: нет живых тиков от Pocket Option WebSocket для данной пары, рынок закрыт, или недостаточно данных для субминутного таймфрейма. Попробуйте позже или выберите другую пару.", atr, adx);
         }
 
         double maxCandleRange = 0;

@@ -349,8 +349,6 @@ public class MarketAnalysisOrchestrator(
         var dayAnchors = await MacroContextEngine.GetDayLevelAnchorsAsync(prep.CleanAsset, prep.CurrentLivePrice);
         var dxyMetrics = MacroContextEngine.ComputeDollarBasketMetrics();
         double liveSpreadBps = 0.0;
-        if (!PriceFeed.UsePocketOption)
-            TiingoWebSocketStream.TryGetSpreadBps(prep.CleanAsset, out liveSpreadBps);
 
         var macroPayload = new {
             DayRangePositionPct = dayAnchors.DayRangePositionPct,
@@ -457,8 +455,7 @@ public class MarketAnalysisOrchestrator(
         var macroData = NormalizeSlice(macroSlice);
         var microData = NormalizeSlice(microSlice);
 
-        double curP = microSlice[^1].Close > 0 ? microSlice[^1].Close : currentPrice;
-        if (curP <= 0) curP = 1.0;
+        double curP = microSlice[^1].Close > 0 ? microSlice[^1].Close : 1.0;
 
         double[] macroCloses = new double[30];
         for (int i = 0; i < 30; i++) macroCloses[i] = macroSlice[i].Close;
@@ -488,7 +485,13 @@ public class MarketAnalysisOrchestrator(
         double lowerWick = Math.Min(last.Open, last.Close) - last.Low;
         float wickBal = (float)((lowerWick - upperWick) / rng);
 
-        // Sanitize & clamp features to protect ONNX from NaN or extreme outliers
+        // Guard against NaN/Inf before Math.Clamp (since Math.Clamp(NaN, min, max) returns NaN)
+        if (!float.IsFinite(distM1) || !float.IsFinite(atrRatio) || !float.IsFinite(zScore) || !float.IsFinite(wickBal))
+        {
+            return null;
+        }
+
+        // Sanitize & clamp features identically to export_objective_dataset.py
         distM1 = Math.Clamp(distM1, -50.0f, 50.0f);
         atrRatio = Math.Clamp(atrRatio, 0.01f, 20.0f);
         zScore = Math.Clamp(zScore, -5.0f, 5.0f);
@@ -510,8 +513,8 @@ public class MarketAnalysisOrchestrator(
 
         if (_settings.EnableMachineLearning)
         {
-            // Fast Path: In-process ONNX Runtime (1.2ms latency, 0 HTTP overhead)
-            if (DualStreamOnnxService.Instance.IsModelLoaded && (prep.TfLower.Equals("s5", StringComparison.OrdinalIgnoreCase) || prep.TfLower.Equals("s10", StringComparison.OrdinalIgnoreCase)))
+            // Fast Path: In-process ONNX Runtime (strictly s5 + m1 as trained in dual_stream_brain_v5.onnx)
+            if (DualStreamOnnxService.Instance.IsModelLoaded && prep.TfLower.Equals("s5", StringComparison.OrdinalIgnoreCase))
             {
                 var tensors = BuildOnnxTensors(prep.ClosedCandles, prep.ClosedHigherCandles, prep.CurrentLivePrice);
                 if (tensors.HasValue)
@@ -666,6 +669,9 @@ public class MarketAnalysisOrchestrator(
         var dbSw = Stopwatch.StartNew();
         int targetHorizon = cm.Timeout.TimeoutCandles;
 
+        // D-6 fix: sanitize NaN/Infinity before JSON serialization (AllowNamedFloatingPointLiterals would emit "NaN" strings).
+        static double S(double v, double fallback = 0.0) => double.IsFinite(v) ? v : fallback;
+
         var sourceDirections = new Dictionary<string, string>
         {
             ["TechAnalysis"] = DirectionExtensions.FromScore(cm.Consensus.TaScore).ToSignal(),
@@ -683,27 +689,27 @@ public class MarketAnalysisOrchestrator(
                 MinutesToNews = sensors.MinutesToNews ?? -1,
                 MarketRegime = cm.EffectiveMarketRegime,
                 VelocityRegime = sensors.State.VelocityRegime ?? "UNKNOWN",
-                Atr = sensors.MainAtr,
-                Adx = sensors.MainAdx,
-                Rsi = sensors.TaDetail.RsiVal,
-                PriceEntropy = sensors.PriceEntropy,
-                TrendMaturity = sensors.TrendMaturity,
-                PricePositionPct = sensors.PricePositionPct,
+                Atr = S(sensors.MainAtr),
+                Adx = S(sensors.MainAdx, 20.0),
+                Rsi = S(sensors.TaDetail.RsiVal, 50.0),
+                PriceEntropy = S(sensors.PriceEntropy),
+                TrendMaturity = S(sensors.TrendMaturity),
+                PricePositionPct = S(sensors.PricePositionPct, 50.0),
                 BbSqueeze = sensors.BbSqueeze,
                 HourUtc = DateTime.UtcNow.Hour,
                 DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
                 Session = TradeOutcomeTracker.ComputeSession(DateTime.UtcNow),
-                DayRangePositionPct = sensors.DayAnchors.DayRangePositionPct,
-                DistToDayHighBps = sensors.DayAnchors.DistToDayHighBps,
-                DistToDayLowBps = sensors.DayAnchors.DistToDayLowBps,
-                AsianHigh = sensors.DayAnchors.AsianHigh,
-                AsianLow = sensors.DayAnchors.AsianLow,
-                DistToAsianHighBps = sensors.DayAnchors.DistToAsianHighBps,
-                DistToAsianLowBps = sensors.DayAnchors.DistToAsianLowBps,
-                DxyMomentum1mBps = sensors.DxyMetrics.DxyMomentum1mBps,
-                DxyMomentum5mBps = sensors.DxyMetrics.DxyMomentum5mBps,
-                BasketSyncScore = sensors.DxyMetrics.BasketSyncScore,
-                SpreadBps = sensors.LiveSpreadBps,
+                DayRangePositionPct = S(sensors.DayAnchors.DayRangePositionPct, 50.0),
+                DistToDayHighBps = S(sensors.DayAnchors.DistToDayHighBps),
+                DistToDayLowBps = S(sensors.DayAnchors.DistToDayLowBps),
+                AsianHigh = S(sensors.DayAnchors.AsianHigh),
+                AsianLow = S(sensors.DayAnchors.AsianLow),
+                DistToAsianHighBps = S(sensors.DayAnchors.DistToAsianHighBps),
+                DistToAsianLowBps = S(sensors.DayAnchors.DistToAsianLowBps),
+                DxyMomentum1mBps = S(sensors.DxyMetrics.DxyMomentum1mBps),
+                DxyMomentum5mBps = S(sensors.DxyMetrics.DxyMomentum5mBps),
+                BasketSyncScore = S(sensors.DxyMetrics.BasketSyncScore),
+                SpreadBps = S(sensors.LiveSpreadBps),
                 TickCountLastCandle = prep.ClosedCandles.Length > 0 ? prep.ClosedCandles[^1].Volume : 0
             },
             NeuralBrain = new {
@@ -808,7 +814,7 @@ public class MarketAnalysisOrchestrator(
                 long bucketTicks = TimeSpan.FromSeconds(prep.IntervalSecs).Ticks;
                 DateTime barOpen = new DateTime(execRefTime.Ticks - (execRefTime.Ticks % bucketTicks), DateTimeKind.Utc);
                 double elapsedAfterMl = (execRefTime - barOpen).TotalSeconds;
-                double maxExecElapsed = prep.IntervalSecs switch { 5 => 1.2, 10 => 2.5, 15 => 3.5, _ => 5.0 };
+                double maxExecElapsed = prep.IntervalSecs switch { 5 => 1.3, 10 => 2.2, 15 => 2.8, 30 => 3.8, _ => 5.0 };
                 if (elapsedAfterMl > maxExecElapsed)
                 {
                     _logger.LogWarning("[ExpiryGuard] Aborted {Asset}/{Timeframe} after ML inference: +{Elapsed:F2}s into candle exceeds strict limit {Max:F1}s.",
@@ -866,8 +872,9 @@ public class MarketAnalysisOrchestrator(
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError(ex, "[SignalTracker] Failed to record prediction for {Asset}. Rolling back CAS cooldown.", prep.CleanAsset);
-                            _lastRealTradeSwByAsset.TryRemove(prep.CleanAsset, out _);
+                            // D-5 fix: cooldown is NOT rolled back on DB error - the broker trade may already be open;
+                            // removing the CAS slot would allow an immediate double entry on the same asset.
+                            _logger.LogError(ex, "[SignalTracker] Failed to record prediction for {Asset}. Cooldown RETAINED to prevent double-entry.", prep.CleanAsset);
                         }
                     });
                     dbSw.Stop();

@@ -108,7 +108,6 @@ internal static class Program
 
                 // 2. Stop any dangling background stream loops before restart
                 try { PocketOptionWebSocketStream.StopStream(); } catch { }
-                try { TiingoWebSocketStream.StopStream(); } catch { }
 
                 // 3. Re-initialize tick channel & collector tokens for clean in-process restart
                 RealtimeTickCollector.PrepareForInProcessRestart();

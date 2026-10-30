@@ -73,6 +73,8 @@ public static partial class MiniAppController
             return Results.Ok(new { status = "Event emitted to Sentry", eventId = eventId.ToString() });
         }).RequireRateLimiting("Global");
 
+        app.MapGet("/api/health/live", () => Results.Ok(new { status = "Healthy" }));
+
         // Health endpoint for Railway and external uptime probes (with 3s in-memory cache to prevent DB connection pool exhaustion)
         app.MapGet("/api/health", async (HttpContext context) =>
         {
@@ -94,9 +96,9 @@ public static partial class MiniAppController
             }
             catch (Exception ex)
             {
-                dbStatus = "Error: " + ex.Message;
+                BotLogger.Error("[HealthCheck] Database check failed", ex);
                 ValutaMetrics.HealthCheckFailures.WithLabels("db").Inc();
-                return Results.Json(new { status = "Unhealthy", db = dbStatus, ml = mlStatus, error = ex.Message }, statusCode: 500);
+                return Results.Json(new { status = "Unhealthy", db = "Error" }, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
             // 2. Check ML service ping
@@ -110,7 +112,7 @@ public static partial class MiniAppController
                     var mlHealthUrl = $"{mlUrl.TrimEnd('/')}/health";
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                     var mlResponse = await hc.GetAsync(mlHealthUrl, cts.Token);
-                    mlStatus = mlResponse.IsSuccessStatusCode ? "Ok" : $"Down ({(int)mlResponse.StatusCode})";
+                    mlStatus = mlResponse.IsSuccessStatusCode ? "Ok" : "Down";
                     if (!mlResponse.IsSuccessStatusCode)
                     {
                         ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
@@ -119,7 +121,8 @@ public static partial class MiniAppController
             }
             catch (Exception ex)
             {
-                mlStatus = "Slow/Down: " + ex.Message;
+                BotLogger.Warn($"[HealthCheck] ML service probe slow/down: {ex.Message}");
+                mlStatus = "Down";
                 ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
             }
 
@@ -339,6 +342,7 @@ public static partial class MiniAppController
 
             try
             {
+                var receiveTask = webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                 while (webSocket.State == WebSocketState.Open && !ct.IsCancellationRequested)
                 {
                     bool hasPrice = false;
@@ -347,11 +351,6 @@ public static partial class MiniAppController
                     if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double poPrice, 3.0))
                     {
                         currentPrice = poPrice;
-                        hasPrice = true;
-                    }
-                    else if (TiingoWebSocketStream.TryGetLivePrice(cleanAsset, out double tiingoPrice))
-                    {
-                        currentPrice = tiingoPrice;
                         hasPrice = true;
                     }
 
@@ -371,7 +370,6 @@ public static partial class MiniAppController
                         sw.Restart();
                     }
 
-                    var receiveTask = webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                     var delayTask = Task.Delay(250, ct);
                     var completed = await Task.WhenAny(receiveTask, delayTask);
                     if (completed == receiveTask)
@@ -382,6 +380,7 @@ public static partial class MiniAppController
                             await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", ct);
                             break;
                         }
+                        receiveTask = webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                     }
                 }
             }
@@ -476,7 +475,7 @@ public static partial class MiniAppController
             }
             catch (Exception ex)
             {
-                return Results.Problem("DB Error: " + ex.Message);
+                return SafeErrorResponse(context, ex);
             }
         }).RequireRateLimiting("Global");
 
@@ -513,7 +512,7 @@ public static partial class MiniAppController
             }
             catch (System.Exception ex)
             {
-                return Microsoft.AspNetCore.Http.Results.Json(new { error = ex.Message }, statusCode: 500);
+                return SafeErrorResponse(context, ex);
             }
         }).RequireRateLimiting("Global");
 
@@ -542,7 +541,7 @@ public static partial class MiniAppController
             }
             catch (Exception ex)
             {
-                return Results.Json(new { error = ex.Message }, statusCode: 500);
+                return SafeErrorResponse(context, ex);
             }
         }).RequireRateLimiting("Global");
 
@@ -623,7 +622,7 @@ public static partial class MiniAppController
             }
             catch (Exception ex)
             {
-                return Results.Json(new { error = ex.Message }, statusCode: 500);
+                return SafeErrorResponse(context, ex);
             }
         });
 
@@ -646,7 +645,7 @@ public static partial class MiniAppController
             }
             catch (Exception ex)
             {
-                return Results.Json(new { error = ex.Message }, statusCode: 500);
+                return SafeErrorResponse(context, ex);
             }
         });
 
@@ -682,31 +681,36 @@ public static partial class MiniAppController
             catch (Exception ex)
             {
                 BotLogger.Error("[InternalNotify] Error", ex);
-                return Results.Json(new { error = ex.Message }, statusCode: 500);
+                return SafeErrorResponse(context, ex);
             }
         }).RequireRateLimiting("Global");
 
         /* Admin MetaLearner Endpoints (Deprecated) */
         app.MapPost("/api/admin/reset-meta-weights", async (HttpContext context) =>
         {
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
+            if (!await HasInternalSecretOrAuthAsync(context))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
 
             return Results.Ok(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
 
         app.MapGet("/api/admin/meta-weights", async (HttpContext context, string? asset, string? timeframe) =>
         {
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
+            if (!await HasInternalSecretOrAuthAsync(context))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
 
             return Results.Ok(new { status = "deprecated", message = "OnlineMetaLearner deprecated; Pure Neural Brain (PatchTST) is active." });
         });
     }
 
     #endregion
+
+    private static IResult SafeErrorResponse(HttpContext ctx, Exception ex, int status = 500)
+    {
+        string traceId = Guid.NewGuid().ToString("N")[..8];
+        BotLogger.Error($"[Err:{traceId}] {ctx.Request.Path}", ex);
+        return Results.Json(new { error = "Internal server error", traceId }, statusCode: status);
+    }
 
     private static async Task<bool> HasInternalSecretOrAuthAsync(HttpContext context)
     {

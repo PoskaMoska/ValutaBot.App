@@ -52,12 +52,12 @@ public static partial class AssetSanitizer
     }
 
     /// <summary>
-    /// Map normalized asset to Broker symbol on weekends, or return null for Tiingo fetching.
+    /// Map normalized asset to Broker symbol on weekends, or return null on weekdays.
     /// </summary>
     public static string? MapSymbolByDayOfWeek(string cleanAsset, DayOfWeek day)
     {
         bool isWeekend = day == DayOfWeek.Saturday || day == DayOfWeek.Sunday;
-        if (!isWeekend) return null; // On weekdays: fetch via Tiingo
+        if (!isWeekend) return null;
 
         // On weekends, map Forex assets to their crypto equivalents (e.g., EURUSD -> EURUSDT)
         if (IsForexAsset(cleanAsset))

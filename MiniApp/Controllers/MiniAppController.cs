@@ -247,12 +247,6 @@ public static partial class MiniAppController
             });
         });
 
-        // Launch Real-Time WebSocket stream for major CME proxy forex streams (0ms latency)
-        string[] topStreamSymbols = { "EUR/USD", "GBP/USD", "AUD/USD", "USD/CAD", "USD/CHF", "USD/JPY" };
-        if (!PriceFeed.UsePocketOption)
-        {
-            TiingoWebSocketStream.StartStream(topStreamSymbols);
-        }
 
         // Init Telegram notifier from config or env (set in Railway dashboard)
         TelegramNotifier.Init(builder.Configuration["TelegramBotToken"] ?? Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN"));
@@ -397,19 +391,7 @@ public static partial class MiniAppController
                         if (!PocketOptionWebSocketStream.IsConnected)
                             wsStatus = "\u23F3 Подключение к Pocket Option OTC...";
                     }
-                    else if (!string.IsNullOrEmpty(TiingoService.GetApiKey()))
-                    {
-                        wsStatus = "\u2705 Подключено";
-                        for (int t = 0; t < 5; t++)
-                        {
-                            if (TiingoWebSocketStream.IsConnected)
-                            {
-                                wsStatus = "\u2705 Подключено";
-                                break;
-                            }
-                            await Task.Delay(1000);
-                        }
-                    }
+
 
                     string msg = "\U0001F680 <b>ValutaBot Успешно Запущен!</b>\n\n\u2699\uFE0F <b>Системная диагностика:</b>\n- C# Датчики: \u2705 ОК\n- PostgreSQL: " + dbStatus + "\n- Нейросеть (PatchTST): " + mlStatus + "\n- WebSocket: " + wsStatus + "\n\n<i>Бот полностью в сети и мониторит рынок.</i>";
                     await ValutaBot.MiniApp.TelegramBotService.SendMessageToAdmins(msg);

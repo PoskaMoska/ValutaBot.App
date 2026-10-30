@@ -372,6 +372,14 @@ public class ConfluenceMatrixEngine(
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
         bool isMlExplicitHold = isNeuralBrain && mlSignal != null && mlSignal.Direction is "HOLD" or "NEUTRAL";
 
+        // D-2 fix: явная проверка «все TF вернули NEUTRAL» до входа в логику.
+        // Если MTF не дал ни одного BUY/PUT направления — это сигнал недостаточности данных (нет связи,
+        // нет свечей). В этом случае принудительно блокируем торговлю уже здесь, не дожидаясь Orchestrator-fallback.
+        bool allMtfNeutral = mtfResult != null
+            && mtfResult.TimeframeDirections != null
+            && mtfResult.TimeframeDirections.Count > 0
+            && !mtfResult.TimeframeDirections.Values.Any(d => d is "BUY" or "PUT");
+
         int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
 
         if (hasMlVerdict)
@@ -458,6 +466,11 @@ public class ConfluenceMatrixEngine(
                 finalDir = taScore > 0 ? "BUY" : "PUT";
                 finalProbPct = (int)Math.Clamp(Math.Round((0.50 + Math.Abs(taScore) * 0.25) * 100.0), 50, 92);
                 safetyNotes.Add("ℹ️ Резервный режим: ML сигнал нейтрален или на калибровке (Fallback Engine)");
+                if (allMtfNeutral)
+                {
+                    finalProbPct = Math.Min(finalProbPct, 52);
+                    safetyNotes.Add("⚠️ MTF без направления (нет данных/все ТФ NEUTRAL): уверенность ограничена 52%, реальный вход невозможен");
+                }
             }
         }
 
@@ -486,9 +499,22 @@ public class ConfluenceMatrixEngine(
                     string wickName = finalDir == "BUY" ? "нижняя тень подтверждает отскок по тренду BUY" : "верхняя тень подтверждает отскок по тренду PUT";
                     if (hasRiskDampener)
                     {
-                        // Риск-демпфер активен (серия убытков или MTF конфликт): даем осторожный бонус без стирания защитного штрафа
-                        finalProbPct = Math.Clamp(finalProbPct + 2, 50, 60);
-                        safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+2%, демпфировано до {finalProbPct}% из-за активного риск-контроля)");
+                        // D-3 fix: риск-демпфер активен (серия убытков или MTF конфликт).
+                        // Wick-бонус НЕ должен стирать штраф Circuit Breaker.
+                        // При >= 3 убытках (CB полный штраф -6%) бонус = 0: wick не отменяет CB.
+                        // При 2 убытках (CB мягкий штраф -3%) даём минимальный бонус +1, но не поднимаем
+                        // finalProbPct выше его значения ДО CB-штрафа (т.е. не компенсируем CB).
+                        if (mlLiveLosses >= 3)
+                        {
+                            // CB hard stop: wick-бонус заблокирован полностью
+                            safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (бонус 0%, демпфировано риск-контролем CB >= 3 убытков)");
+                        }
+                        else
+                        {
+                            // mlLiveLosses == 2 или conflictPenalty < 1: осторожный бонус +1
+                            finalProbPct = Math.Clamp(finalProbPct + 1, 50, 60);
+                            safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+1%, демпфировано до {finalProbPct}% из-за риск-контроля)");
+                        }
                     }
                     else
                     {

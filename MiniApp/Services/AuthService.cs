@@ -12,24 +12,23 @@ public static class AuthService
     public static async Task<(bool isAuthorized, string? errorMessage)> IsRequestAuthorized(HttpContext context)
     {
         var remoteIp = context.Connection.RemoteIpAddress;
-        bool isProxiedExternal = context.Request.Headers.ContainsKey("X-Forwarded-For");
+        bool isProxiedExternal = context.Request.Headers.ContainsKey("X-Forwarded-For")
+                              || context.Request.Headers.ContainsKey("Forwarded");
 
         bool isProductionCloud = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_ENVIRONMENT"))
             || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_PROJECT_ID"))
             || string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Production", StringComparison.OrdinalIgnoreCase);
 
-        // SRE-FIX: In production cloud environments, bypass is strictly prohibited.
-        // Test/local bypass is ONLY permitted in local development or unit test runners.
-        bool isLocalOrTestRunner = !isProductionCloud && !isProxiedExternal && (
-            (remoteIp == null || System.Net.IPAddress.IsLoopback(remoteIp)) &&
-            (context.Request.Headers.TryGetValue("X-Test-Bypass", out var bypassVal) && bypassVal == "true"
-             || Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Development"
-             || (remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp)))
-        );
+        // SRE-FIX (F1): In production cloud or proxied environments, bypass is strictly prohibited.
+        // Local/test bypass requires loopback connection AND explicit Development environment or test runner header.
+        bool isLoopbackOrInMemory = remoteIp == null || System.Net.IPAddress.IsLoopback(remoteIp);
+        bool hasExplicitDevOrTestFlag =
+            string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Development", StringComparison.OrdinalIgnoreCase)
+            || (context.Request.Headers.TryGetValue("X-Test-Bypass", out var bypassVal) && bypassVal == "true");
 
-        if (isLocalOrTestRunner)
+        if (!isProductionCloud && !isProxiedExternal && isLoopbackOrInMemory && hasExplicitDevOrTestFlag)
         {
-            context.Items["userId"] = 123456789L; // Mock user ID for DB settings
+            context.Items["userId"] = 123456789L; // Mock user ID for local dev / test runner
             return (true, null);
         }
 
@@ -37,7 +36,7 @@ public static class AuthService
         if (string.IsNullOrEmpty(botToken))
         {
             BotLogger.Warn("[Security] Auth bypassed? NO. Bot token is missing in configuration. Failing securely.");
-            return (false, "Internal Server Error: Missing bot token configuration."); 
+            return (false, "Internal Server Error: Missing bot token configuration.");
         }
 
         if (!context.Request.Headers.TryGetValue("X-Telegram-Init-Data", out var initDataValues))
@@ -85,7 +84,7 @@ public static class AuthService
         if (initData.Contains("custom_user_id=") && initData.Contains("custom_user_sign="))
         {
             var parsed = HttpUtility.ParseQueryString(initData);
-            if (long.TryParse(parsed["custom_user_id"], out tgUserId))
+            if (long.TryParse(parsed["custom_user_id"], out tgUserId) && tgUserId > 0)
             {
                 string providedSign = parsed["custom_user_sign"] ?? "";
                 string? authDateStr = parsed["auth_date"];
@@ -111,13 +110,18 @@ public static class AuthService
                     expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(tgUserId.ToString()));
                 }
 
-                string expectedSign = Convert.ToHexString(expectedHash).ToLowerInvariant();
-                byte[] provBytes = Encoding.UTF8.GetBytes(providedSign.ToLowerInvariant());
-                byte[] expBytes = Encoding.UTF8.GetBytes(expectedSign);
-                byte[] provHash = SHA256.HashData(provBytes);
-                byte[] expHash = SHA256.HashData(expBytes);
+                byte[] providedBytes;
+                try
+                {
+                    providedBytes = Convert.FromHexString(providedSign);
+                }
+                catch
+                {
+                    return (false, 0, "Invalid custom authorization signature");
+                }
 
-                if (!CryptographicOperations.FixedTimeEquals(provHash, expHash))
+                if (providedBytes.Length != expectedHash.Length ||
+                    !CryptographicOperations.FixedTimeEquals(providedBytes, expectedHash))
                 {
                     return (false, 0, "Invalid custom authorization signature");
                 }

@@ -81,9 +81,7 @@ public class DataRetentionService : BackgroundService
         if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString()))
             throw new InvalidOperationException("DATABASE_URL is not configured.");
 
-        using var conn = DbConnectionFactory.GetConnection();
-        await conn.OpenAsync();
-
+        await using var conn = await DbConnectionFactory.OpenMaintenanceAsync();
         return await ExecuteCycleInternalAsync(conn, forceEmergencyVacuum: allowVacuumFull);
     }
 
@@ -91,16 +89,14 @@ public class DataRetentionService : BackgroundService
     {
         if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
 
-        using var conn = DbConnectionFactory.GetConnection();
-        await conn.OpenAsync(ct);
-
+        await using var conn = await DbConnectionFactory.OpenMaintenanceAsync(ct);
         await ExecuteCycleInternalAsync(conn, forceEmergencyVacuum: false);
     }
 
     private static async Task<StorageTelemetry> ExecuteCycleInternalAsync(System.Data.Common.DbConnection conn, bool forceEmergencyVacuum)
     {
         // 0. Set protective lock timeout so maintenance never blocks concurrent live trading
-        try { await conn.ExecuteAsync("SET lock_timeout = '3s';", commandTimeout: 10); } catch { }
+        await conn.ExecuteAsync("SET lock_timeout = '3s';", commandTimeout: 10);
 
         // 1. One-time zero-downtime PostgreSQL autovacuum tuning per table
         if (!_tableTuningApplied)
@@ -115,10 +111,16 @@ public class DataRetentionService : BackgroundService
 
         BotLogger.Info($"[SmartStorageGovernor] DB Size: {telemetry.DatabaseSizeMb:F1} MB / {telemetry.MaxVolumeSizeMb:F0} MB ({telemetry.UsagePercent:F1}%). Zone: {telemetry.ActiveZone}.");
 
-        // 3. Always truncate unused raw tick queue (po_ticks is purely transient)
+        // 3. Drain unused raw tick queue in non-blocking chunks (avoids ACCESS EXCLUSIVE lock of TRUNCATE)
         try
         {
-            await conn.ExecuteAsync("TRUNCATE TABLE po_ticks;", commandTimeout: 60);
+            await ExecuteChunkedDeleteSubminuteAsync(conn, "po_ticks",
+                @"DELETE FROM po_ticks
+                  WHERE ctid IN (
+                      SELECT ctid FROM po_ticks
+                      LIMIT 5000
+                      FOR UPDATE SKIP LOCKED
+                  )", new { }, chunkSize: 5000);
         }
         catch { }
 
@@ -166,22 +168,24 @@ public class DataRetentionService : BackgroundService
         var shadowCutoff = DateTime.UtcNow.Subtract(shadowRetention);
         var stalePendingCutoff = DateTime.UtcNow.AddHours(-2).ToString("o");
 
-        // 5. Prune expired subminute candles using chunked deletions to prevent hot tick insert starvation
+        // 5. Prune expired subminute candles using chunked deletions with FOR UPDATE SKIP LOCKED
         int subPoDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (PO)",
             @"DELETE FROM subminute_candles
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
                   WHERE asset LIKE '%_PO' AND open_time < @cutoff
-                  LIMIT 10000
-              )", new { cutoff = subCutoff });
+                  LIMIT 5000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = subCutoff }, chunkSize: 5000);
 
         int subLegacyDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (legacy)",
             @"DELETE FROM subminute_candles
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
                   WHERE asset NOT LIKE '%_PO' AND open_time < @cutoff
-                  LIMIT 10000
-              )", new { cutoff = legacySubCutoff });
+                  LIMIT 5000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = legacySubCutoff }, chunkSize: 5000);
 
         int histDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles",
             "DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff = histCutoff });
@@ -229,27 +233,21 @@ public class DataRetentionService : BackgroundService
                 new { });
         }
 
-        // 7. Non-blocking VACUUM maintenance
+        // 7. Non-blocking VACUUM maintenance (or per-table disk-checked SafeVacuumFullAsync when explicitly requested)
         try
         {
-            double maxTableSizeMb = telemetry.TableSizesMb.Values.DefaultIfEmpty(500.0).Max();
-            double requiredHeadroomMb = Math.Max(1500.0, maxTableSizeMb * 1.2);
-            bool hasHeadroom = (MaxVolumeCapacityMb - telemetry.DatabaseSizeMb) >= requiredHeadroomMb;
-
-            if (forceEmergencyVacuum && hasHeadroom)
+            if (forceEmergencyVacuum)
             {
-                BotLogger.Warn($"[SmartStorageGovernor] Manual VACUUM FULL requested and safe headroom verified ({requiredHeadroomMb:F0} MB required). Rewriting tables...");
-                await conn.ExecuteAsync("VACUUM FULL trade_outcomes;", commandTimeout: 300);
-                await conn.ExecuteAsync("VACUUM FULL subminute_candles;", commandTimeout: 300);
-                await conn.ExecuteAsync("VACUUM FULL pending_trades;", commandTimeout: 60);
-                BotLogger.Info("[SmartStorageGovernor] VACUUM FULL complete.");
+                foreach (var tbl in new[] { "trade_outcomes", "subminute_candles", "pending_trades" })
+                {
+                    if (!await SafeVacuumFullAsync(conn, tbl))
+                    {
+                        await conn.ExecuteAsync($"VACUUM (ANALYZE) {tbl};", commandTimeout: 120);
+                    }
+                }
             }
             else
             {
-                if (forceEmergencyVacuum)
-                {
-                    BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL bypassed: Insufficient disk headroom (<{requiredHeadroomMb:F0} MB free) on 5GB volume to safely duplicate table file. Using non-blocking VACUUM (ANALYZE).");
-                }
                 await conn.ExecuteAsync("VACUUM (ANALYZE) trade_outcomes;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) subminute_candles;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) pending_trades;", commandTimeout: 60);
@@ -289,8 +287,9 @@ public class DataRetentionService : BackgroundService
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
                   WHERE open_time < @cutoff
-                  LIMIT 10000
-              )", new { cutoff = DateTime.UtcNow.AddHours(-96).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                  LIMIT 5000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = DateTime.UtcNow.AddHours(-96).ToString("yyyy-MM-ddTHH:mm:ssZ") }, chunkSize: 5000);
 
         // Step 3: Compact ALL features_json immediately (not just old ones)
         int emergencyCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: JSON Compaction ALL)",
@@ -407,6 +406,49 @@ public class DataRetentionService : BackgroundService
             TableSizesMb: tableSizes,
             MeasuredAtUtc: DateTime.UtcNow
         );
+    }
+
+    private static async Task<bool> SafeVacuumFullAsync(System.Data.Common.DbConnection conn, string table)
+    {
+        try
+        {
+            long capacityMb = long.TryParse(Environment.GetEnvironmentVariable("RAILWAY_VOLUME_CAPACITY_MB"), out var cap) ? cap : (long)MaxVolumeCapacityMb;
+            long capacity = capacityMb * 1048576L;
+            long dbSize = await conn.ExecuteScalarAsync<long>("SELECT pg_database_size(current_database())");
+            long walNow = 0;
+            try { walNow = await conn.ExecuteScalarAsync<long>("SELECT COALESCE(sum(size),0)::bigint FROM pg_ls_waldir()"); } catch { }
+            long maxWal = 1073741824L;
+            try { maxWal = await conn.ExecuteScalarAsync<long>("SELECT setting::bigint * 1048576 FROM pg_settings WHERE name='max_wal_size'"); } catch { }
+            long tblSize = await conn.ExecuteScalarAsync<long>("SELECT pg_total_relation_size(@t::regclass)", new { t = table });
+
+            long free = capacity - dbSize - walNow;
+            long need = (long)(tblSize * 1.1) + maxWal + capacity / 10;
+            if (free < need)
+            {
+                BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} skipped: free={free >> 20}MB < need={need >> 20}MB");
+                return false;
+            }
+
+            await conn.ExecuteAsync("SET lock_timeout = '2s'");
+            await conn.ExecuteAsync("SET statement_timeout = '120s'");
+            await conn.ExecuteAsync($"VACUUM FULL {table}", commandTimeout: 150);
+            BotLogger.Info($"[SmartStorageGovernor] VACUUM FULL {table} succeeded.");
+            return true;
+        }
+        catch (Npgsql.PostgresException e) when (e.SqlState is "55P03" or "57014")
+        {
+            BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} aborted by lock/statement timeout ({e.SqlState}).");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} skipped: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            try { await conn.ExecuteAsync("SET statement_timeout = '600s'; SET lock_timeout = '3s';"); } catch { }
+        }
     }
 
     private static async Task<int> ExecuteSafeDeleteAsync(System.Data.Common.DbConnection conn, string tableLabel, string sql, object param)
