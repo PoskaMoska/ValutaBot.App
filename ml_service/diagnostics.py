@@ -145,7 +145,18 @@ def _normalize_interval(iv_raw: str) -> str:
     return s
 
 def _clean_asset_name(asset: str) -> str:
-    return str(asset or "").upper().replace("_PO", "").replace("_OTC", "").replace(" OTC", "").replace("/", "").strip()
+    return (
+        str(asset or "")
+        .upper()
+        .replace("_PO", "")
+        .replace("_OTC", "")
+        .replace(" OTC", "")
+        .replace("/", "")
+        .replace("-", "")
+        .replace("_", "")
+        .replace(" ", "")
+        .strip()
+    )
 
 def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = True) -> dict:
     """
@@ -189,6 +200,8 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
         FROM trade_outcomes
         WHERE created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz
           AND features_json IS NOT NULL
+          AND direction IN ('BUY', 'PUT')
+          AND was_win IS NOT NULL
         ORDER BY created_at::timestamptz DESC
         LIMIT %s
     """, (sample_limit,))
@@ -226,7 +239,8 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
             min_created_at = min(created_ats)
             # 160 candles of m5 = ~13.3 hours; buffer 14h back
             start_cutoff = min_created_at - timedelta(hours=14)
-            start_iso = start_cutoff.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            start_iso_t = start_cutoff.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            start_iso_s = start_cutoff.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
             for tbl, o_col, h_col, l_col, c_col in [
                 ("subminute_candles", "open_price", "high_price", "low_price", "close_price"),
@@ -236,14 +250,14 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
                     cur.execute(f"""
                         SELECT asset, interval, open_time, {o_col}, {h_col}, {l_col}, {c_col}, volume
                         FROM {tbl}
-                        WHERE open_time >= %s
+                        WHERE open_time >= %s OR open_time >= %s
                         ORDER BY asset, interval, open_time ASC
-                    """, (start_iso,))
+                    """, (start_iso_t, start_iso_s))
                     for a_raw, iv_raw, ot, op, hi, lo, cl, vol in cur.fetchall():
                         ca = _clean_asset_name(a_raw)
                         iv = _normalize_interval(iv_raw)
                         bucket = candle_store.setdefault((ca, iv), ([], []))
-                        ts_str = str(ot)[:19]
+                        ts_str = str(ot)[:19].replace("T", " ")
                         if not bucket[0] or bucket[0][-1] != ts_str:
                             bucket[0].append(ts_str)
                             bucket[1].append({
@@ -336,7 +350,7 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
             bucket = candle_store.get((clean_a, tf))
             if bucket and bucket[0]:
                 c_at = rd.get("created_at")
-                iso_cut = c_at.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(c_at, "strftime") else str(c_at)[:19].replace(" ", "T")
+                iso_cut = c_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(c_at, "strftime") else str(c_at)[:19].replace("T", " ")
                 idx = bisect.bisect_right(bucket[0], iso_cut)
                 start_idx = max(0, idx - 160)
                 candles = bucket[1][start_idx:idx]
