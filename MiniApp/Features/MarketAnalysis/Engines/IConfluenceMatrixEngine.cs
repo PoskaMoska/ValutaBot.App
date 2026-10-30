@@ -1,4 +1,4 @@
-﻿using System.Threading.Tasks;
+using System.Threading.Tasks;
 
 namespace ValutaBot.MiniApp;
 
@@ -6,8 +6,8 @@ namespace ValutaBot.MiniApp;
 public record TaSignal(double Score, double Confidence, double Rsi, double Ema, double Volatility, double Atr, double Adx = 20.0);
 
 // D2-3 FIX: SmcSignal strings are guaranteed non-null at construction via Orchestrator sanitization.
-// All comparison sites use == against known literals вЂ” null-safe by C# spec (null != "BULLISH_BOS").
-// However canonical empty value is "" (not null, not "NONE") вЂ” enforced at Orchestrator call site.
+// All comparison sites use == against known literals — null-safe by C# spec (null != "BULLISH_BOS").
+// However canonical empty value is "" (not null, not "NONE") — enforced at Orchestrator call site.
 public record SmcSignal(string BosDirection, string SweepDirection, string OrderBlockType, string FvgType, string Reasoning);
 
 public record OrderflowSignal(double ScoreContribution, string Description);
@@ -46,7 +46,10 @@ public interface IConfluenceMatrixEngine
         SmcSignal smcSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
-        ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0);
+        ConfluenceMatrixResult mtfResult,
+        int consecutiveLosses = 0,
+        double volRatio = 1.0,
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null);
 
     Task<ConsensusDecision> EvaluateMatrixAsync(
         string asset,
@@ -58,7 +61,10 @@ public interface IConfluenceMatrixEngine
         OrderflowSignal ofSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
-        ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0);
+        ConfluenceMatrixResult mtfResult,
+        int consecutiveLosses = 0,
+        double volRatio = 1.0,
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null);
 }
 
 // Replaces ConsensusEngine.DecisionResult
@@ -75,4 +81,3 @@ public record ConsensusDecision(
     double MlProb = 0.0,
     double MlScoreRaw = 0.0
 );
-

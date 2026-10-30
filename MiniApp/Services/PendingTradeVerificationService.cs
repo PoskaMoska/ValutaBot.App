@@ -11,7 +11,8 @@ namespace ValutaBot.MiniApp;
 public class PendingTradeVerificationService : BackgroundService
 {
     private static readonly TimeSpan _checkInterval = TimeSpan.FromSeconds(5);
-    private static readonly SemaphoreSlim _verificationSemaphore = new(20);
+    // 5 concurrent verification tasks bounds pool consumption while handling 100+ trades/sec
+    private static readonly SemaphoreSlim _verificationSemaphore = new(5);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -70,12 +71,14 @@ public class PendingTradeVerificationService : BackgroundService
         }
 
         double? exitPrice = null;
+        bool dbFailed = false;
         string verifyInterval = "s5"; 
         
         DateTime currentRefTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
         double secondsOverdue = (currentRefTime - record.VerifyAt).TotalSeconds;
+        double physicalSecondsOverdue = (DateTime.UtcNow - record.VerifyAt.ToUniversalTime()).TotalSeconds;
 
         try
         {
@@ -187,7 +190,7 @@ public class PendingTradeVerificationService : BackgroundService
                         WHERE asset = @Asset
                           AND interval = @Interval
                           AND open_time >= @CreatedIso
-                          AND open_time <= @TargetIso
+                          AND open_time < @TargetIso
                     ", new { 
                         Asset = cleanAsset, 
                         Interval = verifyInterval, 
@@ -196,8 +199,14 @@ public class PendingTradeVerificationService : BackgroundService
                     }, cancellationToken: ct));
 
                     double exitVal = exitPrice.Value;
-                    double maxH = Math.Max(exc.max_high ?? exitVal, Math.Max(exitVal, record.EntryPrice));
-                    double minL = Math.Min(exc.min_low ?? exitVal, Math.Min(exitVal, record.EntryPrice));
+                    double excMax = exc.max_high.HasValue && !double.IsNaN(exc.max_high.Value) && !double.IsInfinity(exc.max_high.Value) 
+                        ? exc.max_high.Value 
+                        : exitVal;
+                    double excMin = exc.min_low.HasValue && !double.IsNaN(exc.min_low.Value) && !double.IsInfinity(exc.min_low.Value) 
+                        ? exc.min_low.Value 
+                        : exitVal;
+                    double maxH = Math.Max(excMax, Math.Max(exitVal, record.EntryPrice));
+                    double minL = Math.Min(excMin, Math.Min(exitVal, record.EntryPrice));
 
                     if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY"))
                     {
@@ -215,15 +224,20 @@ public class PendingTradeVerificationService : BackgroundService
                     BotLogger.Warn($"[PendingVerifier] MFE/MAE calculation warning: {exMfe.Message}");
                 }
             }
+            dbFailed = false;
         }
         catch (Exception ex)
         {
-             BotLogger.Warn($"[PendingVerifier] DB fetch failed: {ex.Message}");
+            dbFailed = true;
+            BotLogger.Warn($"[PendingVerifier] DB fetch failed: {ex.Message}");
         }
 
         if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
         {
-            if (secondsOverdue >= 120)
+            // Do not archive/cancel trade if DB fetch encountered an exception; retry on next verification sweep
+            if (dbFailed) return;
+
+            if (physicalSecondsOverdue >= 120)
             {
                 // SRE-FIX: Do NOT silently delete the trade! Archive into trade_outcomes with cancelled status
                 // to maintain audit trail and dataset integrity across container restarts/gaps.

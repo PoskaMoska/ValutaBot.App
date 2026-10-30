@@ -288,7 +288,10 @@ def extract_macro_vector(row_dict, feat_obj):
     # 24-31. Enriched TA and Micro-Dynamics (Fix Train-Serve Skew: C# serializes VolStrengthVal in DB and VolRatio in live payload)
     ta_score = _safe_float(ta.get("Score"), 0.0)
     micro_vel = _safe_float(ta.get("MicroVel"), 0.0) / 20.0
-    hma_slope = _safe_float(ta.get("HmaSlope"), 0.0) / 10.0
+    en_price = _safe_float(row_dict.get("entry_price"), 1.0)
+    hma_raw = _safe_float(ta.get("HmaSlope"), 0.0)
+    hma_bps = (hma_raw / en_price) * 10000.0 if en_price > 0 else 0.0
+    hma_slope = float(np.clip(hma_bps / 5.0, -2.0, 2.0))
     vol_raw = ta.get("VolRatio") if ta.get("VolRatio") is not None else ta.get("VolStrengthVal", 1.0)
     vol_ratio = min(3.0, max(0.0, _safe_float(vol_raw, 1.0))) / 3.0
     bb_sq = float(1.0 if (macro.get("BbSqueeze") or row_dict.get("bb_squeeze")) else 0.0)
@@ -332,6 +335,7 @@ class SubminuteCandleStore:
         print("[*] Loading subminute & historical candles into strictly monotonic index...")
         cur = self.conn.cursor()
         raw_buckets = {}
+        target_intervals = ('s5', 's10', 's15', 's30', '1min', 'm1', '5min', 'm5')
         for tbl, o_col, h_col, l_col, c_col in [
             ("subminute_candles", "open_price", "high_price", "low_price", "close_price"),
             ("historical_candles", "open", "high", "low", "close"),
@@ -341,36 +345,41 @@ class SubminuteCandleStore:
                     SELECT asset, interval, open_time, {o_col}, {h_col}, {l_col}, {c_col}, volume
                     FROM {tbl}
                     WHERE asset LIKE '%%_PO'
+                      AND interval = ANY(%s)
                       AND open_time >= to_char((%s::timestamptz - INTERVAL '3 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS')
                     ORDER BY open_time ASC
-                """, (self.min_date,))
-                for asset, interval, ot, op, hi, lo, cl, vol in cur.fetchall():
-                    clean_a = (
-                        asset.upper()
-                        .replace("_PO", "")
-                        .replace("_OTC", "")
-                        .replace(" OTC", "")
-                        .replace("/", "")
-                        .replace("-", "")
-                        .replace("_", "")
-                        .strip()
-                    )
-                    iv = interval.lower().strip()
-                    if iv in ("1min", "1m", "m1"):
-                        iv = "m1"
-                    elif iv in ("5min", "5m", "m5"):
-                        iv = "m5"
-                    key = (clean_a, iv)
-                    bucket = raw_buckets.setdefault(key, [])
-                    ts_str = str(ot)[:19].replace("T", " ")
-                    bucket.append((ts_str, {
-                        "Timestamp": ot,
-                        "Open": _safe_float(op, 1.0),
-                        "High": _safe_float(hi, 1.0),
-                        "Low": _safe_float(lo, 1.0),
-                        "Close": _safe_float(cl, 1.0),
-                        "Volume": _safe_float(vol, 0.0)
-                    }))
+                """, (list(target_intervals), self.min_date))
+                while True:
+                    batch = cur.fetchmany(10000)
+                    if not batch:
+                        break
+                    for asset, interval, ot, op, hi, lo, cl, vol in batch:
+                        clean_a = (
+                            asset.upper()
+                            .replace("_PO", "")
+                            .replace("_OTC", "")
+                            .replace(" OTC", "")
+                            .replace("/", "")
+                            .replace("-", "")
+                            .replace("_", "")
+                            .strip()
+                        )
+                        iv = interval.lower().strip()
+                        if iv in ("1min", "1m", "m1"):
+                            iv = "m1"
+                        elif iv in ("5min", "5m", "m5"):
+                            iv = "m5"
+                        key = (clean_a, iv)
+                        bucket = raw_buckets.setdefault(key, [])
+                        ts_str = str(ot)[:19].replace("T", " ")
+                        bucket.append((ts_str, {
+                            "Timestamp": ot,
+                            "Open": _safe_float(op, 1.0),
+                            "High": _safe_float(hi, 1.0),
+                            "Low": _safe_float(lo, 1.0),
+                            "Close": _safe_float(cl, 1.0),
+                            "Volume": _safe_float(vol, 0.0)
+                        }))
             except Exception as tbl_err:
                 print(f"[-] Warning: Failed to load candles from {tbl}: {tbl_err}")
         cur.close()
@@ -438,13 +447,15 @@ class SubminuteCandleStore:
         return bucket[1][start:idx]
 
 
-def determine_label(entry_price, exit_price, direction, pnl_bps_recorded, min_pnl_threshold=0.30):
+def determine_label(entry_price, exit_price, direction, pnl_bps_recorded, min_pnl_threshold=0.30, was_win=True):
     """
     AUDIT 4 FIX: Accurately identifies true market direction irrespective of order direction.
     Class 0: HOLD / Chop (|raw_delta_bps| <= min_pnl_threshold)
     Class 1: BUY  (Market moved UP:   raw_delta_bps > min_pnl_threshold)
     Class 2: PUT  (Market moved DOWN: raw_delta_bps < -min_pnl_threshold)
     """
+    if was_win is None:
+        return None, 0.0
     en = _safe_float(entry_price)
     ex = _safe_float(exit_price)
     if en > 0.0 and ex > 0.0:
@@ -612,6 +623,25 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
         candles = feat_obj.get("Candles") or feat_obj.get("candles") or []
         if not candles:
             candles = candle_store.get_candles_before(str(row_dict.get("asset") or ""), tf_str_row, row_dict.get("created_at"), seq_len)
+
+        # Strict Anti-Leakage: микро-свеча ОБЯЗАНА быть 100% закрыта ДО created_at
+        created_dt = row_dict.get("created_at")
+        created_ts = created_dt.timestamp() if hasattr(created_dt, "timestamp") else None
+        tf_sec_row = TF_SECONDS.get(tf_str_row, 5)
+        
+        if len(candles) > 1 and created_ts is not None:
+            last_c = candles[-1]
+            last_ts_raw = last_c.get("Timestamp") or last_c.get("timestamp") or last_c.get("openTime")
+            last_open_ts = None
+            if isinstance(last_ts_raw, (int, float)) and last_ts_raw > 0:
+                last_open_ts = float(last_ts_raw) / 1000.0 if float(last_ts_raw) > 1e11 else float(last_ts_raw)
+            elif isinstance(last_ts_raw, str) and len(last_ts_raw) >= 19:
+                try:
+                    last_open_ts = datetime.fromisoformat(last_ts_raw.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    pass
+            if last_open_ts is not None and (last_open_ts + tf_sec_row) > created_ts:
+                candles = candles[:-1]
 
         # Strip trailing unclosed 1-tick candle if present from legacy orchestrator serialization
         if len(candles) > 10:

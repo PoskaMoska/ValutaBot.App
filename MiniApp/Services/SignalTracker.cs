@@ -14,7 +14,7 @@ namespace ValutaBot.MiniApp;
 public static class SignalTracker
 {
     // Cooldown map using atomic CAS ticks to prevent duplicate trade entry races
-    private static readonly ConcurrentDictionary<string, long> _cooldownExpiryTicks = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, long> _cooldownExpirySw = new(StringComparer.OrdinalIgnoreCase);
     internal static readonly ConcurrentDictionary<string, double> _livePrices = new();
 
     public static void UpdateLivePrice(string asset, double price)
@@ -64,7 +64,13 @@ public static class SignalTracker
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
         int durationSecs = Math.Max(1, expiryCandles) * timeframeSecs;
-        DateTime verifyAt = now.AddSeconds(durationSecs);
+        long tfTicks = TimeSpan.FromSeconds(timeframeSecs).Ticks;
+        DateTime barOpen = new DateTime(now.Ticks - (now.Ticks % tfTicks), DateTimeKind.Utc);
+        DateTime verifyAt = barOpen.AddSeconds(durationSecs);
+        if (verifyAt <= now.AddMilliseconds(800))
+        {
+            verifyAt = verifyAt.AddSeconds(timeframeSecs);
+        }
 
         string cooldownKey = isRealTrade ? $"REAL_{asset}_{timeframe}" : $"SHADOW_{asset}_{timeframe}";
 
@@ -73,24 +79,24 @@ public static class SignalTracker
             ? Math.Max(durationSecs, timeframeSecs)
             : Math.Max(1.0, timeframeSecs - 1.0);
 
-        long nowTicks = DateTime.UtcNow.Ticks;
-        long newExpiryTicks = nowTicks + TimeSpan.FromSeconds(cooldownSecs).Ticks;
+        long nowSw = System.Diagnostics.Stopwatch.GetTimestamp();
+        long newExpirySw = nowSw + (long)(cooldownSecs * System.Diagnostics.Stopwatch.Frequency);
 
         while (true)
         {
-            if (_cooldownExpiryTicks.TryGetValue(cooldownKey, out long activeExpiryTicks))
+            if (_cooldownExpirySw.TryGetValue(cooldownKey, out long activeExpirySw))
             {
-                if (nowTicks < activeExpiryTicks)
+                if (nowSw < activeExpirySw)
                 {
                     BotLogger.Warn($"[Tracker] Cooldown active for {cooldownKey}. Skipping duplicate signal recording.");
                     return;
                 }
-                if (_cooldownExpiryTicks.TryUpdate(cooldownKey, newExpiryTicks, activeExpiryTicks))
+                if (_cooldownExpirySw.TryUpdate(cooldownKey, newExpirySw, activeExpirySw))
                     break;
             }
             else
             {
-                if (_cooldownExpiryTicks.TryAdd(cooldownKey, newExpiryTicks))
+                if (_cooldownExpirySw.TryAdd(cooldownKey, newExpirySw))
                     break;
             }
         }

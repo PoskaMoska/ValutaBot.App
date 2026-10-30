@@ -6,6 +6,7 @@ using Xunit;
 
 namespace ValutaBot.Tests.Engines;
 
+[Collection("ClockSkewMonitor")]
 public class ExecutionGatewayLowLatencyTests
 {
     [Fact]
@@ -104,5 +105,45 @@ public class ExecutionGatewayLowLatencyTests
         DateTime staleBrokerTime = new DateTime(2026, 10, 27, 12, 0, 30, DateTimeKind.Utc);
         bool isStale = MarketDataFetcher.IsFeedStale(candleOpen, 5, staleBrokerTime);
         Assert.True(isStale);
+    }
+
+    [Fact]
+    public void HandleTick_OutOfOrderTick_DoesNotCorruptLivePrice()
+    {
+        var handleTickMethod = typeof(PocketOptionWebSocketStream).GetMethod("HandleTick",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(handleTickMethod);
+
+        // 1. Fresh progressive tick at t = 1000.0, price = 1.0900
+        handleTickMethod!.Invoke(null, new object[] { "EURUSD_otc", 1700001000.0, 1.0900, false });
+        bool ok = PocketOptionWebSocketStream.TryGetLivePrice("EURUSD", out double livePrice);
+        Assert.True(ok);
+        Assert.Equal(1.0900, livePrice);
+
+        // 2. Stale out-of-order tick at t = 999.0, price = 1.0800 (must be rejected by watermark)
+        handleTickMethod.Invoke(null, new object[] { "EURUSD_otc", 1700000999.0, 1.0800, false });
+
+        // 3. Live price must NOT be corrupted/overwritten by the stale tick
+        PocketOptionWebSocketStream.TryGetLivePrice("EURUSD", out double priceAfterStale);
+        Assert.Equal(1.0900, priceAfterStale);
+    }
+
+    [Fact]
+    public void HandleTick_BurstLaggedTicks_DoesNotRegressBrokerClock()
+    {
+        var handleTickMethod = typeof(PocketOptionWebSocketStream).GetMethod("HandleTick",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(handleTickMethod);
+
+        // 1. Fresh tick at t = 2000.0
+        handleTickMethod!.Invoke(null, new object[] { "GBPUSD_otc", 1700002000.0, 1.2500, false });
+        var brokerTime1 = PocketOptionWebSocketStream.GetBrokerTimeUtc();
+
+        // 2. Lagged burst tick arriving 1 second later with older timestamp t = 1999.5
+        handleTickMethod.Invoke(null, new object[] { "GBPUSD_otc", 1700001999.5, 1.2505, false });
+        var brokerTime2 = PocketOptionWebSocketStream.GetBrokerTimeUtc();
+
+        // Monotonic invariant: broker clock should never regress backwards
+        Assert.True(brokerTime2 >= brokerTime1, $"Expected broker time to never regress backwards. {brokerTime2} vs {brokerTime1}");
     }
 }

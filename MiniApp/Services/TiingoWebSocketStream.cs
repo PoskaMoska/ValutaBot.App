@@ -73,6 +73,7 @@ public static class TiingoWebSocketStream
         {
             _ = ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutdown", CancellationToken.None);
         }
+        Interlocked.Exchange(ref _loopRunning, 0);
     }
 
     private static bool IsWeekendPause()

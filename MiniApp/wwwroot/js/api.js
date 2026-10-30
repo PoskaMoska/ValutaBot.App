@@ -6,14 +6,12 @@ import {
     getAuthHeader, 
     timeOffset, 
     setTimeOffset, 
-    lastPriceVal, 
     setLastPriceVal, 
     priceSocket, 
     setPriceSocket, 
     triggerCopilotAction,
-    setCircuitBreakerState,
-    isNetworkOnline
-} from './state.js?v=20261028_audit_v2';
+    setCircuitBreakerState
+} from './state.js?v=20261029_audit_v6';
 
 function resolveAuthData() {
     try {
@@ -53,9 +51,10 @@ import {
     hideAiChart, 
     updateAiChartData, 
     updateAiCopilot,
+    recordAnalysisPsychometrics,
     showNetworkBanner,
     hideNetworkBanner
-} from './ui.js?v=20261028_audit_v2';
+} from './ui.js?v=20261029_audit_v6';
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -66,17 +65,18 @@ let reconnectAttempts = 0;
 let wsWatchdogTimer = null;
 let isAnalyzingInProgress = false;
 let chartOhlcAbortController = null;
+let analyzeAbortController = null;
 
-const WS_WATCHDOG_TIMEOUT_MS = 12000;
+const MAX_RECONNECT_ATTEMPTS = 6;
+const WS_WATCHDOG_TIMEOUT_MS = 30000; // SRE-FIX: Relaxed to 30s to match Kestrel Keep-Alive
 
-function resetWsWatchdog() {
-    if (wsWatchdogTimer) clearTimeout(wsWatchdogTimer);
-    wsWatchdogTimer = setTimeout(() => {
-        if (priceSocket && (priceSocket.readyState === WebSocket.OPEN || priceSocket.readyState === WebSocket.CONNECTING)) {
-            console.warn('[WS] Watchdog triggered: socket stalled in state', priceSocket.readyState);
-            try { priceSocket.close(4000, 'Watchdog timeout'); } catch (e) {}
-        }
-    }, WS_WATCHDOG_TIMEOUT_MS);
+function forceReconnect(sock, valEl) {
+    if (priceSocket !== sock) return;
+    sock.onopen = sock.onmessage = sock.onerror = sock.onclose = null;
+    try { sock.close(4000, 'Watchdog'); } catch (e) {}
+    clearWsWatchdog();
+    setPriceSocket(null);
+    scheduleWsReconnect(valEl);
 }
 
 function clearWsWatchdog() {
@@ -96,14 +96,23 @@ export function resetWebSocketBackoff() {
 
 function scheduleWsReconnect(valEl) {
     if (document.hidden) return;
+    
+    // SRE-FIX: Prevent infinite reconnect loops & battery drain
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        if (valEl) valEl.innerText = 'ОФФЛАЙН';
+        showNetworkBanner('Поток цен недоступен. Нажмите на пару для повтора.');
+        return;
+    }
     reconnectAttempts++;
-    const baseDelay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 15000);
-    const jitter = Math.floor(Math.random() * 800);
+    const baseDelay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 12000);
+    const jitter = Math.floor(Math.random() * 500);
     const finalDelay = baseDelay + jitter;
+    
     if (valEl) valEl.innerText = 'ПЕРЕПОДКЛЮЧЕНИЕ...';
     if (reconnectAttempts >= 2) {
-        showNetworkBanner(`Переподключение к потоку котировок (попытка ${reconnectAttempts})...`);
+        showNetworkBanner(`Переподключение к потоку цен (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
     }
+    
     clearTimeout(reconnectTimeout);
     reconnectTimeout = setTimeout(() => {
         if (!document.hidden && (typeof navigator === 'undefined' || navigator.onLine)) {
@@ -143,19 +152,24 @@ export function initPriceWebSocket() {
         const sock = new WebSocket(wsUrl);
         setPriceSocket(sock);
 
+        const armWatchdog = () => {
+            clearWsWatchdog();
+            wsWatchdogTimer = setTimeout(() => forceReconnect(sock, valEl), WS_WATCHDOG_TIMEOUT_MS);
+        };
+
         // Start watchdog immediately to guard against blackholed TCP SYN handshakes
-        resetWsWatchdog();
+        armWatchdog();
 
         sock.onopen = function() {
             if (priceSocket !== sock) return;
             reconnectAttempts = 0;
             hideNetworkBanner();
-            resetWsWatchdog();
+            armWatchdog();
         };
 
         sock.onmessage = function(event) {
             if (priceSocket !== sock) return;
-            resetWsWatchdog();
+            armWatchdog();
             try {
                 const data = JSON.parse(event.data);
                 if (data && data.price !== undefined) {
@@ -173,7 +187,7 @@ export function initPriceWebSocket() {
         sock.onclose = function(e) {
             if (priceSocket !== sock) return;
             clearWsWatchdog();
-            if (e.code === 1000 || document.hidden) return;
+            if (document.hidden) return; // Allow normal server closes to trigger reconnect
             scheduleWsReconnect(valEl);
         };
 
@@ -192,6 +206,7 @@ export function closePriceWebSocket() {
         clearTimeout(reconnectTimeout);
         reconnectTimeout = null;
     }
+    hideNetworkBanner(); // SRE-FIX: Dismiss banner immediately when exiting subminute TF
     if (priceSocket) {
         try {
             priceSocket.onopen = null;
@@ -211,6 +226,7 @@ export async function syncTime() {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const t0 = Date.now();
     try {
         const r = await fetch('/api/time', {
             headers: {
@@ -220,8 +236,10 @@ export async function syncTime() {
         });
         if (r.ok) {
             const d = await r.json();
+            const t1 = Date.now();
             if (d && Number.isFinite(Number(d.t))) {
-                setTimeOffset(Number(d.t) - Date.now());
+                const rtt = t1 - t0;
+                setTimeOffset(Number(d.t) - (t0 + rtt / 2));
             }
         }
     } catch (e) {
@@ -255,12 +273,22 @@ export async function executeAnalysis() {
     clearResults();
     startStatusBar();
 
+    const cleanupUi = () => {
+        hideAiChart();
+        stopStatusBar();
+        if (sphere) sphere.classList.remove('analyzing');
+    };
+
+    // Capture execution snapshot to resolve race conditions
+    const requestedAsset = currentAsset;
+    const requestedTf = currentTf;
+
     if (sphere) {
         sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
         sphere.classList.add('analyzing');
     }
 
-    showAiChart(currentAsset, currentTf);
+    showAiChart(requestedAsset, requestedTf);
 
     // Cancel any previous in-flight chart-ohlc request
     if (chartOhlcAbortController) {
@@ -269,7 +297,7 @@ export async function executeAnalysis() {
     chartOhlcAbortController = new AbortController();
 
     // Fetch early OHLC for the animated chart during the analysis phase
-    fetch(`/api/chart-ohlc?asset=${encodeURIComponent(currentAsset)}&timeframe=${encodeURIComponent(currentTf)}`, {
+    fetch(`/api/chart-ohlc?asset=${encodeURIComponent(requestedAsset)}&timeframe=${encodeURIComponent(requestedTf)}`, {
         headers: {
             'X-Telegram-Init-Data': resolveAuthData()
         },
@@ -277,25 +305,27 @@ export async function executeAnalysis() {
     })
         .then(r => r.ok ? r.json() : [])
         .then(ohlc => {
-            if (Array.isArray(ohlc) && ohlc.length) {
+            if (Array.isArray(ohlc) && ohlc.length && currentAsset === requestedAsset && currentTf === requestedTf) {
                 updateAiChartData(ohlc);
             }
         })
         .catch(() => {});
 
+    // Cancel previous analyze request if pending
+    if (analyzeAbortController) analyzeAbortController.abort();
+    analyzeAbortController = new AbortController();
+
     const startTime = Date.now();
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 18000); // 18s fail-safe timeout
+    let timedOut = false;
+    const timeoutId = setTimeout(() => { timedOut = true; analyzeAbortController.abort(); }, 14000); // Fail-safe 14s
 
     try {
-        const res = await fetch(`/api/analyze?asset=${encodeURIComponent(currentAsset)}&timeframe=${encodeURIComponent(currentTf)}&_=${Date.now()}`, {
+        const res = await fetch(`/api/analyze?asset=${encodeURIComponent(requestedAsset)}&timeframe=${encodeURIComponent(requestedTf)}&_=${Date.now()}`, {
             headers: {
                 'X-Telegram-Init-Data': resolveAuthData()
             },
-            signal: controller.signal
+            signal: analyzeAbortController.signal
         });
-
-        clearTimeout(timeoutId);
 
         if (!res.ok) {
             let errorText = `HTTP_${res.status}: ${res.statusText || 'Error'}`;
@@ -327,11 +357,25 @@ export async function executeAnalysis() {
 
         const rawData = await res.json();
         
+        // SRE-FIX: Drop-in preservation of risk_management and ui_flags
         let data = rawData;
         let config = null;
-        if (rawData.result && rawData.config) {
-            data = rawData.result;
+        if (rawData.result) {
+            data = Object.assign({}, rawData.result, {
+                risk_management: rawData.risk_management,
+                ui_flags: rawData.ui_flags,
+                config: rawData.config,
+                latency_ms: rawData.latency_ms
+            });
             config = rawData.config;
+        }
+
+        // Guard against race condition: user switched asset while request was in-flight
+        if (currentAsset !== requestedAsset || currentTf !== requestedTf) {
+            console.log(`[API] Discarding response for ${requestedAsset} (user switched to ${currentAsset})`);
+            cleanupUi();
+            clearResults();
+            return;
         }
 
         const elapsed = Date.now() - startTime;
@@ -340,9 +384,8 @@ export async function executeAnalysis() {
             await new Promise(resolve => setTimeout(resolve, remainingDelay));
         }
 
-        hideAiChart();
-        stopStatusBar();
-        if (sphere) sphere.classList.remove('analyzing');
+        cleanupUi();
+        recordAnalysisPsychometrics();
 
         // 1. Explicit Circuit Breaker Check First
         if (data.reason === 'CIRCUIT_BREAKER_ACTIVE' || (data.message && data.message.includes('Circuit Breaker'))) {
@@ -380,9 +423,13 @@ export async function executeAnalysis() {
 
         const resDirLabel = document.getElementById('resDirLabel');
         if (resDirLabel) {
-            resDirLabel.innerHTML = isRepeat 
+            let labelHtml = isRepeat 
                 ? 'Направление <span title="Сигнал не изменился" style="font-size:10px;opacity:0.8">🔄</span>'
                 : 'Направление';
+            if (data.ui_flags?.is_ml_overruled) {
+                labelHtml += ' <span title="Консенсус перевесил нейросеть" style="font-size:10px;color:#f59e0b">⚠️</span>';
+            }
+            resDirLabel.innerHTML = labelHtml;
         }
 
         if (resDir) {
@@ -424,16 +471,51 @@ export async function executeAnalysis() {
         const durEl = document.getElementById('resDur');
         if (durEl) durEl.innerText = data.duration || '--';
 
+        // Bind Monte Carlo / Kelly Risk Management Block (#mcCard)
+        const mcCard = document.getElementById('mcCard');
+        if (mcCard && data.risk_management) {
+            const rm = data.risk_management;
+            const mcKelly = document.getElementById('mcKelly');
+            if (mcKelly) {
+                mcKelly.innerText = rm.volatility_filter_passed !== false 
+                    ? `${rm.kelly_percentage}%` 
+                    : '0% (Фильтр)';
+                mcKelly.style.color = rm.volatility_filter_passed !== false && rm.kelly_percentage > 0 ? '#10b981' : '#f59e0b';
+            }
+            const mcEv = document.getElementById('mcEv');
+            if (mcEv) {
+                const prob = Number(data.probability) || 50;
+                const evVal = ((prob / 100 * 0.82) - ((100 - prob) / 100)).toFixed(2);
+                mcEv.innerText = `${evVal > 0 ? '+' : ''}${evVal}`;
+                mcEv.style.color = evVal > 0 ? '#10b981' : '#f59e0b';
+            }
+            const wfStatus = document.getElementById('wfStatus');
+            if (wfStatus) {
+                wfStatus.innerText = rm.volatility_filter_passed !== false ? 'В НОРМЕ' : 'ПАУЗА';
+                wfStatus.style.color = rm.volatility_filter_passed !== false ? '#10b981' : '#ef4444';
+            }
+            mcCard.style.display = 'block';
+        }
+
         if (data.rsi !== undefined) {
             const rsiEl = document.getElementById('resRsi');
             if (rsiEl) {
-                rsiEl.innerText = data.rsi;
-                rsiEl.style.color = data.rsi > 70 ? '#ff1744' : data.rsi < 30 ? '#00e676' : 'var(--subtext)';
+                const rsiNum = Number(data.rsi);
+                if (Number.isFinite(rsiNum)) {
+                    rsiEl.innerText = data.rsi;
+                    rsiEl.style.color = rsiNum > 70 ? '#ff1744' : rsiNum < 30 ? '#00e676' : 'var(--subtext)';
+                } else {
+                    rsiEl.innerText = '--';
+                    rsiEl.style.color = 'var(--subtext)';
+                }
             }
         }
         if (data.ema !== undefined) {
             const emaEl = document.getElementById('resEma');
-            if (emaEl) emaEl.innerText = data.ema;
+            if (emaEl) {
+                const emaNum = Number(data.ema);
+                emaEl.innerText = Number.isFinite(emaNum) ? data.ema : '--';
+            }
         }
         if (data.volumeStrength !== undefined) {
             const volEl = document.getElementById('resVol');
@@ -572,7 +654,7 @@ export async function executeAnalysis() {
         }
         const sigCountEl = document.getElementById('signalsCount') || document.getElementById('signalCount');
         if (sigCountEl) {
-            const verified = data.signalsVerified || 0;
+            const verified = data.signalsVerifiedAsset || data.signalsVerified || 0;
             const pending = data.signalsPending || 0;
             sigCountEl.innerText = verified + (pending > 0 ? ' (+' + pending + ')' : '');
         }
@@ -634,16 +716,16 @@ export async function executeAnalysis() {
         switchResultTab('chart');
         flashResults();
     } catch(e) {
-        clearTimeout(timeoutId);
-        hideAiChart(); // Ensure Canvas loop is stopped on failure!
-        stopStatusBar();
-        if (sphere) sphere.classList.remove('analyzing');
+        cleanupUi();
+        if (e.name === 'AbortError' && !timedOut) return; // Graceful exit on intentional abort
+        if (e.name === 'AbortError' && timedOut) {
+            renderError('Превышен лимит времени ответа сервера (14с)', 'Сервер не успел рассчитать консенсус за отведенное время (14с). Проверьте интернет-соединение или повторите попытку.');
+            return;
+        }
 
         const isAuthError = Boolean(e && e.message && (e.message.includes('HTTP 401') || e.message.includes('HTTP_401') || e.message.includes('auth_date') || e.message.includes('authorization') || e.message.includes('Access Denied')));
         let errorMsg;
-        if (e.name === 'AbortError') {
-            errorMsg = 'Превышен лимит времени ответа сервера (18с)';
-        } else if (e instanceof TypeError && (e.message.includes('fetch') || e.message.includes('NetworkError') || e.message.includes('Failed to fetch'))) {
+        if (e instanceof TypeError && (e.message.includes('fetch') || e.message.includes('NetworkError') || e.message.includes('Failed to fetch'))) {
             errorMsg = 'Сетевая ошибка: проверьте интернет-соединение или доступ к серверу';
         } else if (isAuthError) {
             errorMsg = 'Сессия устарела или доступ не авторизован. Перезапустите бота командой /start в Telegram.';
@@ -665,6 +747,7 @@ export async function executeAnalysis() {
             });
         }
     } finally {
+        clearTimeout(timeoutId);
         if (btn) {
             btn.disabled = false;
             btn.innerText = 'ПОЛУЧИТЬ АНАЛИЗ';

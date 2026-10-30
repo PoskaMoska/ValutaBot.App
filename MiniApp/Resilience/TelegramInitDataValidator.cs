@@ -93,6 +93,12 @@ public static class TelegramInitDataValidator
                 }
             }
 
+            if (userId <= 0)
+            {
+                Console.WriteLine("[InitData] User ID is missing or invalid (non-positive).");
+                return false;
+            }
+
             // Check auth_date expiration (e.g. 24 hours)
             string? authDateStr = parsed["auth_date"];
             if (!long.TryParse(authDateStr, out long authDate))

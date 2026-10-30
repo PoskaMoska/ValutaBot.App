@@ -1,7 +1,7 @@
-import { initPriceWebSocket, closePriceWebSocket, resetWebSocketBackoff, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261028_audit_v2';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261028_audit_v2';
+import { initPriceWebSocket, closePriceWebSocket, resetWebSocketBackoff, syncTime, executeAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261029_audit_v6';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner } from './ui.js?v=20261028_audit_v2';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner } from './ui.js?v=20261029_audit_v6';
 
 // 1. Telegram WebApp Lifecycle & Viewport Stabilization
 if (tg) {
@@ -78,6 +78,7 @@ let switchThrottleTimer = null;
 function throttledWsSwitch() {
     if (switchThrottleTimer) clearTimeout(switchThrottleTimer);
     switchThrottleTimer = setTimeout(() => {
+        resetWebSocketBackoff();
         initPriceWebSocket();
     }, 200);
 }
@@ -227,41 +228,6 @@ document.addEventListener('click', handleGlobalInteraction);
     } catch(e) {}
 })();
 
-initAssetGrid();
-syncTime();
-initPriceWebSocket();
-
-// Page Visibility API - Battery and Railway Resource Protection
-document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-        closePriceWebSocket();
-    } else {
-        if (navigator.onLine) {
-            hideNetworkBanner();
-            resetWebSocketBackoff();
-            syncTime();
-            initPriceWebSocket();
-        } else {
-            showNetworkBanner('Нет интернет-соединения');
-        }
-    }
-});
-
-// Network Reconnect Recovery
-window.addEventListener('online', () => {
-    setNetworkOnlineState(true);
-    hideNetworkBanner();
-    resetWebSocketBackoff();
-    syncTime();
-    initPriceWebSocket();
-});
-
-window.addEventListener('offline', () => {
-    setNetworkOnlineState(false);
-    showNetworkBanner('Нет интернет-соединения');
-    closePriceWebSocket();
-});
-
 function getTfSeconds() {
     const map = { s3:3, s5:5, s10:10, s15:15, s30:30, m1:60, m2:120, m3:180, m5:300, m15:900, m30:1800, h1:3600, h4:14400, d1:86400 };
     return map[currentTf] || 60;
@@ -316,5 +282,47 @@ function updateCountdown() {
     }
 }
 
+function resumeLive() {
+    if (document.hidden) return;
+    hideNetworkBanner();
+    resetWebSocketBackoff();
+    syncTime().finally(updateCountdown);
+    updateCountdown(); // Immediately update display without waiting for 1s interval
+    initPriceWebSocket();
+}
+
+initAssetGrid();
+syncTime().finally(updateCountdown);
+initPriceWebSocket();
 setInterval(updateCountdown, 1000);
 setTimeout(updateCountdown, 100);
+
+// Page Visibility API - Battery and Railway Resource Protection
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        closePriceWebSocket();
+    } else {
+        if (navigator.onLine) {
+            resumeLive();
+        } else {
+            showNetworkBanner('Нет интернет-соединения');
+        }
+    }
+});
+
+// Network Reconnect Recovery
+window.addEventListener('online', () => {
+    setNetworkOnlineState(true);
+    resumeLive();
+});
+
+window.addEventListener('offline', () => {
+    setNetworkOnlineState(false);
+    closePriceWebSocket(); // Close socket first...
+    showNetworkBanner('Нет интернет-соединения'); // ...then show network banner
+    const valEl = document.getElementById('livePriceValue');
+    if (valEl) {
+        valEl.innerText = 'ОФФЛАЙН';
+        valEl.className = 'live-price-value';
+    }
+});

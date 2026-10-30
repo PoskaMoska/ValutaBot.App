@@ -263,7 +263,8 @@ namespace ValutaBot.MiniApp.Services
                 DateTime? sinceUtc = (keyWm.HasValue && pairWm.HasValue)
                     ? (keyWm.Value > pairWm.Value ? keyWm.Value : pairWm.Value)
                     : (keyWm ?? pairWm);
-                var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(asset, timeframe, 12, sinceUtc);
+                // ИСПРАВЛЕНО: Передаем cleanAsset вместо asset для совпадения с базой trade_outcomes
+                var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(cleanAsset, timeframe, 12, sinceUtc);
                 if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 2) return;
 
                 int consecutiveLosses = 0;

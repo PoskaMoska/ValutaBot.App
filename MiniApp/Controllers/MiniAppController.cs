@@ -20,6 +20,19 @@ namespace ValutaBot.MiniApp;
 
 public static partial class MiniAppController
 {
+    public static volatile bool IsSelfRecycleRequested = false;
+
+    public static bool IsSecretValidConstantTime(string? provided, string? expected)
+    {
+        if (string.IsNullOrEmpty(provided) || string.IsNullOrEmpty(expected))
+            return false;
+        byte[] provBytes = Encoding.UTF8.GetBytes(provided);
+        byte[] expBytes = Encoding.UTF8.GetBytes(expected);
+        byte[] provHash = SHA256.HashData(provBytes);
+        byte[] expHash = SHA256.HashData(expBytes);
+        return CryptographicOperations.FixedTimeEquals(provHash, expHash);
+    }
+
     private static readonly IMemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
 
     public static string? LastExceptionMessage { get; set; }
@@ -195,12 +208,33 @@ public static partial class MiniAppController
 
             options.AddPolicy("Global", context =>
             {
-                string forwardedFor = context.Request.Headers["X-Forwarded-For"].FirstOrDefault()?.Split(',')[0].Trim() ?? "";
-                string ip = !string.IsNullOrEmpty(forwardedFor)
-                    ? forwardedFor
-                    : (context.Connection.RemoteIpAddress?.ToString() ?? "unknown_ip");
+                System.Net.IPAddress? clientIp = context.Connection.RemoteIpAddress;
+                if (clientIp == null || System.Net.IPAddress.IsLoopback(clientIp))
+                {
+                    string rawHeader = context.Request.Headers["X-Forwarded-For"].FirstOrDefault() ?? "";
+                    string firstHop = rawHeader.Split(',')[0].Trim();
+                    if (System.Net.IPAddress.TryParse(firstHop, out var parsedForwarded))
+                    {
+                        clientIp = parsedForwarded;
+                    }
+                }
+                string partitionKey;
+                if (clientIp == null)
+                {
+                    partitionKey = "unknown";
+                }
+                else if (clientIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && !clientIp.IsIPv4MappedToIPv6)
+                {
+                    byte[] bytes = clientIp.GetAddressBytes();
+                    Array.Clear(bytes, 8, 8); // /64 subnet mask
+                    partitionKey = new System.Net.IPAddress(bytes).ToString();
+                }
+                else
+                {
+                    partitionKey = clientIp.ToString();
+                }
                 
-                return RateLimitPartition.GetTokenBucketLimiter(ip, _ =>
+                return RateLimitPartition.GetTokenBucketLimiter(partitionKey, _ =>
                     new TokenBucketRateLimiterOptions
                     {
                         TokenLimit = 120,
@@ -271,10 +305,7 @@ public static partial class MiniAppController
                     ? authHeader["Bearer ".Length..].Trim()
                     : authHeader.Trim();
 
-                byte[] expBytes = Encoding.UTF8.GetBytes(expectedToken);
-                byte[] provBytes = Encoding.UTF8.GetBytes(providedToken);
-                if (provBytes.Length == 0 || expBytes.Length != provBytes.Length ||
-                    !CryptographicOperations.FixedTimeEquals(provBytes, expBytes))
+                if (!IsSecretValidConstantTime(providedToken, expectedToken))
                 {
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     context.Response.Headers.Append("WWW-Authenticate", "Bearer realm=\"Metrics\"");

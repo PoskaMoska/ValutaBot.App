@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Net.WebSockets;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -203,7 +204,7 @@ public static partial class MiniAppController
                 return Results.Json(new { error = authError }, statusCode: 401);
 
             if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(timeframe))
-                return Results.Json(new { error = "asset and timeframe are required" });
+                return Results.Json(new { error = "asset and timeframe are required" }, statusCode: StatusCodes.Status400BadRequest);
 
             long userId = 0;
             if (context.Items.TryGetValue("userId", out object? uidObj) && uidObj is long uid) userId = uid;
@@ -267,6 +268,7 @@ public static partial class MiniAppController
 
                 var options = new JsonSerializerOptions
                 {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
                 };
                 var json = JsonSerializer.Serialize(finalResult, options);
@@ -275,7 +277,7 @@ public static partial class MiniAppController
             catch (Exception ex)
             {
                 Console.WriteLine($"[API ERR] /api/analyze failed: {ex}");
-                return Results.Json(new { error = ex.Message });
+                return Results.Json(new { error = "Внутренняя ошибка сервера при анализе данных" }, statusCode: StatusCodes.Status500InternalServerError);
             }
         }).RequireRateLimiting("Global");
 
@@ -289,10 +291,11 @@ public static partial class MiniAppController
                 return Results.Json(Array.Empty<OhlcCandle>());
             try
             {
+                string tf = TimeframeNormalizer.Normalize(timeframe);
                 string clean = ValutaBot.MiniApp.AssetSanitizer.Sanitize(asset);
                 DayOfWeek day = DateTime.UtcNow.DayOfWeek;
                 string? symbol = ValutaBot.MiniApp.AssetSanitizer.MapSymbolByDayOfWeek(clean, day);
-                var ohlc = await fetcher.FetchOhlcWithFallbackAsync(symbol, timeframe, asset, 30);
+                var ohlc = await fetcher.FetchOhlcWithFallbackAsync(symbol, tf, asset, 30);
                 var payload = (ohlc ?? [])
                     .TakeLast(30)
                     .Select(c => new
@@ -310,6 +313,84 @@ public static partial class MiniAppController
                 return Results.Json(Array.Empty<object>());
             }
         }).RequireRateLimiting("Global");
+
+        app.Map("/ws/prices", async (HttpContext context) =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            string? asset = context.Request.Query["asset"];
+            if (string.IsNullOrWhiteSpace(asset))
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+            var cleanAsset = ValutaBot.MiniApp.AssetSanitizer.Sanitize(asset);
+
+            byte[] buffer = new byte[1024];
+            var ct = context.RequestAborted;
+            double lastPrice = 0.0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            try
+            {
+                while (webSocket.State == WebSocketState.Open && !ct.IsCancellationRequested)
+                {
+                    bool hasPrice = false;
+                    double currentPrice = 0.0;
+
+                    if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(cleanAsset, out double poPrice, 3.0))
+                    {
+                        currentPrice = poPrice;
+                        hasPrice = true;
+                    }
+                    else if (TiingoWebSocketStream.TryGetLivePrice(cleanAsset, out double tiingoPrice))
+                    {
+                        currentPrice = tiingoPrice;
+                        hasPrice = true;
+                    }
+
+                    if (hasPrice && Math.Abs(currentPrice - lastPrice) > 1e-7)
+                    {
+                        lastPrice = currentPrice;
+                        string json = $"{{\"price\":{currentPrice.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}";
+                        byte[] bytes = Encoding.UTF8.GetBytes(json);
+                        await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
+                        sw.Restart();
+                    }
+                    else if (sw.ElapsedMilliseconds >= 10000)
+                    {
+                        // Heartbeat every 10s to keep client watchdog alive during quiet markets
+                        byte[] hbBytes = Encoding.UTF8.GetBytes("{\"hb\":1}");
+                        await webSocket.SendAsync(new ArraySegment<byte>(hbBytes), WebSocketMessageType.Text, true, ct);
+                        sw.Restart();
+                    }
+
+                    var receiveTask = webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    var delayTask = Task.Delay(250, ct);
+                    var completed = await Task.WhenAny(receiveTask, delayTask);
+                    if (completed == receiveTask)
+                    {
+                        var res = await receiveTask;
+                        if (res.MessageType == WebSocketMessageType.Close)
+                        {
+                            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", ct);
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WS /ws/prices] Connection closed: {ex.Message}");
+            }
+        });
 
         // Endpoint for Tampermonkey PO Data Vacuum (loopback or internal secret only)
         app.MapPost("/api/collector/tick", async (HttpContext context) =>
@@ -574,11 +655,8 @@ public static partial class MiniAppController
         {
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
             string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
-            byte[] expBytes = Encoding.UTF8.GetBytes(expectedSecret);
-            byte[] provBytes = Encoding.UTF8.GetBytes(providedSecret);
 
-            if (provBytes.Length == 0 || expBytes.Length != provBytes.Length ||
-                !CryptographicOperations.FixedTimeEquals(provBytes, expBytes))
+            if (!IsSecretValidConstantTime(providedSecret, expectedSecret))
             {
                 BotLogger.Warn($"[Security] Blocked unauthorized access to /notify-admins from {context.Connection.RemoteIpAddress}");
                 return Results.Json(new { error = "Forbidden" }, statusCode: 403);
@@ -643,6 +721,7 @@ public static partial class MiniAppController
         }
 
         var (isAuthorized, _) = await AuthService.IsRequestAuthorized(context);
-        return isAuthorized;
+        if (!isAuthorized || context.Items["userId"] is not long uid) return false;
+        return await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsAdminAsync(uid);
     }
 }

@@ -80,15 +80,17 @@ class PayoutAsymmetricFocalLoss(nn.Module):
 
         ce_focal = -(targets_smooth * focal_weight * log_p).sum(dim=-1)
 
-        # Asymmetric binary option EV penalty on opposite directional predictions:
-        # - If true target is BUY (1), penalize P(PUT) (index 2) by adverse_loss_mult
-        # - If true target is PUT (2), penalize P(BUY) (index 1) by adverse_loss_mult
-        wrong_dir_prob = torch.where(
-            targets == 1, p[:, 2],
-            torch.where(targets == 2, p[:, 1], torch.zeros_like(p[:, 0]))
+        # Asymmetric binary option EV penalty on false entries & opposite directional predictions:
+        # 1. Если рынок во флэте (target=0), вход в BUY (p1) или PUT (p2) наказывается полной ставкой
+        # 2. Если рынок BUY (target=1), вход в противоположный PUT (p2) наказывается с мультипликатором adverse_loss_mult
+        # 3. Если рынок PUT (target=2), вход в противоположный BUY (p1) наказывается с мультипликатором adverse_loss_mult
+        adverse_exposure = torch.where(
+            targets == 0, (p[:, 1] + p[:, 2]),
+            torch.where(targets == 1, self.adverse_loss_mult * p[:, 2],
+            torch.where(targets == 2, self.adverse_loss_mult * p[:, 1], torch.zeros_like(p[:, 0])))
         )
-        asymmetric_ev_penalty = 0.25 * self.adverse_loss_mult * wrong_dir_prob
-        loss = ce_focal + asymmetric_ev_penalty
+        asymmetric_ev_penalty = self.adverse_loss_mult * adverse_exposure
+        loss = ce_focal + 0.5 * asymmetric_ev_penalty
 
         if sample_weights is not None:
             loss = loss * sample_weights.float()
@@ -411,7 +413,7 @@ def train_model(
     class_counts = np.bincount(train_y, minlength=3)
     print(f"    Train class counts: HOLD={class_counts[0]:,}, BUY={class_counts[1]:,}, PUT={class_counts[2]:,}")
 
-    weights = np.array([0.05, 1.18, 1.18], dtype=np.float32)
+    weights = np.array([0.80, 1.18, 1.18], dtype=np.float32)
     print(f"    Directional Class weights for Loss: HOLD={weights[0]:.4f}, BUY={weights[1]:.4f}, PUT={weights[2]:.4f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

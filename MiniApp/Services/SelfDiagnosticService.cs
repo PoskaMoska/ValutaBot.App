@@ -275,6 +275,7 @@ public class SelfDiagnosticService : BackgroundService
                 var appLifetime = _serviceProvider.GetService<Microsoft.Extensions.Hosting.IHostApplicationLifetime>();
                 if (appLifetime != null)
                 {
+                    MiniAppController.IsSelfRecycleRequested = true;
                     appLifetime.StopApplication();
                 }
                 else

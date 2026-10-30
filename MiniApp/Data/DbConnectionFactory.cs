@@ -52,16 +52,18 @@ namespace ValutaBot.App.MiniApp.Data
             }
 
             // TCP Keepalive & Socket options optimized for Railway cloud proxy
-            builder.TcpKeepAlive = true;              // Low-level SO_KEEPALIVE on the OS socket
-            builder.KeepAlive = 15;                   // Application keepalive probe every 15s (before proxy's 60s idle timeout)
-            builder.ConnectionLifetime = 300;         // Rotate pooled connections every 5m
-            builder.ConnectionIdleLifetime = 20;      // Evict idle connections after 20s so proxy cannot sever them silently
-            builder.ConnectionPruningInterval = 5;    // Prune every 5s (default 10s) so idle sockets never exceed 25s
-            builder.Timeout = 10;                     // 10s connection timeout
+            builder.TcpKeepAlive = true;
+            builder.TcpKeepAliveTime = 10;
+            builder.TcpKeepAliveInterval = 5;
+            builder.KeepAlive = 0;                    // Application keepalive probe every 10s (well before proxy's 60s idle timeout)
+            builder.ConnectionLifetime = 300;          // Rotate pooled connections every 5m
+            builder.ConnectionIdleLifetime = 15;       // Evict idle connections after 15s so proxy cannot sever them silently
+            builder.ConnectionPruningInterval = 3;     // Prune every 3s so idle sockets never linger
+            builder.Timeout = 15;                      // 15s connection timeout
             builder.CommandTimeout = 30;
 
-            // Connection pool bounds: MinPoolSize = 0 ensures idle sockets are closed before Railway 60s TCP proxy timeout
-            builder.MaxPoolSize = 30;
+            // Pool capacity 50 to prevent pool exhaustion under high concurrency
+            builder.MaxPoolSize = 50;
             builder.MinPoolSize = 0;
 
             string built = builder.ToString();
@@ -109,11 +111,56 @@ namespace ValutaBot.App.MiniApp.Data
             }
             if (_dataSource != null)
             {
+                for (int attempt = 1; attempt <= 2; attempt++)
+                {
+                    try
+                    {
+                        return await _dataSource.OpenConnectionAsync(ct);
+                    }
+                    catch (Exception ex) when (attempt == 1 && (ex is NpgsqlException || ex is System.IO.IOException))
+                    {
+                        BotLogger.Warn($"[DbConnectionFactory] Evicted stale pooled connection ({ex.Message}). Re-acquiring fresh socket...");
+                        await Task.Delay(100, ct);
+                    }
+                }
                 return await _dataSource.OpenConnectionAsync(ct);
             }
             var conn = new NpgsqlConnection(GetConnectionString());
             await conn.OpenAsync(ct);
             return conn;
+        }
+
+                /// <summary>
+        /// Executes an idempotent database operation with automatic transient retry.
+        /// Drops poisoned/stale socket connections from the pool on network severance.
+        /// </summary>
+        public static async Task<T> WithRetryAsync<T>(Func<NpgsqlConnection, Task<T>> action, CancellationToken ct = default)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                await using var conn = await OpenConnectionAsync(ct);
+                try
+                {
+                    return await action(conn);
+                }
+                catch (Exception ex) when (attempt < 3 && !ct.IsCancellationRequested &&
+                    (ex is System.IO.IOException ||
+                     (ex is NpgsqlException ne && (ne.IsTransient || ne.InnerException is System.IO.IOException))))
+                {
+                    BotLogger.Warn($"[DbConnectionFactory] Transient DB error on attempt {attempt} ({ex.Message}). Clearing connection pool and retrying...");
+                    NpgsqlConnection.ClearPool(conn);
+                    await Task.Delay(100 * attempt, ct);
+                }
+            }
+        }
+
+        public static Task WithRetryAsync(Func<NpgsqlConnection, Task> action, CancellationToken ct = default)
+        {
+            return WithRetryAsync(async conn =>
+            {
+                await action(conn);
+                return true;
+            }, ct);
         }
 
         public static async Task InitializeAsync()

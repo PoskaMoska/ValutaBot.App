@@ -126,7 +126,100 @@ namespace ValutaBot.Tests.Engines
             Assert.Equal(50, decision.Probability);
             Assert.Equal(0.0, decision.FinalTotalScore);
         }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_FlatMarketBelowNoiseFloor_CappedAt52Percent()
+        {
+            var taSignal = new TaSignal(1.5, 80.0, 60, 100, 1.0, 5);
+            var smcSignal = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish BOS");
+            var mlSignal = new MlSignal("BUY", 0.75, 0.70, "neural_brain");
+            var stateSignal = new StateSignal("FLAT", 0.01, 0.0);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "Normal", "MTF", new Dictionary<string, string>(), "BUY");
+
+            // Subminute noise audit indicating dead flat market below 1.0 bps noise floor
+            var noiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: false,
+                ZScore: 0.2,
+                LocalAtrBps: 0.3,
+                NoiseFloorBps: 1.0,
+                RegimeDescription: "Шумовой флэт"
+            );
+
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s10", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: noiseAudit);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.Equal(52, decision.Probability);
+            Assert.Contains("Шумовой флэт", decision.CombinedReasoningText);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_BullishWickRejection_BoostsProbability()
+        {
+            var taSignal = new TaSignal(1.0, 70.0, 55, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish BOS");
+            var mlSignal = new MlSignal("BUY", 0.60, 0.65, "neural_brain");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.5);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "Normal", "MTF", new Dictionary<string, string>(), "BUY");
+
+            // Subminute noise audit with tradeable impulse and Bullish Wick rejection
+            var noiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: true,
+                ZScore: 1.2,
+                LocalAtrBps: 2.5,
+                NoiseFloorBps: 1.0,
+                RegimeDescription: "Импульс + Бычий отскок тени",
+                HasBullishWick: true
+            );
+
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s10", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: noiseAudit);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.True(decision.Probability >= 64, $"Expected probability >= 64% on Wick Rejection, got {decision.Probability}");
+            Assert.Contains("Wick Rejection", decision.CombinedReasoningText);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_MacroTrendCompass_ResolvesBuyWhenTaScoreFlat()
+        {
+            // Flat TA (score = 0.05 <= 0.15), ML offline
+            var taSignal = new TaSignal(0.05, 50.0, 52, 100, 1.0, 5);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var mlSignal = new MlSignal("NEUTRAL", 0.5, null, "offline");
+            var stateSignal = new StateSignal("FLAT", 0.0, 0.0);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "Macro M1 BUY", "MTF", new Dictionary<string, string> { ["M1"] = "BUY" }, "BUY");
+
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s15", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.Equal(52, decision.Probability);
+            Assert.Contains("Компас Макро-Тренда (BUY)", decision.CombinedReasoningText);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_RiskDampener_PreservesCircuitBreakerPenaltyDuringWickRejection()
+        {
+            var taSignal = new TaSignal(1.0, 70.0, 55, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish BOS");
+            var mlSignal = new MlSignal("BUY", 0.60, 0.65, "neural_brain");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.5);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "Normal", "MTF", new Dictionary<string, string>(), "BUY");
+
+            var noiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: true,
+                ZScore: 1.2,
+                LocalAtrBps: 2.5,
+                NoiseFloorBps: 1.0,
+                RegimeDescription: "Импульс + Бычий отскок тени",
+                HasBullishWick: true
+            );
+
+            // 3 consecutive losses: circuit breaker penalty (-6%) must NOT be erased by Wick Rejection
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s10", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses: 3, noiseAudit: noiseAudit);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            // Probability should be capped at 60% due to active risk dampener (not 65-68%)
+            Assert.True(decision.Probability <= 60, $"Expected probability <= 60% when circuit breaker is active, got {decision.Probability}");
+            Assert.Contains("демпфировано", decision.CombinedReasoningText);
+        }
     }
 }
-
-

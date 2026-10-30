@@ -76,17 +76,19 @@ internal static class Program
                 var runDuration = DateTime.UtcNow - runStartTime;
                 Console.WriteLine($"[Host Supervisor] Application host stopped cleanly after {runDuration.TotalMinutes:F1}m.");
 
-                // If the application was cleanly requested to stop, check if we should recycle in-process
-                // If it was running for >= 30 seconds, recycle cleanly in-process (e.g. RAM purge self-recycle)
-                if (runDuration.TotalSeconds >= 30)
+                // SRE-FIX: Explicit contract between RAM Guard SelfRecycle and SIGTERM
+                if (MiniAppController.IsSelfRecycleRequested)
                 {
+                    MiniAppController.IsSelfRecycleRequested = false;
                     consecutiveCrashes = 0;
-                    Console.WriteLine("[Host Supervisor] Initiating clean in-process application recycling in 2s...");
+                    Console.WriteLine("[Host Supervisor] RAM Guard self-recycle triggered. Resuscitating host in-process in 2s...");
+                    RealtimeTickCollector.PrepareForInProcessRestart();
                     await Task.Delay(2000);
                     continue;
                 }
 
-                // If it exited almost immediately without error, treat as intentional shutdown
+                // Clean container shutdown / SIGTERM acknowledged
+                Console.WriteLine("[Host Supervisor] Container shutdown / SIGTERM acknowledged. Exiting host process cleanly.");
                 break;
             }
             catch (Exception ex)
@@ -106,14 +108,20 @@ internal static class Program
 
                 // 2. Stop any dangling background stream loops before restart
                 try { PocketOptionWebSocketStream.StopStream(); } catch { }
+                try { TiingoWebSocketStream.StopStream(); } catch { }
+
+                // 3. Re-initialize tick channel & collector tokens for clean in-process restart
+                RealtimeTickCollector.PrepareForInProcessRestart();
 
                 if (consecutiveCrashes >= maxInProcessRestarts)
                 {
                     Console.WriteLine($"[Host Supervisor] Threshold reached ({consecutiveCrashes} consecutive crashes). Escalating to Railway container cold restart.");
                     try
                     {
+                        using var alertCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                        string safeMsg = System.Net.WebUtility.HtmlEncode(ex.Message);
                         await TelegramBotService.SendMessageToAdmins(
-                            $"🚨 <b>[Host Supervisor] Превышен лимит внутрипроцессных перезапусков ({consecutiveCrashes}/{maxInProcessRestarts})</b>\nОшибка: <code>{ex.Message}</code>\nВыполняется холодный перезапуск контейнера Railway.");
+                            $"🚨 <b>[Host Supervisor] Превышен лимит внутрипроцессных перезапусков ({consecutiveCrashes}/{maxInProcessRestarts})</b>\nОшибка: <code>{safeMsg}</code>\nВыполняется холодный перезапуск контейнера Railway.").WaitAsync(alertCts.Token);
                     }
                     catch { }
 
@@ -123,8 +131,10 @@ internal static class Program
                 int backoffSec = Math.Min(consecutiveCrashes * 2, 8);
                 try
                 {
+                    using var alertCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    string safeMsg = System.Net.WebUtility.HtmlEncode(ex.Message);
                     await TelegramBotService.SendMessageToAdmins(
-                        $"⚠️ <b>[Host Supervisor] Сбой хоста C#</b>\nПерехвачено: <code>{ex.Message}</code>\nМгновенная внутрипроцессная реанимация в том же контейнере через {backoffSec}с (попытка {consecutiveCrashes}/{maxInProcessRestarts}).");
+                        $"⚠️ <b>[Host Supervisor] Сбой хоста C#</b>\nПерехвачено: <code>{safeMsg}</code>\nМгновенная внутрипроцессная реанимация в том же контейнере через {backoffSec}с (попытка {consecutiveCrashes}/{maxInProcessRestarts}).").WaitAsync(alertCts.Token);
                 }
                 catch { }
 

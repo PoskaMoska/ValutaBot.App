@@ -26,8 +26,12 @@ public class MarketAnalysisOrchestrator(
 {
     private static readonly ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
     private static readonly ConcurrentDictionary<string, DateTime> _lastSampleTimeByAssetTf = new();
-    private static readonly ConcurrentDictionary<string, DateTime> _lastRealTradeTimeByAsset = new();
+    private static readonly ConcurrentDictionary<string, long> _lastRealTradeSwByAsset = new();
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
+    private static readonly System.Text.Json.JsonSerializerOptions _jsonOptions = new()
+    {
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
     
     private readonly MarketDataFetcher _fetcher = fetcher;
     private readonly IRiskGatekeeper _riskGatekeeper = riskGatekeeper;
@@ -148,8 +152,10 @@ public class MarketAnalysisOrchestrator(
         string asset,
         string timeframe,
         ValutaBot.App.MiniApp.Data.Repositories.UserSettings? userSettings = null,
-        MiniAppController.OhlcCandle[]? preloadedCandles = null)
+        MiniAppController.OhlcCandle[]? preloadedCandles = null,
+        System.Threading.CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         using var timer = ValutaMetrics.PipelineDuration.NewTimer();
         var sw = Stopwatch.StartNew();
         string traceId = Guid.NewGuid().ToString("N").Substring(0, 6).ToUpper();
@@ -399,6 +405,100 @@ public class MarketAnalysisOrchestrator(
 
     #region Pipeline Stage 3: Neural Brain ML Inference
 
+    private static double ComputePandasEma(double[] values, int span)
+    {
+        if (values == null || values.Length == 0) return 0.0;
+        double alpha = 2.0 / (span + 1.0);
+        double num = 0.0;
+        double den = 0.0;
+        double w = 1.0;
+        for (int i = values.Length - 1; i >= 0; i--)
+        {
+            num += w * values[i];
+            den += w;
+            w *= (1.0 - alpha);
+        }
+        return den > 0 ? num / den : values[^1];
+    }
+
+    private static (float[] macro, float[] micro, float[] bridge)? BuildOnnxTensors(
+        MiniAppController.OhlcCandle[] microCandles,
+        MiniAppController.OhlcCandle[] macroCandles,
+        double currentPrice)
+    {
+        if (microCandles == null || microCandles.Length < 30 ||
+            macroCandles == null || macroCandles.Length < 30 || currentPrice <= 0)
+        {
+            return null;
+        }
+
+        var macroSlice = macroCandles[^30..];
+        var microSlice = microCandles[^30..];
+
+        float[] NormalizeSlice(MiniAppController.OhlcCandle[] slice)
+        {
+            float[] result = new float[150];
+            double refP = slice[^1].Close > 0 ? slice[^1].Close : 1.0;
+            double meanVol = slice.Average(c => c.Volume) + 1e-4;
+
+            for (int i = 0; i < 30; i++)
+            {
+                var c = slice[i];
+                int offset = i * 5;
+                result[offset + 0] = (float)((c.Close - refP) / refP * 1000.0);
+                result[offset + 1] = (float)((c.High - c.Low) / refP * 1000.0);
+                result[offset + 2] = (float)((c.High - Math.Max(c.Open, c.Close)) / refP * 1000.0);
+                result[offset + 3] = (float)((Math.Min(c.Open, c.Close) - c.Low) / refP * 1000.0);
+                result[offset + 4] = Math.Clamp((float)(c.Volume / meanVol), 0.0f, 10.0f);
+            }
+            return result;
+        }
+
+        var macroData = NormalizeSlice(macroSlice);
+        var microData = NormalizeSlice(microSlice);
+
+        double curP = microSlice[^1].Close > 0 ? microSlice[^1].Close : currentPrice;
+        if (curP <= 0) curP = 1.0;
+
+        double[] macroCloses = new double[30];
+        for (int i = 0; i < 30; i++) macroCloses[i] = macroSlice[i].Close;
+        double m1Ema = ComputePandasEma(macroCloses, 9);
+        float distM1 = (float)((curP - m1Ema) / curP * 1000.0);
+
+        double s5Tr = microSlice.Average(c => Math.Max(c.High - c.Low, 1e-7));
+        double m1Tr = macroSlice.Average(c => Math.Max(c.High - c.Low, 1e-7));
+        float atrRatio = (float)(s5Tr / (m1Tr + 1e-7));
+
+        double[] microCloses = new double[30];
+        for (int i = 0; i < 30; i++) microCloses[i] = microSlice[i].Close;
+        double microMean = microCloses.Average();
+        double sumSq = 0.0;
+        for (int i = 0; i < 30; i++)
+        {
+            double d = microCloses[i] - microMean;
+            sumSq += d * d;
+        }
+        double microStd = Math.Sqrt(sumSq / 30.0) + 1e-7;
+        double s5Ema = ComputePandasEma(microCloses, 7);
+        float zScore = (float)((curP - s5Ema) / microStd);
+
+        var last = microSlice[^1];
+        double rng = Math.Max(last.High - last.Low, 1e-7);
+        double upperWick = last.High - Math.Max(last.Open, last.Close);
+        double lowerWick = Math.Min(last.Open, last.Close) - last.Low;
+        float wickBal = (float)((lowerWick - upperWick) / rng);
+
+        // Sanitize & clamp features to protect ONNX from NaN or extreme outliers
+        distM1 = Math.Clamp(distM1, -50.0f, 50.0f);
+        atrRatio = Math.Clamp(atrRatio, 0.01f, 20.0f);
+        zScore = Math.Clamp(zScore, -5.0f, 5.0f);
+        wickBal = Math.Clamp(wickBal, -1.0f, 1.0f);
+
+        float[] bridgeData = new[] { distM1, atrRatio, zScore, wickBal };
+
+        return (macroData, microData, bridgeData);
+    }
+
     private async Task<NeuralBrainOutcome> QueryNeuralBrainAsync(
         PreparedCandleData prep,
         SensorsAndFeatures sensors,
@@ -406,9 +506,40 @@ public class MarketAnalysisOrchestrator(
         List<string> traceLines)
     {
         var mlSw = Stopwatch.StartNew();
-        var mlPrediction = _settings.EnableMachineLearning 
-            ? await MLPythonService.PredictAsync(prep.CleanAsset, prep.TfLower, prep.ClosedCandles, prep.IsForex, prep.ClosedHigherCandles, sensors.SmcResult, sensors.MacroPayload) 
-            : null;
+        MLPythonService.MLPythonPrediction? mlPrediction = null;
+
+        if (_settings.EnableMachineLearning)
+        {
+            // Fast Path: In-process ONNX Runtime (1.2ms latency, 0 HTTP overhead)
+            if (DualStreamOnnxService.Instance.IsModelLoaded && (prep.TfLower.Equals("s5", StringComparison.OrdinalIgnoreCase) || prep.TfLower.Equals("s10", StringComparison.OrdinalIgnoreCase)))
+            {
+                var tensors = BuildOnnxTensors(prep.ClosedCandles, prep.ClosedHigherCandles, prep.CurrentLivePrice);
+                if (tensors.HasValue)
+                {
+                    var onnxPred = DualStreamOnnxService.Instance.Predict(tensors.Value.macro, tensors.Value.micro, tensors.Value.bridge);
+                    if (onnxPred.Direction is "BUY" or "PUT")
+                    {
+                        mlPrediction = new MLPythonService.MLPythonPrediction(
+                            Direction: onnxPred.Direction,
+                            Confidence: onnxPred.Probability,
+                            ModelVersion: "dual_stream_onnx_v5",
+                            Accuracy: 0.62,
+                            Auc: 0.65,
+                            NTrain: 52768,
+                            VarianceEstimate: 0.05,
+                            RawConfidence: onnxPred.RawProbability,
+                            HorizonCandles: 1
+                        );
+                    }
+                }
+            }
+
+            // Fallback Path: Python HTTP microservice
+            if (mlPrediction == null)
+            {
+                mlPrediction = await MLPythonService.PredictAsync(prep.CleanAsset, prep.TfLower, prep.ClosedCandles, prep.IsForex, prep.ClosedHigherCandles, sensors.SmcResult, sensors.MacroPayload);
+            }
+        }
         
         string mlDir = "NEUTRAL";
         double mlConf = 0.5;
@@ -464,13 +595,14 @@ public class MarketAnalysisOrchestrator(
         var mlSignal = new MlSignal(ml.Direction, ml.Confidence, ml.Prediction?.Accuracy, ml.Prediction?.ModelVersion ?? "offline", ml.Prediction?.HorizonCandles, ml.Prediction?.RawConfidence);
         var stateSignal = new StateSignal(sensors.State.VelocityRegime, sensors.State.VelocityBpsPerSec, sensors.State.MomentumContribution);
 
-        var consensus = await _cmEngine.EvaluateMatrixAsync(prep.CleanAsset, timeframe, prep.TfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(prep.CleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(prep.MainPrices));
+
+        var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(prep.ClosedCandles, timeframe);
+        traceLines.Add($"[6.8 Noise Gate]     {noiseAudit.RegimeDescription} (TR: {noiseAudit.LocalAtrBps:F2} bps, Порог: {noiseAudit.NoiseFloorBps:F1} bps, Z: {noiseAudit.ZScore:F2})");
+        var consensus = await _cmEngine.EvaluateMatrixAsync(prep.CleanAsset, timeframe, prep.TfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(prep.CleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(prep.MainPrices), noiseAudit);
         
         matrixSw.Stop();
         traceLines.Add($"[6. Риск-контроль]    Нейросеть и фильтры сведены (Фаза: {sensors.State.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
 
-        var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(prep.ClosedCandles, timeframe);
-        traceLines.Add($"[6.8 Noise Gate]     {noiseAudit.RegimeDescription} (TR: {noiseAudit.LocalAtrBps:F2} bps, Порог: {noiseAudit.NoiseFloorBps:F1} bps, Z: {noiseAudit.ZScore:F2})");
 
         var dbSw = Stopwatch.StartNew();
         var timeout = _timeoutEngine.CalculateTimeout(prep.CleanAsset, timeframe, sensors.MainAtr, 1.0, sensors.SmcResult, prep.CurrentLivePrice, sensors.State, prep.IsForex);
@@ -489,6 +621,16 @@ public class MarketAnalysisOrchestrator(
                  FinalDirection = "NEUTRAL",
                  CombinedReasoningText = consensus.CombinedReasoningText + $"\n⚠️ Предупреждение риск-контроля: {sensors.Gatekeeper.Reason}" 
              };
+        }
+        else if (consensus.FinalDirection == "NEUTRAL")
+        {
+            string fallbackDir = prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT";
+            consensus = consensus with {
+                FinalDirection = fallbackDir,
+                CandidateDirection = fallbackDir,
+                Probability = 51,
+                CombinedReasoningText = consensus.CombinedReasoningText + $"\n🧭 Базовый дрейф: нейтральный консенсус приведен к {fallbackDir} (51%) по направлению закрытия последней свечи."
+            };
         }
 
         string effectiveMarketRegime = !string.IsNullOrEmpty(sensors.TaDetail.Regime) && sensors.TaDetail.Regime != "UNKNOWN"
@@ -570,7 +712,7 @@ public class MarketAnalysisOrchestrator(
                 FinalProb = cm.Consensus.Probability
             }
         };
-        string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures);
+        string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures, _jsonOptions);
 
         var shadowMlFeatures = new {
             Smc = sensors.SmcResult,
@@ -578,7 +720,7 @@ public class MarketAnalysisOrchestrator(
             MacroContext = mlFeatures.MacroContext,
             NeuralBrain = mlFeatures.NeuralBrain
         };
-        string shadowFeaturesJson = System.Text.Json.JsonSerializer.Serialize(shadowMlFeatures);
+        string shadowFeaturesJson = System.Text.Json.JsonSerializer.Serialize(shadowMlFeatures, _jsonOptions);
 
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool isSubminute = prep.TfLower.StartsWith("s");
@@ -594,11 +736,11 @@ public class MarketAnalysisOrchestrator(
         bool isGoldenSetup = cm.MtfResult.IsGoldenSetup && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse);
 
         bool isCooldownActive = false;
-        if (_lastRealTradeTimeByAsset.TryGetValue(prep.CleanAsset, out var lastRealTime))
+        if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var lastRealSw))
         {
             int tradeDurationSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
             double requiredCooldownSecs = isS5 ? 20.0 : Math.Max(tradeDurationSecs + 2.0, 15.0);
-            isCooldownActive = (DateTime.UtcNow - lastRealTime).TotalSeconds < requiredCooldownSecs;
+            isCooldownActive = Stopwatch.GetElapsedTime(lastRealSw).TotalSeconds < requiredCooldownSecs;
         }
 
         bool isExhaustedOnS5 = false;
@@ -620,8 +762,9 @@ public class MarketAnalysisOrchestrator(
             && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse)
             && (!isS5 || (htfAligned && !isExhaustedOnS5));
 
+        bool isS5Guarded = isS5 && (isExhaustedOnS5 || !htfAligned || isCooldownActive || cm.Consensus.Probability < requiredProb);
         bool allowShadowRecord = isDirectional
-            && (_settings.DatasetCollectionMode || isCbHalted)
+            && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
 
         double currentLivePrice = prep.CurrentLivePrice;
@@ -642,6 +785,7 @@ public class MarketAnalysisOrchestrator(
                             prep.CleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice, cm.Consensus.FinalDirection);
                         traceLines.Add($"[8. SlippageGate]    [ОТКЛОНЕНО] Неблагоприятное проскальзывание {slippageBps:F2} bps превышает лимит 1.5 bps -> 0ms");
                         canExecuteReal = false;
+                        allowShadowRecord = false;
                     }
                     else
                     {
@@ -654,6 +798,7 @@ public class MarketAnalysisOrchestrator(
                         prep.CleanAsset, timeframe);
                     traceLines.Add("[8. SlippageGate]    [ОТКЛОНЕНО] Поток котировок брокера устарел (>1.5с) или недоступен -> 0ms");
                     canExecuteReal = false;
+                    allowShadowRecord = false;
                 }
             }
 
@@ -663,37 +808,38 @@ public class MarketAnalysisOrchestrator(
                 long bucketTicks = TimeSpan.FromSeconds(prep.IntervalSecs).Ticks;
                 DateTime barOpen = new DateTime(execRefTime.Ticks - (execRefTime.Ticks % bucketTicks), DateTimeKind.Utc);
                 double elapsedAfterMl = (execRefTime - barOpen).TotalSeconds;
-                double maxExecElapsed = prep.IntervalSecs switch { 5 => 2.2, 10 => 3.5, 15 => 4.5, _ => 6.0 };
+                double maxExecElapsed = prep.IntervalSecs switch { 5 => 1.2, 10 => 2.5, 15 => 3.5, _ => 5.0 };
                 if (elapsedAfterMl > maxExecElapsed)
                 {
-                    _logger.LogWarning("[ExpiryGuard] Aborted {Asset}/{Timeframe} after ML inference: +{Elapsed:F2}s into candle exceeds {Max:F1}s limit.",
+                    _logger.LogWarning("[ExpiryGuard] Aborted {Asset}/{Timeframe} after ML inference: +{Elapsed:F2}s into candle exceeds strict limit {Max:F1}s.",
                         prep.CleanAsset, timeframe, elapsedAfterMl, maxExecElapsed);
                     canExecuteReal = false;
+                    allowShadowRecord = false;
                 }
             }
 
             if (canExecuteReal)
             {
-                var nowUtc = DateTime.UtcNow;
+                var nowSw = Stopwatch.GetTimestamp();
                 int tradeDurSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
                 double reqCooldown = isS5 ? 20.0 : Math.Max(tradeDurSecs + 2.0, 15.0);
 
                 while (true)
                 {
-                    if (_lastRealTradeTimeByAsset.TryGetValue(prep.CleanAsset, out var prevTime))
+                    if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var prevSw))
                     {
-                        if ((nowUtc - prevTime).TotalSeconds < reqCooldown)
+                        if (Stopwatch.GetElapsedTime(prevSw).TotalSeconds < reqCooldown)
                         {
                             _logger.LogWarning("[Orchestrator] Concurrency guard: Asset {Asset} trade claimed by concurrent worker. Aborting live execution.", prep.CleanAsset);
                             canExecuteReal = false;
                             break;
                         }
-                        if (_lastRealTradeTimeByAsset.TryUpdate(prep.CleanAsset, nowUtc, prevTime))
+                        if (_lastRealTradeSwByAsset.TryUpdate(prep.CleanAsset, nowSw, prevSw))
                         {
                             break;
                         }
                     }
-                    else if (_lastRealTradeTimeByAsset.TryAdd(prep.CleanAsset, nowUtc))
+                    else if (_lastRealTradeSwByAsset.TryAdd(prep.CleanAsset, nowSw))
                     {
                         break;
                     }
@@ -702,17 +848,28 @@ public class MarketAnalysisOrchestrator(
                 if (canExecuteReal)
                 {
                     _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
-                    _ = SignalTracker.RecordPredictionAsync(cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, featuresJson,
-                        sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", 1.0, "NEUTRAL",
-                        cm.EffectiveMarketRegime,
-                        sensors.State.VelocityRegime ?? "UNKNOWN",
-                        sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal,
-                        htfAligned,
-                        sensors.MinutesToNews ?? -1,
-                        cm.Consensus.CombinedReasoningText ?? "",
-                        ml.Prediction?.ModelVersion ?? "",
-                        ml.Prediction?.Accuracy ?? 0.0,
-                        sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await SignalTracker.RecordPredictionAsync(cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, featuresJson,
+                                sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", 1.0, "NEUTRAL",
+                                cm.EffectiveMarketRegime,
+                                sensors.State.VelocityRegime ?? "UNKNOWN",
+                                sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal,
+                                htfAligned,
+                                sensors.MinutesToNews ?? -1,
+                                cm.Consensus.CombinedReasoningText ?? "",
+                                ml.Prediction?.ModelVersion ?? "",
+                                ml.Prediction?.Accuracy ?? 0.0,
+                                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "[SignalTracker] Failed to record prediction for {Asset}. Rolling back CAS cooldown.", prep.CleanAsset);
+                            _lastRealTradeSwByAsset.TryRemove(prep.CleanAsset, out _);
+                        }
+                    });
                     dbSw.Stop();
                     traceLines.Add($"[8. База данных]     Записан Entry Price: {currentLivePrice} (Уверенность: {cm.Consensus.Probability}%, Ожидание: {targetHorizon} свечей) -> {dbSw.ElapsedMilliseconds}ms");
                 }

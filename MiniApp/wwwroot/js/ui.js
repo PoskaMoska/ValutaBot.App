@@ -1,31 +1,35 @@
-import { lastPriceVal } from './state.js?v=20261028_audit_v2';
+import { lastPriceVal } from './state.js?v=20261029_audit_v6';
 
 let priceFlashTimeout = null;
+let cachedLivePriceEl = null;
+let cachedTrafficLightEl = null;
 
 export function updateLivePriceUI(price) {
-    const valEl = document.getElementById('livePriceValue');
-    if (!valEl) return;
+    if (!cachedLivePriceEl) {
+        cachedLivePriceEl = document.getElementById('livePriceValue');
+        if (!cachedLivePriceEl) return;
+    }
 
     const isHighVal = price > 100;
     const formatted = price.toFixed(isHighVal ? 2 : 5);
 
-    valEl.innerText = formatted;
+    cachedLivePriceEl.innerText = formatted;
 
     if (lastPriceVal > 0) {
         if (price > lastPriceVal) {
-            valEl.className = 'live-price-value up';
+            cachedLivePriceEl.className = 'live-price-value up';
         } else if (price < lastPriceVal) {
-            valEl.className = 'live-price-value down';
+            cachedLivePriceEl.className = 'live-price-value down';
         }
         
         if (priceFlashTimeout) clearTimeout(priceFlashTimeout);
         priceFlashTimeout = setTimeout(() => {
-            if (valEl.innerText === formatted) {
-                valEl.className = 'live-price-value';
+            if (cachedLivePriceEl && cachedLivePriceEl.innerText === formatted) {
+                cachedLivePriceEl.className = 'live-price-value';
             }
         }, 400);
     } else {
-        valEl.className = 'live-price-value';
+        cachedLivePriceEl.className = 'live-price-value';
     }
 }
 
@@ -92,8 +96,8 @@ export function parseMd(text) {
         .replace(/'/g, '&#039;');
 
     return escaped
-        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
-        .replace(/\*(.*?)\*/g, '<i>$1</i>')
+        .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+        .replace(/\*([^*]+)\*/g, '<i>$1</i>')
         .replace(/\n/g, '<br/>');
 }
 
@@ -116,7 +120,10 @@ export function renderExpiryCandles(containerId, ohlc, count) {
     if (!container || !ohlc || !ohlc.length) return;
     const n = Math.max(1, Math.min(count || ohlc.length, ohlc.length));
     const tail = ohlc.slice(-n).map(k => ({
-        o: Number(k.o), h: Number(k.h), l: Number(k.l), c: Number(k.c)
+        o: Number(k.o ?? k.open), 
+        h: Number(k.h ?? k.high), 
+        l: Number(k.l ?? k.low), 
+        c: Number(k.c ?? k.close)
     })).filter(k => [k.o, k.h, k.l, k.c].every(Number.isFinite));
     if (!tail.length) return;
 
@@ -328,17 +335,17 @@ let lastTrafficStatus = null;
 export function updateTrafficLight(status) {
     if (status === lastTrafficStatus) return;
     lastTrafficStatus = status;
-    const tl = document.getElementById('trafficLight');
-    if (!tl) return;
+    if (!cachedTrafficLightEl) cachedTrafficLightEl = document.getElementById('trafficLight');
+    if (!cachedTrafficLightEl) return;
     if (status === 'action') {
-        tl.style.background = '#10b981';
-        tl.style.boxShadow = '0 0 10px #10b981';
+        cachedTrafficLightEl.style.background = '#10b981';
+        cachedTrafficLightEl.style.boxShadow = '0 0 10px #10b981';
     } else if (status === 'prepare') {
-        tl.style.background = '#f59e0b';
-        tl.style.boxShadow = '0 0 10px #f59e0b';
+        cachedTrafficLightEl.style.background = '#f59e0b';
+        cachedTrafficLightEl.style.boxShadow = '0 0 10px #f59e0b';
     } else {
-        tl.style.background = '#ef4444';
-        tl.style.boxShadow = '0 0 10px #ef4444';
+        cachedTrafficLightEl.style.background = '#ef4444';
+        cachedTrafficLightEl.style.boxShadow = '0 0 10px #ef4444';
     }
 }
 
@@ -427,6 +434,16 @@ export function hideAiChart() {
         container.style.display = 'none';
         hideChartTimer = null;
     }, 350);
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+        const c = document.getElementById('aiChartContainer');
+        if (!document.hidden && !aiChartAnimationId && c && c.classList.contains('active')) {
+            updateCanvasDimensions();
+            renderAiChartLoop();
+        }
+    });
 }
 
 function renderAiChartLoop() {
@@ -542,8 +559,9 @@ if (typeof window !== 'undefined') {
 let lastAnalysisTimestamp = 0;
 let recentAnalysisCount = 0;
 let analysisCountResetTimer = null;
+let lastSpeedPenalty = 0;
 
-export function getSessionPsychometrics() {
+export function recordAnalysisPsychometrics() {
     const now = Date.now();
     let speedPenalty = 0;
     
@@ -567,24 +585,43 @@ export function getSessionPsychometrics() {
     }
 
     lastAnalysisTimestamp = now;
+    lastSpeedPenalty = speedPenalty;
     return { speedPenalty };
+}
+
+export function getSessionPsychometrics() {
+    return { speedPenalty: lastSpeedPenalty };
 }
 
 export function updateAiCopilot(data, onActionCallback) {
     const card = document.getElementById('aiCopilotCard');
     if (!card) return;
 
-    if (!data || !data.copilotAdvice) {
+    let rawAdvice = data ? (data.copilotAdvice || data.CopilotAdvice) : null;
+    if (typeof rawAdvice === 'string') {
+        try {
+            rawAdvice = JSON.parse(rawAdvice);
+        } catch {
+            rawAdvice = { message: rawAdvice };
+        }
+    }
+    if (!rawAdvice) {
         card.style.display = 'none';
         return;
     }
 
-    const advice = data.copilotAdvice;
+    // Normalizing C# PascalCase vs JS camelCase fields
+    const status = (rawAdvice.status || rawAdvice.Status || 'NORMAL').toUpperCase();
+    const title = rawAdvice.title || rawAdvice.Title || 'Рекомендация Ко-пилота';
+    const message = rawAdvice.message || rawAdvice.Message || '';
+    const recommendedAsset = rawAdvice.recommendedAsset || rawAdvice.RecommendedAsset || null;
+    const recommendedTf = rawAdvice.recommendedTf || rawAdvice.RecommendedTf || null;
+    const qualityScore = Number(rawAdvice.qualityScore ?? rawAdvice.QualityScore ?? 85);
+
     card.style.display = 'block';
 
     const psycho = getSessionPsychometrics();
-    const baseScore = advice.qualityScore || 85;
-    const focusScore = Math.max(30, Math.min(99, baseScore - psycho.speedPenalty));
+    const focusScore = Math.max(30, Math.min(99, qualityScore - psycho.speedPenalty));
 
     const focusDot = document.getElementById('copilotFocusDot');
     const focusText = document.getElementById('copilotFocusText');
@@ -605,11 +642,11 @@ export function updateAiCopilot(data, onActionCallback) {
     }
 
     card.classList.remove('state-golden', 'state-danger', 'state-caution');
-    if (advice.status === 'GOLDEN') {
+    if (status === 'GOLDEN') {
         card.classList.add('state-golden');
-    } else if (advice.status === 'CIRCUIT_BREAKER' || advice.status === 'NOISE_GUARD' || advice.status === 'CONFLICT' || advice.status === 'NEWS_RISK' || psycho.speedPenalty >= 25) {
+    } else if (status === 'CIRCUIT_BREAKER' || status === 'NOISE_GUARD' || status === 'CONFLICT' || status === 'NEWS_RISK' || psycho.speedPenalty >= 25) {
         card.classList.add('state-danger');
-    } else if (advice.status === 'WAIT' || advice.status === 'CAUTION') {
+    } else if (status === 'WAIT' || status === 'CAUTION') {
         card.classList.add('state-caution');
     }
 
@@ -618,16 +655,16 @@ export function updateAiCopilot(data, onActionCallback) {
         if (psycho.speedPenalty >= 25) {
             headlineEl.innerText = '⚠️ Внимание: Высокая частота входов (Тильт-контроль)';
         } else {
-            headlineEl.innerText = advice.title || 'Рекомендация Ко-пилота';
+            headlineEl.innerText = title;
         }
     }
 
     const msgEl = document.getElementById('copilotMessage');
     if (msgEl) {
         if (psycho.speedPenalty >= 25) {
-            msgEl.innerText = `Ты делаешь частые запросы с интервалом менее 12 сек. Вход на эмоциях без паузы приводит к сливу в 78% случаев. ${advice.message || ''}`;
+            msgEl.innerText = `Ты делаешь частые запросы с интервалом менее 12 сек. Вход на эмоциях без паузы приводит к сливу в 78% случаев. ${message}`;
         } else {
-            msgEl.innerText = advice.message || '';
+            msgEl.innerText = message;
         }
     }
 
@@ -635,24 +672,23 @@ export function updateAiCopilot(data, onActionCallback) {
     const actionBtn = document.getElementById('copilotActionBtn');
     const actionLabel = document.getElementById('copilotActionLabel');
 
-    if (actionWrap && actionBtn && (advice.recommendedAsset || advice.recommendedTf)) {
+    if (actionWrap && actionBtn && (recommendedAsset || recommendedTf)) {
         actionWrap.style.display = 'block';
-        const targetAsset = advice.recommendedAsset;
-        const targetTf = advice.recommendedTf;
         let btnText = '🎯 ';
-        if (targetAsset && targetTf) {
-            btnText += `Переключить на ${targetAsset} (${targetTf.toUpperCase()})`;
-        } else if (targetAsset) {
-            btnText += `Переключить на ${targetAsset}`;
-        } else if (targetTf) {
-            btnText += `Переключить на ${targetTf.toUpperCase()}`;
+        const tfUpper = recommendedTf ? String(recommendedTf).toUpperCase() : '';
+        if (recommendedAsset && tfUpper) {
+            btnText += `Переключить на ${recommendedAsset} (${tfUpper})`;
+        } else if (recommendedAsset) {
+            btnText += `Переключить на ${recommendedAsset}`;
+        } else if (tfUpper) {
+            btnText += `Переключить на ${tfUpper}`;
         }
 
         if (actionLabel) actionLabel.innerText = btnText;
 
         actionBtn.onclick = () => {
             if (typeof onActionCallback === 'function') {
-                onActionCallback({ asset: targetAsset, tf: targetTf });
+                onActionCallback({ asset: recommendedAsset, tf: recommendedTf });
             }
         };
     } else if (actionWrap) {

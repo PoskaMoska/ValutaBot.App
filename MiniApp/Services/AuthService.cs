@@ -114,8 +114,10 @@ public static class AuthService
                 string expectedSign = Convert.ToHexString(expectedHash).ToLowerInvariant();
                 byte[] provBytes = Encoding.UTF8.GetBytes(providedSign.ToLowerInvariant());
                 byte[] expBytes = Encoding.UTF8.GetBytes(expectedSign);
+                byte[] provHash = SHA256.HashData(provBytes);
+                byte[] expHash = SHA256.HashData(expBytes);
 
-                if (provBytes.Length != expBytes.Length || !CryptographicOperations.FixedTimeEquals(provBytes, expBytes))
+                if (!CryptographicOperations.FixedTimeEquals(provHash, expHash))
                 {
                     return (false, 0, "Invalid custom authorization signature");
                 }

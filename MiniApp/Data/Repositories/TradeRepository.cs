@@ -449,6 +449,7 @@ FROM outcome_data;");
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<SignalTracker.PredictionRecord>();
             using var conn = DbConnectionFactory.GetConnection();
+            string upToIso = upTo.ToUniversalTime().ToString("o");
             var rows = await conn.QueryAsync(@"
                 SELECT id as ""Id"", direction as ""Direction"", asset as ""Asset"", timeframe as ""Timeframe"", 
                        binance_symbol as ""BinanceSymbol"", entry_price as ""EntryPrice"", 
@@ -462,10 +463,10 @@ FROM outcome_data;");
                        price_entropy as ""PriceEntropy"", trend_maturity as ""TrendMaturity"", price_position_pct as ""PricePositionPct"", bb_squeeze as ""BbSqueeze"",
                        ta_telemetry::text as ""TaTelemetry"", ml_telemetry::text as ""MlTelemetry"", smc_telemetry::text as ""SmcTelemetry""
                 FROM pending_trades 
-                WHERE verify_at::timestamptz <= @UpToUtc
-                ORDER BY verify_at::timestamptz ASC
+                WHERE verify_at <= @UpToIso
+                ORDER BY verify_at ASC
                 LIMIT @Limit", 
-                new { UpToUtc = upTo.ToUniversalTime(), Limit = limit });
+                new { UpToIso = upToIso, Limit = limit });
 
             return rows.Select(r => new SignalTracker.PredictionRecord
             {

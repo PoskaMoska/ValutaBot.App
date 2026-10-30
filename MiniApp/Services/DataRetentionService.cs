@@ -35,10 +35,10 @@ public record StorageTelemetry(
 public class DataRetentionService : BackgroundService
 {
     private const double MaxVolumeCapacityMb = 5120.0; // Railway 5 GB starter volume (5 * 1024 MB)
-    private const double GreenThresholdMb    = 1600.0; // Safe operational zone (~2.8 GB physical disk with WAL)
-    private const double YellowThresholdMb   = 2400.0; // Importance sampling + 24h shadow window (~3.6 GB physical disk)
-    private const double RedThresholdMb      = 2700.0; // High-frequency cleanup every 15 min (~4.1 GB physical disk with WAL)
-    private const double EmergencyThresholdMb= 2950.0; // Critical purge before physical disk exceeds 90% (leaving safe WAL/temp buffer)
+    private const double GreenThresholdMb    = 2200.0; // Safe operational zone (~3.7 GB physical disk with WAL)
+    private const double YellowThresholdMb   = 2800.0; // Importance sampling + 4d shadow window (~4.3 GB physical disk)
+    private const double RedThresholdMb      = 3200.0; // High-frequency cleanup every 15 min (~4.7 GB physical disk with WAL)
+    private const double EmergencyThresholdMb= 3300.0; // Critical purge before physical disk exceeds 90% (leaving safe WAL/temp buffer)
 
     private static StorageTelemetry? _latestTelemetry;
     private static bool _tableTuningApplied = false;
@@ -99,6 +99,9 @@ public class DataRetentionService : BackgroundService
 
     private static async Task<StorageTelemetry> ExecuteCycleInternalAsync(System.Data.Common.DbConnection conn, bool forceEmergencyVacuum)
     {
+        // 0. Set protective lock timeout so maintenance never blocks concurrent live trading
+        try { await conn.ExecuteAsync("SET lock_timeout = '3s';", commandTimeout: 10); } catch { }
+
         // 1. One-time zero-downtime PostgreSQL autovacuum tuning per table
         if (!_tableTuningApplied)
         {
@@ -229,9 +232,13 @@ public class DataRetentionService : BackgroundService
         // 7. Non-blocking VACUUM maintenance
         try
         {
-            if (forceEmergencyVacuum && (MaxVolumeCapacityMb - telemetry.DatabaseSizeMb) >= 2000.0)
+            double maxTableSizeMb = telemetry.TableSizesMb.Values.DefaultIfEmpty(500.0).Max();
+            double requiredHeadroomMb = Math.Max(1500.0, maxTableSizeMb * 1.2);
+            bool hasHeadroom = (MaxVolumeCapacityMb - telemetry.DatabaseSizeMb) >= requiredHeadroomMb;
+
+            if (forceEmergencyVacuum && hasHeadroom)
             {
-                BotLogger.Warn("[SmartStorageGovernor] Manual VACUUM FULL requested and safe headroom verified. Rewriting tables...");
+                BotLogger.Warn($"[SmartStorageGovernor] Manual VACUUM FULL requested and safe headroom verified ({requiredHeadroomMb:F0} MB required). Rewriting tables...");
                 await conn.ExecuteAsync("VACUUM FULL trade_outcomes;", commandTimeout: 300);
                 await conn.ExecuteAsync("VACUUM FULL subminute_candles;", commandTimeout: 300);
                 await conn.ExecuteAsync("VACUUM FULL pending_trades;", commandTimeout: 60);
@@ -241,7 +248,7 @@ public class DataRetentionService : BackgroundService
             {
                 if (forceEmergencyVacuum)
                 {
-                    BotLogger.Warn("[SmartStorageGovernor] VACUUM FULL bypassed: Insufficient disk headroom (<2.0 GB free) on 5GB volume to safely duplicate table file. Using non-blocking VACUUM (ANALYZE).");
+                    BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL bypassed: Insufficient disk headroom (<{requiredHeadroomMb:F0} MB free) on 5GB volume to safely duplicate table file. Using non-blocking VACUUM (ANALYZE).");
                 }
                 await conn.ExecuteAsync("VACUUM (ANALYZE) trade_outcomes;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) subminute_candles;", commandTimeout: 120);

@@ -258,7 +258,10 @@ def build_macro_vector_live(
     # Extended 31 features
     ta_score = _safe_float(ta.get("Score"), 0.0)
     micro_vel = _safe_float(ta.get("MicroVel"), 0.0) / 20.0
-    hma_slope = _safe_float(ta.get("HmaSlope"), 0.0) / 10.0
+    last_close = _safe_float(candles[-1].get("Close", candles[-1].get("close")), 1.0) if candles else 1.0
+    hma_raw = _safe_float(ta.get("HmaSlope"), 0.0)
+    hma_bps = (hma_raw / last_close) * 10000.0 if last_close > 0 else 0.0
+    hma_slope = float(np.clip(hma_bps / 5.0, -2.0, 2.0))
     vol_raw = ta.get("VolRatio") if ta.get("VolRatio") is not None else ta.get("VolStrengthVal", 1.0)
     vol_ratio = min(3.0, max(0.0, _safe_float(vol_raw, 1.0))) / 3.0
     bb_sq = float(1.0 if macro.get("BbSqueeze") else 0.0)

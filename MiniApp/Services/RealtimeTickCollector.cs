@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Dapper;
+using Npgsql;
 using ValutaBot.App.MiniApp.Data.Repositories;
 using ValutaBot.App.MiniApp.Data;
 
@@ -165,7 +166,7 @@ namespace ValutaBot.MiniApp
         // With CreateUnbounded, a PostgreSQL outage at ~100 ticks/sec fills ~30k events in 5min → OOM.
         // DropOldest: gaps in subminute_candles are acceptable; OOM is not.
         private const int ChannelCapacity = 100_000;
-        private static readonly Channel<TickEvent> _tickChannel = Channel.CreateBounded<TickEvent>(
+        private static Channel<TickEvent> _tickChannel = Channel.CreateBounded<TickEvent>(
             new BoundedChannelOptions(ChannelCapacity)
             {
                 FullMode     = BoundedChannelFullMode.DropOldest,
@@ -178,7 +179,7 @@ namespace ValutaBot.MiniApp
 
         private static int _isInitialized = 0;
         private static readonly SemaphoreSlim _dbWriteLock = new(1, 1);
-        private static readonly CancellationTokenSource _collectorCts = new();
+        private static CancellationTokenSource _collectorCts = new();
 
         public static Task InitializeAsync()
         {
@@ -264,6 +265,23 @@ namespace ValutaBot.MiniApp
         /// Actively flushes all buffered ticks in memory and in the Channel to PostgreSQL.
         /// Called on graceful host shutdown, ProcessExit, before emergency self-recycle, or during in-process restart.
         /// </summary>
+        public static void PrepareForInProcessRestart()
+        {
+            lock (_dbWriteLock)
+            {
+                Interlocked.Exchange(ref _isInitialized, 0);
+                try { _collectorCts.Cancel(); } catch { }
+                _tickChannel.Writer.TryComplete();
+                _collectorCts = new CancellationTokenSource();
+                _tickChannel = Channel.CreateBounded<TickEvent>(new BoundedChannelOptions(ChannelCapacity)
+                {
+                    FullMode = BoundedChannelFullMode.DropOldest,
+                    SingleReader = true,
+                    SingleWriter = false
+                });
+            }
+        }
+
         public static async Task<int> FlushAsync(CancellationToken ct = default)
         {
             var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -337,21 +355,35 @@ namespace ValutaBot.MiniApp
                 // D1-3 FIX: commandTimeout=8s prevents the consumer loop from blocking
                 // for Npgsql's default 30s ConnectTimeout when PostgreSQL is flapping.
                 // With 8s cap: retry cycle is 8s + 0.5s delay = ~8.5s max blocked per attempt.
-                const int DbCommandTimeoutSecs = 8;
+                // Command timeout handled by batch
+                // const int DbCommandTimeoutSecs = 8;
 
                 // High-load optimization: execute the entire grouped batch in one command instead of N sequential proxy roundtrips
 
+                // Pipeline all grouped records in a single network round-trip via NpgsqlBatch
+                await using var batch = new NpgsqlBatch(conn, tx);
+                const string batchSql = @"
+                    INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (asset, interval, open_time) DO UPDATE SET
+                        high_price  = GREATEST(subminute_candles.high_price,  EXCLUDED.high_price),
+                        low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
+                        close_price = EXCLUDED.close_price,
+                        volume      = subminute_candles.volume + EXCLUDED.volume;";
+                foreach (var item in grouped)
                 {
-                    await conn.ExecuteAsync(@"
-                        INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
-                        VALUES (@Asset, @Interval, @OpenTime, @Open, @High, @Low, @Close, @Volume)
-                        ON CONFLICT (asset, interval, open_time) DO UPDATE SET
-                            high_price  = GREATEST(subminute_candles.high_price,  EXCLUDED.high_price),
-                            low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
-                            close_price = EXCLUDED.close_price,
-                            volume      = subminute_candles.volume + EXCLUDED.volume;
-                    ", grouped.ToList(), tx, commandTimeout: DbCommandTimeoutSecs);
+                    var batchCmd = new NpgsqlBatchCommand(batchSql);
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Asset });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Interval });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.OpenTime });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Open });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.High });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Low });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Close });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = (double)item.Volume });
+                    batch.BatchCommands.Add(batchCmd);
                 }
+                await batch.ExecuteNonQueryAsync(ct);
                 
                 await tx.CommitAsync(ct);
                 return true;
@@ -435,9 +467,12 @@ namespace ValutaBot.MiniApp
                 {
                     if (buffer.Count > 0)
                     {
-                        await _dbWriteLock.WaitAsync(TimeSpan.FromSeconds(3));
-                        try { await WriteBatchInternalAsync(buffer, CancellationToken.None); }
-                        finally { _dbWriteLock.Release(); }
+                        bool acquired = await _dbWriteLock.WaitAsync(TimeSpan.FromSeconds(3));
+                        if (acquired)
+                        {
+                            try { await WriteBatchInternalAsync(buffer, CancellationToken.None); }
+                            finally { _dbWriteLock.Release(); }
+                        }
                     }
                     await FlushAsync(CancellationToken.None);
                 }

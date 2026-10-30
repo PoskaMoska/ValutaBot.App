@@ -21,9 +21,6 @@ public class ConfluenceMatrixEngine(
     IMarketAnalyzer marketAnalyzer,
     IAutoCalibrationEngine? autoCalib = null) : IConfluenceMatrixEngine
 {
-    // 4D Matrix — fetch mode (always makes 3 HTTP requests)
-    // Named distinctly from the smart-reuse overload to make fallback behavior explicit.
-    // Only called directly when no pre-loaded candles are available.
     private MiniAppController.OhlcCandle[] StripUnclosedCandle(MiniAppController.OhlcCandle[] candles, string tf)
     {
         if (candles == null || candles.Length <= 1) return candles ?? Array.Empty<MiniAppController.OhlcCandle>();
@@ -128,9 +125,6 @@ public class ConfluenceMatrixEngine(
     Resolve3DTimeframes(string tf) =>
     tf.ToLower() switch
     {
-    // FIX PRIORITY-1: РџРµСЂРµРіСЂСѓР·РєР° РїСЂРёРЅРёРјР°СЋС‰Р°СЏ СѓР¶Рµ Р·Р°РіСЂСѓР¶РµРЅРЅС‹Рµ current+higher СЃРІРµС‡Рё РёР· Orchestrator'Р°.
-        // This is required so the 1-fetch pre-loaded primaryCandles and macroCandles in Evaluate4DMatrixAsync
-    // Р­С‚Рѕ СѓСЃС‚СЂР°РЅСЏРµС‚ РіР»Р°РІРЅСѓСЋ РїСЂРёС‡РёРЅСѓ РЅРµСЃС‚Р°Р±РёР»СЊРЅРѕСЃС‚Рё: rate limit Рё Doppelganger Bug.
         "s5"                      => ("s5",  "s10", "m1"),
         "s10"                     => ("s5",  "s10", "m1"),
         "s15"                     => ("s5",  "s15", "m1"),
@@ -150,13 +144,6 @@ public class ConfluenceMatrixEngine(
     /// Scores directional bias for a single timeframe using the full
     /// TechnicalAnalysisEngine pipeline (HMA, ConnorsRSI, ADX, Volume).
     /// </summary>
-    /// <remarks>
-    /// FIX: Previously passed candles=null to ScoreTimeframe, which caused
-    /// candles.Length == 0 < 14 always return score=0.0 always "NEUTRAL".
-    /// Now constructs a real OhlcCandle[] from price/volume arrays.
-    /// </remarks>
-    // Р’ РѕС‚Р»РёС‡РёРµ РѕС‚ ScoreDirection (РєРѕС‚РѕСЂРѕРјСѓ РЅСѓР¶РµРЅ С‚РѕР»СЊРєРѕ С†РµРЅС‹ Рё РґР°РµС‚ avgDiffВ±0.5),
-    // СЌС‚РѕС‚ РјРµС‚РѕРґ РїРµСЂРµРґР°РµС‚ СЂРµР°Р»СЊРЅС‹Рµ High/Low СЃРІРµС‡Рё -> ATR/ADX РєРѕСЂСЂРµРєС‚РЅС‹ -> РЅРµС‚ С€СѓРјР° В±12%.
     private string ScoreDirectionFromCandles(
         MiniAppController.OhlcCandle[] ohlcCandles,
         double[] prices,
@@ -172,15 +159,12 @@ public class ConfluenceMatrixEngine(
 
         try
         {
-    // РџРµСЂРµРґР°РµРј СЂРµР°Р»СЊРЅС‹Рµ OhlcCandle[] (СЃ РЅР°СЃС‚РѕСЏС‰РёРјРё High/Low) РЅР°РїСЂСЏРјСѓСЋ РІ ScoreTimeframe
-            // FIX ROOT CAUSE #3: Include asset in cache key for per-asset isolation
             var (score, _, _, _, _, _) = marketAnalyzer.ScoreTimeframe(
                 $"4dmatrix_{asset}_{tf}", tf, prices,
                 volumes: volumes,
                 candles: ohlcCandles.AsSpan()
             );
 
-    // РџРѕСЂРѕРі В±0.20: РїСЂРё С€РєР°Р»Рµ [-1, +1] РѕС‚СЃРµРєР°РµС‚ СЂС‹РЅРѕС‡РЅС‹Р№ С€СѓРј
             return score > 0.20 ? "BUY" : score < -0.20 ? "PUT" : "NEUTRAL";
         }
         catch (Exception ex)
@@ -190,10 +174,6 @@ public class ConfluenceMatrixEngine(
         }
     }
 
-
-    // FIX PRIORITY-1: РџРµСЂРµРіСЂСѓР·РєР° РїСЂРёРЅРёРјР°СЋС‰Р°СЏ СѓР¶Рµ Р·Р°РіСЂСѓР¶РµРЅРЅС‹Рµ current+higher СЃРІРµС‡Рё РёР· Orchestrator'Р°.
-    // РЈРјРЅРѕ РјР°РїРїРёС‚ РёС… РЅР° СЃР»РѕС‚С‹ (micro/primary/macro) Рё РґРµР»Р°РµС‚ 1 HTTP-Р·Р°РїСЂРѕСЃ РґР»СЏ РЅРµРґРѕСЃС‚Р°СЋС‰РµРіРѕ С‚Р°Р№РјС„СЂРµР№РјР°.
-    // Р­С‚Рѕ СѓСЃС‚СЂР°РЅСЏРµС‚ РіР»Р°РІРЅСѓСЋ РїСЂРёС‡РёРЅСѓ РЅРµСЃС‚Р°Р±РёР»СЊРЅРѕСЃС‚Рё: rate limit Рё Doppelganger Bug.
     public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
         string asset,
         string primaryTimeframe,
@@ -225,7 +205,6 @@ public class ConfluenceMatrixEngine(
             string dirPrimary = "NEUTRAL";
             string dirMacro = "NEUTRAL";
 
-            // Helper to process a TF: either use pre-loaded, or fetch via HTTP
             async Task<string> ProcessTf(string targetTf)
             {
                 if (targetTf == currentTf)
@@ -238,9 +217,7 @@ public class ConfluenceMatrixEngine(
                 }
                 else
                 {
-                    // Fetch missing TF
                     var candlesRaw = await fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, targetTf, asset, 50);
-                    // Drop the unclosed live candle, just like TA and ML do, to prevent massive indicators skew.
                     candlesRaw = StripUnclosedCandle(candlesRaw, targetTf);
                     var pricesRaw = candlesRaw.Select(c => c.Close).ToArray();
                     var volsRaw = candlesRaw.Select(c => c.Volume).ToArray();
@@ -306,10 +283,7 @@ public class ConfluenceMatrixEngine(
 
     // Unified Matrix Evaluation
     
-    /// <summary>
-    /// Merges TA, SMC, Orderflow, ML, and Multi-Timeframe into a final decision.
-    /// </summary>
-            public Task<ConsensusDecision> EvaluateMatrixAsync(
+    public Task<ConsensusDecision> EvaluateMatrixAsync(
         string asset,
         string timeframe,
         bool isSubMinute,
@@ -319,9 +293,12 @@ public class ConfluenceMatrixEngine(
         OrderflowSignal ofSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
-        ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0)
+        ConfluenceMatrixResult mtfResult,
+        int consecutiveLosses = 0,
+        double volRatio = 1.0,
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null)
     {
-        return EvaluateMatrixAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio);
+        return EvaluateMatrixAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit);
     }
 
     public async Task<ConsensusDecision> EvaluateMatrixAsync(
@@ -333,13 +310,19 @@ public class ConfluenceMatrixEngine(
         SmcSignal smcSignal,
         MlSignal mlSignal,
         StateSignal stateSignal,
-        ConfluenceMatrixResult mtfResult, int consecutiveLosses = 0, double volRatio = 1.0)
+        ConfluenceMatrixResult mtfResult,
+        int consecutiveLosses = 0,
+        double volRatio = 1.0,
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null)
     {
         await Task.CompletedTask;
         double taScore = taSignal.Score;
+        if (double.IsNaN(taScore) || double.IsInfinity(taScore))
+        {
+            taScore = 0.0;
+        }
 
-        // OF DISABLED: 35.8% empirical win-rate (5.5Пѓ anti-signal on live data). 
-        // Order flow tick-volume is unreliable on subminute timeframes. Pending structural rework.
+        // OF DISABLED: 35.8% empirical win-rate (anti-signal on live data).
         double ofScore = 0.0;
 
         double smcScore = 0;
@@ -364,11 +347,7 @@ public class ConfluenceMatrixEngine(
             double conf = double.IsNaN(mlSignal.Confidence) || double.IsInfinity(mlSignal.Confidence) ? 0.5 : mlSignal.Confidence;
             double directionalConf = Math.Clamp(conf, 0.5, 0.99);
             rawProb = mlSignal.Direction == "BUY" ? directionalConf : (mlSignal.Direction == "PUT" ? (1.0 - directionalConf) : 0.5);
-    
-    
         }
-
-
 
         double mlScore = (rawProb - 0.5) * 2.0; // Smooth signed scaling [-1.0, +1.0] (+ for BUY, - for PUT)
         if (double.IsNaN(mlScore) || double.IsInfinity(mlScore)) mlScore = 0.0;
@@ -376,14 +355,12 @@ public class ConfluenceMatrixEngine(
         bool isNeuralBrain = !string.IsNullOrEmpty(mlSignal.ModelVersion) &&
                              (mlSignal.ModelVersion.Contains("patch_tst", StringComparison.OrdinalIgnoreCase) ||
                               mlSignal.ModelVersion.Contains("seq_brain", StringComparison.OrdinalIgnoreCase) ||
+                              mlSignal.ModelVersion.Contains("dual_stream", StringComparison.OrdinalIgnoreCase) ||
                               mlSignal.ModelVersion.Contains("neural", StringComparison.OrdinalIgnoreCase));
 
         // ══════════════════════════════════════════════════════════════════════════
-        // PURE NEURAL BRAIN ARCHITECTURE (Вариант 1)
+        // TWO-STAGE HURDLE ARCHITECTURE
         // ══════════════════════════════════════════════════════════════════════════
-        // Решение и вероятность определяются на 100% нейросетью.
-        // Старые индикаторы (TA, SMC) не разбавляют и не подавляют сигнал тренда,
-        // а остаются в качестве справочной телеметрии для AI Co-Pilot.
         double normTa  = Math.Clamp(taScore, -1.0, 1.0);
         double normSmc = Math.Clamp(smcScore, -1.0, 1.0);
         double normMl  = Math.Clamp(mlScore, -1.0, 1.0);
@@ -395,6 +372,8 @@ public class ConfluenceMatrixEngine(
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
         bool isMlExplicitHold = isNeuralBrain && mlSignal != null && mlSignal.Direction is "HOLD" or "NEUTRAL";
 
+        int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
+
         if (hasMlVerdict)
         {
             // Pure Neural Decision
@@ -404,16 +383,13 @@ public class ConfluenceMatrixEngine(
                 : 0.50;
             finalProbPct = (int)Math.Clamp(Math.Round(neuralConf * 100.0), 50, 92);
 
-            // S5 Micro-Timeframe Noise Calibration:
-            // 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
-            // Cap confidence to 59% so s5 blocks false certainty on single-tick bursts while allowing genuine >=58% setups.
+            // S5 Micro-Timeframe Noise Calibration
             if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
             {
                 finalProbPct = Math.Min(59, finalProbPct);
             }
 
-            // Circuit Breaker risk dampener (C# риск-менеджмент серий потерь)
-            int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
+            // Circuit Breaker risk dampener
             if (mlLiveLosses >= 3)
             {
                 finalProbPct = Math.Max(50, finalProbPct - 6);
@@ -425,7 +401,7 @@ public class ConfluenceMatrixEngine(
                 safetyNotes.Add($"⚠️ Осторожность: 2 убытка подряд на {asset}/{timeframe} (-3% уверенности)");
             }
 
-            // MTF Conflict penalty (если старший ТФ жестко противоречит)
+            // MTF Conflict penalty
             if (conflictPenalty < 1.0)
             {
                 finalProbPct = Math.Max(50, (int)Math.Round(finalProbPct * conflictPenalty));
@@ -434,7 +410,7 @@ public class ConfluenceMatrixEngine(
         }
         else if (isMlExplicitHold)
         {
-            // Neural Brain is online and explicitly commanded HOLD / flat market: never override with legacy TA fallback
+            // Neural Brain explicitly commanded HOLD: keep neutral
             finalDir = "NEUTRAL";
             finalProbPct = 50;
             safetyNotes.Add($"ℹ️ Neural Brain ({mlSignal!.ModelVersion}): HOLD (flat market, entry blocked)");
@@ -442,18 +418,94 @@ public class ConfluenceMatrixEngine(
         else
         {
             // Fallback (если ML временно недоступен или выдал NEUTRAL)
-            // Архитектурный инвариант: при пустом стакане, нулевых тиках или |taScore| <= 0.15 — строго NEUTRAL (50%)
-            if (Math.Abs(taScore) <= 0.15)
+            // Архитектурный инвариант: при пустом стакане, нулевых тиках или |taScore| <= 0.15 — используем Компас Макро-Тренда
+            if (double.IsNaN(taScore) || double.IsInfinity(taScore) || Math.Abs(taScore) <= 0.15)
             {
-                finalDir = "NEUTRAL";
-                finalProbPct = 50;
-                safetyNotes.Add("ℹ️ Консенсус нейтрален: |TA score| <= 0.15 (Нейтральный рынок, BUY-байас исключен)");
+                string macroDir = "NEUTRAL";
+                if (mtfResult != null)
+                {
+                    if (mtfResult.DominantDirection is "BUY" or "PUT")
+                        macroDir = mtfResult.DominantDirection;
+                    else if (mtfResult.TimeframeDirections != null)
+                    {
+                        string[] priorityTfs = new[] { "D1", "H4", "H1", "M30", "M15", "M5", "M3", "M2", "M1", "S30", "S15", "S10", "S5" };
+                        foreach (var tfKey in priorityTfs)
+                        {
+                            if (mtfResult.TimeframeDirections.TryGetValue(tfKey, out var d) && d is "BUY" or "PUT")
+                            {
+                                macroDir = d;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (macroDir is "BUY" or "PUT")
+                {
+                    finalDir = macroDir;
+                    finalProbPct = 52;
+                    safetyNotes.Add($"🧭 Компас Макро-Тренда ({macroDir}): Базовое направление зафиксировано по старшему ТФ при слабом локальном импульсе (|TA| <= 0.15)");
+                }
+                else
+                {
+                    finalDir = "NEUTRAL";
+                    finalProbPct = 50;
+                    safetyNotes.Add("ℹ️ Консенсус нейтрален: |TA score| <= 0.15 (Нейтральный рынок, BUY-байас исключен)");
+                }
             }
             else
             {
                 finalDir = taScore > 0 ? "BUY" : "PUT";
                 finalProbPct = (int)Math.Clamp(Math.Round((0.50 + Math.Abs(taScore) * 0.25) * 100.0), 50, 92);
                 safetyNotes.Add("ℹ️ Резервный режим: ML сигнал нейтрален или на калибровке (Fallback Engine)");
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════════
+        // STAGE 2: SUBMINUTE NOISE & WICK REJECTION CALIBRATION
+        // ══════════════════════════════════════════════════════════════════════════
+        bool hasRiskDampener = (mlLiveLosses >= 2) || (conflictPenalty < 1.0);
+        if (noiseAudit.HasValue && finalDir is "BUY" or "PUT" && isSubMinute)
+        {
+            var na = noiseAudit.Value;
+            if (!na.IsTradeableImpulse)
+            {
+                // Затухание волатильности или шумовой флэт: не блокируем сигнал, но честно калибруем вероятность
+                if (na.LocalAtrBps < na.NoiseFloorBps && finalProbPct > 52)
+                {
+                    finalProbPct = 52;
+                    safetyNotes.Add($"⚠️ Шумовой флэт: размах свечей ({na.LocalAtrBps:F2} bps) ниже порога шума брокера ({na.NoiseFloorBps:F1} bps). Уверенность ограничена 52%.");
+                }
+            }
+            else
+            {
+                // Здоровый импульс + Тень отскока (Wick Rejection) по тренду
+                bool hasWick = (finalDir == "BUY" && na.HasBullishWick) || (finalDir == "PUT" && na.HasBearishWick);
+                if (hasWick)
+                {
+                    string wickName = finalDir == "BUY" ? "нижняя тень подтверждает отскок по тренду BUY" : "верхняя тень подтверждает отскок по тренду PUT";
+                    if (hasRiskDampener)
+                    {
+                        // Риск-демпфер активен (серия убытков или MTF конфликт): даем осторожный бонус без стирания защитного штрафа
+                        finalProbPct = Math.Clamp(finalProbPct + 2, 50, 60);
+                        safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+2%, демпфировано до {finalProbPct}% из-за активного риск-контроля)");
+                    }
+                    else
+                    {
+                        finalProbPct = Math.Clamp(Math.Max(finalProbPct, 61) + 4, 61, 68);
+                        safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+4%)");
+                    }
+                }
+
+                // Детекция экстремального выброса цены (Mean Reversion на затухании)
+                if (na.IsExtremeOverbought && taSignal.Rsi >= 78.0)
+                {
+                    safetyNotes.Add($"⚡ Mean Reversion: экстремальный вылет цены ({na.ZScore:F1}σ, RSI {taSignal.Rsi:F0}) — вероятность затухания и отскока вниз");
+                }
+                else if (na.IsExtremeOversold && taSignal.Rsi <= 22.0)
+                {
+                    safetyNotes.Add($"⚡ Mean Reversion: экстремальная перепроданность ({na.ZScore:F1}σ, RSI {taSignal.Rsi:F0}) — вероятность затухания и отскока вверх");
+                }
             }
         }
 
@@ -472,7 +524,7 @@ public class ConfluenceMatrixEngine(
         }
         coPilot.AppendLine("[Показания датчиков C# (Телеметрия)]");
         coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
-        coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult.DominantDirection}{(mtfResult.IsGoldenSetup ? " [GOLDEN]" : "")}");
+        coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult?.DominantDirection ?? "NEUTRAL"}{(mtfResult?.IsGoldenSetup == true ? " [GOLDEN]" : "")}");
         coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal.VelocityBpsPerSec:F2} bps/s");
         if (safetyNotes.Count > 0)
         {
@@ -503,4 +555,3 @@ public class ConfluenceMatrixEngine(
         );
     }
 }
-

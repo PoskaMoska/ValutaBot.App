@@ -25,30 +25,73 @@ public partial class TelegramBotService : BackgroundService
     private static readonly IMemoryCache UserLastActivity = new MemoryCache(new MemoryCacheOptions());
     private static string _webAppUrl = "https://chowder-dreamland-spotlight.ngrok-free.dev";
 
+    private static long _tgBlockedUntilTicks = 0;
+
+    internal static async Task WaitTgGateAsync(CancellationToken ct = default)
+    {
+        long blockedUntil = Interlocked.Read(ref _tgBlockedUntilTicks);
+        if (blockedUntil > 0)
+        {
+            var remaining = new DateTime(blockedUntil, DateTimeKind.Utc) - DateTime.UtcNow;
+            if (remaining > TimeSpan.Zero)
+            {
+                await Task.Delay(remaining, ct);
+            }
+        }
+    }
+
+    internal static void RegisterTgBlock(int seconds)
+    {
+        int clampedSec = Math.Clamp(seconds, 1, 120);
+        long newBlockUntil = DateTime.UtcNow.AddSeconds(clampedSec).Ticks;
+        while (true)
+        {
+            long current = Interlocked.Read(ref _tgBlockedUntilTicks);
+            if (newBlockUntil <= current) break;
+            if (Interlocked.CompareExchange(ref _tgBlockedUntilTicks, newBlockUntil, current) == current)
+            {
+                BotLogger.Warn($"[TG Bot API] Centralized rate-limit gate engaged for {clampedSec}s across all Telegram bot workers.");
+                break;
+            }
+        }
+    }
+
     public static async Task<bool> IsUserAllowed(long chatId)
     {
-        if (await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsAdminAsync(chatId))
-            return true;
-
-        if (await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsUserAllowedAsync(chatId))
-            return true;
-
-        var reg = await ValutaBot.App.MiniApp.Data.Repositories.RegistrationRepository.GetRegistrationByChatIdAsync(chatId);
-        if (reg != null && reg.HasRegistered)
+        string cacheKey = $"allowed_{chatId}";
+        if (UserLastActivity.TryGetValue(cacheKey, out bool cachedAllowed) && cachedAllowed)
         {
-            if (reg.HasDeposited)
-            {
-                await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAllowedUserAsync(chatId);
-                return true;
-            }
+            return true;
+        }
 
-            if (reg.TrialEndsAt.HasValue && reg.TrialEndsAt.Value > DateTime.UtcNow)
+        bool isAllowed = false;
+        if (await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsAdminAsync(chatId))
+            isAllowed = true;
+        else if (await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsUserAllowedAsync(chatId))
+            isAllowed = true;
+        else
+        {
+            var reg = await ValutaBot.App.MiniApp.Data.Repositories.RegistrationRepository.GetRegistrationByChatIdAsync(chatId);
+            if (reg != null && reg.HasRegistered)
             {
-                return true;
+                if (reg.HasDeposited)
+                {
+                    await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAllowedUserAsync(chatId);
+                    isAllowed = true;
+                }
+                else if (reg.TrialEndsAt.HasValue && reg.TrialEndsAt.Value > DateTime.UtcNow)
+                {
+                    isAllowed = true;
+                }
             }
         }
 
-        return false;
+        if (isAllowed)
+        {
+            UserLastActivity.Set(cacheKey, true, TimeSpan.FromSeconds(60));
+        }
+
+        return isAllowed;
     }
 
     public static async Task SendMessageToAdmins(string text)
@@ -290,8 +333,9 @@ public partial class TelegramBotService : BackgroundService
                     catch { }
                 }
                 resp.Dispose();
+                RegisterTgBlock(delaySec);
                 BotLogger.Warn($"[TG Bot API] 429 Rate Limit on outbound call. Backing off for {delaySec}s (Attempt {attempt}/3)");
-                await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 30)), ct);
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 120)), ct);
                 continue;
             }
             return resp;
@@ -301,6 +345,7 @@ public partial class TelegramBotService : BackgroundService
 
     internal static async Task SendMessage(string token, long chatId, string text)
     {
+        await WaitTgGateAsync();
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
         for (int attempt = 1; attempt <= 2; attempt++)
         {
@@ -311,7 +356,8 @@ public partial class TelegramBotService : BackgroundService
             }
             catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429 && attempt == 1)
             {
-                int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 30);
+                int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 120);
+                RegisterTgBlock(retrySec);
                 BotLogger.Warn($"[TG Bot] sendMessage 429 rate-limited. Retrying after {retrySec}s...");
                 await Task.Delay(TimeSpan.FromSeconds(retrySec));
             }
@@ -344,6 +390,7 @@ public partial class TelegramBotService : BackgroundService
 
     internal static async Task EditMessageText(string token, long chatId, int messageId, string text)
     {
+        await WaitTgGateAsync();
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
         for (int attempt = 1; attempt <= 2; attempt++)
         {
@@ -354,7 +401,8 @@ public partial class TelegramBotService : BackgroundService
             }
             catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429 && attempt == 1)
             {
-                int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 30);
+                int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 120);
+                RegisterTgBlock(retrySec);
                 BotLogger.Warn($"[TG Bot] editMessageText 429 rate-limited. Retrying after {retrySec}s...");
                 await Task.Delay(TimeSpan.FromSeconds(retrySec));
             }

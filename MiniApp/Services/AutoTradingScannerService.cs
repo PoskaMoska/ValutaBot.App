@@ -118,9 +118,7 @@ public class AutoTradingScannerService : BackgroundService
                     {
                         string key = $"{item.pair}:{item.tf}";
                         queuedKeys.TryRemove(key, out _);
-
                         if (stoppingToken.IsCancellationRequested) break;
-
                         // Drop stale events that waited too long in queue relative to their timeframe (prevents s5/s10 entry skew)
                         double maxQueueWaitSec = item.tf.Equals("s5", StringComparison.OrdinalIgnoreCase) ? 2.0
                             : item.tf.Equals("s10", StringComparison.OrdinalIgnoreCase) ? 2.8
@@ -129,15 +127,21 @@ public class AutoTradingScannerService : BackgroundService
                         {
                             continue;
                         }
-
                         if (!inFlightKeys.TryAdd(key, 1))
                         {
                             continue;
                         }
-
                         try
                         {
                             await ProcessSubminuteScanAsync(item.pair, item.tf, stoppingToken);
+                        }
+                        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "[AutoScanner] Worker encountered unexpected error on {Pair}/{Tf}: {Message}", item.pair, item.tf, ex.Message);
                         }
                         finally
                         {
@@ -146,6 +150,10 @@ public class AutoTradingScannerService : BackgroundService
                     }
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+                catch (Exception ex)
+                {
+                    _logger.LogCritical(ex, "[AutoScanner] Fatal error in scanner worker: {Message}", ex.Message);
+                }
             }, stoppingToken));
         }
 
@@ -223,34 +231,19 @@ public class AutoTradingScannerService : BackgroundService
                 DateTime currentCandleClose = currentCandleOpen.AddSeconds(tfSecs);
 
                 double elapsedFromOpen = (refTime - currentCandleOpen).TotalSeconds;
-                double remainingToClose = (currentCandleClose - refTime).TotalSeconds;
 
+                // Entry window aligned with Orchestrator ExpiryGuard (1.2s for s5, 2.0s for s10, 2.5s for s15)
                 double maxOpenElapsed = tfSecs switch
-                {
-                    5 => 0.8,
-                    10 => 1.5,
-                    15 => 2.2,
-                    _ => 3.0
-                };
-
-                double minRemainingBuffer = tfSecs switch
                 {
                     5 => 1.2,
                     10 => 2.0,
-                    15 => 3.0,
-                    30 => 4.0,
-                    _ => 5.0
+                    15 => 2.5,
+                    _ => 3.5
                 };
 
                 if (elapsedFromOpen > maxOpenElapsed)
                 {
                     _logger.LogWarning($"[AutoScanner] Skipped {pair}/{tf}: open window elapsed (+{elapsedFromOpen:F2}s > {maxOpenElapsed:F1}s).");
-                    return;
-                }
-
-                if (remainingToClose < minRemainingBuffer)
-                {
-                    _logger.LogWarning($"[AutoScanner] Skipped {pair}/{tf}: insufficient time to candle close ({remainingToClose:F2}s < {minRemainingBuffer:F1}s). Early expiry risk averted.");
                     return;
                 }
 

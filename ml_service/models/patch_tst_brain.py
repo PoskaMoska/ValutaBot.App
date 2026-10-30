@@ -721,7 +721,7 @@ class DualStreamPatchBrain(nn.Module):
         alpha_dir, _ = self._compute_orthogonal_alpha(x_micro, x_mtf, x_macro)
 
         total_dir = alpha_dir + deep_dir
-        hold_logit = 0.5 * (logits_pos[:, 0] + logits_neg[:, 0]) - 2.5
+        hold_logit = 0.5 * (logits_pos[:, 0] + logits_neg[:, 0])
         buy_logit = 0.5 * total_dir
         put_logit = -0.5 * total_dir
 
