@@ -190,7 +190,7 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
     """)
     agg_rows = cur.fetchall()
 
-    # Part B: Deep JSON sequence & sensor inspection on recent snapshots
+    # Part B: Deep JSON sequence & sensor inspection on recent snapshots (within 24h uncompacted window)
     cur.execute("""
         SELECT
             id, asset, timeframe, direction, was_win, pnl_bps,
@@ -198,7 +198,7 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
             price_entropy, adx_at_signal, rsi_at_signal, minutes_to_news,
             created_at, features_json
         FROM trade_outcomes
-        WHERE created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz
+        WHERE created_at::timestamptz >= NOW() - INTERVAL '24 hours'
           AND features_json IS NOT NULL
           AND direction IN ('BUY', 'PUT')
           AND was_win IS NOT NULL
@@ -207,6 +207,24 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
     """, (sample_limit,))
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
+
+    # Fallback to broader window if less than 50 trades in 24h
+    if len(rows) < 50:
+        cur.execute("""
+            SELECT
+                id, asset, timeframe, direction, was_win, pnl_bps,
+                max_favorable_bps, max_adverse_bps,
+                price_entropy, adx_at_signal, rsi_at_signal, minutes_to_news,
+                created_at, features_json
+            FROM trade_outcomes
+            WHERE created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz
+              AND features_json IS NOT NULL
+              AND direction IN ('BUY', 'PUT')
+              AND was_win IS NOT NULL
+            ORDER BY created_at::timestamptz DESC
+            LIMIT %s
+        """, (sample_limit,))
+        rows = cur.fetchall()
 
     total = len(rows)
     if total == 0:
@@ -356,8 +374,21 @@ def run_dataset_sanity_audit(sample_limit: int = 500, notify_telegram: bool = Tr
                 candles = bucket[1][start_idx:idx]
 
         if len(candles) < 40:
-            short_candle_windows += 1
-            continue
+            # Check if this snapshot was legitimately compacted by DataRetentionService (>23h old with MacroContext/Sensors preserved)
+            is_compacted_archived = False
+            c_at = rd.get("created_at")
+            if c_at and hasattr(c_at, "timestamp") and isinstance(feat, dict):
+                try:
+                    c_dt = c_at.astimezone(timezone.utc) if c_at.tzinfo else c_at.replace(tzinfo=timezone.utc)
+                    age_h = (datetime.now(timezone.utc) - c_dt).total_seconds() / 3600.0
+                    if age_h >= 23.0 and ("MacroContext" in feat or "NeuralBrain" in feat or "Ta" in feat):
+                        is_compacted_archived = True
+                except Exception:
+                    pass
+
+            if not is_compacted_archived:
+                short_candle_windows += 1
+                continue
 
         total_candles_checked += len(candles)
         flat_bars = 0
