@@ -189,8 +189,12 @@ def main():
 
             label = 1 if delta_bps >= 0.6 else 0
 
-            # Macro window: 30 closed M1 bars strictly prior to entry_epoch (>= 60s ago)
-            m1_avail_count = np.searchsorted(m1_epochs, entry_epoch - 60, side='right')
+            # Точный Point-in-Time расчет закрытия свечи s5:
+            # Свеча s5 с open_time = entry_epoch закрывается ровно в entry_epoch + 5 сек.
+            # M1 свеча с open_time = T_m1 закрывается в T_m1 + 60 сек.
+            # Она закрыта к моменту s5_close_epoch тогда и только тогда, когда T_m1 <= s5_close_epoch - 60 (entry_epoch - 55).
+            s5_close_epoch = entry_epoch + 5
+            m1_avail_count = np.searchsorted(m1_epochs, s5_close_epoch - 60, side='right')
             if m1_avail_count < 30:
                 continue
 

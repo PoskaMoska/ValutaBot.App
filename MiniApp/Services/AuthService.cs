@@ -20,13 +20,15 @@ public static class AuthService
             || string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Production", StringComparison.OrdinalIgnoreCase);
 
         // SRE-FIX (F1): In production cloud or proxied environments, bypass is strictly prohibited.
-        // Local/test bypass requires loopback connection AND explicit Development environment or test runner header.
+        // Local/test bypass requires loopback/in-memory connection AND explicit Development/Testing host environment.
         bool isLoopbackOrInMemory = remoteIp == null || System.Net.IPAddress.IsLoopback(remoteIp);
-        bool hasExplicitDevOrTestFlag =
-            string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Development", StringComparison.OrdinalIgnoreCase)
-            || (context.Request.Headers.TryGetValue("X-Test-Bypass", out var bypassVal) && bypassVal == "true");
+        string? hostEnv = (context.RequestServices?.GetService(typeof(Microsoft.AspNetCore.Hosting.IWebHostEnvironment)) as Microsoft.AspNetCore.Hosting.IWebHostEnvironment)?.EnvironmentName
+                       ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+        bool isExplicitDev = string.Equals(hostEnv, "Development", StringComparison.OrdinalIgnoreCase);
+        bool isTestHost = string.Equals(hostEnv, "Testing", StringComparison.OrdinalIgnoreCase) || remoteIp == null;
+        bool hasDevBypassHeader = context.Request.Headers.TryGetValue("X-Test-Bypass", out var bypassVal) && bypassVal == "true";
 
-        if (!isProductionCloud && !isProxiedExternal && isLoopbackOrInMemory && hasExplicitDevOrTestFlag)
+        if (!isProductionCloud && !isProxiedExternal && isLoopbackOrInMemory && (isExplicitDev || (isTestHost && hasDevBypassHeader)))
         {
             context.Items["userId"] = 123456789L; // Mock user ID for local dev / test runner
             return (true, null);

@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Net.WebSockets;
 using Microsoft.AspNetCore.Builder;
@@ -17,6 +19,13 @@ public static partial class MiniAppController
 {
     private sealed record CachedHealth(DateTime ExpiresUtc, object Payload);
     private static volatile CachedHealth? _cachedHealthResult;
+
+    // SRE / Security: Concurrent WebSocket connection limits
+    private static int _activeWebSocketConnections = 0;
+    private const int MaxGlobalWebSocketConnections = 500;
+    private static readonly ConcurrentDictionary<string, int> _wsConnectionsPerIp = new();
+    private const int MaxWsPerIp = 5;
+    private static readonly byte[] HeartbeatBytes = Encoding.UTF8.GetBytes("{\"hb\":1}");
 
     public static void RegisterRoutes(WebApplication app)
     {
@@ -332,17 +341,60 @@ public static partial class MiniAppController
                 return;
             }
 
-            using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
-            var cleanAsset = ValutaBot.MiniApp.AssetSanitizer.Sanitize(asset);
+            // 1. WebSocket Authentication (Query String token/initData or Header)
+            if (!context.Request.Headers.ContainsKey("X-Telegram-Init-Data"))
+            {
+                string? queryAuth = context.Request.Query["token"].FirstOrDefault()
+                                 ?? context.Request.Query["initData"].FirstOrDefault();
+                if (!string.IsNullOrEmpty(queryAuth))
+                {
+                    context.Request.Headers["X-Telegram-Init-Data"] = queryAuth;
+                }
+            }
 
-            byte[] buffer = new byte[1024];
-            var ct = context.RequestAborted;
-            double lastPrice = 0.0;
-            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
+            if (!isAuthorized)
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                await context.Response.WriteAsync($"Unauthorized: {authError}");
+                return;
+            }
 
+            // 2. Per-IP and Global WebSocket Connection Limiting (DoS protection)
+            string clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            int currentIpCount = _wsConnectionsPerIp.AddOrUpdate(clientIp, 1, (_, count) => count + 1);
+            if (currentIpCount > MaxWsPerIp)
+            {
+                int rem = _wsConnectionsPerIp.AddOrUpdate(clientIp, 0, (_, count) => Math.Max(0, count - 1));
+                if (rem == 0) _wsConnectionsPerIp.TryRemove(new KeyValuePair<string, int>(clientIp, 0));
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                await context.Response.WriteAsync("Too many connections from your IP.");
+                return;
+            }
+
+            if (Interlocked.Increment(ref _activeWebSocketConnections) > MaxGlobalWebSocketConnections)
+            {
+                Interlocked.Decrement(ref _activeWebSocketConnections);
+                int rem = _wsConnectionsPerIp.AddOrUpdate(clientIp, 0, (_, count) => Math.Max(0, count - 1));
+                if (rem == 0) _wsConnectionsPerIp.TryRemove(new KeyValuePair<string, int>(clientIp, 0));
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                await context.Response.WriteAsync("Server connection limit reached.");
+                return;
+            }
+
+            WebSocket? webSocket = null;
+            Task<WebSocketReceiveResult>? receiveTask = null;
             try
             {
-                var receiveTask = webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                webSocket = await context.WebSockets.AcceptWebSocketAsync();
+                var cleanAsset = ValutaBot.MiniApp.AssetSanitizer.Sanitize(asset);
+
+                byte[] buffer = new byte[1024];
+                var ct = context.RequestAborted;
+                double lastPrice = 0.0;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                receiveTask = webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                 while (webSocket.State == WebSocketState.Open && !ct.IsCancellationRequested)
                 {
                     bool hasPrice = false;
@@ -364,9 +416,8 @@ public static partial class MiniAppController
                     }
                     else if (sw.ElapsedMilliseconds >= 10000)
                     {
-                        // Heartbeat every 10s to keep client watchdog alive during quiet markets
-                        byte[] hbBytes = Encoding.UTF8.GetBytes("{\"hb\":1}");
-                        await webSocket.SendAsync(new ArraySegment<byte>(hbBytes), WebSocketMessageType.Text, true, ct);
+                        // Heartbeat every 10s to keep client watchdog alive during quiet markets (zero-alloc static buffer)
+                        await webSocket.SendAsync(new ArraySegment<byte>(HeartbeatBytes), WebSocketMessageType.Text, true, ct);
                         sw.Restart();
                     }
 
@@ -377,17 +428,36 @@ public static partial class MiniAppController
                         var res = await receiveTask;
                         if (res.MessageType == WebSocketMessageType.Close)
                         {
-                            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", ct);
+                            // RFC 6455: Use CloseOutputAsync when replying to an incoming client Close frame
+                            await webSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
                             break;
                         }
                         receiveTask = webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                     }
+                }
+
+                // Graceful Shutdown on host stop / container restart (SIGTERM -> 1001 EndpointUnavailable)
+                if (ct.IsCancellationRequested && webSocket.State == WebSocketState.Open)
+                {
+                    using var shutdownCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+                    await webSocket.CloseOutputAsync(WebSocketCloseStatus.EndpointUnavailable, "Server restart", shutdownCts.Token);
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
                 Console.WriteLine($"[WS /ws/prices] Connection closed: {ex.Message}");
+            }
+            finally
+            {
+                if (receiveTask != null && !receiveTask.IsCompleted)
+                {
+                    _ = receiveTask.ContinueWith(t => { var _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+                }
+                webSocket?.Dispose();
+                Interlocked.Decrement(ref _activeWebSocketConnections);
+                int rem = _wsConnectionsPerIp.AddOrUpdate(clientIp, 0, (_, count) => Math.Max(0, count - 1));
+                if (rem == 0) _wsConnectionsPerIp.TryRemove(new KeyValuePair<string, int>(clientIp, 0));
             }
         });
 
@@ -399,10 +469,7 @@ public static partial class MiniAppController
                 && remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp);
             string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
             string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
-            bool hasValidSecret = !string.IsNullOrEmpty(providedSecret) &&
-                CryptographicOperations.FixedTimeEquals(
-                    Encoding.UTF8.GetBytes(providedSecret),
-                    Encoding.UTF8.GetBytes(expectedSecret));
+            bool hasValidSecret = IsSecretValidConstantTime(providedSecret, expectedSecret);
 
             if (!isLoopback && !hasValidSecret)
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
@@ -428,7 +495,7 @@ public static partial class MiniAppController
             catch { }
             BotLogger.Info($"[PO Vacuum] Captured raw tick: {body}");
             return Results.Ok();
-        });
+        }).RequireRateLimiting("Global");
     }
 
     #endregion
@@ -562,35 +629,21 @@ public static partial class MiniAppController
 
             var rep = chaos.GetLatestReport();
             return rep != null ? Results.Json(rep) : Results.Json(new { status = "NO_REPORT_YET", message = "Run POST /api/chaos/run to execute initial audit." });
-        });
+        }).RequireRateLimiting("Global");
 
         app.MapPost("/api/chaos/run", async (HttpContext context, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
-            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
-            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
-            if (string.IsNullOrEmpty(providedSecret) ||
-                !CryptographicOperations.FixedTimeEquals(
-                    Encoding.UTF8.GetBytes(providedSecret),
-                    Encoding.UTF8.GetBytes(expectedSecret)))
-            {
+            if (!await HasInternalSecretOrAuthAsync(context))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            }
 
             var report = await chaos.RunFullAuditAsync();
             return Results.Json(report);
-        });
+        }).RequireRateLimiting("Global");
 
         app.MapPost("/api/chaos/run/{category}", async (HttpContext context, string category, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
-            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
-            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
-            if (string.IsNullOrEmpty(providedSecret) ||
-                !CryptographicOperations.FixedTimeEquals(
-                    Encoding.UTF8.GetBytes(providedSecret),
-                    Encoding.UTF8.GetBytes(expectedSecret)))
-            {
+            if (!await HasInternalSecretOrAuthAsync(context))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            }
 
             if (Enum.TryParse<ValutaBot.MiniApp.Features.ChaosAudit.Models.ChaosCategory>(category, true, out var cat))
             {
@@ -598,7 +651,7 @@ public static partial class MiniAppController
                 return Results.Json(report);
             }
             return Results.BadRequest(new { error = $"Unknown category '{category}'. Available: Invariants, DataAndDbFaults, StressAndOutages, TradingLogicQuality" });
-        });
+        }).RequireRateLimiting("Global");
 
         app.MapGet("/api/admin/clock-skew", async (HttpContext context) =>
         {
@@ -606,7 +659,7 @@ public static partial class MiniAppController
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
 
             return Results.Json(new { snapshot = ValutaBot.MiniApp.Services.ClockSkewMonitor.GetLatest(), utcNow = DateTime.UtcNow });
-        });
+        }).RequireRateLimiting("Global");
 
         app.MapGet("/api/admin/db-stats", async (HttpContext context) =>
         {
@@ -624,19 +677,12 @@ public static partial class MiniAppController
             {
                 return SafeErrorResponse(context, ex);
             }
-        });
+        }).RequireRateLimiting("Global");
 
         app.MapPost("/api/admin/db-maintenance", async (HttpContext context, bool? full) =>
         {
-            string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
-            string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
-            if (string.IsNullOrEmpty(providedSecret) ||
-                !CryptographicOperations.FixedTimeEquals(
-                    Encoding.UTF8.GetBytes(providedSecret),
-                    Encoding.UTF8.GetBytes(expectedSecret)))
-            {
+            if (!await HasInternalSecretOrAuthAsync(context))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            }
 
             try
             {
@@ -647,7 +693,7 @@ public static partial class MiniAppController
             {
                 return SafeErrorResponse(context, ex);
             }
-        });
+        }).RequireRateLimiting("Global");
 
         // Internal endpoint for ML service -> Telegram admin notifications (Constant-time secret comparison + Rate Limiting)
         app.MapPost("/internal/notify-admins", async Task<IResult> (HttpContext context) =>
@@ -714,16 +760,23 @@ public static partial class MiniAppController
 
     private static async Task<bool> HasInternalSecretOrAuthAsync(HttpContext context)
     {
+        // 1. Constant-time SHA-256 check on X-Internal-Secret
         string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
         string providedSecret = context.Request.Headers["X-Internal-Secret"].ToString();
-        if (!string.IsNullOrEmpty(providedSecret) &&
-            CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(providedSecret),
-                Encoding.UTF8.GetBytes(expectedSecret)))
+        if (IsSecretValidConstantTime(providedSecret, expectedSecret))
         {
             return true;
         }
 
+        // 2. Constant-time SHA-256 check on X-Admin-Key
+        string? adminKey = Environment.GetEnvironmentVariable("ADMIN_KEY");
+        string providedAdminKey = context.Request.Headers["X-Admin-Key"].ToString();
+        if (!string.IsNullOrEmpty(adminKey) && IsSecretValidConstantTime(providedAdminKey, adminKey))
+        {
+            return true;
+        }
+
+        // 3. Admin session authorization via Telegram MiniApp
         var (isAuthorized, _) = await AuthService.IsRequestAuthorized(context);
         if (!isAuthorized || context.Items["userId"] is not long uid) return false;
         return await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsAdminAsync(uid);

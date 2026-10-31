@@ -167,33 +167,48 @@ namespace ValutaBot.App.MiniApp.Data
         {
             System.IO.IOException or System.Net.Sockets.SocketException or TimeoutException => true,
             NpgsqlException { InnerException: System.IO.IOException or System.Net.Sockets.SocketException or TimeoutException } => true,
-            NpgsqlException ne and not PostgresException => ne.IsTransient,
+            PostgresException pe => pe.SqlState switch
+            {
+                "08000" or "08001" or "08003" or "08004" or "08006" or "08007" => true,
+                "57P01" or "57P02" or "57P03" => true,
+                "53300" => true,
+                _ => false
+            },
+            NpgsqlException ne => ne.IsTransient,
             _ => false
         };
 
         private static bool IsRetryableSql(Exception ex) =>
-            ex is PostgresException { SqlState: "40001" or "40P01" or "57P03" or "55P03" };
+            ex is PostgresException { SqlState: "40001" or "40P01" or "55P03" };
 
         /// <summary>
         /// Executes an idempotent database operation with automatic transient retry.
-        /// Clears the connection pool ONLY on network/socket severance (never on SQL lock/deadlock errors).
+        /// Relies on Npgsql automatic broken-socket eviction on Dispose instead of ClearPool to avoid Thundering Herd.
         /// </summary>
         public static async Task<T> WithRetryAsync<T>(Func<NpgsqlConnection, Task<T>> action, CancellationToken ct = default)
         {
             for (int attempt = 1; ; attempt++)
             {
-                await using var conn = await OpenConnectionAsync(ct);
+                NpgsqlConnection? conn = null;
                 try
                 {
+                    conn = await OpenConnectionAsync(ct);
                     return await action(conn);
                 }
                 catch (Exception ex) when (attempt < 4 && !ct.IsCancellationRequested &&
                     (IsNetworkTransient(ex) || IsRetryableSql(ex)))
                 {
                     bool isNet = IsNetworkTransient(ex);
-                    BotLogger.Warn($"[DbConnectionFactory] Transient DB error on attempt {attempt} ({ex.Message}, net={isNet}). Retrying...");
-                    if (isNet) NpgsqlConnection.ClearPool(conn);
-                    await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt + Random.Shared.Next(0, 100)), ct);
+                    BotLogger.Warn($"[DbConnectionFactory] Transient DB error on attempt {attempt}/3 ({ex.Message}, net={isNet}). Retrying...");
+                    int delayMs = (int)(Math.Pow(2, attempt) * 100) + Random.Shared.Next(50, 150);
+                    await Task.Delay(delayMs, ct);
+                }
+                finally
+                {
+                    if (conn != null)
+                    {
+                        await conn.DisposeAsync();
+                    }
                 }
             }
         }
@@ -202,9 +217,10 @@ namespace ValutaBot.App.MiniApp.Data
         {
             for (int attempt = 1; ; attempt++)
             {
-                await using var conn = await OpenConnectionAsync(ct);
+                NpgsqlConnection? conn = null;
                 try
                 {
+                    conn = await OpenConnectionAsync(ct);
                     await using var tx = await conn.BeginTransactionAsync(ct);
                     var result = await action(conn, tx);
                     await tx.CommitAsync(ct);
@@ -214,9 +230,16 @@ namespace ValutaBot.App.MiniApp.Data
                     (IsNetworkTransient(ex) || IsRetryableSql(ex)))
                 {
                     bool isNet = IsNetworkTransient(ex);
-                    BotLogger.Warn($"[DbConnectionFactory] Transient transactional DB error on attempt {attempt} ({ex.Message}, net={isNet}). Retrying...");
-                    if (isNet) NpgsqlConnection.ClearPool(conn);
-                    await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt + Random.Shared.Next(0, 100)), ct);
+                    BotLogger.Warn($"[DbConnectionFactory] Transient transactional DB error on attempt {attempt}/3 ({ex.Message}, net={isNet}). Retrying...");
+                    int delayMs = (int)(Math.Pow(2, attempt) * 100) + Random.Shared.Next(50, 150);
+                    await Task.Delay(delayMs, ct);
+                }
+                finally
+                {
+                    if (conn != null)
+                    {
+                        await conn.DisposeAsync();
+                    }
                 }
             }
         }
@@ -365,6 +388,7 @@ namespace ValutaBot.App.MiniApp.Data
                     ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS rsi_at_signal DOUBLE PRECISION NOT NULL DEFAULT 50.0;
                     ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE;
                     ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS minutes_to_news INTEGER NOT NULL DEFAULT -1;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NULL;
                     ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS features_json TEXT;
                 END $$;
 

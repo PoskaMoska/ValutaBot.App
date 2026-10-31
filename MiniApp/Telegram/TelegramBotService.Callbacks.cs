@@ -69,9 +69,7 @@ public partial class TelegramBotService
                     parse_mode = "HTML", 
                     reply_markup = retryKeyboard 
                 };
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-                await _httpClient.PostAsync(new Uri($"https://api.telegram.org/bot{token}/sendMessage"), content);
+                await SendMessageWithKeyboard(token, chatId, payload.text, retryKeyboard);
             }
         }
         else if (data.StartsWith("approve_"))

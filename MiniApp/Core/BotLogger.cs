@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -99,9 +99,15 @@ public static class BotLogger
                 {
                     try
                     {
+                        await TelegramBotService.WaitTgGateAsync();
                         // Sanitize length for Telegram message limits (max 4096)
                         string msg = alert.Length > 4000 ? alert.Substring(0, 4000) + "..." : alert;
                         await botClient.SendTextMessageAsync(chatId: _adminChatId, text: $"⚠️ *SYSTEM ALERT*\n```\n{msg}\n```", parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                    }
+                    catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429)
+                    {
+                        int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 120);
+                        TelegramBotService.RegisterTgBlock(retrySec);
                     }
                     catch { /* Ignore telegram send errors (network drop, blocked bot) */ }
                 }

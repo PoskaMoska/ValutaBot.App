@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,8 @@ public class PendingTradeVerificationService : BackgroundService
     private static readonly TimeSpan _checkInterval = TimeSpan.FromSeconds(5);
     // 5 concurrent verification tasks bounds pool consumption while handling 100+ trades/sec
     private static readonly SemaphoreSlim _verificationSemaphore = new(5);
+    // Short-lived cache of trades awaiting broker candle flush to prevent Head-of-Line blocking
+    private static readonly ConcurrentDictionary<string, DateTime> _awaitingCandleUntil = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -30,12 +33,18 @@ public class PendingTradeVerificationService : BackgroundService
 
     private static async Task SweepExpiredTradesAsync(CancellationToken ct)
     {
+        var nowUtc = DateTime.UtcNow;
+        foreach (var kvp in _awaitingCandleUntil)
+        {
+            if (kvp.Value < nowUtc) _awaitingCandleUntil.TryRemove(kvp.Key, out _);
+        }
+
         List<SignalTracker.PredictionRecord> expired;
         DateTime currentRefTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
         // Wait 4s after VerifyAt so RealtimeTickCollector's 3s batch buffer has guaranteed flushed the expiry s5 candle to PostgreSQL.
-        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(currentRefTime.AddSeconds(-4)); }
+        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(currentRefTime.AddSeconds(-4), limit: 150); }
         catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Could not load pending trades: {ex.Message}"); return; }
 
         if (expired.Count == 0) return;
@@ -45,7 +54,10 @@ public class PendingTradeVerificationService : BackgroundService
         foreach (var record in expired)
         {
             if (ct.IsCancellationRequested) break;
-            
+
+            if (_awaitingCandleUntil.TryGetValue(record.Id, out var waitExpiry) && waitExpiry > nowUtc)
+                continue;
+
             tasks.Add(Task.Run(async () =>
             {
                 await _verificationSemaphore.WaitAsync(ct).ConfigureAwait(false);
@@ -258,9 +270,16 @@ public class PendingTradeVerificationService : BackgroundService
                 };
 
                 await TradeRepository.SaveTradeOutcomeAsync(staleOutcome, record.Id);
+                _awaitingCandleUntil.TryRemove(record.Id, out _);
+            }
+            else
+            {
+                _awaitingCandleUntil[record.Id] = DateTime.UtcNow.AddSeconds(5);
             }
             return;
         }
+
+        _awaitingCandleUntil.TryRemove(record.Id, out _);
 
         // Guard: NEUTRAL / SHADOW_NEUTRAL сигнал не несёт обучающей информации
         if (record.Direction is "NEUTRAL" or "SHADOW_NEUTRAL")

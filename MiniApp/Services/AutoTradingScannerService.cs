@@ -228,21 +228,28 @@ public class AutoTradingScannerService : BackgroundService
 
             if (recentCandles.Length >= minCandles)
             {
-                var lastCandleTime = recentCandles[^1].Timestamp;
+                // GetRecentCandles appends the newly-opened 1-tick live candle at [^1] right after OnCandleClosed.
+                // Select the actual just-closed candle for deduplication and close-age calculation:
+                bool isLastClosed = recentCandles[^1].Timestamp.AddSeconds(tfSecs) <= refTime.AddMilliseconds(250);
+                var targetClosedCandle = isLastClosed
+                    ? recentCandles[^1]
+                    : (recentCandles.Length > 1 ? recentCandles[^2] : recentCandles[^1]);
 
-                // Atomic deduplication barrier against scanning the same candle
+                var lastCandleTime = targetClosedCandle.Timestamp;
+
+                // Atomic deduplication barrier against scanning the same closed candle
                 string scanKey = $"{pair}:{tf}";
                 if (_lastScannedCandleTimes.TryGetValue(scanKey, out var prevScannedTime) && prevScannedTime >= lastCandleTime)
                 {
-                    _logger.LogDebug($"[AutoScanner] Skipped {scanKey}: candle {lastCandleTime:HH:mm:ss.fff} already analyzed.");
+                    _logger.LogDebug($"[AutoScanner] Skipped {scanKey}: closed candle {lastCandleTime:HH:mm:ss.fff} already analyzed.");
                     return;
                 }
 
-                // CAS claim on the candle timestamp before starting inference
+                // CAS claim on the closed candle timestamp before starting inference
                 if (!_lastScannedCandleTimes.TryAdd(scanKey, lastCandleTime) &&
                     !_lastScannedCandleTimes.TryUpdate(scanKey, lastCandleTime, prevScannedTime))
                 {
-                    _logger.LogDebug($"[AutoScanner] Skipped {scanKey}: candle {lastCandleTime:HH:mm:ss.fff} claimed by another worker.");
+                    _logger.LogDebug($"[AutoScanner] Skipped {scanKey}: closed candle {lastCandleTime:HH:mm:ss.fff} claimed by another worker.");
                     return;
                 }
 
@@ -258,7 +265,7 @@ public class AutoTradingScannerService : BackgroundService
                     _  => 15.0
                 };
 
-                if (candleAgeFromCloseSec <= maxCloseAgeSec)
+                if (candleAgeFromCloseSec <= maxCloseAgeSec && candleAgeFromCloseSec >= -0.5)
                 {
                     using var scope = _serviceProvider.CreateScope();
                     var orchestrator = scope.ServiceProvider.GetRequiredService<IMarketAnalysisOrchestrator>();

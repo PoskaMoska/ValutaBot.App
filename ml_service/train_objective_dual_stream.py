@@ -100,22 +100,38 @@ def train_model():
     bridge_x = data["bridge_x"]
     labels = data["labels"]
 
+    epochs_arr = None
     if "epochs" in data:
         order = np.argsort(data["epochs"], kind="stable")
         macro_x = macro_x[order]
         micro_x = micro_x[order]
         bridge_x = bridge_x[order]
         labels = labels[order]
+        epochs_arr = data["epochs"][order]
 
     N = len(labels)
     print(f"Total samples: {N}")
 
-    # Chronological Train (80%) / Val (10%) / Test (10%) with 30-sample embargo gap to prevent window overlap leakage
-    embargo = 30 if N > 500 else 0
+    # Chronological Train (80%) / Val (10%) / Test (10%) with 2400s (40-min) temporal embargo
+    # (30 M1 bars = 1800s macro window + 30s label horizon = 1830s overlap; 2400s prevents all autocorrelation leakage)
+    TIME_EMBARGO_SEC = 2400
     train_n = int(0.80 * N)
-    val_start = min(N, train_n + embargo)
-    val_end = min(N, val_start + int(0.10 * N))
-    ts_start = min(N, val_end + embargo)
+    if epochs_arr is not None and N > 500 and (int(epochs_arr[-1]) - int(epochs_arr[0])) > TIME_EMBARGO_SEC * 4:
+        train_cutoff_epoch = int(epochs_arr[max(0, train_n - 1)])
+        val_start = int(np.searchsorted(epochs_arr, train_cutoff_epoch + TIME_EMBARGO_SEC, side="left"))
+        val_end = min(N, val_start + int(0.10 * N))
+        val_cutoff_epoch = int(epochs_arr[max(0, min(N - 1, val_end - 1))])
+        ts_start = int(np.searchsorted(epochs_arr, val_cutoff_epoch + TIME_EMBARGO_SEC, side="left"))
+        if val_start >= N or ts_start >= N:
+            embargo = 30
+            val_start = min(N, train_n + embargo)
+            val_end = min(N, val_start + int(0.10 * N))
+            ts_start = min(N, val_end + embargo)
+    else:
+        embargo = 30 if N > 500 else 0
+        val_start = min(N, train_n + embargo)
+        val_end = min(N, val_start + int(0.10 * N))
+        ts_start = min(N, val_end + embargo)
 
     tr_macro, val_macro, ts_macro = macro_x[:train_n], macro_x[val_start:val_end], macro_x[ts_start:]
     tr_micro, val_micro, ts_micro = micro_x[:train_n], micro_x[val_start:val_end], micro_x[ts_start:]

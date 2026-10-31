@@ -43,6 +43,17 @@ public static class SubminuteNoiseGatekeeper
             _     => 2.0
         };
 
+        // 1.5. Защита от поврежденных котировок (NaN / Infinity / <= 0) во всем входном массиве
+        for (int i = 0; i < count; i++)
+        {
+            var c = candles[i];
+            if (!double.IsFinite(c.Open) || !double.IsFinite(c.High) || !double.IsFinite(c.Low) || !double.IsFinite(c.Close) ||
+                c.Close <= 0 || c.High < c.Low)
+            {
+                return new NoiseAuditResult(false, 0.0, 0.0, brokerNoiseFloorBps, "Некорректные котировки в окне (NaN/Infinity)");
+            }
+        }
+
         // 2. Расчет быстрой 7-периодной EMA цены закрытия без запаздывания SMA
         double alpha = 2.0 / (7.0 + 1.0);
         double ema = candles[0].Close;
@@ -88,20 +99,26 @@ public static class SubminuteNoiseGatekeeper
         double candleRangeBps = (candleRange / currentPrice) * 10000.0;
 
         // D-7 fix: True Range последней свечи для spike detection.
-        // candleRange (H-L) занижает реальный размах при гэп-доджи (Open≈Close, но Low далеко от prevClose).
-        // Используем lastTr = max(H-L, |H-prevClose|, |L-prevClose|) для корректного сравнения с avgTr.
+        // База (baseTr) считается по предыдущим барам окна без тестируемой свечи, чтобы спайк не завышал сам себе порог.
         double lastTr = candleRange;
         if (count >= 2)
         {
-            double prevClose = candles[count - 2].Close;
-            lastTr = Math.Max(candleRange, Math.Max(Math.Abs(lastCandle.High - prevClose), Math.Abs(lastCandle.Low - prevClose)));
+            double prevCloseLast = candles[count - 2].Close;
+            lastTr = Math.Max(candleRange, Math.Max(Math.Abs(lastCandle.High - prevCloseLast), Math.Abs(lastCandle.Low - prevCloseLast)));
         }
 
-        // Детекция аномального ценового спайка (Spike / Outlier) и гэп-доджи (D-7):
-        // Одиночная свеча с размахом > 3.0x среднего True Range, гэп-доджи (узкий H-L при прыжке TR > 3.0x avgTr),
-        // либо размах > 5x порога шума при высоком Z-score
-        bool isGapDojiSpike = candleRange < avgTr * 0.5 && lastTr > 3.0 * avgTr;
-        bool isSpike = (avgTr > 1e-7 && (candleRange > 3.0 * avgTr || isGapDojiSpike)) ||
+        double baseTr = window > 1 ? Math.Max((sumTr - lastTr) / (window - 1), 0.0) : avgTr;
+        // Гэп = часть TR вне диапазона H-L (свыше 1.5x базового TR)
+        bool hasGap = baseTr > 1e-7 && (lastTr - candleRange) > 1.5 * baseTr;
+        // Пинбар: свеча без разрыва с доминирующей тенью (>=60% range), до 5x базы
+        double upW = lastCandle.High - Math.Max(lastCandle.Open, lastCandle.Close);
+        double loW = Math.Min(lastCandle.Open, lastCandle.Close) - lastCandle.Low;
+        bool isPinbarShape = !hasGap && candleRange > 1e-12 && candleRange <= 5.0 * baseTr
+                             && Math.Max(upW, loW) / candleRange >= 0.60;
+
+        bool isGapDojiSpike = (candleRange < avgTr * 0.5 && lastTr > 3.0 * avgTr) || (hasGap && lastTr > 3.0 * baseTr);
+        bool isSpike = (baseTr > 1e-7 && lastTr > 3.0 * baseTr && !isPinbarShape) ||
+                       isGapDojiSpike ||
                        (candleRangeBps > 5.0 * brokerNoiseFloorBps && Math.Abs(zScore) >= 2.2);
 
         // 5. Правило «Снайперского импульса»:
@@ -116,7 +133,7 @@ public static class SubminuteNoiseGatekeeper
         // 6. Детекция теней отскока (Wick Rejection) на последней закрытой свече
         bool hasBullishWick = false;
         bool hasBearishWick = false;
-        if (candleRange > 1e-7 && !isSpike)
+        if (candleRange > 1e-7 && !isSpike && !hasGap)
         {
             double upperWick = lastCandle.High - Math.Max(lastCandle.Open, lastCandle.Close);
             double lowerWick = Math.Min(lastCandle.Open, lastCandle.Close) - lastCandle.Low;

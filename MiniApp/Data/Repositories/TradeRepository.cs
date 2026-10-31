@@ -448,25 +448,35 @@ FROM outcome_data;");
         public static async Task<List<SignalTracker.PredictionRecord>> GetPendingTradesToVerifyAsync(DateTime upTo, int limit = 100)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<SignalTracker.PredictionRecord>();
-            using var conn = DbConnectionFactory.GetConnection();
             string upToIso = upTo.ToUniversalTime().ToString("o");
-            var rows = await conn.QueryAsync(@"
-                SELECT id as ""Id"", direction as ""Direction"", asset as ""Asset"", timeframe as ""Timeframe"", 
-                       binance_symbol as ""BinanceSymbol"", entry_price as ""EntryPrice"", 
-                       created_at as ""CreatedAtStr"", verify_at as ""VerifyAtStr"", 
-                       is_forex as ""IsForex"", source_directions as ""SourceDirectionsStr"",
-                       probability as ""Probability"", features_json as ""FeaturesJson"", ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"", ml_prob as ""MlProb"", ml_score as ""MlScore"",
-                       smc_bos_dir as ""SmcBosDir"", smc_has_ob as ""SmcHasOb"", smc_has_fvg as ""SmcHasFvg"", of_delta_ratio as ""OfDeltaRatio"", of_state as ""OfState"", dynamic_horizon as ""DynamicHorizon"",
-                       market_regime as ""MarketRegime"", velocity_regime as ""VelocityRegime"", atr_at_signal as ""AtrAtSignal"", adx_at_signal as ""AdxAtSignal"",
-                       rsi_at_signal as ""RsiAtSignal"", higher_tf_aligned as ""HigherTfAligned"", minutes_to_news as ""MinutesToNews"",
-                       reasoning_text as ""ReasoningText"", ml_model_version as ""MlModelVersion"", ml_model_accuracy as ""MlModelAccuracy"",
-                       price_entropy as ""PriceEntropy"", trend_maturity as ""TrendMaturity"", price_position_pct as ""PricePositionPct"", bb_squeeze as ""BbSqueeze"",
-                       ta_telemetry::text as ""TaTelemetry"", ml_telemetry::text as ""MlTelemetry"", smc_telemetry::text as ""SmcTelemetry""
-                FROM pending_trades 
-                WHERE verify_at <= @UpToIso
-                ORDER BY verify_at ASC
-                LIMIT @Limit", 
-                new { UpToIso = upToIso, Limit = limit });
+            return await DbConnectionFactory.WithRetryAsync(async conn =>
+            {
+                var rows = await conn.QueryAsync(@"
+                    WITH targets AS (
+                        SELECT id
+                        FROM pending_trades
+                        WHERE verify_at <= @UpToIso
+                          AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '15 seconds')
+                        ORDER BY verify_at ASC
+                        LIMIT @Limit
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE pending_trades p
+                    SET claimed_at = NOW()
+                    FROM targets t
+                    WHERE p.id = t.id
+                    RETURNING p.id as ""Id"", p.direction as ""Direction"", p.asset as ""Asset"", p.timeframe as ""Timeframe"", 
+                              p.binance_symbol as ""BinanceSymbol"", p.entry_price as ""EntryPrice"", 
+                              p.created_at as ""CreatedAtStr"", p.verify_at as ""VerifyAtStr"", 
+                              p.is_forex as ""IsForex"", p.source_directions as ""SourceDirectionsStr"",
+                              p.probability as ""Probability"", p.features_json as ""FeaturesJson"", p.ta_score as ""TaScore"", p.of_score as ""OfScore"", p.smc_score as ""SmcScore"", p.ml_prob as ""MlProb"", p.ml_score as ""MlScore"",
+                              p.smc_bos_dir as ""SmcBosDir"", p.smc_has_ob as ""SmcHasOb"", p.smc_has_fvg as ""SmcHasFvg"", p.of_delta_ratio as ""OfDeltaRatio"", p.of_state as ""OfState"", p.dynamic_horizon as ""DynamicHorizon"",
+                              p.market_regime as ""MarketRegime"", velocity_regime as ""VelocityRegime"", atr_at_signal as ""AtrAtSignal"", adx_at_signal as ""AdxAtSignal"",
+                              p.rsi_at_signal as ""RsiAtSignal"", higher_tf_aligned as ""HigherTfAligned"", p.minutes_to_news as ""MinutesToNews"",
+                              p.reasoning_text as ""ReasoningText"", p.ml_model_version as ""MlModelVersion"", p.ml_model_accuracy as ""MlModelAccuracy"",
+                              p.price_entropy as ""PriceEntropy"", p.trend_maturity as ""TrendMaturity"", p.price_position_pct as ""PricePositionPct"", p.bb_squeeze as ""BbSqueeze"",
+                              p.ta_telemetry::text as ""TaTelemetry"", p.ml_telemetry::text as ""MlTelemetry"", p.smc_telemetry::text as ""SmcTelemetry"";", 
+                    new { UpToIso = upToIso, Limit = limit });
 
             return rows.Select(r => new SignalTracker.PredictionRecord
             {
@@ -512,6 +522,7 @@ FROM outcome_data;");
                 MlTelemetry = (string?)r.MlTelemetry,
                 SmcTelemetry = (string?)r.SmcTelemetry
             }).Where(r => r.CreatedAt != DateTime.MinValue).ToList();
+            });
         }
 
         public static async Task DeletePendingTradeAsync(string id)

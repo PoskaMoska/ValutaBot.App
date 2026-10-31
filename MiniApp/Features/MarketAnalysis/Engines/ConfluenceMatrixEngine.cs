@@ -369,18 +369,44 @@ public class ConfluenceMatrixEngine(
         string finalDir;
         int finalProbPct;
 
+        const int RequiredProb = 58;
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
         bool isMlExplicitHold = isNeuralBrain && mlSignal != null && mlSignal.Direction is "HOLD" or "NEUTRAL";
 
-        // D-2 fix: явная проверка «все TF вернули NEUTRAL» до входа в логику.
-        // Если MTF не дал ни одного BUY/PUT направления — это сигнал недостаточности данных (нет связи,
-        // нет свечей). В этом случае принудительно блокируем торговлю уже здесь, не дожидаясь Orchestrator-fallback.
-        bool allMtfNeutral = mtfResult != null
-            && mtfResult.TimeframeDirections != null
-            && mtfResult.TimeframeDirections.Count > 0
-            && !mtfResult.TimeframeDirections.Values.Any(d => d is "BUY" or "PUT");
+        // D-2 fix: проверка отсутствия направленного MTF-консенсуса (пустой словарь/null или все TF == NEUTRAL при отсутствии DominantDirection).
+        bool mtfBlind = mtfResult == null ||
+                        (mtfResult.DominantDirection is not ("BUY" or "PUT") &&
+                         (mtfResult.TimeframeDirections is not { Count: > 0 } ||
+                          !mtfResult.TimeframeDirections.Values.Any(d => d is "BUY" or "PUT")));
 
         int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
+        int probCeiling = 100; // жёсткий потолок вероятности, применяется после всех стадий
+
+        if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
+        {
+            probCeiling = Math.Min(probCeiling, 59);
+        }
+
+        int ApplyRiskDampeners(int p, bool emitNotes)
+        {
+            if (mlLiveLosses >= 3)
+            {
+                p = Math.Max(50, p - 6);
+                if (emitNotes) safetyNotes.Add($"⚠️ Circuit Breaker: {mlLiveLosses} убытка подряд на {asset}/{timeframe} (-6% уверенности)");
+            }
+            else if (mlLiveLosses == 2)
+            {
+                p = Math.Max(50, p - 3);
+                if (emitNotes) safetyNotes.Add($"⚠️ Осторожность: 2 убытка подряд на {asset}/{timeframe} (-3% уверенности)");
+            }
+
+            if (conflictPenalty < 1.0)
+            {
+                p = Math.Max(50, (int)Math.Round(p * conflictPenalty));
+                if (emitNotes) safetyNotes.Add("⚠️ MTF Conflict: Противоречие со старшим таймфреймом");
+            }
+            return p;
+        }
 
         if (hasMlVerdict)
         {
@@ -397,30 +423,14 @@ public class ConfluenceMatrixEngine(
                 finalProbPct = Math.Min(59, finalProbPct);
             }
 
-            // Circuit Breaker risk dampener
-            if (mlLiveLosses >= 3)
-            {
-                finalProbPct = Math.Max(50, finalProbPct - 6);
-                safetyNotes.Add($"⚠️ Circuit Breaker: {mlLiveLosses} убытка подряд на {asset}/{timeframe} (-6% уверенности)");
-            }
-            else if (mlLiveLosses == 2)
-            {
-                finalProbPct = Math.Max(50, finalProbPct - 3);
-                safetyNotes.Add($"⚠️ Осторожность: 2 убытка подряд на {asset}/{timeframe} (-3% уверенности)");
-            }
-
-            // MTF Conflict penalty
-            if (conflictPenalty < 1.0)
-            {
-                finalProbPct = Math.Max(50, (int)Math.Round(finalProbPct * conflictPenalty));
-                safetyNotes.Add("⚠️ MTF Conflict: Противоречие со старшим таймфреймом");
-            }
+            finalProbPct = ApplyRiskDampeners(finalProbPct, emitNotes: true);
         }
         else if (isMlExplicitHold)
         {
             // Neural Brain explicitly commanded HOLD: keep neutral
             finalDir = "NEUTRAL";
             finalProbPct = 50;
+            probCeiling = 50;
             safetyNotes.Add($"ℹ️ Neural Brain ({mlSignal!.ModelVersion}): HOLD (flat market, entry blocked)");
         }
         else
@@ -451,13 +461,15 @@ public class ConfluenceMatrixEngine(
                 if (macroDir is "BUY" or "PUT")
                 {
                     finalDir = macroDir;
-                    finalProbPct = 52;
+                    finalProbPct = ApplyRiskDampeners(52, emitNotes: true);
+                    probCeiling = Math.Min(probCeiling, 52);
                     safetyNotes.Add($"🧭 Компас Макро-Тренда ({macroDir}): Базовое направление зафиксировано по старшему ТФ при слабом локальном импульсе (|TA| <= 0.15)");
                 }
                 else
                 {
                     finalDir = "NEUTRAL";
                     finalProbPct = 50;
+                    probCeiling = 50;
                     safetyNotes.Add("ℹ️ Консенсус нейтрален: |TA score| <= 0.15 (Нейтральный рынок, BUY-байас исключен)");
                 }
             }
@@ -465,10 +477,16 @@ public class ConfluenceMatrixEngine(
             {
                 finalDir = taScore > 0 ? "BUY" : "PUT";
                 finalProbPct = (int)Math.Clamp(Math.Round((0.50 + Math.Abs(taScore) * 0.25) * 100.0), 50, 92);
+                if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
+                {
+                    finalProbPct = Math.Min(59, finalProbPct);
+                }
+                finalProbPct = ApplyRiskDampeners(finalProbPct, emitNotes: true);
                 safetyNotes.Add("ℹ️ Резервный режим: ML сигнал нейтрален или на калибровке (Fallback Engine)");
-                if (allMtfNeutral)
+                if (mtfBlind)
                 {
                     finalProbPct = Math.Min(finalProbPct, 52);
+                    probCeiling = Math.Min(probCeiling, 52);
                     safetyNotes.Add("⚠️ MTF без направления (нет данных/все ТФ NEUTRAL): уверенность ограничена 52%, реальный вход невозможен");
                 }
             }
@@ -487,6 +505,7 @@ public class ConfluenceMatrixEngine(
                 if (na.LocalAtrBps < na.NoiseFloorBps && finalProbPct > 52)
                 {
                     finalProbPct = 52;
+                    probCeiling = Math.Min(probCeiling, 52);
                     safetyNotes.Add($"⚠️ Шумовой флэт: размах свечей ({na.LocalAtrBps:F2} bps) ниже порога шума брокера ({na.NoiseFloorBps:F1} bps). Уверенность ограничена 52%.");
                 }
             }
@@ -499,11 +518,6 @@ public class ConfluenceMatrixEngine(
                     string wickName = finalDir == "BUY" ? "нижняя тень подтверждает отскок по тренду BUY" : "верхняя тень подтверждает отскок по тренду PUT";
                     if (hasRiskDampener)
                     {
-                        // D-3 fix: риск-демпфер активен (серия убытков или MTF конфликт).
-                        // Wick-бонус НЕ должен стирать штраф Circuit Breaker.
-                        // При >= 3 убытках (CB полный штраф -6%) бонус = 0: wick не отменяет CB.
-                        // При 2 убытках (CB мягкий штраф -3%) даём минимальный бонус +1, но не поднимаем
-                        // finalProbPct выше его значения ДО CB-штрафа (т.е. не компенсируем CB).
                         if (mlLiveLosses >= 3)
                         {
                             // CB hard stop: wick-бонус заблокирован полностью
@@ -511,14 +525,16 @@ public class ConfluenceMatrixEngine(
                         }
                         else
                         {
-                            // mlLiveLosses == 2 или conflictPenalty < 1: осторожный бонус +1
-                            finalProbPct = Math.Clamp(finalProbPct + 1, 50, 60);
+                            // Никогда не снижаем, не превышаем 60 и не пересекаем порог входа снизу
+                            int bumped = Math.Min(finalProbPct + 1, Math.Max(finalProbPct, 60));
+                            if (finalProbPct < RequiredProb && bumped >= RequiredProb) bumped = finalProbPct;
+                            finalProbPct = bumped;
                             safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+1%, демпфировано до {finalProbPct}% из-за риск-контроля)");
                         }
                     }
                     else
                     {
-                        finalProbPct = Math.Clamp(Math.Max(finalProbPct, 61) + 4, 61, 68);
+                        finalProbPct = Math.Clamp(finalProbPct + 4, 50, 68);
                         safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+4%)");
                     }
                 }
@@ -526,14 +542,26 @@ public class ConfluenceMatrixEngine(
                 // Детекция экстремального выброса цены (Mean Reversion на затухании)
                 if (na.IsExtremeOverbought && taSignal.Rsi >= 78.0)
                 {
+                    if (finalDir == "BUY")
+                    {
+                        finalProbPct = Math.Min(finalProbPct, 55);
+                        probCeiling = Math.Min(probCeiling, 55);
+                    }
                     safetyNotes.Add($"⚡ Mean Reversion: экстремальный вылет цены ({na.ZScore:F1}σ, RSI {taSignal.Rsi:F0}) — вероятность затухания и отскока вниз");
                 }
                 else if (na.IsExtremeOversold && taSignal.Rsi <= 22.0)
                 {
+                    if (finalDir == "PUT")
+                    {
+                        finalProbPct = Math.Min(finalProbPct, 55);
+                        probCeiling = Math.Min(probCeiling, 55);
+                    }
                     safetyNotes.Add($"⚡ Mean Reversion: экстремальная перепроданность ({na.ZScore:F1}σ, RSI {taSignal.Rsi:F0}) — вероятность затухания и отскока вверх");
                 }
             }
         }
+
+        finalProbPct = Math.Min(finalProbPct, probCeiling);
 
         var coPilot = new System.Text.StringBuilder();
         coPilot.AppendLine($"--- Сигнальный анализ ({asset} {timeframe}) ---");

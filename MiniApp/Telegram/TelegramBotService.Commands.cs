@@ -63,27 +63,7 @@ public partial class TelegramBotService
             resize_keyboard = true
         };
 
-        try
-        {
-            // Send first message with Inline Keyboard (Registration)
-            var payloadInline = new 
-            { 
-                chat_id = chatId, 
-                text, 
-                parse_mode = "HTML", 
-                reply_markup = inlineKeyboard 
-            };
-            var jsonInline = JsonSerializer.Serialize(payloadInline);
-            using var contentInline = new StringContent(jsonInline, Encoding.UTF8, "application/json");
-            await _httpClient.PostAsync(new Uri($"https://api.telegram.org/bot{token}/sendMessage"), contentInline);
-
-            // The user explicitly requested to remove the second message (the one with the reply keyboard)
-            // so we only send the first message with the inline keyboard.
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[TG Bot] SendGatedWelcome exception: {ex.Message}");
-        }
+        await SendMessageWithKeyboard(token, chatId, text, inlineKeyboard);
     }
 
     private static string GetCustomWebAppUrl(string baseUrl, long chatId, string botToken)
@@ -121,17 +101,7 @@ public partial class TelegramBotService
             is_persistent = true
         };
 
-        try
-        {
-            var payload = new { chat_id = chatId, text, parse_mode = "HTML", reply_markup = keyboard };
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            await _httpClient.PostAsync(new Uri($"https://api.telegram.org/bot{token}/sendMessage"), content);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[TG Bot] SendUserWelcome exception: {ex.Message}");
-        }
+        await SendMessageWithKeyboard(token, chatId, text, keyboard);
     }
 
     internal static async Task SendAdminWelcome(string token, long chatId, string webAppUrl)
@@ -160,17 +130,7 @@ public partial class TelegramBotService
             resize_keyboard = true
         };
 
-        try
-        {
-            var payload = new { chat_id = chatId, text, parse_mode = "HTML", reply_markup = keyboard };
-            var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            await _httpClient.PostAsync(new Uri($"https://api.telegram.org/bot{token}/sendMessage"), content);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[TG Bot] SendAdminWelcome exception: {ex.Message}");
-        }
+        await SendMessageWithKeyboard(token, chatId, text, keyboard);
     }
 
     public static async Task AutoApproveUser(long chatId)

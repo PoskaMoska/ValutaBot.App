@@ -18,6 +18,11 @@ public sealed class DualStreamOnnxService : IDisposable
     private static readonly Lazy<DualStreamOnnxService> _lazyInstance = new(() => new DualStreamOnnxService());
     public static DualStreamOnnxService Instance => _lazyInstance.Value;
 
+    private static readonly int[] MacroDims = [1, 30, 5];
+    private static readonly int[] MicroDims = [1, 30, 5];
+    private static readonly int[] BridgeDims = [1, 4];
+
+    private readonly ReaderWriterLockSlim _sessionLock = new(LockRecursionPolicy.NoRecursion);
     private readonly InferenceSession? _session;
     private readonly bool _isLoaded;
     private volatile bool _disposed;
@@ -69,9 +74,9 @@ public sealed class DualStreamOnnxService : IDisposable
                 // Pre-warm ONNX session execution provider and memory buffers so first live inference is ~1ms
                 try
                 {
-                    var dummyMacro = new DenseTensor<float>(new float[150], new[] { 1, 30, 5 });
-                    var dummyMicro = new DenseTensor<float>(new float[150], new[] { 1, 30, 5 });
-                    var dummyBridge = new DenseTensor<float>(new float[4], new[] { 1, 4 });
+                    var dummyMacro = new DenseTensor<float>(new float[150], MacroDims);
+                    var dummyMicro = new DenseTensor<float>(new float[150], MicroDims);
+                    var dummyBridge = new DenseTensor<float>(new float[4], BridgeDims);
                     using var warmup = _session.Run(new[]
                     {
                         NamedOnnxValue.CreateFromTensor("macro_x", dummyMacro),
@@ -96,7 +101,7 @@ public sealed class DualStreamOnnxService : IDisposable
         }
     }
 
-    private static bool HasNonFinite(float[] data)
+    private static bool HasNonFinite(ReadOnlySpan<float> data)
     {
         for (int i = 0; i < data.Length; i++)
         {
@@ -120,24 +125,34 @@ public sealed class DualStreamOnnxService : IDisposable
             return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
         }
 
-        long startSw = Stopwatch.GetTimestamp();
-
+        _sessionLock.EnterReadLock();
         try
         {
-            var macroTensor = new DenseTensor<float>(macroData, new[] { 1, 30, 5 });
-            var microTensor = new DenseTensor<float>(microData, new[] { 1, 30, 5 });
-            var bridgeTensor = new DenseTensor<float>(bridgeData, new[] { 1, 4 });
+            if (_disposed || _session == null)
+            {
+                return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
+            }
 
-            var inputs = new List<NamedOnnxValue>(3)
+            long startSw = Stopwatch.GetTimestamp();
+
+            var macroTensor = new DenseTensor<float>(macroData, MacroDims);
+            var microTensor = new DenseTensor<float>(microData, MicroDims);
+            var bridgeTensor = new DenseTensor<float>(bridgeData, BridgeDims);
+
+            var inputs = new NamedOnnxValue[]
             {
                 NamedOnnxValue.CreateFromTensor("macro_x", macroTensor),
                 NamedOnnxValue.CreateFromTensor("micro_x", microTensor),
                 NamedOnnxValue.CreateFromTensor("bridge_x", bridgeTensor)
             };
 
-            // InferenceSession.Run is thread-safe in ONNX Runtime; concurrent workers execute without lock contention
+            // InferenceSession.Run is thread-safe in ONNX Runtime; concurrent workers execute under read lock
             using var results = _session.Run(inputs);
-            var outputTensor = results.First().AsTensor<float>();
+            if (results.Count == 0)
+            {
+                return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
+            }
+            var outputTensor = results[0].AsTensor<float>();
             float logit = outputTensor.GetValue(0);
             if (!float.IsFinite(logit))
             {
@@ -167,12 +182,25 @@ public sealed class DualStreamOnnxService : IDisposable
             BotLogger.Warn($"[DualStreamOnnx] Prediction failed: {ex.Message}");
             return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
         }
+        finally
+        {
+            _sessionLock.ExitReadLock();
+        }
     }
 
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
-        try { _session?.Dispose(); } catch { }
+        _sessionLock.EnterWriteLock();
+        try
+        {
+            if (_disposed) return;
+            _disposed = true;
+            try { _session?.Dispose(); } catch { }
+        }
+        finally
+        {
+            _sessionLock.ExitWriteLock();
+        }
     }
 }

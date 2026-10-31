@@ -88,7 +88,8 @@ export function flashResults() {
 // XSS-Safe Markdown Parser
 export function parseMd(text) {
     if (!text) return '';
-    const escaped = String(text)
+    const normalized = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const escaped = normalized
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -263,9 +264,10 @@ export function renderError(rawError, debugText) {
     if (rawError) {
         const errLower = String(rawError).toLowerCase();
         
-        if (errLower.includes('circuit_breaker') || errLower.includes('предохранитель')) {
+        if (errLower.includes('circuit_breaker') || errLower.includes('предохранитель') || errLower.includes('приостановлен')) {
             title = '⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ';
-            desc = 'Сработал защитный предохранитель депозита (Circuit Breaker). Пожалуйста, подождите или смените актив.';
+            desc = String(rawError).replace(/^circuit_breaker:\s*/i, '') || 
+                   'Сработал защитный предохранитель депозита (Circuit Breaker). Пожалуйста, подождите или смените актив.';
         } else if (errLower.includes('too many requests') || errLower.includes('rate limit') || errLower.includes('429')) {
             title = '⚠️ Превышен лимит запросов';
             const match = String(rawError).match(/(\d+)s/);
@@ -439,15 +441,27 @@ export function hideAiChart() {
 if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
         const c = document.getElementById('aiChartContainer');
-        if (!document.hidden && !aiChartAnimationId && c && c.classList.contains('active')) {
-            updateCanvasDimensions();
-            renderAiChartLoop();
+        if (document.hidden) {
+            if (aiChartAnimationId) {
+                cancelAnimationFrame(aiChartAnimationId);
+                aiChartAnimationId = null;
+            }
+        } else {
+            if (!aiChartAnimationId && c && c.classList.contains('active')) {
+                updateCanvasDimensions();
+                renderAiChartLoop();
+            }
         }
     });
 }
 
 function renderAiChartLoop() {
     if (document.hidden) {
+        aiChartAnimationId = null;
+        return;
+    }
+    const container = document.getElementById('aiChartContainer');
+    if (!container || !container.classList.contains('active')) {
         aiChartAnimationId = null;
         return;
     }

@@ -67,6 +67,7 @@ let isAnalyzingInProgress = false;
 let runSeq = 0;
 let chartOhlcAbortController = null;
 let analyzeAbortController = null;
+let analyzeTimeoutTimer = null;
 
 // Resilient JSON parser: server may serialize NaN/Infinity tokens (AllowNamedFloatingPointLiterals)
 function safeParseJson(text) {
@@ -80,6 +81,10 @@ const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 
 export function cancelAnalysis() {
     runSeq++;
+    if (analyzeTimeoutTimer) {
+        clearTimeout(analyzeTimeoutTimer);
+        analyzeTimeoutTimer = null;
+    }
     try { if (chartOhlcAbortController) chartOhlcAbortController.abort(); } catch (e) {}
     try { if (analyzeAbortController) analyzeAbortController.abort(); } catch (e) {}
     hideAiChart();
@@ -172,7 +177,9 @@ export function initPriceWebSocket() {
 
     try {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/prices?asset=${encodeURIComponent(currentAsset)}`;
+        const authToken = resolveAuthData();
+        const authParam = authToken ? `&initData=${encodeURIComponent(authToken)}` : '';
+        const wsUrl = `${protocol}//${window.location.host}/ws/prices?asset=${encodeURIComponent(currentAsset)}${authParam}`;
         
         const sock = new WebSocket(wsUrl);
         setPriceSocket(sock);
@@ -347,17 +354,28 @@ export async function executeAnalysis() {
     // Cancel previous analyze request if pending
     if (analyzeAbortController) analyzeAbortController.abort();
     analyzeAbortController = new AbortController();
+    if (analyzeTimeoutTimer) {
+        clearTimeout(analyzeTimeoutTimer);
+        analyzeTimeoutTimer = null;
+    }
 
+    const currentRun = myRun;
+    const currentController = analyzeAbortController;
     const startTime = Date.now();
     let timedOut = false;
-    const timeoutId = setTimeout(() => { timedOut = true; analyzeAbortController.abort(); }, 14000); // Fail-safe 14s
+    analyzeTimeoutTimer = setTimeout(() => {
+        if (currentRun === runSeq && !currentController.signal.aborted) {
+            timedOut = true;
+            currentController.abort();
+        }
+    }, 14000); // Fail-safe 14s
 
     try {
         const res = await fetch(`/api/analyze?asset=${encodeURIComponent(requestedAsset)}&timeframe=${encodeURIComponent(requestedTf)}&_=${Date.now()}`, {
             headers: {
                 'X-Telegram-Init-Data': resolveAuthData()
             },
-            signal: analyzeAbortController.signal
+            signal: currentController.signal
         });
 
         if (!res.ok) {
@@ -432,7 +450,7 @@ export async function executeAnalysis() {
         // 1. Explicit Circuit Breaker Check First
         if (data.reason === 'CIRCUIT_BREAKER_ACTIVE' || (data.message && data.message.includes('Circuit Breaker'))) {
             if (typeof setCircuitBreakerState === 'function') setCircuitBreakerState(true);
-            renderError('⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ ⚠️', 'Сработал защитный предохранитель депозита (Circuit Breaker).\n' + (data.message || ''));
+            renderError('circuit_breaker: ' + (data.message || 'Предохранитель депозита активен'));
             return;
         }
 
@@ -793,7 +811,10 @@ export async function executeAnalysis() {
             });
         }
     } finally {
-        clearTimeout(timeoutId);
+        if (analyzeTimeoutTimer && currentRun === runSeq) {
+            clearTimeout(analyzeTimeoutTimer);
+            analyzeTimeoutTimer = null;
+        }
         if (!isStale()) {
             if (btn) {
                 btn.disabled = false;

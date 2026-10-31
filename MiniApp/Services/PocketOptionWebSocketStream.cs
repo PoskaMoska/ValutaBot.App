@@ -98,8 +98,30 @@ public static class PocketOptionWebSocketStream
     public static string Status { get; private set; } = "IDLE";
     private sealed record BrokerClockAnchor(long BrokerUtcTicks, long LocalStopwatchTimestamp);
     private static volatile BrokerClockAnchor? _clockAnchor;
-    private static long _suspectAnchorSw = 0;
-    private static long _suspectAnchorTick0 = 0;
+    private const double AnchorToleranceSec = 5.0;
+    private const double AnchorConfirmSec = 2.0;
+    private const double AnchorSoloConfirmSec = 5.0;
+    private const double AnchorAgreeSec = 1.0;
+    private const int AnchorQuorum = 2;
+    private const long FutureTickGuardTicks = 10L * 60 * TimeSpan.TicksPerSecond;
+
+    private sealed class AnchorSuspect
+    {
+        public long Sw0;
+        public long Off0;
+        public long LastSw;
+        public long LastOff;
+        public bool Confirmed;
+    }
+
+    private static readonly object _anchorLock = new();
+    private static readonly Dictionary<string, AnchorSuspect> _anchorSuspects = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly long _swEpoch = System.Diagnostics.Stopwatch.GetTimestamp();
+    private static long _lastInToleranceSw;
+    private static int _clockEpoch;
+
+    private static long BrokerMinusLocalTicks(long brokerUtcTicks, long sw)
+        => brokerUtcTicks - System.Diagnostics.Stopwatch.GetElapsedTime(_swEpoch, sw).Ticks;
 
     public static DateTime LastTickUtc => DateTime.UtcNow - System.Diagnostics.Stopwatch.GetElapsedTime(Volatile.Read(ref _lastTickSw));
     public static DateTime LastBrokerTickUtc =>
@@ -108,9 +130,16 @@ public static class PocketOptionWebSocketStream
 
     public static void ResetClockAndWatermarksOnDstShift()
     {
-        _clockAnchor = null;
-        _suspectAnchorSw = 0;
+        lock (_anchorLock)
+        {
+            _clockAnchor = null;
+            _anchorSuspects.Clear();
+            _lastInToleranceSw = 0;
+        }
+        Interlocked.Increment(ref _clockEpoch);
         _lastCandleSrvTs.Clear();
+        _livePrices.Clear();
+        _lastTickTicksBySymbol.Clear();
     }
 
     /// <summary>
@@ -136,18 +165,31 @@ public static class PocketOptionWebSocketStream
     /// <summary>
     /// Actively forces a WebSocket reconnection (called by Watchdog or SelfDiagnosticService when feed stalls).
     /// </summary>
+    private static void CancelConnection()
+    {
+        var cts = Volatile.Read(ref _connectionCts);
+        try { cts?.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
     public static void ForceReconnect(string reason)
     {
         BotLogger.Warn($"[PO WS] ForceReconnect triggered: {reason}");
         Volatile.Write(ref _lastTickSw, System.Diagnostics.Stopwatch.GetTimestamp());
-        try { _connectionCts?.Cancel(); } catch { }
+        CancelConnection();
     }
 
     private static async Task SendTextAsync(ClientWebSocket ws, string payload, CancellationToken token)
     {
         if (ws.State != WebSocketState.Open) return;
         byte[] bytes = Encoding.UTF8.GetBytes(payload);
-        await _sendLock.WaitAsync(token);
+        try
+        {
+            await _sendLock.WaitAsync(token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
         try
         {
             if (ws.State == WebSocketState.Open)
@@ -155,6 +197,8 @@ public static class PocketOptionWebSocketStream
                 await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
             }
         }
+        catch (ObjectDisposedException) { }
+        catch (WebSocketException) when (ws.State != WebSocketState.Open) { }
         finally
         {
             _sendLock.Release();
@@ -163,11 +207,12 @@ public static class PocketOptionWebSocketStream
 
     public static bool TryGetLivePrice(string symbol, out double price, double maxAgeSeconds = 2.0)
     {
-        if (_livePrices.TryGetValue(AssetSanitizer.Sanitize(symbol), out var entry) && entry.Price > 0)
+        if (_clockAnchor != null &&
+            _livePrices.TryGetValue(AssetSanitizer.Sanitize(symbol), out var entry) && entry.Price > 0)
         {
             double arrivalAge = System.Diagnostics.Stopwatch.GetElapsedTime(entry.LocalSwTimestamp).TotalSeconds;
             double brokerAge = (GetBrokerTimeUtc().Ticks - entry.BrokerUtcTicks) / (double)TimeSpan.TicksPerSecond;
-            if (arrivalAge <= maxAgeSeconds && brokerAge <= maxAgeSeconds)
+            if (arrivalAge <= maxAgeSeconds && brokerAge <= maxAgeSeconds && brokerAge >= -AnchorToleranceSec)
             {
                 price = entry.Price;
                 return true;
@@ -179,17 +224,42 @@ public static class PocketOptionWebSocketStream
 
     public static void StartStream(string[]? assets = null)
     {
-        if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) != 0)
-        {
-            BotLogger.Warn("[PO WS] StartStream called while stream loop is already running. Ignored.");
-            return;
-        }
-
         if (assets != null && assets.Length > 0)
         {
             _subscribedAssets = assets;
         }
 
+        if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) != 0)
+        {
+            if (Volatile.Read(ref _cts).IsCancellationRequested)
+            {
+                BotLogger.Warn("[PO WS] StartStream called while stream loop is unwinding after stop. Deferring start...");
+                _ = DeferredStartAsync();
+                return;
+            }
+            BotLogger.Warn("[PO WS] StartStream called while stream loop is already running. Ignored.");
+            return;
+        }
+
+        LaunchStream();
+    }
+
+    private static async Task DeferredStartAsync()
+    {
+        for (int i = 0; i < 100; i++)
+        {
+            await Task.Delay(50).ConfigureAwait(false);
+            if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) == 0)
+            {
+                LaunchStream();
+                return;
+            }
+        }
+        BotLogger.Error("[PO WS] Deferred StartStream gave up: previous loop did not exit within 5s.");
+    }
+
+    private static void LaunchStream()
+    {
         var cts = new CancellationTokenSource();
         var oldCts = Interlocked.Exchange(ref _cts, cts);
         try { oldCts.Cancel(); oldCts.Dispose(); } catch { }
@@ -202,11 +272,9 @@ public static class PocketOptionWebSocketStream
 
     public static void StopStream()
     {
-        try { _cts.Cancel(); } catch { }
-        try { _connectionCts?.Cancel(); } catch { }
+        try { Volatile.Read(ref _cts).Cancel(); } catch (ObjectDisposedException) { }
+        CancelConnection();
         Status = "STOPPED";
-        // D12 fix: _loopRunning is reset exclusively in RunConnectionLoopAsync's finally block
-        // so a fast StopStream+StartStream sequence cannot spawn duplicate loops sharing _webSocket.
     }
 
     private static async Task<(string? authPayloadJson, string? tradingUrl)> LoadSessionFromDbAsync(CancellationToken token = default)
@@ -696,7 +764,7 @@ public static class PocketOptionWebSocketStream
                 else if (pendingEvent == "successauth" && !subscribed)
                 {
                     subscribed = true;
-                    _ = SubscribeAllAssetsAsync(ws, connectionToken);
+                    _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
                 }
                 pendingEvent = null;
                 continue;
@@ -739,7 +807,7 @@ public static class PocketOptionWebSocketStream
                 if (!subscribed && text.Contains("successauth"))
                 {
                     subscribed = true;
-                    _ = SubscribeAllAssetsAsync(ws, connectionToken);
+                    _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
                 }
 
                 try
@@ -875,55 +943,99 @@ public static class PocketOptionWebSocketStream
         }
     }
 
-    /// <summary>
-    /// D3 & D4 fix: Advances broker clock anchor monotonically forward.
-    /// Rejects delayed replay bursts from rewinding the anchor backwards, and only re-anchors on >5s shift
-    /// if the new offset persists steadily for >= 2s of monotonic time at ~1x real-time rate.
-    /// </summary>
-    private static bool TryUpdateAnchor(long tickTimeUtc, long swNow)
+    private static async Task SubscribeAllAssetsSafeAsync(ClientWebSocket ws, CancellationToken connectionToken)
     {
-        var prev = _clockAnchor;
-        if (prev == null)
+        try
         {
-            _clockAnchor = new BrokerClockAnchor(tickTimeUtc, swNow);
-            return true;
+            await SubscribeAllAssetsAsync(ws, connectionToken).ConfigureAwait(false);
         }
-
-        long impliedTicks = prev.BrokerUtcTicks + System.Diagnostics.Stopwatch.GetElapsedTime(prev.LocalStopwatchTimestamp, swNow).Ticks;
-        long lagTicks = impliedTicks - tickTimeUtc; // >0: tick is older than extrapolated broker clock
-
-        if (Math.Abs(lagTicks) <= 5 * TimeSpan.TicksPerSecond)
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (Exception ex)
         {
-            _suspectAnchorSw = 0;
-            if (lagTicks < 0)
+            BotLogger.Warn($"[PO WS] Subscription dispatch failed: {ex.Message}. Aborting socket to trigger clean reconnect.");
+            try { ws.Abort(); } catch { }
+        }
+    }
+
+    private static bool TryUpdateAnchor(string symbol, long tickTimeUtc, long swNow, out bool rebasedBackward)
+    {
+        rebasedBackward = false;
+        lock (_anchorLock)
+        {
+            var prev = _clockAnchor;
+            if (prev == null)
             {
                 _clockAnchor = new BrokerClockAnchor(tickTimeUtc, swNow);
+                _lastInToleranceSw = swNow;
+                return true;
             }
-            return true;
-        }
 
-        // |lag| > 5s: either a delayed socket burst or a genuine server clock/DST jump
-        if (_suspectAnchorSw == 0)
-        {
-            _suspectAnchorSw = swNow;
-            _suspectAnchorTick0 = tickTimeUtc;
-            return false;
-        }
+            long tickOff = BrokerMinusLocalTicks(tickTimeUtc, swNow);
+            long anchorOff = BrokerMinusLocalTicks(prev.BrokerUtcTicks, prev.LocalStopwatchTimestamp);
+            long lagTicks = anchorOff - tickOff; // >0: тик старше экстраполированного времени
 
-        double localSec = System.Diagnostics.Stopwatch.GetElapsedTime(_suspectAnchorSw, swNow).TotalSeconds;
-        double tickSec = (tickTimeUtc - _suspectAnchorTick0) / (double)TimeSpan.TicksPerSecond;
-        if (localSec >= 2.0 && Math.Abs(tickSec - localSec) <= 0.25 * localSec)
-        {
-            _suspectAnchorSw = 0;
+            if (Math.Abs(lagTicks) <= (long)(AnchorToleranceSec * TimeSpan.TicksPerSecond))
+            {
+                _anchorSuspects.Remove(symbol);
+                _lastInToleranceSw = swNow;
+                if (lagTicks < 0)
+                {
+                    _clockAnchor = new BrokerClockAnchor(tickTimeUtc, swNow);
+                }
+                return true;
+            }
+
+            // |lag| > 5s: испытательный срок строго для ТЕКУЩЕГО символа
+            if (!_anchorSuspects.TryGetValue(symbol, out var s))
+            {
+                _anchorSuspects[symbol] = new AnchorSuspect
+                {
+                    Sw0 = swNow,
+                    Off0 = tickOff,
+                    LastSw = swNow,
+                    LastOff = tickOff,
+                    Confirmed = false
+                };
+                return false;
+            }
+
+            double runSec = System.Diagnostics.Stopwatch.GetElapsedTime(s.Sw0, swNow).TotalSeconds;
+            double driftSec = Math.Abs(tickOff - s.Off0) / (double)TimeSpan.TicksPerSecond;
+            if (driftSec > Math.Max(0.5, 0.25 * runSec))
+            {
+                s.Sw0 = swNow; s.Off0 = tickOff; s.LastSw = swNow; s.LastOff = tickOff; s.Confirmed = false;
+                return false;
+            }
+
+            s.LastSw = swNow;
+            s.LastOff = tickOff;
+            if (runSec >= AnchorConfirmSec) s.Confirmed = true;
+            if (!s.Confirmed) return false;
+
+            int agree = 0;
+            long agreeTicks = (long)(AnchorAgreeSec * TimeSpan.TicksPerSecond);
+            foreach (var o in _anchorSuspects.Values)
+            {
+                if (o.Confirmed &&
+                    System.Diagnostics.Stopwatch.GetElapsedTime(o.LastSw, swNow).TotalSeconds <= 3.0 &&
+                    Math.Abs(o.LastOff - tickOff) <= agreeTicks)
+                {
+                    agree++;
+                }
+            }
+
+            int quorum = Math.Min(AnchorQuorum, Math.Max(1, _subscribedAssets.Length));
+            bool soloOk = runSec >= AnchorSoloConfirmSec &&
+                          System.Diagnostics.Stopwatch.GetElapsedTime(_lastInToleranceSw, swNow).TotalSeconds >= AnchorSoloConfirmSec;
+            if (agree < quorum && !soloOk) return false;
+
+            rebasedBackward = lagTicks > 0;
+            _anchorSuspects.Clear();
+            _lastInToleranceSw = swNow;
             _clockAnchor = new BrokerClockAnchor(tickTimeUtc, swNow);
             return true;
         }
-
-        if (tickSec > localSec * 1.25 + 0.5 || tickSec < 0)
-        {
-            _suspectAnchorSw = 0; // Fast catch-up burst detected — reset suspect tracker
-        }
-        return false;
     }
 
     private static bool HandleTick(string asset, double srvTs, double price, bool isBackfill = false)
@@ -935,28 +1047,46 @@ public static class PocketOptionWebSocketStream
             return false;
         }
 
+        int epoch = Volatile.Read(ref _clockEpoch);
         double utcSec = srvTs - ServerTimeOffsetSec;
         long tickTimeUtc = DateTimeOffset.FromUnixTimeMilliseconds((long)(utcSec * 1000)).UtcTicks;
 
-        // D4 upper bound: reject future-poisoned timestamps (>10 minutes ahead of host UTC) before touching watermarks
-        if (tickTimeUtc - DateTime.UtcNow.Ticks > TimeSpan.FromMinutes(10).Ticks)
+        // D4 upper bound: record skew before rejecting future-poisoned timestamps (>10 minutes ahead of host UTC) so DST shifts are still detected
+        if (tickTimeUtc - DateTime.UtcNow.Ticks > FutureTickGuardTicks)
         {
+            if (!isBackfill)
+            {
+                ValutaBot.MiniApp.Services.ClockSkewMonitor.Record(tickTimeUtc);
+            }
             return false;
         }
 
         long swNow = System.Diagnostics.Stopwatch.GetTimestamp();
-        if (!isBackfill && !TryUpdateAnchor(tickTimeUtc, swNow))
-        {
-            return false;
-        }
-
         string baseAsset = PriceFeed.BaseAsset(asset);          // EURUSD_otc -> EURUSD
         string candleKey = baseAsset + PriceFeed.PoSuffix;      // -> EURUSD_PO
+
+        if (!isBackfill)
+        {
+            if (!TryUpdateAnchor(baseAsset, tickTimeUtc, swNow, out bool rebasedBackward))
+            {
+                return false;
+            }
+            if (rebasedBackward)
+            {
+                ResetClockAndWatermarksOnDstShift();
+                RealtimeTickCollector.ResetAllAccumulatorsAndRingBuffers();
+                BotLogger.Warn("[PO WS] Broker clock anchor rebased BACKWARD (quorum confirmed). Cleaned watermarks and live prices.");
+            }
+        }
 
         bool fedToCandles = TryAdvanceCandleWatermark(candleKey, srvTs, isBackfill);
 
         if (!isBackfill && fedToCandles)
         {
+            if (epoch != Volatile.Read(ref _clockEpoch))
+            {
+                return false;
+            }
             // D5 fix: store broker tick timestamp and prevent out-of-order overwrite
             _livePrices.AddOrUpdate(
                 baseAsset,

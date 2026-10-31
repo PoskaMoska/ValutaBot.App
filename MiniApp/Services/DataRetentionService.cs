@@ -168,12 +168,13 @@ public class DataRetentionService : BackgroundService
         var shadowCutoff = DateTime.UtcNow.Subtract(shadowRetention);
         var stalePendingCutoff = DateTime.UtcNow.AddHours(-2).ToString("o");
 
-        // 5. Prune expired subminute candles using chunked deletions with FOR UPDATE SKIP LOCKED
+        // 5. Prune expired subminute candles using chunked deletions with FOR UPDATE SKIP LOCKED (ordered by open_time ASC for index scan)
         int subPoDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (PO)",
             @"DELETE FROM subminute_candles
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
                   WHERE asset LIKE '%_PO' AND open_time < @cutoff
+                  ORDER BY open_time ASC
                   LIMIT 5000
                   FOR UPDATE SKIP LOCKED
               )", new { cutoff = subCutoff }, chunkSize: 5000);
@@ -183,6 +184,7 @@ public class DataRetentionService : BackgroundService
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
                   WHERE asset NOT LIKE '%_PO' AND open_time < @cutoff
+                  ORDER BY open_time ASC
                   LIMIT 5000
                   FOR UPDATE SKIP LOCKED
               )", new { cutoff = legacySubCutoff }, chunkSize: 5000);
@@ -287,6 +289,7 @@ public class DataRetentionService : BackgroundService
               WHERE ctid IN (
                   SELECT ctid FROM subminute_candles
                   WHERE open_time < @cutoff
+                  ORDER BY open_time ASC
                   LIMIT 5000
                   FOR UPDATE SKIP LOCKED
               )", new { cutoff = DateTime.UtcNow.AddHours(-96).ToString("yyyy-MM-ddTHH:mm:ssZ") }, chunkSize: 5000);
@@ -413,25 +416,40 @@ public class DataRetentionService : BackgroundService
         try
         {
             long capacityMb = long.TryParse(Environment.GetEnvironmentVariable("RAILWAY_VOLUME_CAPACITY_MB"), out var cap) ? cap : (long)MaxVolumeCapacityMb;
-            long capacity = capacityMb * 1048576L;
-            long dbSize = await conn.ExecuteScalarAsync<long>("SELECT pg_database_size(current_database())");
-            long walNow = 0;
-            try { walNow = await conn.ExecuteScalarAsync<long>("SELECT COALESCE(sum(size),0)::bigint FROM pg_ls_waldir()"); } catch { }
-            long maxWal = 1073741824L;
-            try { maxWal = await conn.ExecuteScalarAsync<long>("SELECT setting::bigint * 1048576 FROM pg_settings WHERE name='max_wal_size'"); } catch { }
-            long tblSize = await conn.ExecuteScalarAsync<long>("SELECT pg_total_relation_size(@t::regclass)", new { t = table });
+            long totalCapacityBytes = capacityMb * 1024L * 1024L;
+            long dbSizeBytes = await conn.ExecuteScalarAsync<long>("SELECT pg_database_size(current_database());");
 
-            long free = capacity - dbSize - walNow;
-            long need = (long)(tblSize * 1.1) + maxWal + capacity / 10;
-            if (free < need)
+            long maxWalBytes = 1073741824L;
+            try
             {
-                BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} skipped: free={free >> 20}MB < need={need >> 20}MB");
+                maxWalBytes = await conn.ExecuteScalarAsync<long>("SELECT pg_size_bytes(current_setting('max_wal_size'));");
+            }
+            catch { }
+
+            long currentWalBytes = maxWalBytes;
+            try
+            {
+                currentWalBytes = await conn.ExecuteScalarAsync<long>("SELECT COALESCE(sum(size), 0)::bigint FROM pg_ls_waldir();");
+            }
+            catch (Npgsql.PostgresException ex) when (ex.SqlState == "42501")
+            {
+                BotLogger.Warn("[SmartStorageGovernor] pg_ls_waldir permission denied. Defaulting WAL reservation to max_wal_size.");
+            }
+            catch { }
+
+            long tableSizeBytes = await conn.ExecuteScalarAsync<long>("SELECT pg_total_relation_size(@t::regclass);", new { t = table });
+
+            long estimatedFreeBytes = totalCapacityBytes - dbSizeBytes - currentWalBytes;
+            long requiredBytes = (long)(tableSizeBytes * 2.2) + maxWalBytes + (long)(totalCapacityBytes * 0.15);
+            if (estimatedFreeBytes < requiredBytes)
+            {
+                BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} skipped: free={estimatedFreeBytes >> 20}MB < required={requiredBytes >> 20}MB");
                 return false;
             }
 
-            await conn.ExecuteAsync("SET lock_timeout = '2s'");
-            await conn.ExecuteAsync("SET statement_timeout = '120s'");
-            await conn.ExecuteAsync($"VACUUM FULL {table}", commandTimeout: 150);
+            await conn.ExecuteAsync("SET lock_timeout = '2s';");
+            await conn.ExecuteAsync("SET statement_timeout = '120s';");
+            await conn.ExecuteAsync($"VACUUM FULL {table};", commandTimeout: 150);
             BotLogger.Info($"[SmartStorageGovernor] VACUUM FULL {table} succeeded.");
             return true;
         }

@@ -75,7 +75,18 @@ function toggleMenu(m) {
 }
 
 let switchThrottleTimer = null;
+let copilotExecTimer = null;
+let countdownTimerId = null;
+
+export function cancelCopilotTimer() {
+    if (copilotExecTimer) {
+        clearTimeout(copilotExecTimer);
+        copilotExecTimer = null;
+    }
+}
+
 function throttledWsSwitch() {
+    cancelCopilotTimer();
     cancelAnalysis();
     updateCountdown();
     if (switchThrottleTimer) clearTimeout(switchThrottleTimer);
@@ -123,37 +134,36 @@ function setTf(el) {
     resetSignalKey();
 }
 
-let copilotExecTimer = null;
 export function applyCopilotRecommendation(rec) {
     if (!rec) return;
-    if (rec.asset) {
-        const safeAsset = CSS.escape(rec.asset);
-        const item = document.querySelector(`.asset-item[data-asset="${safeAsset}"]`);
-        if (item) {
-            setAsset(item);
-        } else {
-            setCurrentAsset(rec.asset);
-            const selEl = document.getElementById('selectedAsset');
-            if (selEl) selEl.textContent = rec.asset;
-            throttledWsSwitch();
-            resetSignalKey();
-        }
+    cancelCopilotTimer();
+    let assetChanged = false;
+    let tfChanged = false;
+    if (rec.asset && rec.asset !== currentAsset) {
+        setCurrentAsset(rec.asset);
+        const selEl = document.getElementById('selectedAsset');
+        if (selEl) selEl.textContent = rec.asset;
+        document.querySelectorAll('.asset-item').forEach(i => {
+            i.classList.toggle('active', i.getAttribute('data-asset') === rec.asset);
+        });
+        assetChanged = true;
     }
-    if (rec.tf) {
-        const tfUpper = rec.tf.toUpperCase();
-        const safeTf = CSS.escape(tfUpper);
-        const tfItem = document.querySelector(`.tf-btn[data-tf="${safeTf}"]`);
-        if (tfItem) {
-            setTf(tfItem);
-        } else {
-            setCurrentTf(rec.tf);
-            const selEl = document.getElementById('selectedTf');
-            if (selEl) selEl.textContent = tfUpper;
-            throttledWsSwitch();
-            resetSignalKey();
-        }
+    if (rec.tf && rec.tf.toLowerCase() !== currentTf.toLowerCase()) {
+        const tfClean = rec.tf.toLowerCase();
+        setCurrentTf(tfClean);
+        const selEl = document.getElementById('selectedTf');
+        if (selEl) selEl.textContent = tfClean.toUpperCase();
+        document.querySelectorAll('.tf-btn').forEach(i => {
+            i.classList.toggle('active', (i.getAttribute('data-tf') || '').toLowerCase() === tfClean);
+        });
+        tfChanged = true;
     }
-    if (copilotExecTimer) clearTimeout(copilotExecTimer);
+    if (assetChanged || tfChanged) {
+        const sphere = document.getElementById('mainSphere');
+        if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
+        throttledWsSwitch();
+        resetSignalKey();
+    }
     copilotExecTimer = setTimeout(() => {
         copilotExecTimer = null;
         executeAnalysis();
@@ -246,8 +256,9 @@ function updateCountdown() {
         if (!cachedCandleTimeEl) return;
     }
     const tfSec = getTfSeconds();
-    const now = Math.floor((Date.now() + timeOffset) / 1000);
-    const remaining = tfSec - (now % tfSec);
+    const nowSec = Math.floor((Date.now() + timeOffset) / 1000);
+    const elapsed = nowSec % tfSec;
+    const remaining = (tfSec - 1) - elapsed; // Range: [tfSec - 1 ... 0]
     const mins = Math.floor(remaining / 60);
     const secs = remaining % 60;
     const nextText = `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -256,17 +267,17 @@ function updateCountdown() {
         lastCandleText = nextText;
     }
     
-    let greenThresh = 3;
-    let yellowThresh = 10;
+    let greenThresh = 2;
+    let yellowThresh = 8;
     
     if (tfSec <= 5) {
-        greenThresh = 1; yellowThresh = 2;
+        greenThresh = 0; yellowThresh = 1;
     } else if (tfSec <= 10) {
-        greenThresh = 1; yellowThresh = 3;
+        greenThresh = 1; yellowThresh = 2;
     } else if (tfSec <= 15) {
-        greenThresh = 1; yellowThresh = 4;
+        greenThresh = 1; yellowThresh = 3;
     } else if (tfSec <= 30) {
-        greenThresh = 2; yellowThresh = 6;
+        greenThresh = 2; yellowThresh = 5;
     }
     let nextClass = 'time';
     if (remaining <= greenThresh) {
@@ -296,18 +307,34 @@ function resumeLive() {
 initAssetGrid();
 syncTime().finally(updateCountdown);
 initPriceWebSocket();
-(function tickCountdown() {
+
+function tickCountdown() {
+    if (document.hidden) {
+        countdownTimerId = null;
+        return;
+    }
     updateCountdown();
-    const drift = (Date.now() + timeOffset) % 1000;
-    setTimeout(tickCountdown, 1000 - (drift >= 0 ? drift : drift + 1000) + 15);
-})();
+    const nowMs = Date.now() + timeOffset;
+    const drift = ((nowMs % 1000) + 1000) % 1000;
+    const delay = Math.max(50, 1000 - drift + 5);
+    countdownTimerId = setTimeout(tickCountdown, delay);
+}
+tickCountdown();
 
 // Page Visibility API - Battery and Railway Resource Protection
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
         closePriceWebSocket();
+        cancelCopilotTimer();
+        if (countdownTimerId) {
+            clearTimeout(countdownTimerId);
+            countdownTimerId = null;
+        }
     } else {
         updateCountdown();
+        if (!countdownTimerId) {
+            tickCountdown();
+        }
         if (navigator.onLine) {
             resumeLive();
         } else {

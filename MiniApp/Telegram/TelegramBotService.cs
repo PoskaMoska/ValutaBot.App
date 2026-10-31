@@ -56,6 +56,12 @@ public partial class TelegramBotService : BackgroundService
         }
     }
 
+    public static void InvalidateUserCache(long chatId)
+    {
+        UserLastActivity.Remove($"allowed_{chatId}");
+        BotLogger.Info($"[Security] Invalidated access cache for chatId: {chatId}");
+    }
+
     public static async Task<bool> IsUserAllowed(long chatId)
     {
         string cacheKey = $"allowed_{chatId}";
@@ -321,12 +327,13 @@ public partial class TelegramBotService : BackgroundService
 
     internal static async Task<HttpResponseMessage> PostTelegramJsonWithRetryAsync(string url, string jsonPayload, CancellationToken ct = default)
     {
-        var client = MiniAppController.HttpFactory!.CreateClient("Telegram");
+        var client = MiniAppController.HttpFactory?.CreateClient("Telegram") ?? _httpClient;
         for (int attempt = 1; attempt <= 3; attempt++)
         {
+            await WaitTgGateAsync(ct);
             using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
             var resp = await client.PostAsync(url, content, ct);
-            if ((int)resp.StatusCode == 429 && attempt < 3)
+            if ((int)resp.StatusCode == 429)
             {
                 int delaySec = 5;
                 if (resp.Headers.RetryAfter?.Delta.HasValue == true)
@@ -350,8 +357,12 @@ public partial class TelegramBotService : BackgroundService
                 resp.Dispose();
                 RegisterTgBlock(delaySec);
                 BotLogger.Warn($"[TG Bot API] 429 Rate Limit on outbound call. Backing off for {delaySec}s (Attempt {attempt}/3)");
-                await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 120)), ct);
-                continue;
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 120)), ct);
+                    continue;
+                }
+                return new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
             }
             return resp;
         }

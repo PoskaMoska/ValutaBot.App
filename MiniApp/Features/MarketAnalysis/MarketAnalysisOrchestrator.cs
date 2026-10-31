@@ -26,7 +26,8 @@ public class MarketAnalysisOrchestrator(
 {
     private static readonly ConcurrentDictionary<string, string> _lastSeenModelVersions = new();
     private static readonly ConcurrentDictionary<string, DateTime> _lastSampleTimeByAssetTf = new();
-    private static readonly ConcurrentDictionary<string, long> _lastRealTradeSwByAsset = new();
+    private static readonly ConcurrentDictionary<string, (long StartTs, double CooldownSecs)> _lastRealTradeSwByAsset = new();
+    private static double S(double v, double fallback = 0.0) => double.IsFinite(v) ? v : fallback;
     private static readonly System.Threading.SemaphoreSlim _csvSemaphore = new(1, 1);
     private static readonly System.Text.Json.JsonSerializerOptions _jsonOptions = new()
     {
@@ -351,30 +352,30 @@ public class MarketAnalysisOrchestrator(
         double liveSpreadBps = 0.0;
 
         var macroPayload = new {
-            DayRangePositionPct = dayAnchors.DayRangePositionPct,
-            DistToDayHighBps = dayAnchors.DistToDayHighBps,
-            DistToDayLowBps = dayAnchors.DistToDayLowBps,
-            DistToAsianHighBps = dayAnchors.DistToAsianHighBps,
-            DistToAsianLowBps = dayAnchors.DistToAsianLowBps,
-            DxyMomentum1mBps = dxyMetrics.DxyMomentum1mBps,
-            DxyMomentum5mBps = dxyMetrics.DxyMomentum5mBps,
-            BasketSyncScore = dxyMetrics.BasketSyncScore,
-            SpreadBps = liveSpreadBps,
-            PriceEntropy = priceEntropy,
-            TrendMaturity = trendMaturity,
-            PricePositionPct = pricePositionPct,
+            DayRangePositionPct = S(dayAnchors.DayRangePositionPct, 50.0),
+            DistToDayHighBps = S(dayAnchors.DistToDayHighBps),
+            DistToDayLowBps = S(dayAnchors.DistToDayLowBps),
+            DistToAsianHighBps = S(dayAnchors.DistToAsianHighBps),
+            DistToAsianLowBps = S(dayAnchors.DistToAsianLowBps),
+            DxyMomentum1mBps = S(dxyMetrics.DxyMomentum1mBps),
+            DxyMomentum5mBps = S(dxyMetrics.DxyMomentum5mBps),
+            BasketSyncScore = S(dxyMetrics.BasketSyncScore),
+            SpreadBps = S(liveSpreadBps),
+            PriceEntropy = S(priceEntropy),
+            TrendMaturity = S(trendMaturity),
+            PricePositionPct = S(pricePositionPct, 50.0),
             BbSqueeze = bbSqueeze,
             MinutesToNews = minutesToNews ?? -1,
-            Adx = mainAdx,
-            Rsi = taDetail.RsiVal,
+            Adx = S(mainAdx, 20.0),
+            Rsi = S(taDetail.RsiVal, 50.0),
             HourUtc = DateTime.UtcNow.Hour,
             DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
-            TickCountLastCandle = prep.ClosedCandles.Length > 0 ? prep.ClosedCandles[^1].Volume : 0,
+            TickCountLastCandle = prep.ClosedCandles.Length > 0 ? S(prep.ClosedCandles[^1].Volume) : 0,
             Ta = new {
-                Score = taDetail.Score,
-                MicroVel = taDetail.MicroVel,
-                HmaSlope = taDetail.HmaSlope,
-                VolRatio = taDetail.VolStrengthVal
+                Score = S(taDetail.Score),
+                MicroVel = S(taDetail.MicroVel),
+                HmaSlope = S(taDetail.HmaSlope),
+                VolRatio = S(taDetail.VolStrengthVal)
             }
         };
 
@@ -403,9 +404,9 @@ public class MarketAnalysisOrchestrator(
 
     #region Pipeline Stage 3: Neural Brain ML Inference
 
-    private static double ComputePandasEma(double[] values, int span)
+    private static double ComputePandasEma(ReadOnlySpan<double> values, int span)
     {
-        if (values == null || values.Length == 0) return 0.0;
+        if (values.IsEmpty) return 0.0;
         double alpha = 2.0 / (span + 1.0);
         double num = 0.0;
         double den = 0.0;
@@ -430,14 +431,16 @@ public class MarketAnalysisOrchestrator(
             return null;
         }
 
-        var macroSlice = macroCandles[^30..];
-        var microSlice = microCandles[^30..];
+        ReadOnlySpan<MiniAppController.OhlcCandle> macroSlice = macroCandles.AsSpan(macroCandles.Length - 30, 30);
+        ReadOnlySpan<MiniAppController.OhlcCandle> microSlice = microCandles.AsSpan(microCandles.Length - 30, 30);
 
-        float[] NormalizeSlice(MiniAppController.OhlcCandle[] slice)
+        static float[] NormalizeSlice(ReadOnlySpan<MiniAppController.OhlcCandle> slice)
         {
             float[] result = new float[150];
             double refP = slice[^1].Close > 0 ? slice[^1].Close : 1.0;
-            double meanVol = slice.Average(c => c.Volume) + 1e-4;
+            double sumVol = 0.0;
+            for (int i = 0; i < 30; i++) sumVol += slice[i].Volume;
+            double meanVol = (sumVol / 30.0) + 1e-4;
 
             for (int i = 0; i < 30; i++)
             {
@@ -457,18 +460,32 @@ public class MarketAnalysisOrchestrator(
 
         double curP = microSlice[^1].Close > 0 ? microSlice[^1].Close : 1.0;
 
-        double[] macroCloses = new double[30];
-        for (int i = 0; i < 30; i++) macroCloses[i] = macroSlice[i].Close;
+        Span<double> macroCloses = stackalloc double[30];
+        double sumM1Tr = 0.0;
+        for (int i = 0; i < 30; i++)
+        {
+            macroCloses[i] = macroSlice[i].Close;
+            sumM1Tr += Math.Max(macroSlice[i].High - macroSlice[i].Low, 1e-7);
+        }
         double m1Ema = ComputePandasEma(macroCloses, 9);
         float distM1 = (float)((curP - m1Ema) / curP * 1000.0);
 
-        double s5Tr = microSlice.Average(c => Math.Max(c.High - c.Low, 1e-7));
-        double m1Tr = macroSlice.Average(c => Math.Max(c.High - c.Low, 1e-7));
+        Span<double> microCloses = stackalloc double[30];
+        double sumS5Tr = 0.0;
+        double sumMicroCloses = 0.0;
+        for (int i = 0; i < 30; i++)
+        {
+            double c = microSlice[i].Close;
+            microCloses[i] = c;
+            sumMicroCloses += c;
+            sumS5Tr += Math.Max(microSlice[i].High - microSlice[i].Low, 1e-7);
+        }
+
+        double s5Tr = sumS5Tr / 30.0;
+        double m1Tr = sumM1Tr / 30.0;
         float atrRatio = (float)(s5Tr / (m1Tr + 1e-7));
 
-        double[] microCloses = new double[30];
-        for (int i = 0; i < 30; i++) microCloses[i] = microSlice[i].Close;
-        double microMean = microCloses.Average();
+        double microMean = sumMicroCloses / 30.0;
         double sumSq = 0.0;
         for (int i = 0; i < 30; i++)
         {
@@ -669,9 +686,6 @@ public class MarketAnalysisOrchestrator(
         var dbSw = Stopwatch.StartNew();
         int targetHorizon = cm.Timeout.TimeoutCandles;
 
-        // D-6 fix: sanitize NaN/Infinity before JSON serialization (AllowNamedFloatingPointLiterals would emit "NaN" strings).
-        static double S(double v, double fallback = 0.0) => double.IsFinite(v) ? v : fallback;
-
         var sourceDirections = new Dictionary<string, string>
         {
             ["TechAnalysis"] = DirectionExtensions.FromScore(cm.Consensus.TaScore).ToSignal(),
@@ -680,11 +694,27 @@ public class MarketAnalysisOrchestrator(
             ["LIGHTGBM"]     = ml.Direction,
         };
 
+        var sanitizedSmc = new {
+            sensors.SmcResult.HasLiquiditySweep, sensors.SmcResult.SweepDirection,
+            sensors.SmcResult.HasFvg, sensors.SmcResult.FvgType,
+            FvgTop = S(sensors.SmcResult.FvgTop), FvgBottom = S(sensors.SmcResult.FvgBottom), FvgGapSize = S(sensors.SmcResult.FvgGapSize),
+            sensors.SmcResult.HasOrderBlock, sensors.SmcResult.OrderBlockType,
+            OrderBlockLevel = S(sensors.SmcResult.OrderBlockLevel), sensors.SmcResult.IsUnmitigatedOb,
+            sensors.SmcResult.HasBos, sensors.SmcResult.BosDirection
+        };
+        var sanitizedTa = sensors.TaDetail with {
+            Score = S(sensors.TaDetail.Score), Confidence = S(sensors.TaDetail.Confidence), RsiVal = S(sensors.TaDetail.RsiVal, 50.0),
+            HmaVal = S(sensors.TaDetail.HmaVal), VolStrengthVal = S(sensors.TaDetail.VolStrengthVal), AtrVal = S(sensors.TaDetail.AtrVal),
+            HmaSlope = S(sensors.TaDetail.HmaSlope), MicroVel = S(sensors.TaDetail.MicroVel), VolRatio = S(sensors.TaDetail.VolRatio),
+            VelContrib = S(sensors.TaDetail.VelContrib), HmaContrib = S(sensors.TaDetail.HmaContrib), RsiContrib = S(sensors.TaDetail.RsiContrib),
+            ConnorsContrib = S(sensors.TaDetail.ConnorsContrib), VolStrengthContrib = S(sensors.TaDetail.VolStrengthContrib)
+        };
+
         var mlFeatures = new {
-            Candles = prep.ClosedCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-            MtfCandles = prep.ClosedHigherCandles.Select(c => new { c.Timestamp, c.Open, c.High, c.Low, c.Close, c.Volume }).ToArray(),
-            Smc = sensors.SmcResult,
-            Ta = sensors.TaDetail,
+            Candles = prep.ClosedCandles.Select(c => new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) }).ToArray(),
+            MtfCandles = prep.ClosedHigherCandles.Select(c => new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) }).ToArray(),
+            Smc = sanitizedSmc,
+            Ta = sanitizedTa,
             MacroContext = new {
                 MinutesToNews = sensors.MinutesToNews ?? -1,
                 MarketRegime = cm.EffectiveMarketRegime,
@@ -710,19 +740,19 @@ public class MarketAnalysisOrchestrator(
                 DxyMomentum5mBps = S(sensors.DxyMetrics.DxyMomentum5mBps),
                 BasketSyncScore = S(sensors.DxyMetrics.BasketSyncScore),
                 SpreadBps = S(sensors.LiveSpreadBps),
-                TickCountLastCandle = prep.ClosedCandles.Length > 0 ? prep.ClosedCandles[^1].Volume : 0
+                TickCountLastCandle = prep.ClosedCandles.Length > 0 ? S(prep.ClosedCandles[^1].Volume) : 0
             },
             NeuralBrain = new {
-                Prob = cm.Consensus.MlProb,
-                Score = cm.Consensus.MlScoreRaw,
+                Prob = S(cm.Consensus.MlProb, 0.5),
+                Score = S(cm.Consensus.MlScoreRaw),
                 FinalProb = cm.Consensus.Probability
             }
         };
         string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures, _jsonOptions);
 
         var shadowMlFeatures = new {
-            Smc = sensors.SmcResult,
-            Ta = sensors.TaDetail,
+            Smc = sanitizedSmc,
+            Ta = sanitizedTa,
             MacroContext = mlFeatures.MacroContext,
             NeuralBrain = mlFeatures.NeuralBrain
         };
@@ -742,11 +772,11 @@ public class MarketAnalysisOrchestrator(
         bool isGoldenSetup = cm.MtfResult.IsGoldenSetup && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse);
 
         bool isCooldownActive = false;
-        if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var lastRealSw))
+        if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var lastReal))
         {
             int tradeDurationSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
             double requiredCooldownSecs = isS5 ? 20.0 : Math.Max(tradeDurationSecs + 2.0, 15.0);
-            isCooldownActive = Stopwatch.GetElapsedTime(lastRealSw).TotalSeconds < requiredCooldownSecs;
+            isCooldownActive = Stopwatch.GetElapsedTime(lastReal.StartTs).TotalSeconds < Math.Max(lastReal.CooldownSecs, requiredCooldownSecs);
         }
 
         bool isExhaustedOnS5 = false;
@@ -829,23 +859,24 @@ public class MarketAnalysisOrchestrator(
                 var nowSw = Stopwatch.GetTimestamp();
                 int tradeDurSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
                 double reqCooldown = isS5 ? 20.0 : Math.Max(tradeDurSecs + 2.0, 15.0);
+                var claim = (StartTs: nowSw, CooldownSecs: reqCooldown);
 
                 while (true)
                 {
-                    if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var prevSw))
+                    if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var prev))
                     {
-                        if (Stopwatch.GetElapsedTime(prevSw).TotalSeconds < reqCooldown)
+                        if (Stopwatch.GetElapsedTime(prev.StartTs).TotalSeconds < Math.Max(prev.CooldownSecs, reqCooldown))
                         {
                             _logger.LogWarning("[Orchestrator] Concurrency guard: Asset {Asset} trade claimed by concurrent worker. Aborting live execution.", prep.CleanAsset);
                             canExecuteReal = false;
                             break;
                         }
-                        if (_lastRealTradeSwByAsset.TryUpdate(prep.CleanAsset, nowSw, prevSw))
+                        if (_lastRealTradeSwByAsset.TryUpdate(prep.CleanAsset, claim, prev))
                         {
                             break;
                         }
                     }
-                    else if (_lastRealTradeSwByAsset.TryAdd(prep.CleanAsset, nowSw))
+                    else if (_lastRealTradeSwByAsset.TryAdd(prep.CleanAsset, claim))
                     {
                         break;
                     }
