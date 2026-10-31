@@ -20,6 +20,7 @@ public class HistoricalCandleAccumulatorService : BackgroundService
     private static readonly string[] Assets = BaseAssets.Select(PriceFeed.CandleKey).ToArray();
     private const int MaxCandlesPerAsset = 300_000;
     private const string Interval = "1m";
+    private DateTime _lastRollupMinuteUtc = DateTime.MinValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -54,7 +55,12 @@ public class HistoricalCandleAccumulatorService : BackgroundService
                 if (isWeekday && isMarketOpen)
                 {
                     await RealtimeTickCollector.FlushAsync(stoppingToken);
-                    await FlushAndSaveAsync(targetClosedMinute);
+                    DateTime startMinute = _lastRollupMinuteUtc == DateTime.MinValue || (targetClosedMinute - _lastRollupMinuteUtc) > TimeSpan.FromMinutes(15) || targetClosedMinute < _lastRollupMinuteUtc ? targetClosedMinute : _lastRollupMinuteUtc.AddMinutes(1);
+                    for (var min = startMinute; min <= targetClosedMinute; min = min.AddMinutes(1))
+                    {
+                        await FlushAndSaveAsync(min);
+                        _lastRollupMinuteUtc = min;
+                    }
                 }
             }
             catch (Exception ex)

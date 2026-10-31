@@ -79,6 +79,7 @@ public static class MLPythonService
         }
     }
     private static Process? _mlProcess; // Track to prevent zombie leaks
+    private static int _exitHookRegistered = 0;
 
 
     private static readonly JsonSerializerOptions _jsonOptions = new() { 
@@ -214,18 +215,21 @@ public static class MLPythonService
                     BotLogger.Info($"[MLPython] Python service started (PID: {_mlProcess.Id}).");
 
                     // FIX: Ensure Python process is killed when C# app exits.
-                    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+                    if (Interlocked.Exchange(ref _exitHookRegistered, 1) == 0)
                     {
-                        try
+                        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
                         {
-                            if (_mlProcess != null && !_mlProcess.HasExited)
+                            try
                             {
-                                BotLogger.Info($"[MLPython] Terminating Python service (PID: {_mlProcess.Id})...");
-                                _mlProcess.Kill();
+                                if (_mlProcess != null && !_mlProcess.HasExited)
+                                {
+                                    BotLogger.Info($"[MLPython] Terminating Python service tree (PID: {_mlProcess.Id})...");
+                                    _mlProcess.Kill(entireProcessTree: true);
+                                }
                             }
-                        }
-                        catch { /* Ignore kill errors during shutdown */ }
-                    };
+                            catch { /* Ignore kill errors during shutdown */ }
+                        };
+                    }
                 }
             }
         }
@@ -307,8 +311,8 @@ public static class MLPythonService
                     {
                         if (_mlProcess != null && !_mlProcess.HasExited)
                         {
-                            BotLogger.Warn($"[MLPython] Watchdog killing stale Python service (PID: {_mlProcess.Id})...");
-                            _mlProcess.Kill();
+                            BotLogger.Warn($"[MLPython] Watchdog killing stale Python service tree (PID: {_mlProcess.Id})...");
+                            _mlProcess.Kill(entireProcessTree: true);
                         }
                     }
                     catch (Exception killEx) 

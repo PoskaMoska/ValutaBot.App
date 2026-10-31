@@ -41,7 +41,12 @@ public static class PocketOptionWebSocketStream
     private const int ReconnectAfterConnectedMs = 1_000;
     private const int MinBackoffMs = 5_000;
     private const int MaxBackoffMs = 60_000;
-    public static double ServerTimeOffsetSec { get; set; } = 7200.0; // Pocket Option server time is UTC+2 (auto-adjusted on DST)
+    private static double _serverTimeOffsetSec = 7200.0;
+    public static double ServerTimeOffsetSec
+    {
+        get => Volatile.Read(ref _serverTimeOffsetSec);
+        set => Volatile.Write(ref _serverTimeOffsetSec, value);
+    }
 
     private const string DefaultTradingUrl = "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket";
     private const string TryDemoTradingUrl = "wss://try-demo-eu.po.market/socket.io/?EIO=4&transport=websocket";
@@ -127,6 +132,20 @@ public static class PocketOptionWebSocketStream
     public static DateTime LastBrokerTickUtc =>
         _clockAnchor is { } a ? new DateTime(a.BrokerUtcTicks, DateTimeKind.Utc) : DateTime.MinValue;
     public static int ConsecutiveAuthFailures => Volatile.Read(ref _consecutiveAuthFailures);
+
+    private static void ResetClockAndWatermarksCore(BrokerClockAnchor? preservedAnchor)
+    {
+        lock (_anchorLock)
+        {
+            _clockAnchor = preservedAnchor;
+            _anchorSuspects.Clear();
+            _lastInToleranceSw = preservedAnchor?.LocalStopwatchTimestamp ?? 0;
+        }
+        Interlocked.Increment(ref _clockEpoch);
+        _lastCandleSrvTs.Clear();
+        _livePrices.Clear();
+        _lastTickTicksBySymbol.Clear();
+    }
 
     public static void ResetClockAndWatermarksOnDstShift()
     {
@@ -1056,6 +1075,9 @@ public static class PocketOptionWebSocketStream
         {
             if (!isBackfill)
             {
+                var nowSwForGuard = System.Diagnostics.Stopwatch.GetTimestamp();
+                Volatile.Write(ref _lastMessageSw, nowSwForGuard);
+                Volatile.Write(ref _lastTickSw, nowSwForGuard);
                 ValutaBot.MiniApp.Services.ClockSkewMonitor.Record(tickTimeUtc);
             }
             return false;
@@ -1073,13 +1095,16 @@ public static class PocketOptionWebSocketStream
             }
             if (rebasedBackward)
             {
-                ResetClockAndWatermarksOnDstShift();
+                ResetClockAndWatermarksCore(_clockAnchor);
+                epoch = Volatile.Read(ref _clockEpoch);
                 RealtimeTickCollector.ResetAllAccumulatorsAndRingBuffers();
                 BotLogger.Warn("[PO WS] Broker clock anchor rebased BACKWARD (quorum confirmed). Cleaned watermarks and live prices.");
             }
         }
 
+        if (epoch != Volatile.Read(ref _clockEpoch)) return false;
         bool fedToCandles = TryAdvanceCandleWatermark(candleKey, srvTs, isBackfill);
+        if (epoch != Volatile.Read(ref _clockEpoch)) return false;
 
         if (!isBackfill && fedToCandles)
         {

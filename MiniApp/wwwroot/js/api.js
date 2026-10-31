@@ -144,9 +144,13 @@ function scheduleWsReconnect(valEl) {
     
     clearTimeout(reconnectTimeout);
     reconnectTimeout = setTimeout(() => {
-        if (!document.hidden && (typeof navigator === 'undefined' || navigator.onLine)) {
-            initPriceWebSocket();
+        if (document.hidden) return;
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            // Still offline: poll in 2000ms instead of permanently dying
+            reconnectTimeout = setTimeout(() => scheduleWsReconnect(valEl), 2000);
+            return;
         }
+        initPriceWebSocket();
     }, finalDelay);
 }
 

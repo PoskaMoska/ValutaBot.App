@@ -352,7 +352,7 @@ public class MarketAnalysisOrchestrator(
         double liveSpreadBps = 0.0;
 
         var macroPayload = new {
-            DayRangePositionPct = S(dayAnchors.DayRangePositionPct, 50.0),
+            DayRangePositionPct = S(dayAnchors.DayRangePositionPct, 0.5),
             DistToDayHighBps = S(dayAnchors.DistToDayHighBps),
             DistToDayLowBps = S(dayAnchors.DistToDayLowBps),
             DistToAsianHighBps = S(dayAnchors.DistToAsianHighBps),
@@ -363,7 +363,7 @@ public class MarketAnalysisOrchestrator(
             SpreadBps = S(liveSpreadBps),
             PriceEntropy = S(priceEntropy),
             TrendMaturity = S(trendMaturity),
-            PricePositionPct = S(pricePositionPct, 50.0),
+            PricePositionPct = S(pricePositionPct, 0.5),
             BbSqueeze = bbSqueeze,
             MinutesToNews = minutesToNews ?? -1,
             Adx = S(mainAdx, 20.0),
@@ -433,6 +433,22 @@ public class MarketAnalysisOrchestrator(
 
         ReadOnlySpan<MiniAppController.OhlcCandle> macroSlice = macroCandles.AsSpan(macroCandles.Length - 30, 30);
         ReadOnlySpan<MiniAppController.OhlcCandle> microSlice = microCandles.AsSpan(microCandles.Length - 30, 30);
+
+        static bool HasInvalidCandle(ReadOnlySpan<MiniAppController.OhlcCandle> slice)
+        {
+            for (int i = 0; i < slice.Length; i++)
+            {
+                var c = slice[i];
+                if (!double.IsFinite(c.Open) || !double.IsFinite(c.High) || !double.IsFinite(c.Low) ||
+                    !double.IsFinite(c.Close) || !double.IsFinite(c.Volume) ||
+                    c.Close <= 0 || c.Open <= 0 || c.Low <= 0 || c.High < c.Low || c.Volume < 0)
+                    return true;
+            }
+            return false;
+        }
+
+        if (HasInvalidCandle(macroSlice) || HasInvalidCandle(microSlice))
+            return null;
 
         static float[] NormalizeSlice(ReadOnlySpan<MiniAppController.OhlcCandle> slice)
         {
@@ -724,12 +740,12 @@ public class MarketAnalysisOrchestrator(
                 Rsi = S(sensors.TaDetail.RsiVal, 50.0),
                 PriceEntropy = S(sensors.PriceEntropy),
                 TrendMaturity = S(sensors.TrendMaturity),
-                PricePositionPct = S(sensors.PricePositionPct, 50.0),
+                PricePositionPct = S(sensors.PricePositionPct, 0.5),
                 BbSqueeze = sensors.BbSqueeze,
                 HourUtc = DateTime.UtcNow.Hour,
                 DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
                 Session = TradeOutcomeTracker.ComputeSession(DateTime.UtcNow),
-                DayRangePositionPct = S(sensors.DayAnchors.DayRangePositionPct, 50.0),
+                DayRangePositionPct = S(sensors.DayAnchors.DayRangePositionPct, 0.5),
                 DistToDayHighBps = S(sensors.DayAnchors.DistToDayHighBps),
                 DistToDayLowBps = S(sensors.DayAnchors.DistToDayLowBps),
                 AsianHigh = S(sensors.DayAnchors.AsianHigh),
@@ -1188,7 +1204,7 @@ public class MarketAnalysisOrchestrator(
             smcDirection = uiSmcDirection,
             smcConfidence = uiSmcConfidence,
             lgbmDirection = cm.MlSignal.Direction,
-            lgbmConfidence = (int)Math.Clamp(Math.Round(cm.MlSignal.Confidence * 100), 50, 99),
+            lgbmConfidence = (int)Math.Clamp(Math.Round(S(cm.MlSignal.Confidence, 0.5) * 100), 50, 99),
             winRateOverall = stats.WinRate,
             winRateAsset = assetStats.WinRate,
             signalsVerifiedAsset = assetStats.Verified,
@@ -1196,8 +1212,8 @@ public class MarketAnalysisOrchestrator(
             ema = Math.Round(GetSafeLimit(sensors.TaResult.hmaVal), prep.IsForex ? 5 : 2),
             volumeStrength = Math.Round(GetSafeLimit(sensors.TaResult.volStrengthVal), 2),
             atr = Math.Round(GetSafeLimit(sensors.MainAtr), prep.IsForex ? 5 : 2),
-            chartData = prep.MainPrices,
-            chartOhlc = prep.RawCandles.TakeLast(80).Select(c => new { o = Math.Round(c.Open, 8), h = Math.Round(c.High, 8), l = Math.Round(c.Low, 8), c = Math.Round(c.Close, 8), v = Math.Round(c.Volume, 2) }).ToArray(),
+            chartData = prep.MainPrices.Select(p => GetSafeLimit(p)).ToArray(),
+            chartOhlc = prep.RawCandles.TakeLast(80).Select(c => new { o = Math.Round(GetSafeLimit(c.Open), 8), h = Math.Round(GetSafeLimit(c.High), 8), l = Math.Round(GetSafeLimit(c.Low), 8), c = Math.Round(GetSafeLimit(c.Close), 8), v = Math.Round(GetSafeLimit(c.Volume), 2) }).ToArray(),
             goldenSetup = exec.IsGoldenSetup,
             confluenceLabel = cm.MtfResult.ConfluenceLabel,
             confluenceRatio = cm.MtfResult.ConfluenceRatio,

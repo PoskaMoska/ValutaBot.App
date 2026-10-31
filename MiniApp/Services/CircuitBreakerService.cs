@@ -53,7 +53,7 @@ namespace ValutaBot.MiniApp.Services
             new(StringComparer.OrdinalIgnoreCase);
 
         private static string GetSymbolKey(string asset, string timeframe)
-            => $"{AssetSanitizer.Sanitize(asset)}_{timeframe.Trim().ToLowerInvariant()}";
+            => $"{AssetSanitizer.Sanitize(asset)}_{TimeframeNormalizer.Normalize(timeframe).ToLowerInvariant()}";
 
         public CircuitBreakerService(IOptions<TradingBotSettings> options, Func<NpgsqlConnection> connectionFactory)
         {
@@ -167,6 +167,7 @@ namespace ValutaBot.MiniApp.Services
         public bool IsSymbolQuarantined(string asset, string timeframe, out string? reason)
         {
             reason = null;
+            timeframe = TimeframeNormalizer.Normalize(timeframe);
             string cleanAsset = AssetSanitizer.Sanitize(asset);
 
             // 1. Check Pair-level quarantine (highest priority: protects all timeframes of toxic asset)
@@ -207,6 +208,7 @@ namespace ValutaBot.MiniApp.Services
         public async Task CheckSymbolStateAsync(string asset, string timeframe, bool? latestWasWin = null, bool isShadow = false, CancellationToken ct = default)
         {
             if (latestWasWin == null) return;
+            timeframe = TimeframeNormalizer.Normalize(timeframe);
             string key = GetSymbolKey(asset, timeframe);
             string cleanAsset = AssetSanitizer.Sanitize(asset);
 
@@ -265,7 +267,7 @@ namespace ValutaBot.MiniApp.Services
                     : (keyWm ?? pairWm);
                 // ИСПРАВЛЕНО: Передаем cleanAsset вместо asset для совпадения с базой trade_outcomes
                 var recentAssetOutcomes = await TradeRepository.GetRecentOutcomesForAssetAsync(cleanAsset, timeframe, 12, sinceUtc);
-                if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 2) return;
+                if (recentAssetOutcomes == null || recentAssetOutcomes.Count < 3) return;
 
                 int consecutiveLosses = 0;
                 foreach (bool win in recentAssetOutcomes)
@@ -277,12 +279,12 @@ namespace ValutaBot.MiniApp.Services
                 bool shouldQuarantine = false;
                 string qReason = string.Empty;
 
-                if (consecutiveLosses >= 2)
+                if (consecutiveLosses >= 3)
                 {
                     shouldQuarantine = true;
                     qReason = $"{consecutiveLosses} consecutive losses on {key}";
                 }
-                else if (recentAssetOutcomes.Count >= 10)
+                else if (recentAssetOutcomes.Count >= 12)
                 {
                     int wins = recentAssetOutcomes.Count(w => w);
                     double winRate = (double)wins / recentAssetOutcomes.Count;
@@ -299,8 +301,8 @@ namespace ValutaBot.MiniApp.Services
                     _symbolQuarantine[key] = (until, qReason);
                     _shadowRecoveryStreak[key] = 0;
 
-                    // If 2+ consecutive losses, quarantine the entire asset pair across all timeframes
-                    if (consecutiveLosses >= 2)
+                    // If 3+ consecutive losses, quarantine the entire asset pair across all timeframes
+                    if (consecutiveLosses >= 3)
                     {
                         _symbolQuarantine[cleanAsset] = (until, qReason);
                         _shadowRecoveryStreak[cleanAsset] = 0;
@@ -441,7 +443,7 @@ namespace ValutaBot.MiniApp.Services
         {
             try
             {
-                var (haltedUntil, reason) = await ReadHaltFromDbAsync(ct);
+                var (haltedUntil, reason, createdAt) = await ReadHaltFromDbAsync(ct);
                 lock (_lock)
                 {
                     _cacheLoadedAt = DateTime.UtcNow;
@@ -453,6 +455,12 @@ namespace ValutaBot.MiniApp.Services
                     else if (haltedUntil.HasValue && DateTime.UtcNow >= haltedUntil.Value)
                     {
                         _lastCooldownExpiredUtc = haltedUntil.Value;
+                        _haltedUntil = null;
+                        _haltReason = string.Empty;
+                    }
+                    else if (!haltedUntil.HasValue && createdAt.HasValue && reason == "EXPIRED")
+                    {
+                        _lastCooldownExpiredUtc = createdAt.Value;
                         _haltedUntil = null;
                         _haltReason = string.Empty;
                     }
@@ -468,19 +476,19 @@ namespace ValutaBot.MiniApp.Services
             }
         }
 
-        private sealed record CbState(DateTime? halted_until, string? reason);
+        private sealed record CbState(DateTime? halted_until, string? reason, DateTime? created_at);
 
-        private async Task<(DateTime? haltedUntil, string? reason)> ReadHaltFromDbAsync(CancellationToken ct = default)
+        private async Task<(DateTime? haltedUntil, string? reason, DateTime? createdAt)> ReadHaltFromDbAsync(CancellationToken ct = default)
         {
             await using var conn = _getConnection();
             await conn.OpenAsync(ct);
 
             var row = await conn.QueryFirstOrDefaultAsync<CbState>(
-                "SELECT halted_until, reason FROM circuit_breaker_state WHERE id = 1;"
+                "SELECT halted_until, reason, created_at FROM circuit_breaker_state WHERE id = 1;"
             );
 
-            if (row == null) return (null, null);
-            return (row.halted_until, row.reason);
+            if (row == null) return (null, null, null);
+            return (row.halted_until, row.reason, row.created_at);
         }
 
         private async Task EnsureTableAsync(CancellationToken ct = default)
@@ -520,7 +528,13 @@ namespace ValutaBot.MiniApp.Services
             {
                 await using var conn = _getConnection();
                 await conn.OpenAsync(ct);
-                await conn.ExecuteAsync("DELETE FROM circuit_breaker_state WHERE id = 1;");
+                // Preserve expiration timestamp in DB so post-restart sweeps don't re-trigger on old losses
+                await conn.ExecuteAsync(@"
+                    UPDATE circuit_breaker_state 
+                    SET halted_until = NULL, 
+                        reason = 'EXPIRED', 
+                        created_at = @ExpiredAt 
+                    WHERE id = 1;", new { ExpiredAt = DateTime.UtcNow });
             }
             catch (Exception ex)
             {

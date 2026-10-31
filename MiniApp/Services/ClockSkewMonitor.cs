@@ -30,6 +30,7 @@ public static class ClockSkewMonitor
     private static int _next;
     private static int _count;
     private static DateTime _lastEvalUtc = DateTime.MinValue;
+    private static int _extremeSamplesSinceEval;
     private static bool _alerting;
     private static SkewSnapshot? _latest;
 
@@ -59,9 +60,11 @@ public static class ClockSkewMonitor
             _ring[_next] = skewMs;
             _next = (_next + 1) % Capacity;
             if (_count < Capacity) _count++;
-            if (nowUtc - _lastEvalUtc >= EvalInterval)
+            if (Math.Abs(skewMs) >= 1_800_000) _extremeSamplesSinceEval++;
+            if (nowUtc - _lastEvalUtc >= EvalInterval || (_count >= MinSamples && _extremeSamplesSinceEval >= (Capacity / 2) + 1))
             {
                 _lastEvalUtc = nowUtc;
+                _extremeSamplesSinceEval = 0;
                 evaluate = true;
             }
         }

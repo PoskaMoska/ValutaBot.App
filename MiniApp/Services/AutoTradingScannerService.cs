@@ -34,6 +34,7 @@ public class AutoTradingScannerService : BackgroundService
     private static readonly string[] _subminuteTfs = { "s5", "s10", "s15", "s30", "m1" };
 
     private static readonly ConcurrentDictionary<string, DateTime> _lastScannedCandleTimes = new(StringComparer.OrdinalIgnoreCase);
+    public static void ResetLastScannedTimes() => _lastScannedCandleTimes.Clear();
 
     private static readonly Dictionary<string, int> _minCandlesPerTf =
         new(StringComparer.OrdinalIgnoreCase)
@@ -137,6 +138,11 @@ public class AutoTradingScannerService : BackgroundService
                         }
                         if (!inFlightKeys.TryAdd(key, 1))
                         {
+                            await Task.Delay(15, stoppingToken);
+                            if (Stopwatch.GetElapsedTime(item.queuedSw).TotalSeconds <= maxQueueWaitSec && queuedKeys.TryAdd(key, 1))
+                            {
+                                if (!channel.Writer.TryWrite(item)) queuedKeys.TryRemove(key, out _);
+                            }
                             continue;
                         }
                         try
@@ -239,7 +245,7 @@ public class AutoTradingScannerService : BackgroundService
 
                 // Atomic deduplication barrier against scanning the same closed candle
                 string scanKey = $"{pair}:{tf}";
-                if (_lastScannedCandleTimes.TryGetValue(scanKey, out var prevScannedTime) && prevScannedTime >= lastCandleTime)
+                if (_lastScannedCandleTimes.TryGetValue(scanKey, out var prevScannedTime) && prevScannedTime >= lastCandleTime && (prevScannedTime - lastCandleTime) <= TimeSpan.FromMinutes(5))
                 {
                     _logger.LogDebug($"[AutoScanner] Skipped {scanKey}: closed candle {lastCandleTime:HH:mm:ss.fff} already analyzed.");
                     return;

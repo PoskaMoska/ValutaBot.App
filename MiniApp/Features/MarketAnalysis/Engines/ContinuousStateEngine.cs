@@ -38,7 +38,7 @@ public static class ContinuousStateEngine
 
         foreach (var p in prices)
         {
-            if (double.IsNaN(p) || double.IsInfinity(p))
+            if (!double.IsFinite(p) || p <= 0)
             {
                 return new ContinuousStateResult(0, 0, 0, "UNKNOWN", 0, "Обнаружено повреждение данных (NaN/Infinity).");
             }

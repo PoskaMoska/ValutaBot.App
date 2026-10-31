@@ -170,7 +170,7 @@ namespace ValutaBot.MiniApp
             new BoundedChannelOptions(ChannelCapacity)
             {
                 FullMode     = BoundedChannelFullMode.DropOldest,
-                SingleReader = true,   // only ProcessTickQueueAsync reads
+                SingleReader = false,
                 SingleWriter = false   // multiple WS ticks write concurrently
             });
 
@@ -180,6 +180,7 @@ namespace ValutaBot.MiniApp
         private static int _isInitialized = 0;
         private static readonly SemaphoreSlim _dbWriteLock = new(1, 1);
         private static CancellationTokenSource _collectorCts = new();
+        private static readonly List<TickEvent> _pendingBatchBuffer = new(8000);
 
         public static Task InitializeAsync()
         {
@@ -210,6 +211,7 @@ namespace ValutaBot.MiniApp
             _s30.Clear();
             _m1.Clear();
             _ringBuffers.Clear();
+            ValutaBot.MiniApp.Services.AutoTradingScannerService.ResetLastScannedTimes();
         }
 
         public static void Initialize()
@@ -270,13 +272,14 @@ namespace ValutaBot.MiniApp
             lock (_dbWriteLock)
             {
                 Interlocked.Exchange(ref _isInitialized, 0);
+                _pendingBatchBuffer.Clear();
                 try { _collectorCts.Cancel(); } catch { }
                 _tickChannel.Writer.TryComplete();
                 _collectorCts = new CancellationTokenSource();
                 _tickChannel = Channel.CreateBounded<TickEvent>(new BoundedChannelOptions(ChannelCapacity)
                 {
                     FullMode = BoundedChannelFullMode.DropOldest,
-                    SingleReader = true,
+                    SingleReader = false,
                     SingleWriter = false
                 });
             }
@@ -298,7 +301,7 @@ namespace ValutaBot.MiniApp
 
             try
             {
-                var drainList = new List<TickEvent>(2000);
+                var drainList = _pendingBatchBuffer;
                 while (_tickChannel.Reader.TryRead(out var tick))
                 {
                     drainList.Add(tick);
@@ -309,8 +312,11 @@ namespace ValutaBot.MiniApp
                 bool ok = await WriteBatchInternalAsync(drainList, linkedCts.Token);
                 if (ok)
                 {
-                    BotLogger.Info($"[TickCollector] Flushed {drainList.Count} buffered ticks to PostgreSQL.");
-                    return drainList.Count;
+                    int flushedCount = drainList.Count;
+                    drainList.Clear();
+                    BotLogger.Info($"[TickCollector] Flushed {flushedCount} buffered ticks to PostgreSQL.");
+                    return flushedCount;
+                    // drained and cleared above
                 }
                 return 0;
             }
@@ -397,13 +403,13 @@ namespace ValutaBot.MiniApp
 
         private static async Task ProcessTickQueueAsync()
         {
-            var buffer = new List<TickEvent>(1000);
+            var buffer = _pendingBatchBuffer;
             var token = _collectorCts.Token;
             int consecutiveBatchFailures = 0;
 
             try
             {
-                while (!token.IsCancellationRequested && await _tickChannel.Reader.WaitToReadAsync(token))
+                while (!token.IsCancellationRequested && (buffer.Count > 0 || await _tickChannel.Reader.WaitToReadAsync(token)))
                 {
                     if (buffer.Count == 0 && _tickChannel.Reader.Count < 200)
                     {
@@ -424,6 +430,22 @@ namespace ValutaBot.MiniApp
                         {
                             wroteAny = true;
                             success = await WriteBatchInternalAsync(buffer, token);
+                            if (success)
+                            {
+                                buffer.Clear();
+                                consecutiveBatchFailures = 0;
+                            }
+                            else
+                            {
+                                consecutiveBatchFailures++;
+                                if (consecutiveBatchFailures >= 5)
+                                {
+                                    BotLogger.Error($"[TickCollector] Batch write failed {consecutiveBatchFailures} times consecutively. Discarding {buffer.Count} poisoned ticks to restore channel ingestion.");
+                                    buffer.Clear();
+                                    consecutiveBatchFailures = 0;
+                                }
+                            }
+                            wroteAny = false;
                         }
                     }
                     finally
@@ -513,6 +535,7 @@ namespace ValutaBot.MiniApp
                     };
 
                     MiniAppController.OhlcCandle? liveCandle = null;
+                    MiniAppController.OhlcCandle[]? closedCandlesFromLock = null;
                     if (tDict != null && tDict.TryGetValue(cleanAsset, out var live))
                     {
                         lock (live)
@@ -521,12 +544,13 @@ namespace ValutaBot.MiniApp
                             {
                                 liveCandle = new MiniAppController.OhlcCandle(
                                     live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
+                            closedCandlesFromLock = ring.GetRecent(live.Open.HasValue ? limit - 1 : limit);
                             }
                         }
                     }
 
                     int closedToTake = liveCandle != null ? limit - 1 : limit;
-                    var closedCandles = ring.GetRecent(closedToTake);
+                    var closedCandles = closedCandlesFromLock ?? ring.GetRecent(closedToTake);
 
                     if (liveCandle != null)
                     {

@@ -437,6 +437,7 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_opentime_asset ON subminute_candles(open_time, asset);
+                CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
                 DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf;
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_at;
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_at;

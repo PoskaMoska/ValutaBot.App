@@ -139,6 +139,7 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf, "CONNORS_RSI"), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.ConnorsRsiLastClosedTick);
             if (s.ConnorsRsiBase is null || unseen > 50 || IsTimestampRewind(candles, s.ConnorsRsiLastClosedTick) || IsStale(s))
             {
@@ -173,10 +174,12 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
     {
         if (candles.Length < period) return candles.Length > 0 ? candles[^1].Close : 0.0;
+        return GetHmaWithSlope(asset, tf, candles, period).current; { /*
         if (_states.Count > 1000) PruneStates();
         var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.HmaLastClosedTick);
             if (s.HmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastClosedTick) || IsStale(s))
             {
@@ -203,7 +206,7 @@ internal sealed class IndicatorCache
             // FIX-HMA-SLOPE: запоминаем предыдущее значение перед обновлением
             s.HmaPrev = s.HmaLast;
             s.HmaLast = liveHma.Update(candles[^1].Close);
-            return s.HmaLast;
+            return s.HmaLast; */
         }
     }
 
@@ -220,6 +223,7 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.HmaLastClosedTick);
             if (s.HmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.HmaLastClosedTick) || IsStale(s))
             {
@@ -271,6 +275,7 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf, $"EMA_{period}"), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.EmaLastClosedTick);
             if (s.EmaBase is null || unseen > 50 || IsTimestampRewind(candles, s.EmaLastClosedTick) || IsStale(s))
             {
@@ -309,6 +314,7 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf, $"ADX_{period}"), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.AdxLastClosedTick);
             if (s.AdxBase is null || unseen > 50 || IsTimestampRewind(candles, s.AdxLastClosedTick) || IsStale(s))
             {
@@ -347,6 +353,7 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf, $"ATR_{period}"), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.AtrLastClosedTick);
             if (s.AtrBase is null || unseen > 50 || IsTimestampRewind(candles, s.AtrLastClosedTick) || IsStale(s))
             {
@@ -383,6 +390,7 @@ internal sealed class IndicatorCache
         var s = _states.GetOrAdd((asset, tf, "SMC"), _ => new CacheState());
         lock (s)
         {
+            s.LastAccess = DateTime.UtcNow;
             int unseen = CountUnseen(candles, s.SmcLastClosedTick);
             if (s.SmcBase is null || unseen > 50 || IsTimestampRewind(candles, s.SmcLastClosedTick) || IsStale(s))
             {
@@ -394,7 +402,7 @@ internal sealed class IndicatorCache
             else if (unseen > 0)
             {
                 int startIdx = Math.Max(0, candles.Length - unseen - 20);
-                s.SmcBase.Update(candles.Slice(startIdx, candles.Length - 1 - startIdx), currentPrice);
+                if (unseen > 1) s.SmcBase.Update(candles.Slice(startIdx, candles.Length - 1 - startIdx), currentPrice);
                 s.SmcLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
             }
 

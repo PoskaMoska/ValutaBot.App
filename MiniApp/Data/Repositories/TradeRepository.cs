@@ -90,6 +90,60 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
     {
         private const string PoEraCutoff = "2026-10-15 21:55:00+00";
 
+        private static double Sanitize(double val, double fallback = 0.0) => double.IsFinite(val) ? val : fallback;
+
+        private static void SanitizeOutcome(TradeOutcomeRecord o)
+        {
+            o.EntryPrice = Sanitize(o.EntryPrice);
+            o.ExitPrice = Sanitize(o.ExitPrice);
+            o.PnlBps = Sanitize(o.PnlBps);
+            o.TaScore = Sanitize(o.TaScore);
+            o.OfScore = Sanitize(o.OfScore);
+            o.SmcScore = Sanitize(o.SmcScore);
+            o.MlProb = Sanitize(o.MlProb, 0.5);
+            o.MlScore = Sanitize(o.MlScore);
+            o.OfDeltaRatio = Sanitize(o.OfDeltaRatio, 1.0);
+            o.AtrAtSignal = Sanitize(o.AtrAtSignal);
+            o.AdxAtSignal = Sanitize(o.AdxAtSignal);
+            o.RsiAtSignal = Sanitize(o.RsiAtSignal, 50.0);
+            o.MlModelAccuracy = Sanitize(o.MlModelAccuracy);
+            o.MaxFavorableBps = Sanitize(o.MaxFavorableBps);
+            o.MaxAdverseBps = Sanitize(o.MaxAdverseBps);
+            o.PriceEntropy = Sanitize(o.PriceEntropy);
+            o.PricePositionPct = Sanitize(o.PricePositionPct, 0.5);
+        }
+
+        private static SignalTracker.PredictionRecord SanitizePrediction(SignalTracker.PredictionRecord r)
+        {
+            r.EntryPrice = Sanitize(r.EntryPrice);
+            r.TaScore = Sanitize(r.TaScore);
+            r.OfScore = Sanitize(r.OfScore);
+            r.SmcScore = Sanitize(r.SmcScore);
+            r.MlProb = Sanitize(r.MlProb, 0.5);
+            r.MlScore = Sanitize(r.MlScore);
+            r.OfDeltaRatio = Sanitize(r.OfDeltaRatio, 1.0);
+            r.AtrAtSignal = Sanitize(r.AtrAtSignal);
+            r.AdxAtSignal = Sanitize(r.AdxAtSignal);
+            r.RsiAtSignal = Sanitize(r.RsiAtSignal, 50.0);
+            r.MlModelAccuracy = Sanitize(r.MlModelAccuracy);
+            r.PriceEntropy = Sanitize(r.PriceEntropy);
+            r.PricePositionPct = Sanitize(r.PricePositionPct, 0.5);
+            return r;
+        }
+
+        private static Dictionary<string, string> SafeDeserializeDirections(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new Dictionary<string, string>();
+            try
+            {
+                return System.Text.Json.JsonSerializer.Deserialize(json, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>();
+            }
+            catch
+            {
+                return new Dictionary<string, string>();
+            }
+        }
+
         public static async Task<EvolutionDumpDto?> GetEvolutionDumpAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return null;
@@ -169,7 +223,7 @@ FROM outcome_data;");
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
                     VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
-                    ON CONFLICT (id) DO NOTHING", outcomes); // Dapper handles the loop
+                    ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; })); // Dapper handles the loop
             }
             catch (Exception ex)
             {
@@ -180,6 +234,7 @@ FROM outcome_data;");
         public static async Task SaveTradeOutcomeAsync(TradeOutcomeRecord outcome, string? pendingTradeIdToDelete = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            SanitizeOutcome(outcome);
             for (int attempt = 1; attempt <= 2; attempt++)
             {
                 try
@@ -202,7 +257,7 @@ FROM outcome_data;");
                             @TaDirection, @MlDirection, @SmcDirection, @OfDirection, @ConflictCount,
                             @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
                             @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
-                            @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, @TaTelemetry::jsonb, @MlTelemetry::jsonb, @SmcTelemetry::jsonb)
+                            @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(@TaTelemetry, '')::jsonb, NULLIF(@MlTelemetry, '')::jsonb, NULLIF(@SmcTelemetry, '')::jsonb)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
                         timeframe = EXCLUDED.timeframe,
@@ -369,7 +424,7 @@ FROM outcome_data;");
                     EntryPrice = r.EntryPrice != null ? Convert.ToDouble(r.EntryPrice) : 0.0,
                     ExitPrice = r.ExitPrice != null ? Convert.ToDouble(r.ExitPrice) : 0.0,
                     PnlBps = r.PnlBps != null ? Convert.ToDouble(r.PnlBps) : 0.0,
-                    WasWin = Convert.ToBoolean(r.WasWin),
+                    WasWin = r.WasWin != null ? Convert.ToBoolean(r.WasWin) : null,
                     TaScore = r.TaScore != null ? Convert.ToDouble(r.TaScore) : 0.0,
                     OfScore = r.OfScore != null ? Convert.ToDouble(r.OfScore) : 0.0,
                     SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,
@@ -394,10 +449,10 @@ FROM outcome_data;");
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.ExecuteAsync(@"
                 INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, @TaTelemetry::jsonb, @MlTelemetry::jsonb, @SmcTelemetry::jsonb)
+                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(@TaTelemetry, '')::jsonb, NULLIF(@MlTelemetry, '')::jsonb, NULLIF(@SmcTelemetry, '')::jsonb)
                 ON CONFLICT (id) DO NOTHING", 
                 new {
-                    record.Id,
+                    Id = SanitizePrediction(record).Id,
                     record.Direction,
                     record.Asset,
                     record.Timeframe,
@@ -489,8 +544,8 @@ FROM outcome_data;");
                 CreatedAt = string.IsNullOrEmpty(r.CreatedAtStr) ? DateTime.MinValue : DateTime.Parse(r.CreatedAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),
                 VerifyAt = string.IsNullOrEmpty(r.VerifyAtStr) ? DateTime.MinValue : DateTime.Parse(r.VerifyAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),
                 IsForex = r.IsForex != null ? Convert.ToBoolean(r.IsForex) : false,
-                SourceDirections = string.IsNullOrEmpty(r.SourceDirectionsStr) ? new Dictionary<string, string>() : 
-                    System.Text.Json.JsonSerializer.Deserialize(r.SourceDirectionsStr, ValutaBotJsonContext.Default.DictionaryStringString) ?? new Dictionary<string, string>(),
+                SourceDirections = SafeDeserializeDirections((string?)r.SourceDirectionsStr),
+
                 Probability = r.Probability != null ? Convert.ToInt32(r.Probability) : 0,
                 FeaturesJson = r.FeaturesJson ?? "",
                 TaScore = r.TaScore != null ? Convert.ToDouble(r.TaScore) : 0.0,

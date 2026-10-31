@@ -45,7 +45,7 @@ public static class SignalTracker
 
         // Hard Circuit Breaker Guard: Never record a live order when Circuit Breaker is active!
         bool isRealTrade = direction is "BUY" or "PUT";
-        if (isRealTrade && TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true)
+        if (isRealTrade && (TradeOutcomeTracker.CircuitBreaker?.IsHalted() == true || (TradeOutcomeTracker.CircuitBreaker != null && TradeOutcomeTracker.CircuitBreaker.IsSymbolQuarantined(asset, timeframe, out _))))
         {
             BotLogger.Warn($"[Tracker] BLOCKED live {direction} on {asset}: Circuit Breaker is HALTED ({TradeOutcomeTracker.CircuitBreaker.GetHaltedReason()}). Downgrading to SHADOW.");
             direction = "SHADOW_" + direction;
@@ -56,6 +56,7 @@ public static class SignalTracker
         var now = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
+        timeframeSecs = Math.Max(1, timeframeSecs);
         int durationSecs = Math.Max(1, expiryCandles) * timeframeSecs;
         long tfTicks = TimeSpan.FromSeconds(timeframeSecs).Ticks;
         DateTime barOpen = new DateTime(now.Ticks - (now.Ticks % tfTicks), DateTimeKind.Utc);

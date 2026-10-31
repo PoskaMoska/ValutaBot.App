@@ -150,7 +150,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             using var conn = DbConnectionFactory.GetConnection();
             var settings = await GetSettingsAsync(chatId); // ensures row exists
 
-            bool newVal = settingType switch
+            _ = settingType switch
             {
                 "ml" => !settings.EnableMl,
                 "smc" => !settings.EnableSmc,
@@ -166,7 +166,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 _ => throw new ArgumentException("Unknown setting type")
             };
 
-            await conn.ExecuteAsync($"UPDATE user_settings SET {column} = @newVal WHERE chat_id = @chatId", new { newVal, chatId });
+            await conn.ExecuteAsync($"UPDATE user_settings SET {column} = NOT COALESCE({column}, true) WHERE chat_id = @chatId", new { chatId });
             _settingsCache.TryRemove(chatId, out _);
         }
     }

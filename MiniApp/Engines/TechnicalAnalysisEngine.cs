@@ -50,6 +50,27 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             return new TaScoringDetail(0.0, 50.0, 50.0, prices.Length > 0 ? prices[^1] : 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "NOT_ENOUGH_DATA", 0.0, 0.0, 0.0, 0.0, 0.0);
         }
 
+        for (int i = 0; i < prices.Length; i++)
+        {
+            if (!double.IsFinite(prices[i]) || prices[i] <= 0)
+                return new TaScoringDetail(0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "CORRUPTED_DATA", 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        for (int i = 0; i < volumes.Length; i++)
+        {
+            if (!double.IsFinite(volumes[i]) || volumes[i] < 0)
+                return new TaScoringDetail(0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "CORRUPTED_DATA", 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        for (int i = 0; i < candles.Length; i++)
+        {
+            var c = candles[i];
+            if (!double.IsFinite(c.Open) || !double.IsFinite(c.High) || !double.IsFinite(c.Low) ||
+                !double.IsFinite(c.Close) || !double.IsFinite(c.Volume) ||
+                c.Low > c.High || c.Close <= 0 || c.Open <= 0 || c.Low <= 0 || c.Volume < 0)
+            {
+                return new TaScoringDetail(0.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "CORRUPTED_DATA", 0.0, 0.0, 0.0, 0.0, 0.0);
+            }
+        }
+
         bool isSubMinute = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase);
 
         int rsiPeriod = isSubMinute ? 8 : 14;
@@ -305,7 +326,9 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             for (int i = 0; i < candles.Length; i++)
             {
                 var c = candles[i];
-                if (c.Low > c.High || c.Close <= 0 || c.Open <= 0 || double.IsNaN(c.Close) || double.IsInfinity(c.Close))
+                if (!double.IsFinite(c.Open) || !double.IsFinite(c.High) || !double.IsFinite(c.Low) ||
+                    !double.IsFinite(c.Close) || !double.IsFinite(c.Volume) ||
+                    c.Low > c.High || c.Close <= 0 || c.Open <= 0 || c.Low <= 0 || c.Volume < 0)
                 {
                     BotLogger.Warn($"[Gatekeeper] Corrupted candle detected at index {i}: O={c.Open}, H={c.High}, L={c.Low}, C={c.Close}. Low > High or invalid values.");
                     return new GatekeeperResult(false, "Corrupted candle data (Low > High or invalid price).", 0, 0);

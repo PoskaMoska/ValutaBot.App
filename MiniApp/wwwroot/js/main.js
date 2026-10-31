@@ -1,7 +1,7 @@
 import { initPriceWebSocket, closePriceWebSocket, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
 import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261029_audit_v6';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner } from './ui.js?v=20261029_audit_v6';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError } from './ui.js?v=20261029_audit_v6';
 
 // 1. Telegram WebApp Lifecycle & Viewport Stabilization
 if (tg) {
@@ -63,6 +63,9 @@ function initAssetGrid() {
     const gridEl = document.getElementById('assetGrid');
     if (gridEl) {
         gridEl.innerHTML = `<div class='otc-scroll' style='grid-column:1/-1'><div class='asset-grid'>${renderAssets(assetsList)}</div></div>`;
+        const safeAsset = (window.CSS && CSS.escape) ? CSS.escape(currentAsset) : currentAsset.replace(/(["\\])/g, '\\$1');
+        const activeItem = gridEl.querySelector(`.asset-item[data-asset="${safeAsset}"]`);
+        if (activeItem) activeItem.classList.add('active');
     }
 }
 
@@ -88,6 +91,7 @@ export function cancelCopilotTimer() {
 function throttledWsSwitch() {
     cancelCopilotTimer();
     cancelAnalysis();
+    closePriceWebSocket(); // Immediate disconnect: prevents stale ticks from old pair leaking into UI
     updateCountdown();
     if (switchThrottleTimer) clearTimeout(switchThrottleTimer);
     switchThrottleTimer = setTimeout(() => {
@@ -223,6 +227,9 @@ function handleGlobalInteraction(e) {
 
 document.addEventListener('click', handleGlobalInteraction);
 
+// Initialize asset DOM elements first so subsequent URL params can match them
+initAssetGrid();
+
 // URL Params with CSS Injection Guard
 (function() {
     try {
@@ -230,11 +237,13 @@ document.addEventListener('click', handleGlobalInteraction);
         const a = p.get('asset');
         const t = p.get('tf');
         if (a) {
-            const el = document.querySelector(`.asset-item[data-asset="${CSS.escape(a.toUpperCase())}"]`);
+            const safeA = (window.CSS && CSS.escape) ? CSS.escape(a.toUpperCase()) : a.toUpperCase().replace(/(["\\])/g, '\\$1');
+            const el = document.querySelector(`.asset-item[data-asset="${safeA}"]`);
             if (el) { setAsset(el); el.scrollIntoView && el.scrollIntoView({ block: 'nearest' }); }
         }
         if (t) {
-            const el = document.querySelector(`.tf-btn[data-tf="${CSS.escape(t.toUpperCase())}"]`);
+            const safeT = (window.CSS && CSS.escape) ? CSS.escape(t.toUpperCase()) : t.toUpperCase().replace(/(["\\])/g, '\\$1');
+            const el = document.querySelector(`.tf-btn[data-tf="${safeT}"]`);
             if (el) setTf(el);
         }
     } catch(e) {}
@@ -295,16 +304,30 @@ function updateCountdown() {
     }
 }
 
+let resumeDebounceTimer = null;
 function resumeLive() {
     if (document.hidden) return;
-    hideNetworkBanner();
-    resetWebSocketBackoff();
-    syncTime().finally(updateCountdown);
-    updateCountdown(); // Immediately update display without waiting for 1s interval
-    initPriceWebSocket();
+    if (resumeDebounceTimer) clearTimeout(resumeDebounceTimer);
+    resumeDebounceTimer = setTimeout(() => {
+        resumeDebounceTimer = null;
+        if (document.hidden) return;
+        hideNetworkBanner();
+        resetWebSocketBackoff();
+        syncTime().finally(updateCountdown);
+        updateCountdown(); // Immediately update display without waiting for 1s interval
+        initPriceWebSocket();
+    }, 150);
 }
 
-initAssetGrid();
+// Banner tap recovery
+const netAlertEl = document.getElementById('networkAlert');
+if (netAlertEl) {
+    netAlertEl.style.cursor = 'pointer';
+    netAlertEl.addEventListener('click', () => {
+        resumeLive();
+    });
+}
+
 syncTime().finally(updateCountdown);
 initPriceWebSocket();
 
@@ -356,8 +379,10 @@ window.addEventListener('online', () => {
 
 window.addEventListener('offline', () => {
     setNetworkOnlineState(false);
-    closePriceWebSocket(); // Close socket first...
-    showNetworkBanner('Нет интернет-соединения'); // ...then show network banner
+    closePriceWebSocket();
+    cancelAnalysis();
+    showNetworkBanner('Нет интернет-соединения');
+    renderError('⚠️ Ошибка соединения', 'Соединение с интернетом потеряно. Проверьте подключение (4G/Wi-Fi).');
     const valEl = document.getElementById('livePriceValue');
     if (valEl) {
         valEl.innerText = 'ОФФЛАЙН';

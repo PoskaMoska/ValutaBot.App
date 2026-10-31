@@ -24,7 +24,7 @@ public static partial class MiniAppController
     private static int _activeWebSocketConnections = 0;
     private const int MaxGlobalWebSocketConnections = 500;
     private static readonly ConcurrentDictionary<string, int> _wsConnectionsPerIp = new();
-    private const int MaxWsPerIp = 5;
+    private const int MaxWsPerIp = 20;
     private static readonly byte[] HeartbeatBytes = Encoding.UTF8.GetBytes("{\"hb\":1}");
 
     public static void RegisterRoutes(WebApplication app)
@@ -165,10 +165,10 @@ public static partial class MiniAppController
             }
 
             string providedSecret = query.TryGetValue("secret", out var secVal) ? secVal.ToString().Trim() : "";
-            byte[] expBytes = Encoding.UTF8.GetBytes(expectedSecret);
-            byte[] provBytes = Encoding.UTF8.GetBytes(providedSecret);
+            byte[] expHash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(expectedSecret));
+            byte[] provHash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(providedSecret));
 
-            if (expBytes.Length != provBytes.Length || !CryptographicOperations.FixedTimeEquals(expBytes, provBytes))
+            if (!CryptographicOperations.FixedTimeEquals(expHash, provHash))
             {
                 BotLogger.Warn($"[Security] Unauthorized postback attempt blocked (Invalid Secret). IP: {context.Connection.RemoteIpAddress}");
                 return Results.Unauthorized();
@@ -199,7 +199,7 @@ public static partial class MiniAppController
             await TelegramBotService.ProcessPostback(chatId, pocketId, status, deposit);
 
             return Results.Ok(new { success = true, message = "Postback processed successfully" });
-        });
+        }).RequireRateLimiting("Global");
     }
 
     #endregion

@@ -229,12 +229,12 @@ def train_dual_stream(data_path="ml_service/data/dataset_v5_dual_stream.npz", ep
 
     # Save PyTorch checkpoint
     os.makedirs("ml_service/models", exist_ok=True)
-    save_pt = "ml_service/models/dual_stream_brain_v5.pt"
+    save_pt = "ml_service/models/legacy_dual_stream_brain_v5.pt"
     torch.save(best_checkpoint or model.state_dict(), save_pt)
     print(f"[+] Saved PyTorch weights to: {save_pt}")
     
-    # Auto-export to ONNX for 1ms in-process C# execution!
-    save_onnx = "ml_service/models/dual_stream_brain_v5.onnx"
+    # Auto-export to ONNX (legacy model path to avoid overwriting production dual_stream_brain_v5.onnx)
+    save_onnx = "ml_service/models/legacy_dual_stream_brain_v5.onnx"
     dummy_macro = torch.randn(1, 30, 5)
     dummy_micro = torch.randn(1, 30, 5)
     dummy_bridge = torch.randn(1, 4)
