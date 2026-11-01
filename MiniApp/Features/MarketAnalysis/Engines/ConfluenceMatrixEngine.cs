@@ -346,8 +346,8 @@ public class ConfluenceMatrixEngine(
             taScore = 0.0;
         }
 
-        // OF DISABLED from live voting, but preserved in telemetry if passed via ofSignal
-        double ofScore = ofSignal?.ScoreContribution ?? 0.0;
+        // OF DISABLED: 35.8% empirical win-rate (anti-signal on live data).
+        double ofScore = 0.0;
 
         double smcScore = 0;
         if ((smcSignal.BosDirection ?? "").Contains("BULLISH")) smcScore += 0.5;
