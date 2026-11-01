@@ -448,6 +448,9 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_tz_expr ON trade_outcomes ((created_at::timestamptz) DESC);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_tz_expr ON trade_outcomes ((verified_at::timestamptz) DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_registrations_trial_reminders ON registrations (trial_started_at, trial_ends_at) WHERE has_deposited = FALSE AND chat_id > 0;
                 DROP INDEX IF EXISTS idx_subminute_opentime_asset;
                 DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf;
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_at;
@@ -467,6 +470,7 @@ namespace ValutaBot.App.MiniApp.Data
                     BEGIN
                         ALTER TABLE subminute_candles SET (
                             fillfactor = 80,
+                            autovacuum_vacuum_threshold = 50,
                             autovacuum_vacuum_scale_factor = 0.02,
                             autovacuum_analyze_scale_factor = 0.01,
                             autovacuum_vacuum_cost_limit = 2000,
@@ -485,8 +489,11 @@ namespace ValutaBot.App.MiniApp.Data
                     EXCEPTION WHEN others THEN END;
                     BEGIN
                         ALTER TABLE pending_trades SET (
+                            fillfactor = 70,
+                            autovacuum_vacuum_threshold = 20,
                             autovacuum_vacuum_scale_factor = 0.01,
-                            autovacuum_vacuum_cost_limit = 1000
+                            autovacuum_vacuum_cost_limit = 1000,
+                            autovacuum_vacuum_cost_delay = 2
                         );
                     EXCEPTION WHEN others THEN END;
                 END $$;

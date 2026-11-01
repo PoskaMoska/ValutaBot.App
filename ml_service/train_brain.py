@@ -413,7 +413,14 @@ def train_model(
     class_counts = np.bincount(train_y, minlength=3)
     print(f"    Train class counts: HOLD={class_counts[0]:,}, BUY={class_counts[1]:,}, PUT={class_counts[2]:,}")
 
-    weights = np.array([0.80, 1.18, 1.18], dtype=np.float32)
+    # Класс HOLD (0) получает повышенный штраф за ложное срабатывание в распиле,
+    # соответствующий соотношению риска и доходности Pocket Option (1.00 / 0.85 = 1.18):
+    total_samples = float(len(train_y))
+    class_freq = np.bincount(train_y, minlength=3) / max(1.0, total_samples)
+    # Balanced weights with Pocket Option asymmetric EV penalty:
+    base_w = 1.0 / np.maximum(class_freq, 0.05)
+    base_w = base_w / base_w.mean()
+    weights = np.array([base_w[0] * 1.25, base_w[1] * 1.18, base_w[2] * 1.18], dtype=np.float32)
     print(f"    Directional Class weights for Loss: HOLD={weights[0]:.4f}, BUY={weights[1]:.4f}, PUT={weights[2]:.4f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

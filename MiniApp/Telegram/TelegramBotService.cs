@@ -362,11 +362,19 @@ public partial class TelegramBotService : BackgroundService
                     await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 120)), ct);
                     continue;
                 }
-                return new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+                
+                // FIX: Всегда инициализируем StringContent во избежание NullReferenceException у вызывающего кода
+                return new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests)
+                {
+                    Content = new StringContent("{\"ok\":false,\"description\":\"Too Many Requests: retry limit exceeded\"}", Encoding.UTF8, "application/json")
+                };
             }
             return resp;
         }
-        return new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+        return new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests)
+        {
+            Content = new StringContent("{\"ok\":false,\"description\":\"Too Many Requests: retry limit exceeded\"}", Encoding.UTF8, "application/json")
+        };
     }
 
     internal static async Task SendMessage(string token, long chatId, string text)

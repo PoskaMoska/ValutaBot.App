@@ -102,7 +102,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
 
         // Detect dead flat market (range < 35% of ATR over 10 bars)
         bool isDeadMarket = false;
-        if (prices.Length >= 10 && atrVal > 1e-9)
+        if (prices.Length >= 10)
         {
             double minP = double.MaxValue, maxP = double.MinValue;
             for (int i = prices.Length - 10; i < prices.Length; i++)
@@ -110,7 +110,8 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
                 if (prices[i] < minP) minP = prices[i];
                 if (prices[i] > maxP) maxP = prices[i];
             }
-            if ((maxP - minP) < (atrVal * 0.35))
+            double windowRange = maxP - minP;
+            if (windowRange < 1e-9 || (atrVal > 1e-9 && windowRange < (atrVal * 0.35)) || atrVal <= 1e-9)
                 isDeadMarket = true;
         }
 

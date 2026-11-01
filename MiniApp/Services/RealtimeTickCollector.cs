@@ -356,8 +356,12 @@ namespace ValutaBot.MiniApp
                 // but the items already consumed into 'buffer' retain their insertion (FIFO) order.
                 // Since Channel is SingleReader, buffer preserves the order ticks arrived from WS.
                 // Calling g.ToList() locks in that FIFO order so First()=oldest=Open, Last()=newest=Close.
+                // Гарантируем строгий порядок взятия строковых блокировок для исключения взаимных блокировок (Deadlocks)
                 var grouped = buffer
                     .GroupBy(t => new { t.Asset, t.Interval, t.OpenTime })
+                    .OrderBy(g => g.Key.Asset)
+                    .ThenBy(g => g.Key.Interval)
+                    .ThenBy(g => g.Key.OpenTime)
                     .Select(g =>
                     {
                         var ordered = g.ToList(); // FIFO insertion order = chronological
@@ -371,7 +375,7 @@ namespace ValutaBot.MiniApp
                             Close    = ordered.Last().Price,   // chronologically last tick
                             Volume   = ordered.Count
                         };
-                    });
+                    }).ToList();
 
                 // D1-3 FIX: commandTimeout=8s prevents the consumer loop from blocking
                 // for Npgsql's default 30s ConnectTimeout when PostgreSQL is flapping.

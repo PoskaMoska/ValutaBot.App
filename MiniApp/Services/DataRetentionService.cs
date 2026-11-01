@@ -191,8 +191,14 @@ public class DataRetentionService : BackgroundService
 
         int histDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles",
             "DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff = histCutoff });
-        int pendingDeleted = await ExecuteSafeDeleteAsync(conn, "pending_trades",
-            "DELETE FROM pending_trades WHERE verify_at < @cutoff", new { cutoff = stalePendingCutoff });
+        int pendingDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "pending_trades (Stale)",
+            @"DELETE FROM pending_trades
+              WHERE ctid IN (
+                  SELECT ctid FROM pending_trades
+                  WHERE verify_at < @cutoff
+                  LIMIT 1000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = stalePendingCutoff }, chunkSize: 1000);
 
         // 6. Importance Sampling and Pruning for trade_outcomes
         int shadowDeleted = 0;

@@ -237,7 +237,7 @@ class DualStreamPatchBrain(nn.Module):
             pos[:, 22] = 0.0  # neutralize ordinal asset_id in deep MLP
         if xm.size(1) >= 31:
             pos[:, 24] = torch.tanh(xm[:, 24] * 1.5)
-            pos[:, 25] = torch.tanh(xm[:, 25] * 300.0)     # rescale hma_slope from ~1e-3 to [-1, 1]
+            pos[:, 25] = torch.tanh(xm[:, 25] * 1.0)
             pos[:, 28] = torch.clamp(xm[:, 28] - 0.5, -1.0, 1.0)
 
         neg = pos.clone()
@@ -337,7 +337,7 @@ class DualStreamPatchBrain(nn.Module):
         if x_macro.size(1) >= 31:
             ta_score = torch.clamp(x_macro[:, 23], -1.0, 1.0)
             mvel = torch.tanh(x_macro[:, 24] * 1.5)
-            hma = torch.tanh(x_macro[:, 25] * 300.0)
+            hma = torch.tanh(x_macro[:, 25] * 1.0)
             vol_ratio = torch.clamp(x_macro[:, 26], 0.0, 1.0)
             bb_sq = torch.clamp(x_macro[:, 27], 0.0, 1.0)
         else:

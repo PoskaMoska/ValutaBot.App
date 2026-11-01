@@ -73,6 +73,7 @@ namespace ValutaBot.MiniApp.Services
                     await SendExpiredNoticeAsync(token, reg);
                     reg.TrialExpiredSent = true;
                     await RegistrationRepository.SaveRegistrationAsync(reg);
+                    await Task.Delay(40, ct); // Rate limit guard: <= 25 msg/s global
                     continue;
                 }
 
@@ -89,6 +90,7 @@ namespace ValutaBot.MiniApp.Services
                     reg.ReminderDay3Sent = true;
                     reg.ReminderDay2Sent = true; // Mark day 2 as well to prevent late out-of-order sending
                     await RegistrationRepository.SaveRegistrationAsync(reg);
+                    await Task.Delay(40, ct); // Rate limit guard: <= 25 msg/s global
                     continue;
                 }
 
@@ -99,6 +101,7 @@ namespace ValutaBot.MiniApp.Services
                     await SendDay2ValueReminderAsync(token, reg, now);
                     reg.ReminderDay2Sent = true;
                     await RegistrationRepository.SaveRegistrationAsync(reg);
+                    await Task.Delay(40, ct); // Rate limit guard: <= 25 msg/s global
                 }
             }
         }

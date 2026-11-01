@@ -228,7 +228,8 @@ public class MarketAnalysisOrchestrator(
         DateTime referenceNowUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
-        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= referenceNowUtc;
+        // Допуск 250мс для компенсации джиттера таймштампа тиков и монотонного Stopwatch
+        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= referenceNowUtc.AddMilliseconds(250);
         var closedCandles = isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
         if (closedCandles.Length > limit)
             closedCandles = closedCandles.TakeLast(limit).ToArray();
@@ -239,7 +240,14 @@ public class MarketAnalysisOrchestrator(
         MiniAppController.OhlcCandle[]? higherCandles = null;
         if (higherTf != null)
         {
-            higherCandles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, higherTf, cleanAsset, 100);
+            try
+            {
+                higherCandles = await _fetcher.FetchOhlcWithFallbackAsync(symbol, higherTf, cleanAsset, 100);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("[TRACE {TraceId}] Higher TF {Htf} unavailable on cold start: {Msg}", traceId, higherTf, ex.Message);
+            }
         }
         var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1 && higherTf != null) 
             ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= referenceNowUtc) 
@@ -375,7 +383,8 @@ public class MarketAnalysisOrchestrator(
                 Score = S(taDetail.Score),
                 MicroVel = S(taDetail.MicroVel),
                 HmaSlope = S(taDetail.HmaSlope),
-                VolRatio = S(taDetail.VolStrengthVal)
+                VolStrengthVal = S(taDetail.VolStrengthVal),
+                VolRatio = S(taDetail.VolRatio)
             }
         };
 
@@ -618,13 +627,15 @@ public class MarketAnalysisOrchestrator(
         var matrixSw = Stopwatch.StartNew();
         double conflictPenalty = 1.0;
         if (prep.ClosedHigherCandles.Length > 0 && prep.HigherTf != null) {
+            double[] higherPrices = prep.ClosedHigherCandles.Select(c => c.Close).ToArray();
+            double[] higherVolumes = prep.ClosedHigherCandles.Select(c => c.Volume).ToArray();
             var hAdx = _mathEngine.ComputeTrueAdx(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles);
             var hAtr = _mathEngine.ComputeAtr(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles);
-            var hResult = _marketAnalyzer.ScoreTimeframe(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles.Select(c=>c.Close).ToArray(), prep.ClosedHigherCandles.Select(c=>c.Volume).ToArray(), candles: prep.ClosedHigherCandles, adxOverride: hAdx.adx, atrOverride: hAtr, isForex: prep.IsForex);
+            var hResult = _marketAnalyzer.ScoreTimeframe(prep.CleanAsset, prep.HigherTf, higherPrices, higherVolumes, candles: prep.ClosedHigherCandles, adxOverride: hAdx.adx, atrOverride: hAtr, isForex: prep.IsForex);
             conflictPenalty *= (sensors.TaResult.score * hResult.score < -0.01) ? 0.7 : 1.0;
         }
 
-        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(prep.CleanAsset, timeframe, prep.IsForex, prep.Symbol, prep.ClosedCandles, prep.ClosedPrices, prep.ClosedVolumes, prep.ClosedHigherCandles, prep.ClosedHigherCandles.Select(c=>c.Close).ToArray(), prep.ClosedHigherCandles.Select(c=>c.Volume).ToArray());
+        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(prep.CleanAsset, timeframe, prep.IsForex, prep.Symbol, prep.ClosedCandles, prep.ClosedPrices, prep.ClosedVolumes, prep.ClosedHigherCandles, prep.ClosedHigherCandles.Length > 0 ? prep.ClosedHigherCandles.Select(c => c.Close).ToArray() : Array.Empty<double>(), prep.ClosedHigherCandles.Length > 0 ? prep.ClosedHigherCandles.Select(c => c.Volume).ToArray() : Array.Empty<double>());
         
         var taSignal = new TaSignal(sensors.TaResult.score, sensors.TaResult.confidence, sensors.TaResult.rsiVal, sensors.TaResult.hmaVal, sensors.TaResult.volStrengthVal, sensors.MainAtr, sensors.MainAdx);
         var smcSignal = new SmcSignal(sensors.SmcResult.BosDirection ?? "", sensors.SmcResult.SweepDirection ?? "", sensors.SmcResult.OrderBlockType ?? "", sensors.SmcResult.FvgType ?? "", "");

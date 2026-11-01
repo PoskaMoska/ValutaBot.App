@@ -1,15 +1,40 @@
 import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
 import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261029_audit_v6';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError } from './ui.js?v=20261029_audit_v6';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions } from './ui.js?v=20261029_audit_v6';
 
-// 1. Telegram WebApp Lifecycle & Viewport Stabilization
+// 1. Telegram WebApp Lifecycle, Viewport & Theme Synchronization
 if (tg) {
     try {
         tg.ready();
         tg.expand();
         if (typeof tg.enableClosingConfirmation === 'function') {
-            tg.enableClosingConfirmation(); // Prevent accidental swipe dismiss
+            tg.enableClosingConfirmation();
+        }
+        
+        // Синхронизация системного бара и оверскролла Telegram с темой терминала
+        const syncTgTheme = () => {
+            try {
+                if (typeof tg.setHeaderColor === 'function') tg.setHeaderColor('#03010c');
+                if (typeof tg.setBackgroundColor === 'function') tg.setBackgroundColor('#03010c');
+            } catch (e) {}
+        };
+        syncTgTheme();
+        if (typeof tg.onEvent === 'function') {
+            tg.onEvent('themeChanged', syncTgTheme);
+            
+            // Обработка открытия/закрытия виртуальной клавиатуры и изменения вьюпорта
+            tg.onEvent('viewportChanged', (eventData) => {
+                if (tg.viewportHeight) {
+                    document.documentElement.style.setProperty('--tg-viewport-height', `${tg.viewportHeight}px`);
+                }
+                if (tg.viewportStableHeight) {
+                    document.documentElement.style.setProperty('--tg-viewport-stable-height', `${tg.viewportStableHeight}px`);
+                }
+                if (typeof updateCanvasDimensions === 'function') {
+                    updateCanvasDimensions();
+                }
+            });
         }
         if (window.Sentry && tg.initDataUnsafe?.user) {
             const u = tg.initDataUnsafe.user;
@@ -105,6 +130,13 @@ function setAsset(el) {
     el = el.closest('.asset-item') || el;
     const a = el.getAttribute('data-asset');
     if (!a) return;
+    
+    // Если актив не изменился — просто закрываем меню без сброса сокета и анализа
+    if (a === currentAsset) {
+        const menuEl = document.getElementById('assetMenu');
+        if (menuEl) menuEl.classList.remove('show');
+        return;
+    }
     setCurrentAsset(a);
     const selEl = document.getElementById('selectedAsset');
     if (selEl) selEl.innerText = a;
@@ -124,6 +156,13 @@ function setTf(el) {
     el = el.closest('.tf-btn') || el;
     const tf = el.getAttribute('data-tf');
     if (!tf) return;
+    
+    // Если таймфрейм не изменился — закрываем меню без прерывания потока
+    if (tf.toLowerCase() === currentTf.toLowerCase()) {
+        const menuEl = document.getElementById('tfMenu');
+        if (menuEl) menuEl.classList.remove('show');
+        return;
+    }
     setCurrentTf(tf);
     const selEl = document.getElementById('selectedTf');
     if (selEl) selEl.innerText = tf.toUpperCase();
@@ -222,7 +261,8 @@ function handleGlobalInteraction(e) {
         return;
     }
 
-    if (!target.closest('.selector-section') && !target.closest('.error-debug-toggle')) {
+    // Закрываем меню при клике вне триггеров и самих списков меню
+    if (!target.closest('.dropdown-trigger') && !target.closest('.asset-menu') && !target.closest('.tf-menu')) {
         const am = document.getElementById('assetMenu');
         const tm = document.getElementById('tfMenu');
         if (am && am.classList.contains('show')) am.classList.remove('show');
@@ -319,9 +359,11 @@ function resumeLive() {
         hideNetworkBanner();
         resetWebSocketBackoff();
         syncTime().finally(updateCountdown);
-        updateCountdown(); // Immediately update display without waiting for 1s interval
-        handleWakeupReconnect();
-        initPriceWebSocket();
+        updateCountdown();
+        // Защита от дублирующего соединения: если реконнект пробуждения сработал, второй вызов опускается
+        if (!handleWakeupReconnect()) {
+            initPriceWebSocket();
+        }
     }, 150);
 }
 

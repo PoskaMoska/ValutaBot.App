@@ -20,8 +20,10 @@ public class PendingTradeVerificationService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        
+        // Сброс зависших блокировок после холодного перезапуска контейнера
+        await TradeRepository.ResetAllOrphanedClaimsAsync();
         BotLogger.Info("[PendingVerifier] Started. Sweeping pending trades every 5s for strict grid verification.");
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await SweepExpiredTradesAsync(stoppingToken); }
@@ -43,10 +45,20 @@ public class PendingTradeVerificationService : BackgroundService
         DateTime currentRefTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
-        // Wait 4s after VerifyAt so RealtimeTickCollector's 3s batch buffer has guaranteed flushed the expiry s5 candle to PostgreSQL.
-        // limit 30 ensures 5 parallel workers process the batch in <= 6s, well inside the 15s claim lease.
-        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(currentRefTime.AddSeconds(-4), limit: 30); }
-        catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Could not load pending trades: {ex.Message}"); return; }
+        // Передаем активные ключи _awaitingCandleUntil, чтобы база НЕ клеймила ожидающие свечей сделки
+        var activeAwaitingIds = _awaitingCandleUntil.Where(kvp => kvp.Value > nowUtc).Select(kvp => kvp.Key).ToList();
+        try 
+        { 
+            expired = await TradeRepository.GetPendingTradesToVerifyAsync(
+                currentRefTime.AddSeconds(-4), 
+                limit: 30, 
+                excludeIds: activeAwaitingIds); 
+        }
+        catch (Exception ex) 
+        { 
+            BotLogger.Warn($"[PendingVerifier] Could not load pending trades: {ex.Message}"); 
+            return; 
+        }
 
         if (expired.Count == 0) return;
 
@@ -55,9 +67,6 @@ public class PendingTradeVerificationService : BackgroundService
         foreach (var record in expired)
         {
             if (ct.IsCancellationRequested) break;
-
-            if (_awaitingCandleUntil.TryGetValue(record.Id, out var waitExpiry) && waitExpiry > nowUtc)
-                continue;
 
             tasks.Add(Task.Run(async () =>
             {
@@ -224,8 +233,12 @@ public class PendingTradeVerificationService : BackgroundService
 
         if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
         {
-            // Do not archive/cancel trade if DB fetch encountered an exception; retry on next verification sweep
-            if (dbFailed) return;
+            if (dbFailed)
+            {
+                // Освобождаем claimed_at, чтобы сделка сразу повторилась на следующем тике с новым коннектом
+                await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
+                return;
+            }
 
             if (physicalSecondsOverdue >= 120)
             {

@@ -31,8 +31,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         {
             if (SuperAdmins.Contains(chatId)) return true;
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return false;
-            using var conn = DbConnectionFactory.GetConnection();
-            return await conn.ExecuteScalarAsync<bool>("SELECT EXISTS(SELECT 1 FROM allowed_users WHERE chat_id = @chatId)", new { chatId });
+            
+            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
+            return await conn.ExecuteScalarAsync<bool>(
+                "SELECT EXISTS(SELECT 1 FROM allowed_users WHERE chat_id = @chatId)", new { chatId });
         }
 
         public static async Task<bool> IsAdminAsync(long chatId)
@@ -112,12 +114,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             {
                 return cached.settings;
             }
-
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new UserSettings();
-
             try
             {
-                using var conn = DbConnectionFactory.GetConnection();
+                await using var conn = await DbConnectionFactory.OpenConnectionAsync();
                 var settings = await conn.QueryFirstOrDefaultAsync<UserSettings>(
                     "SELECT enable_ml as EnableMl, enable_smc as EnableSmc, enable_of as EnableOf FROM user_settings WHERE chat_id = @chatId", 
                     new { chatId });
@@ -126,16 +126,14 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 {
                     settings = new UserSettings();
                     await conn.ExecuteAsync(
-                        "INSERT INTO user_settings (chat_id, enable_ml, enable_smc, enable_of) VALUES (@chatId, @EnableMl, @EnableSmc, @EnableOf)",
+                        "INSERT INTO user_settings (chat_id, enable_ml, enable_smc, enable_of) VALUES (@chatId, @EnableMl, @EnableSmc, @EnableOf) ON CONFLICT (chat_id) DO NOTHING",
                         new { chatId, settings.EnableMl, settings.EnableSmc, settings.EnableOf });
                 }
-
                 _settingsCache[chatId] = (settings, DateTime.UtcNow);
                 return settings;
             }
             catch (Exception)
             {
-                // Fallback to last known cached settings or default on transient DB network glitches
                 if (_settingsCache.TryGetValue(chatId, out var fallback))
                 {
                     return fallback.settings;
@@ -147,17 +145,9 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public static async Task ToggleSettingAsync(long chatId, string settingType)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            using var conn = DbConnectionFactory.GetConnection();
-            var settings = await GetSettingsAsync(chatId); // ensures row exists
-
-            _ = settingType switch
-            {
-                "ml" => !settings.EnableMl,
-                "smc" => !settings.EnableSmc,
-                "of" => !settings.EnableOf,
-                _ => throw new ArgumentException("Unknown setting type")
-            };
-
+            
+            // Сначала получаем настройки (одно соединение)
+            var settings = await GetSettingsAsync(chatId);
             string column = settingType switch
             {
                 "ml" => "enable_ml",
@@ -165,8 +155,12 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 "of" => "enable_of",
                 _ => throw new ArgumentException("Unknown setting type")
             };
-
-            await conn.ExecuteAsync($"UPDATE user_settings SET {column} = NOT COALESCE({column}, true) WHERE chat_id = @chatId", new { chatId });
+            // Затем обновляем (второе соединение открывается СТРОГО ПОСЛЕ освобождения первого)
+            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
+            await conn.ExecuteAsync(
+                $"UPDATE user_settings SET {column} = NOT COALESCE({column}, true) WHERE chat_id = @chatId", 
+                new { chatId });
+                
             _settingsCache.TryRemove(chatId, out _);
         }
     }

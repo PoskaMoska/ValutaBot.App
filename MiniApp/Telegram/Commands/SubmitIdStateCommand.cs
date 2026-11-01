@@ -18,11 +18,8 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
 
         public async Task ExecuteAsync(long chatId, string command, string cleanText, bool isAdmin, string token, string webAppUrl)
         {
-            // RACE CONDITION FIX: Atomically claim the state. If two Tasks run concurrently
-            // (e.g. user double-taps), only the first one succeeds. The second sees None and exits.
-            bool claimed = TelegramBotService.UserStates.TryUpdate(chatId,
-                newValue: TelegramBotService.UserState.None,
-                comparisonValue: TelegramBotService.UserState.AwaitingId);
+            // RACE CONDITION FIX: Atomically claim the state and purge from memory
+            bool claimed = TelegramBotService.UserStates.TryRemove(chatId, out var state) && state == TelegramBotService.UserState.AwaitingId;
             if (!claimed) return;
             var match = Regex.Match(cleanText, @"\d{7,10}");
             if (match.Success)
@@ -109,6 +106,10 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             {
                 await TelegramBotService.SendMessage(token, chatId, "❌ <b>Неверный формат ID.</b>\n\nПожалуйста, введите корректный ID аккаунта Pocket Option (это число из 7-10 цифр).");
             }
+
+            // Очищаем состояние и временный ID из памяти сразу после обработки
+            TelegramBotService.UserStates.TryRemove(chatId, out _);
+            TelegramBotService.UserSubmittedIds.TryRemove(chatId, out _);
         }
     }
 }

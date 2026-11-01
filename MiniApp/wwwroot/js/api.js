@@ -131,7 +131,9 @@ export function handleWakeupReconnect() {
     if (_pendingReconnectOnWakeup) {
         _pendingReconnectOnWakeup = false;
         initPriceWebSocket();
+        return true; // Сигнализирует main.js, что реконнект уже выполнен
     }
+    return false;
 }
 
 function scheduleWsReconnect(valEl, isPolling = false) {
@@ -278,8 +280,14 @@ export function closePriceWebSocket() {
         clearTimeout(reconnectTimeout);
         reconnectTimeout = null;
     }
-    _pendingReconnectOnWakeup = false;
     resetLivePriceFlash();
+    
+    // Мгновенный сброс отображения старой цены при смене валютной пары
+    const valEl = document.getElementById('livePriceValue');
+    if (valEl) {
+        valEl.innerText = '--';
+        valEl.className = 'live-price-value';
+    }
     if (priceSocket) {
         try {
             priceSocket.onopen = null;

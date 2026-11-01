@@ -88,8 +88,35 @@ public class AutoTradingScannerService : BackgroundService
             return;
         }
 
-        _logger.LogInformation("[AutoScanner] Event-driven Pocket Option scanner started (s5..m1).");
-        await RunSubminuteScannerAsync(stoppingToken);
+        _logger.LogInformation("[AutoScanner] Event-driven Pocket Option scanner supervisor initialized (s5..m1).");
+        int consecutiveFailures = 0;
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await RunSubminuteScannerAsync(stoppingToken);
+                consecutiveFailures = 0; // Сброс при чистом завершении (если канал был пересоздан)
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                consecutiveFailures++;
+                int delaySec = Math.Min(consecutiveFailures * 2, 30);
+                _logger.LogError(ex, "[AutoScanner] Scanner loop crashed (failure #{Count}). Resuscitating scanner in {Delay}s...", consecutiveFailures, delaySec);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delaySec), stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+        }
+        _logger.LogInformation("[AutoScanner] Scanner service stopped cleanly.");
     }
 
     private async Task RunSubminuteScannerAsync(CancellationToken stoppingToken)

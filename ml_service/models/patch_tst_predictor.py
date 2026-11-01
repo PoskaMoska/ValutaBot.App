@@ -328,7 +328,7 @@ class PatchTSTPredictor:
             self._candle_features = checkpoint.get("candle_features", 5)
             self._seq_len = checkpoint.get("seq_len", 160)
             self._seq_len_mtf = checkpoint.get("seq_len_mtf", 30)
-            self._macro_features = checkpoint.get("macro_features", 23)
+            self._macro_features = checkpoint.get("macro_features", 31)
             macro_dim = self._macro_features
             d_model = checkpoint.get("d_model", 64)
             backbone = checkpoint.get("backbone", "hybrid")
@@ -465,17 +465,17 @@ class PatchTSTPredictor:
             p_buy = float(probs[1])
             p_put = float(probs[2])
 
-            # Determine direction from directional probabilities (conditional on non-flat movement)
-            p_dir_sum = max(p_buy + p_put, 1e-8)
-            p_buy_cond = p_buy / p_dir_sum
-            p_put_cond = p_put / p_dir_sum
-
-            # Flat-market / zero-drift tie-break guard: return HOLD instead of biasing towards BUY
-            if abs(p_buy - p_put) < 1e-4 or abs(p_buy_cond - 0.5) < 1e-4:
+            # Full-Recall Flat Guard: если класс HOLD доминирует или превышает порог безубыточности
+            # на Pocket Option (флэт гарантирует убыток из-за спреда):
+            if p_hold >= max(p_buy, p_put) or p_hold >= 0.45 or abs(p_buy - p_put) < 0.02:
                 direction = "HOLD"
                 calibrated_prob = 0.50
                 raw_prob = 0.50
             else:
+                p_dir_sum = max(p_buy + p_put, 1e-8)
+                p_buy_cond = p_buy / p_dir_sum
+                p_put_cond = p_put / p_dir_sum
+
                 if p_buy > p_put:
                     direction = "BUY"
                     raw_dir_prob = p_buy_cond
@@ -483,11 +483,8 @@ class PatchTSTPredictor:
                     direction = "PUT"
                     raw_dir_prob = p_put_cond
 
-                # Calibrated confidence:
-                # In binary options, raw_dir_prob (p_buy_cond or p_put_cond) directly reflects binary directional confidence.
-                # Flat chop (HOLD) dampens directional confidence proportionally:
-                # When p_hold is high, flat movement indicates high risk of expiry tie/loss on Pocket Option.
-                chop_penalty = max(0.20, 1.0 - p_hold * 0.75)
+                # Плавный штраф за остаточный риск флэта
+                chop_penalty = max(0.20, 1.0 - p_hold * 0.85)
                 calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * chop_penalty
 
                 # S5 Micro-Regime Dampener:

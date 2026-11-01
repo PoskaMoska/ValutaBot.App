@@ -480,7 +480,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 PO_CUTOFF_UTC = "2026-10-21 20:15:00+00"
 
-def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=8, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True, min_pnl_bps=0.30):
+def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30, channels=8, include_tiingo=False, min_date=PO_CUTOFF_UTC, stride_hf=True, min_pnl_bps=1.20):
     print("=" * 60)
     print("[*] Neural Brain Dataset Exporter (V4 Architecture)")
     print(f"Connecting to database...")
@@ -828,7 +828,7 @@ if __name__ == "__main__":
     parser.add_argument("--channels", type=int, choices=[4, 5, 8], default=8, help="Candle feature channels: 4 (OHLC), 5 (OHLCV) or 8 (OHLCV+Wicks+Range)")
     parser.add_argument("--include-tiingo", action="store_true", help="Include legacy Tiingo era rows (not recommended for PO OTC)")
     parser.add_argument("--min-date", default=PO_CUTOFF_UTC, help="Minimum created_at UTC timestamp for PO era")
-    parser.add_argument("--min-pnl-bps", type=float, default=0.30, help="Minimum price delta in bps for non-HOLD classification")
+    parser.add_argument("--min-pnl-bps", type=float, default=1.20, help="Minimum price delta in bps for non-HOLD classification (spread hurdle)")
     parser.add_argument("--no-stride-hf", action="store_true", help="Disable SQL striding of high-frequency s5/s10 rows")
     args = parser.parse_args()
     

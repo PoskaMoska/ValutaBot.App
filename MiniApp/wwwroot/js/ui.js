@@ -137,13 +137,11 @@ export function renderExpiryCandles(containerId, ohlc, count) {
         c: Number(k.c ?? k.close)
     })).filter(k => [k.o, k.h, k.l, k.c].every(Number.isFinite));
     if (!tail.length) return;
-
     const H = 40;
     const lo = Math.min(...tail.map(k => k.l));
     const hi = Math.max(...tail.map(k => k.h));
     const span = hi - lo;
     const y = (p) => span < 1e-12 ? H / 2 : 2 + ((hi - p) / span) * (H - 4);
-
     container.innerHTML = tail.map((k, i) => {
         const yH = y(k.h), yL = y(k.l);
         const yO = y(k.o), yC = y(k.c);
@@ -152,7 +150,7 @@ export function renderExpiryCandles(containerId, ohlc, count) {
         const forming = i === tail.length - 1 ? ' forming' : '';
         const wickStyle = `top:${yH.toFixed(1)}px;height:${Math.max(1, yL - yH).toFixed(1)}px`;
         const bodyStyle = `top:${bodyTop.toFixed(1)}px;height:${bodyH.toFixed(1)}px`;
-        const cls = 'exp-neutral';
+        const cls = k.c >= k.o ? 'exp-bull' : 'exp-bear';
         return `<div class='exp-candle${forming}'><div class='exp-wick ${cls}' style='${wickStyle}'></div><div class='exp-body ${cls}' style='${bodyStyle}'></div></div>`;
     }).join('');
 }
@@ -393,15 +391,21 @@ function updateCanvasDimensions() {
     const canvas = document.getElementById('aiChartCanvas');
     if (!canvas || !canvas.parentElement) return;
     const rect = canvas.parentElement.getBoundingClientRect();
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Поддержка 3x дисплеев (iPhone Retina / Samsung Ultra) с ограничением до 3
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
     cachedCanvasW = rect.width;
     cachedCanvasH = rect.height;
     cachedFloorGrad = null;
     if (cachedCanvasW > 0 && cachedCanvasH > 0) {
-        canvas.width = Math.floor(cachedCanvasW * dpr);
-        canvas.height = Math.floor(cachedCanvasH * dpr);
+        const targetW = Math.round(cachedCanvasW * dpr);
+        const targetH = Math.round(cachedCanvasH * dpr);
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+            canvas.width = targetW;
+            canvas.height = targetH;
+        }
         const ctx = canvas.getContext('2d');
         if (ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
             cachedFloorGrad = ctx.createLinearGradient(0, cachedCanvasH * 0.6, 0, cachedCanvasH);
             cachedFloorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
             cachedFloorGrad.addColorStop(1, 'rgba(184, 41, 255, 0.15)');
@@ -501,7 +505,10 @@ function renderAiChartLoop() {
         }
     }
     const ctx = canvas.getContext('2d');
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    
+    // Полный аппаратный сброс буфера кадра для предотвращения остаточных артефактов
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     
     ctx.save();
     ctx.scale(dpr, dpr);
@@ -543,7 +550,6 @@ function renderAiChartLoop() {
         const range = maxP - minP || 1;
         const scaleY = (h - paddingY * 2) / range;
         
-        // Candles (drawn crisp and fast without heavy shadowBlur)
         for (let i = 0; i < count; i++) {
             const c = aiChartData[i];
             const open = Number(c.open ?? c.o);
@@ -564,7 +570,6 @@ function renderAiChartLoop() {
             
             const color = isBull ? '#00b3ff' : '#9b5de5'; 
             
-            // 1. Draw Wick
             ctx.strokeStyle = color;
             ctx.lineWidth = 1; 
             ctx.beginPath();
@@ -572,24 +577,29 @@ function renderAiChartLoop() {
             ctx.lineTo(cx, Math.floor(yLow) + 0.5);
             ctx.stroke();
             
-            // 2. Draw Solid Body
             ctx.fillStyle = color;
             ctx.fillRect(Math.floor(x), Math.floor(yTop), candleWidth, Math.ceil(bodyH));
         }
     }
-
     ctx.restore();
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
 }
-
+// Экспорт для Telegram WebApp viewportChanged
+export { updateCanvasDimensions };
+// Обработка ориентации и визуального вьюпорта
 if (typeof window !== 'undefined') {
-    window.addEventListener('resize', () => {
+    const onWindowOrViewportResize = () => {
         if (!aiChartAnimationId || resizeRafId) return;
         resizeRafId = requestAnimationFrame(() => {
             resizeRafId = null;
             if (aiChartAnimationId) updateCanvasDimensions();
         });
-    }, { passive: true });
+    };
+    window.addEventListener('resize', onWindowOrViewportResize, { passive: true });
+    window.addEventListener('orientationchange', onWindowOrViewportResize, { passive: true });
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', onWindowOrViewportResize, { passive: true });
+    }
 }
 
 // Session psychometrics tracker

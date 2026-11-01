@@ -68,9 +68,8 @@ public class ConfluenceMatrixEngine(
                 [macroTf.ToUpper()]   = dirMacro,
             };
 
-            var counts    = tfDirs.Values.GroupBy(d => d).ToDictionary(g => g.Key, g => g.Count());
-            int buyCount  = counts.GetValueOrDefault("BUY", 0);
-            int putCount  = counts.GetValueOrDefault("PUT", 0);
+            int buyCount  = (dirMicro == "BUY" ? 1 : 0) + (dirPrimary == "BUY" ? 1 : 0) + (dirMacro == "BUY" ? 1 : 0);
+            int putCount  = (dirMicro == "PUT" ? 1 : 0) + (dirPrimary == "PUT" ? 1 : 0) + (dirMacro == "PUT" ? 1 : 0);
             int maxAgree  = Math.Max(buyCount, putCount);
 
             double confluenceRatio = Math.Round(maxAgree / 3.0, 2);
@@ -206,33 +205,27 @@ public class ConfluenceMatrixEngine(
             string dirPrimary = "NEUTRAL";
             string dirMacro = "NEUTRAL";
 
-            async Task<string> ProcessTf(string targetTf)
+            Task<string> FetchAndScoreAsync(string targetTf) => Task.Run(async () =>
             {
-                if (targetTf == currentTf)
-                {
-                    return ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), targetTf, asset);
-                }
-                else if (targetTf == hTf)
-                {
-                    return ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), targetTf, asset);
-                }
-                else
-                {
-                    var candlesRaw = await fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, targetTf, asset, 50);
-                    candlesRaw = StripUnclosedCandle(candlesRaw, targetTf);
-                    var pricesRaw = candlesRaw.Select(c => c.Close).ToArray();
-                    var volsRaw = candlesRaw.Select(c => c.Volume).ToArray();
-                    return ScoreDirectionFromCandles(candlesRaw, pricesRaw, volsRaw, targetTf, asset);
-                }
-            }
+                var candlesRaw = await fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, targetTf, asset, 50);
+                candlesRaw = StripUnclosedCandle(candlesRaw, targetTf);
+                double[] pricesRaw = new double[candlesRaw.Length];
+                double[] volsRaw = new double[candlesRaw.Length];
+                for (int i = 0; i < candlesRaw.Length; i++) { pricesRaw[i] = candlesRaw[i].Close; volsRaw[i] = candlesRaw[i].Volume; }
+                return ScoreDirectionFromCandles(candlesRaw, pricesRaw, volsRaw, targetTf, asset);
+            });
 
-            var tMicro = ProcessTf(microTf);
-            var tPrimary = ProcessTf(primaryTf);
-            var tMacro = ProcessTf(macroTf);
-            await Task.WhenAll(tMicro, tPrimary, tMacro);
-            dirMicro = await tMicro;
-            dirPrimary = await tPrimary;
-            dirMacro = await tMacro;
+            dirMicro = microTf == currentTf ? ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), microTf, asset)
+                     : microTf == hTf ? ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), microTf, asset)
+                     : await FetchAndScoreAsync(microTf);
+
+            dirPrimary = primaryTf == currentTf ? ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), primaryTf, asset)
+                       : primaryTf == hTf ? ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), primaryTf, asset)
+                       : await FetchAndScoreAsync(primaryTf);
+
+            dirMacro = macroTf == currentTf ? ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), macroTf, asset)
+                     : macroTf == hTf ? ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), macroTf, asset)
+                     : await FetchAndScoreAsync(macroTf);
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -241,9 +234,8 @@ public class ConfluenceMatrixEngine(
                 [macroTf.ToUpper()]   = dirMacro,
             };
 
-            var counts    = tfDirs.Values.GroupBy(d => d).ToDictionary(g => g.Key, g => g.Count());
-            int buyCount  = counts.GetValueOrDefault("BUY", 0);
-            int putCount  = counts.GetValueOrDefault("PUT", 0);
+            int buyCount  = (dirMicro == "BUY" ? 1 : 0) + (dirPrimary == "BUY" ? 1 : 0) + (dirMacro == "BUY" ? 1 : 0);
+            int putCount  = (dirMicro == "PUT" ? 1 : 0) + (dirPrimary == "PUT" ? 1 : 0) + (dirMacro == "PUT" ? 1 : 0);
             int maxAgree  = Math.Max(buyCount, putCount);
 
             double confluenceRatio = Math.Round(maxAgree / 3.0, 2);
@@ -324,7 +316,7 @@ public class ConfluenceMatrixEngine(
         return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, null);
     }
 
-    private async Task<ConsensusDecision> EvaluateMatrixInternalAsync(
+    private Task<ConsensusDecision> EvaluateMatrixInternalAsync(
         string asset,
         string timeframe,
         bool isSubMinute,
@@ -339,7 +331,7 @@ public class ConfluenceMatrixEngine(
         ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
         OrderflowSignal? ofSignal = null)
     {
-        await Task.CompletedTask;
+        // Zero-allocation synchronous decision tree
         double taScore = taSignal.Score;
         if (double.IsNaN(taScore) || double.IsInfinity(taScore))
         {
@@ -618,7 +610,7 @@ public class ConfluenceMatrixEngine(
             BotLogger.Info($"\n{consensusReasoning}");
         }
 
-        return new ConsensusDecision(
+        return Task.FromResult(new ConsensusDecision(
             CandidateDirection: finalDir,
             FinalDirection: finalDir,
             Probability: finalProbPct,
@@ -630,6 +622,6 @@ public class ConfluenceMatrixEngine(
             SmcScore: normSmc,
             MlProb: rawProb,
             MlScoreRaw: normMl
-        );
+        ));
     }
 }

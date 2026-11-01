@@ -201,9 +201,11 @@ public static class PocketOptionWebSocketStream
     {
         if (ws.State != WebSocketState.Open) return;
         byte[] bytes = Encoding.UTF8.GetBytes(payload);
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, timeoutCts.Token);
         try
         {
-            await _sendLock.WaitAsync(token);
+            await _sendLock.WaitAsync(linkedCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -213,14 +215,19 @@ public static class PocketOptionWebSocketStream
         {
             if (ws.State == WebSocketState.Open)
             {
-                await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+                await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, linkedCts.Token).ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
+        {
+            BotLogger.Warn("[PO WS] SendTextAsync timed out (2s). Aborting socket to unblock send pipeline.");
+            try { ws.Abort(); } catch { }
+        }
         catch (ObjectDisposedException) { }
-        catch (WebSocketException) when (ws.State != WebSocketState.Open) { }
+        catch (WebSocketException) { }
         finally
         {
-            _sendLock.Release();
+            try { _sendLock.Release(); } catch { }
         }
     }
 
@@ -954,25 +961,40 @@ public static class PocketOptionWebSocketStream
         catch { }
     }
 
+    private static readonly ConcurrentDictionary<string, double> _lastBackfillSrvTs = new(StringComparer.OrdinalIgnoreCase);
     private static bool TryAdvanceCandleWatermark(string candleKey, double srvTs, bool isBackfill = false)
     {
+        if (isBackfill)
+        {
+            // Бэкфилл защищен отдельной монотонной ватермаркой, не блокируемой текущими тиками
+            while (true)
+            {
+                if (_lastBackfillSrvTs.TryGetValue(candleKey, out double prevBf))
+                {
+                    if (srvTs <= prevBf) return false;
+                    if (_lastBackfillSrvTs.TryUpdate(candleKey, srvTs, prevBf)) return true;
+                }
+                else if (_lastBackfillSrvTs.TryAdd(candleKey, srvTs))
+                {
+                    return true;
+                }
+            }
+        }
         while (true)
         {
             if (_lastCandleSrvTs.TryGetValue(candleKey, out double prevTs))
             {
-                // Self-healing if previous watermark was shifted by DST or server clock step (>5 min ahead)
-                if (!isBackfill && prevTs - srvTs > 300.0)
+                if (prevTs - srvTs > 300.0)
                 {
                     if (_lastCandleSrvTs.TryUpdate(candleKey, srvTs, prevTs)) return true;
                     continue;
                 }
-                if (srvTs < prevTs) return false;
-                if (srvTs == prevTs) return !isBackfill;
+                if (srvTs <= prevTs) return false;
                 if (_lastCandleSrvTs.TryUpdate(candleKey, srvTs, prevTs)) return true;
             }
-            else
+            else if (_lastCandleSrvTs.TryAdd(candleKey, srvTs))
             {
-                if (_lastCandleSrvTs.TryAdd(candleKey, srvTs)) return true;
+                return true;
             }
         }
     }

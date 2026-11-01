@@ -23,13 +23,17 @@
         body {
             background: #03010c;
             color: var(--text);
-            padding: 12px;
-            padding-bottom: 24px;
+            /* Safe-Area поддержка для iPhone с вырезом / Dynamic Island / Home Indicator */
+            padding-top: max(12px, env(safe-area-inset-top, 12px));
+            padding-right: max(12px, env(safe-area-inset-right, 12px));
+            padding-bottom: max(24px, calc(24px + env(safe-area-inset-bottom, 0px)));
+            padding-left: max(12px, env(safe-area-inset-left, 12px));
             font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             user-select: none;
             font-size: 14.5px;
             line-height: 1.45;
-            min-height: 100vh;
+            /* Устранение резинового отскока Telegram WebApp */
+            min-height: var(--tg-viewport-height, 100vh);
             overflow-x: hidden;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
@@ -1204,6 +1208,7 @@
 
 
 /* AI Animated Chart */
+/* AI Animated Chart — устранение помех мобильному скроллу (Touch Gesture Collisions) */
 .ai-chart-container {
     width: 100%;
     height: 180px;
@@ -1217,6 +1222,9 @@
     opacity: 0;
     transform: translateY(10px);
     transition: opacity 0.4s ease, transform 0.4s ease;
+    /* Разрешает вертикальный свайп сквозь контейнер без задержек */
+    touch-action: pan-y;
+    pointer-events: none;
 }
 .ai-chart-container.active {
     opacity: 1;
@@ -1226,6 +1234,9 @@
     width: 100%;
     height: 100%;
     display: block;
+    /* Отключает перехват жестов и предотвращает лаги скролла */
+    pointer-events: none;
+    touch-action: none;
 }
 
 /* ─── AI Copilot Tactical Card ─── */

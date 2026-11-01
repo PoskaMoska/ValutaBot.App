@@ -70,37 +70,40 @@ internal sealed class IndicatorCache
 
     // FIX C-3: Thread-safe, non-blocking LRU eviction with TOCTOU lock protection.
     // Evicts only states idle for >= 30 minutes, preventing active state evictions.
-    private void PruneStates()
+    private void SchedulePruneStates()
     {
         if (System.Threading.Interlocked.CompareExchange(ref _isPruning, 1, 0) != 0) return;
-        try
+        System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
-            var cutoff = DateTime.UtcNow.AddMinutes(-30);
-            var toDelete = _states
-                .Where(kv => kv.Value.LastAccess < cutoff)
-                .OrderBy(kv => kv.Value.LastAccess)
-                .Take(Math.Max(1, _states.Count / 4))
-                .Select(kv => kv.Key)
-                .ToList();
-
-            foreach (var k in toDelete)
+            try
             {
-                if (_states.TryGetValue(k, out var s))
+                var cutoff = DateTime.UtcNow.AddMinutes(-30);
+                var toDelete = _states
+                    .Where(kv => kv.Value.LastAccess < cutoff)
+                    .OrderBy(kv => kv.Value.LastAccess)
+                    .Take(Math.Max(1, _states.Count / 4))
+                    .Select(kv => kv.Key)
+                    .ToList();
+
+                foreach (var k in toDelete)
                 {
-                    lock (s)
+                    if (_states.TryGetValue(k, out var s))
                     {
-                        if (s.LastAccess < cutoff)
+                        lock (s)
                         {
-                            _states.TryRemove(new KeyValuePair<(string, string, string), CacheState>(k, s));
+                            if (s.LastAccess < cutoff)
+                            {
+                                _states.TryRemove(new KeyValuePair<(string, string, string), CacheState>(k, s));
+                            }
                         }
                     }
                 }
             }
-        }
-        finally
-        {
-            System.Threading.Interlocked.Exchange(ref _isPruning, 0);
-        }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _isPruning, 0);
+            }
+        });
     }
 
     /// <summary>
@@ -120,7 +123,7 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
         if (candles.Length <= period) return 50.0;
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, $"RSI_{period}"), _ => new CacheState());
         lock (s)
         {
@@ -159,7 +162,7 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles)
     {
         if (candles.Length < 20) return GetRsi(asset, tf, candles, 14);
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, "CONNORS_RSI"), _ => new CacheState());
         lock (s)
         {
@@ -199,7 +202,7 @@ internal sealed class IndicatorCache
     {
         if (candles.Length < period) return candles.Length > 0 ? candles[^1].Close : 0.0;
         return GetHmaWithSlope(asset, tf, candles, period).current; { /*
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
         lock (s)
         {
@@ -243,7 +246,7 @@ internal sealed class IndicatorCache
         if (candles.Length < period + 1)
             return (candles.Length > 0 ? candles[^1].Close : 0.0, candles.Length > 1 ? candles[^2].Close : 0.0);
 
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
         lock (s)
         {
@@ -295,7 +298,7 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
     {
         if (candles.Length == 0) return 0.0;
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, $"EMA_{period}"), _ => new CacheState());
         lock (s)
         {
@@ -334,7 +337,7 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
         if (candles.Length <= period) return (20.0, 0.0, 0.0);
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, $"ADX_{period}"), _ => new CacheState());
         lock (s)
         {
@@ -373,7 +376,7 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
         if (candles.Length <= period) return 0.0;
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, $"ATR_{period}"), _ => new CacheState());
         lock (s)
         {
@@ -410,7 +413,7 @@ internal sealed class IndicatorCache
 
     public StatefulSmc GetSmcState(string asset, string tf, ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
     {
-        if (_states.Count > 1000) PruneStates();
+        if (_states.Count > 1000) SchedulePruneStates();
         var s = _states.GetOrAdd((asset, tf, "SMC"), _ => new CacheState());
         lock (s)
         {
