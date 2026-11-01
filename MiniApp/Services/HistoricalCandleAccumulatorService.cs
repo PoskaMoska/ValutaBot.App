@@ -133,23 +133,15 @@ public class HistoricalCandleAccumulatorService : BackgroundService
 
                 totalSaved++;
 
-                // FIFO cap: keep max 100,000 rows per asset
-                long count = await conn.ExecuteScalarAsync<long>(
-                    "SELECT COUNT(*) FROM historical_candles WHERE asset = @Asset AND interval = @Interval",
-                    new { Asset = asset, Interval });
-
-                if (count > MaxCandlesPerAsset)
-                {
-                    await conn.ExecuteAsync(@"
-                        DELETE FROM historical_candles
-                        WHERE id IN (
-                            SELECT id FROM historical_candles
-                            WHERE asset = @Asset AND interval = @Interval
-                            ORDER BY open_time ASC
-                            LIMIT @ToDelete
-                        )
-                    ", new { Asset = asset, Interval, ToDelete = count - MaxCandlesPerAsset });
-                }
+                // FIFO cap: keep max 100,000 rows per asset via single query without N+1 COUNT(*)
+                await conn.ExecuteAsync(@"
+                    DELETE FROM historical_candles
+                    WHERE id IN (
+                        SELECT id FROM historical_candles
+                        WHERE asset = @Asset AND interval = @Interval
+                        ORDER BY open_time DESC
+                        OFFSET @MaxCandles
+                    );", new { Asset = asset, Interval, MaxCandles = MaxCandlesPerAsset });
             }
             catch (Exception ex)
             {

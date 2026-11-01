@@ -659,11 +659,17 @@ public static class PocketOptionWebSocketStream
                 return (Encoding.UTF8.GetString(rented, 0, firstResult.Count), null);
             }
 
-            using var ms = new MemoryStream();
+            const int maxFrameBytes = 4 * 1024 * 1024; // 4 MB safety limit
+            using var ms = new MemoryStream(Math.Min(65536, firstResult.Count * 2));
             ms.Write(rented, 0, firstResult.Count);
             WebSocketReceiveResult nextResult;
             do
             {
+                if (ms.Length > maxFrameBytes)
+                {
+                    BotLogger.Error("[PO WS] Frame exceeded 4MB limit, aborting frame receive.");
+                    return (null, null);
+                }
                 nextResult = await ws.ReceiveAsync(new ArraySegment<byte>(rented), token);
                 if (nextResult.MessageType == WebSocketMessageType.Close) return (null, null);
                 ms.Write(rented, 0, nextResult.Count);
@@ -753,12 +759,21 @@ public static class PocketOptionWebSocketStream
         bool subscribed = false;
         string? pendingEvent = null;
 
+        using var frameTimeoutCts = new CancellationTokenSource();
+        using var reg = connectionToken.Register(() =>
+        {
+            try { frameTimeoutCts.Cancel(); } catch { }
+        });
+
         while (ws.State == WebSocketState.Open && !connectionToken.IsCancellationRequested)
         {
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(connectionToken);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+            frameTimeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
 
-            var (text, binary) = await ReceiveFrameAsync(ws, timeoutCts.Token);
+            var (text, binary) = await ReceiveFrameAsync(ws, frameTimeoutCts.Token);
+            if (!frameTimeoutCts.TryReset())
+            {
+                break;
+            }
 
             if (text == null && binary == null)
             {

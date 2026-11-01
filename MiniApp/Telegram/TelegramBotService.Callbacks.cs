@@ -39,6 +39,14 @@ public partial class TelegramBotService
             var reg = await ValutaBot.App.MiniApp.Data.Repositories.RegistrationRepository.GetPocketRegistrationAsync(pocketId);
             if (reg != null)
             {
+                // SECURITY: Prevent Pocket ID hijacking via crafted callback data
+                if (reg.ChatId > 0 && reg.ChatId != chatId)
+                {
+                    BotLogger.Warn($"[Security 🛡️] Chat {chatId} attempted to claim Pocket ID {pocketId} belonging to chat {reg.ChatId}");
+                    await SendMessage(token, chatId, "❌ <b>Этот Pocket ID уже привязан к другому Telegram-аккаунту.</b>");
+                    return;
+                }
+
                 hasDeposited = reg.HasDeposited;
                 reg.ChatId = chatId;
                 await ValutaBot.App.MiniApp.Data.Repositories.RegistrationRepository.SaveRegistrationAsync(reg);

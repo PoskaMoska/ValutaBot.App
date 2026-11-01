@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -201,6 +201,9 @@ public sealed class DualStreamOnnxService : IDisposable
         finally
         {
             _sessionLock.ExitWriteLock();
+            // FIX R4-#1: Dispose the RWLS to release the native SRWLOCK OS handle.
+            // Must be called AFTER ExitWriteLock() -- never before or inside the try block.
+            _sessionLock.Dispose();
         }
     }
 }

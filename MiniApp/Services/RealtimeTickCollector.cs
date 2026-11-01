@@ -107,9 +107,9 @@ namespace ValutaBot.MiniApp
 
             public void AddRange(IEnumerable<MiniAppController.OhlcCandle> candles)
             {
+                var sorted = candles.OrderBy(c => c.Timestamp).ToList();
                 lock (_lock)
                 {
-                    var sorted = candles.OrderBy(c => c.Timestamp);
                     foreach (var c in sorted)
                     {
                         if (_count > 0)
@@ -211,6 +211,7 @@ namespace ValutaBot.MiniApp
             _s30.Clear();
             _m1.Clear();
             _ringBuffers.Clear();
+            _recentCandlesCache.Clear();
             ValutaBot.MiniApp.Services.AutoTradingScannerService.ResetLastScannedTimes();
         }
 
@@ -269,7 +270,14 @@ namespace ValutaBot.MiniApp
         /// </summary>
         public static void PrepareForInProcessRestart()
         {
-            lock (_dbWriteLock)
+            bool acquired = false;
+            try
+            {
+                acquired = _dbWriteLock.Wait(TimeSpan.FromSeconds(5));
+            }
+            catch { }
+
+            try
             {
                 Interlocked.Exchange(ref _isInitialized, 0);
                 _pendingBatchBuffer.Clear();
@@ -282,6 +290,13 @@ namespace ValutaBot.MiniApp
                     SingleReader = false,
                     SingleWriter = false
                 });
+            }
+            finally
+            {
+                if (acquired)
+                {
+                    try { _dbWriteLock.Release(); } catch { }
+                }
             }
         }
 
@@ -417,7 +432,7 @@ namespace ValutaBot.MiniApp
                         try { await Task.Delay(250, token); } catch (OperationCanceledException) { }
                     }
 
-                    bool wroteAny = false;
+
                     bool success = false;
                     await _dbWriteLock.WaitAsync(token);
                     try
@@ -428,7 +443,7 @@ namespace ValutaBot.MiniApp
                         }
                         if (buffer.Count > 0)
                         {
-                            wroteAny = true;
+
                             success = await WriteBatchInternalAsync(buffer, token);
                             if (success)
                             {
@@ -445,32 +460,12 @@ namespace ValutaBot.MiniApp
                                     consecutiveBatchFailures = 0;
                                 }
                             }
-                            wroteAny = false;
+
                         }
                     }
                     finally
                     {
                         _dbWriteLock.Release();
-                    }
-
-                    if (wroteAny)
-                    {
-
-                        if (success)
-                        {
-                            buffer.Clear(); // Only clear on success to prevent tick loss
-                            consecutiveBatchFailures = 0;
-                        }
-                        else
-                        {
-                            consecutiveBatchFailures++;
-                            if (consecutiveBatchFailures >= 5)
-                            {
-                                BotLogger.Error($"[TickCollector] Batch write failed {consecutiveBatchFailures} times consecutively. Discarding {buffer.Count} poisoned ticks to restore channel ingestion.");
-                                buffer.Clear();
-                                consecutiveBatchFailures = 0;
-                            }
-                        }
                     }
                     
                     // Throttle conditionally: if buffer has items (error retry), wait 300ms.

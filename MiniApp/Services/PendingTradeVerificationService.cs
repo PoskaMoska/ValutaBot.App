@@ -44,7 +44,8 @@ public class PendingTradeVerificationService : BackgroundService
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
         // Wait 4s after VerifyAt so RealtimeTickCollector's 3s batch buffer has guaranteed flushed the expiry s5 candle to PostgreSQL.
-        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(currentRefTime.AddSeconds(-4), limit: 150); }
+        // limit 30 ensures 5 parallel workers process the batch in <= 6s, well inside the 15s claim lease.
+        try { expired = await TradeRepository.GetPendingTradesToVerifyAsync(currentRefTime.AddSeconds(-4), limit: 30); }
         catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Could not load pending trades: {ex.Message}"); return; }
 
         if (expired.Count == 0) return;
@@ -96,8 +97,7 @@ public class PendingTradeVerificationService : BackgroundService
         {
             // Settle on Pocket Option OTC candle stream ("{ASSET}_PO").
             string cleanAsset = PriceFeed.CandleKey(record.Asset);
-            await using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
-            await conn.OpenAsync(ct);
+            await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync(ct);
             
             // Physical duration expiry: verifyUtc is the exact moment the contract expires.
             DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();

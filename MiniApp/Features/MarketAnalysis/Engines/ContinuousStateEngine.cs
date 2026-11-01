@@ -55,40 +55,49 @@ public static class ContinuousStateEngine
         };
         bool isSubMinute = tfSeconds < 60;
 
-        // 1. Calculate Dynamic Volatility (Proxy for ATR / Measurement Noise)
-        double sumDiff = 0, sumSqDiff = 0;
+        // 1. Calculate Dynamic Volatility via Welford algorithm (Numerically stable, no catastrophic cancellation)
+        double meanDiff = 0.0, m2Diff = 0.0;
+        int diffCount = 0;
         for (int i = 1; i < n; i++)
         {
             double diff = prices[i] - prices[i - 1];
-            sumDiff += diff;
-            sumSqDiff += diff * diff;
+            diffCount++;
+            double delta = diff - meanDiff;
+            meanDiff += delta / diffCount;
+            m2Diff += delta * (diff - meanDiff);
         }
-        double meanDiff = sumDiff / (n - 1);
-        double variance = (sumSqDiff / (n - 1)) - (meanDiff * meanDiff);
+        double variance = diffCount > 1 ? m2Diff / diffCount : 0.0;
         double dynamicAtr = Math.Sqrt(Math.Max(1e-12, variance));
 
-        // 2. Historical SG Derivatives for Z-Score Normalization
-        int velCount = n - 4; // SG filter needs 5 points window
-        double sumVel = 0, sumSqVel = 0, sumAccel = 0, sumSqAccel = 0;
+        // 2. Historical SG Derivatives for Z-Score Normalization via Welford algorithm
+        double meanVel = 0.0, m2Vel = 0.0;
+        double meanAccel = 0.0, m2Accel = 0.0;
+        int velCount = 0;
         
         for (int i = 4; i < n; i++)
         {
+            double pMid = Math.Max(1e-8, prices[i-2]);
             double sgV = (-2.0 * prices[i-4] - 1.0 * prices[i-3] + 0.0 * prices[i-2] + 1.0 * prices[i-1] + 2.0 * prices[i]) / 10.0;
-            double instV = (sgV / Math.Max(1e-8, prices[i-2])) * 10_000.0;
-            sumVel += instV; sumSqVel += instV * instV;
+            double instV = (sgV / pMid) * 10_000.0;
 
             double sgA = (2.0 * prices[i-4] - 1.0 * prices[i-3] - 2.0 * prices[i-2] - 1.0 * prices[i-1] + 2.0 * prices[i]) / 7.0;
-            double instA = (sgA / Math.Max(1e-8, prices[i-2])) * 10_000.0;
-            sumAccel += instA; sumSqAccel += instA * instA;
+            double instA = (sgA / pMid) * 10_000.0;
+
+            velCount++;
+            double deltaV = instV - meanVel;
+            meanVel += deltaV / velCount;
+            m2Vel += deltaV * (instV - meanVel);
+
+            double deltaA = instA - meanAccel;
+            meanAccel += deltaA / velCount;
+            m2Accel += deltaA * (instA - meanAccel);
         }
 
-        double meanVel = sumVel / velCount;
-        double stdDevVel = Math.Sqrt(Math.Max(1e-12, (sumSqVel / velCount) - (meanVel * meanVel)));
+        double stdDevVel = Math.Sqrt(Math.Max(1e-12, velCount > 1 ? m2Vel / velCount : 0.0));
         double minStdDevV = isSubMinute ? 0.05 : 0.5; // Prevent infinity in completely dead markets
         stdDevVel = Math.Max(minStdDevV, stdDevVel);
 
-        double meanAccel = sumAccel / velCount;
-        double stdDevAccel = Math.Sqrt(Math.Max(1e-12, (sumSqAccel / velCount) - (meanAccel * meanAccel)));
+        double stdDevAccel = Math.Sqrt(Math.Max(1e-12, velCount > 1 ? m2Accel / velCount : 0.0));
         double minStdDevA = isSubMinute ? 0.01 : 0.1;
         stdDevAccel = Math.Max(minStdDevA, stdDevAccel);
 

@@ -416,9 +416,16 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         for (int i = 0; i < 25; i++)
         {
             int idx = prices.Length - 25 + i;
-            double prevPrice = prices[idx - 1] <= 0 ? 1e-10 : prices[idx - 1];
-            double currPrice = prices[idx] <= 0 ? 1e-10 : prices[idx];
-            returns[i] = Math.Log(currPrice / prevPrice);
+            double prevPrice = prices[idx - 1];
+            double currPrice = prices[idx];
+            if (prevPrice <= 0 || currPrice <= 0 || !double.IsFinite(prevPrice) || !double.IsFinite(currPrice))
+            {
+                returns[i] = 0.0;
+            }
+            else
+            {
+                returns[i] = Math.Log(currPrice / prevPrice);
+            }
         }
 
         double shortVol = StandardDeviationScalar(returns.Slice(20, 5));

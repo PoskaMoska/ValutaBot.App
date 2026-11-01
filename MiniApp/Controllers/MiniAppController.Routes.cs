@@ -633,7 +633,7 @@ public static partial class MiniAppController
 
         app.MapPost("/api/chaos/run", async (HttpContext context, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
-            if (!await HasInternalSecretOrAuthAsync(context))
+            if (!await HasInternalSecretOrAuthAsync(context, requireSystemLevel: true))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
 
             var report = await chaos.RunFullAuditAsync();
@@ -642,7 +642,7 @@ public static partial class MiniAppController
 
         app.MapPost("/api/chaos/run/{category}", async (HttpContext context, string category, ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService chaos) =>
         {
-            if (!await HasInternalSecretOrAuthAsync(context))
+            if (!await HasInternalSecretOrAuthAsync(context, requireSystemLevel: true))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
 
             if (Enum.TryParse<ValutaBot.MiniApp.Features.ChaosAudit.Models.ChaosCategory>(category, true, out var cat))
@@ -681,7 +681,8 @@ public static partial class MiniAppController
 
         app.MapPost("/api/admin/db-maintenance", async (HttpContext context, bool? full) =>
         {
-            if (!await HasInternalSecretOrAuthAsync(context))
+            bool requiresSystem = full == true;
+            if (!await HasInternalSecretOrAuthAsync(context, requireSystemLevel: requiresSystem))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
 
             try
@@ -758,7 +759,7 @@ public static partial class MiniAppController
         return Results.Json(new { error = "Internal server error", traceId }, statusCode: status);
     }
 
-    private static async Task<bool> HasInternalSecretOrAuthAsync(HttpContext context)
+    private static async Task<bool> HasInternalSecretOrAuthAsync(HttpContext context, bool requireSystemLevel = false)
     {
         // 1. Constant-time SHA-256 check on X-Internal-Secret
         string expectedSecret = Environment.GetEnvironmentVariable("INTERNAL_API_SECRET") ?? _internalApiSecretFallback;
@@ -774,6 +775,11 @@ public static partial class MiniAppController
         if (!string.IsNullOrEmpty(adminKey) && IsSecretValidConstantTime(providedAdminKey, adminKey))
         {
             return true;
+        }
+
+        if (requireSystemLevel)
+        {
+            return false;
         }
 
         // 3. Admin session authorization via Telegram MiniApp

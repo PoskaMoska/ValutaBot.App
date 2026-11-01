@@ -1,4 +1,4 @@
-import { initPriceWebSocket, closePriceWebSocket, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
+import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
 import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261029_audit_v6';
 export { tg, getCustomInitData, currentAsset, currentTf };
 import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError } from './ui.js?v=20261029_audit_v6';
@@ -167,11 +167,13 @@ export function applyCopilotRecommendation(rec) {
         if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
         throttledWsSwitch();
         resetSignalKey();
-    }
-    copilotExecTimer = setTimeout(() => {
-        copilotExecTimer = null;
+        copilotExecTimer = setTimeout(() => {
+            copilotExecTimer = null;
+            executeAnalysis();
+        }, 250);
+    } else {
         executeAnalysis();
-    }, 250);
+    }
 }
 
 function handleGlobalInteraction(e) {
@@ -221,7 +223,10 @@ function handleGlobalInteraction(e) {
     }
 
     if (!target.closest('.selector-section') && !target.closest('.error-debug-toggle')) {
-        document.querySelectorAll('.asset-menu, .tf-menu').forEach(m => m.classList.remove('show'));
+        const am = document.getElementById('assetMenu');
+        const tm = document.getElementById('tfMenu');
+        if (am && am.classList.contains('show')) am.classList.remove('show');
+        if (tm && tm.classList.contains('show')) tm.classList.remove('show');
     }
 }
 
@@ -260,7 +265,7 @@ let lastCandleText = '';
 
 function updateCountdown() {
     if (document.hidden) return;
-    if (!cachedCandleTimeEl) {
+    if (!cachedCandleTimeEl || !cachedCandleTimeEl.isConnected) {
         cachedCandleTimeEl = document.getElementById('candleTime');
         if (!cachedCandleTimeEl) return;
     }
@@ -315,6 +320,7 @@ function resumeLive() {
         resetWebSocketBackoff();
         syncTime().finally(updateCountdown);
         updateCountdown(); // Immediately update display without waiting for 1s interval
+        handleWakeupReconnect();
         initPriceWebSocket();
     }, 150);
 }
@@ -366,7 +372,7 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-window.addEventListener('pageshow', (e) => { if (e.persisted) resumeLive(); });
+window.addEventListener('pageshow', () => { resumeLive(); });
 if (navigator.connection && typeof navigator.connection.addEventListener === 'function') {
     navigator.connection.addEventListener('change', () => { if (navigator.onLine) resumeLive(); });
 }

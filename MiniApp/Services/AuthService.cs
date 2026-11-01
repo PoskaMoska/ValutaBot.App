@@ -107,9 +107,8 @@ public static class AuthService
                 }
                 else
                 {
-                    // Backward compatibility: Validate legacy persistent Telegram chat keyboard buttons
-                    // signed with HMAC-SHA256(botToken, tgUserId). Forgery is cryptographically impossible without botToken.
-                    expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(tgUserId.ToString()));
+                    // SECURITY: Reject legacy tokens lacking auth_date to prevent permanent, non-expiring credentials
+                    return (false, 0, "Legacy token without auth_date is deprecated and no longer accepted");
                 }
 
                 byte[] providedBytes;

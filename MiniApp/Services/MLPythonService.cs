@@ -122,7 +122,8 @@ public static class MLPythonService
         }
     }
 
-    private static CancellationTokenSource? _watchdogCts;
+    // FIX R4-#2: volatile ensures write is immediately visible to the watchdog thread (ARM64 memory model).
+    private static volatile CancellationTokenSource? _watchdogCts;
     private static int _isLaunching = 0; // Lock to prevent multiple spawns
 
     private static void EnsureLocalPythonServiceRunning()
@@ -272,8 +273,12 @@ public static class MLPythonService
                     var hc = _httpFactory?.CreateClient("MLPythonService");
                     if (hc != null) 
                     {
-                        hc.Timeout = TimeSpan.FromSeconds(HealthTimeoutSeconds);
-                        var resp = await hc.GetAsync(new Uri($"{_baseUrl}/health"), token);
+                        // FIX R4-#3: Use CancellationToken instead of hc.Timeout on a factory-managed client.
+                        // Setting HttpClient.Timeout on an IHttpClientFactory instance is not recommended
+                        // and bypasses Polly pipeline. CancellationToken integrates correctly with both.
+                        using var healthTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        healthTimeoutCts.CancelAfter(TimeSpan.FromSeconds(HealthTimeoutSeconds));
+                        var resp = await hc.GetAsync(new Uri($"{_baseUrl}/health"), healthTimeoutCts.Token);
 
                         if (resp.IsSuccessStatusCode)
                         {

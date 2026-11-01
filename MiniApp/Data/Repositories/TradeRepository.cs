@@ -149,11 +149,12 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return null;
             try
             {
-                using var conn = DbConnectionFactory.GetConnection();
-                string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                    ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
-                    : "";
-                var dto = await conn.QueryFirstOrDefaultAsync<EvolutionDumpDto>($@"
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        : "";
+                    var dto = await conn.QueryFirstOrDefaultAsync<EvolutionDumpDto>($@"
 WITH outcome_data AS (
     SELECT 
         id,
@@ -202,7 +203,8 @@ SELECT
     COUNT(id) FILTER (WHERE dt >= NOW() - INTERVAL '48 hours' AND ml_dir = win_dir AND ta_dir != win_dir AND ta_dir != 'NEUTRAL' AND ml_dir != 'NEUTRAL') as MlSavedTrades
 
 FROM outcome_data;");
-                return dto;
+                    return dto;
+                });
             }
             catch (Exception ex)
             {
@@ -216,14 +218,16 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             try
             {
-                using var conn = DbConnectionFactory.GetConnection();
-                await conn.ExecuteAsync(@"
-                    INSERT INTO trade_outcomes 
-                    (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
-                     smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
-                            @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
-                    ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; })); // Dapper handles the loop
+                await DbConnectionFactory.WithRetryAsync(async (conn, tx) =>
+                {
+                    await conn.ExecuteAsync(@"
+                        INSERT INTO trade_outcomes 
+                        (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
+                         smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
+                        VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
+                                @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
+                        ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; }), transaction: tx);
+                });
             }
             catch (Exception ex)
             {
@@ -235,12 +239,11 @@ FROM outcome_data;");
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             SanitizeOutcome(outcome);
-            for (int attempt = 1; attempt <= 2; attempt++)
+            try
             {
-                try
+                await DbConnectionFactory.WithRetryAsync(async (conn, tx) =>
                 {
-                    using var conn = DbConnectionFactory.GetConnection();
-                await conn.ExecuteAsync(@"
+                    const string sql = @"
                     INSERT INTO trade_outcomes 
                     (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon,
@@ -311,79 +314,79 @@ FROM outcome_data;");
                         bb_squeeze = EXCLUDED.bb_squeeze,
                         ta_telemetry = EXCLUDED.ta_telemetry,
                         ml_telemetry = EXCLUDED.ml_telemetry,
-                        smc_telemetry = EXCLUDED.smc_telemetry;
-                " + (!string.IsNullOrEmpty(pendingTradeIdToDelete) ? " DELETE FROM pending_trades WHERE id = @PendingTradeId;" : ""), new
-                {
-                    PendingTradeId = pendingTradeIdToDelete,
-                    outcome.Id,
-                    outcome.Asset,
-                    outcome.Timeframe,
-                    outcome.Direction,
-                    outcome.Probability,
-                    outcome.EntryPrice,
-                    outcome.ExitPrice,
-                    outcome.PnlBps,
-                    outcome.WasWin,
-                    outcome.TaScore,
-                    outcome.OfScore,
-                    outcome.SmcScore,
-                    outcome.MlProb,
-                    outcome.MlScore,
-                    outcome.FeaturesJson,
-                    outcome.CreatedAt,
-                    outcome.VerifiedAt,
-                    outcome.SmcBosDir,
-                    outcome.SmcHasOb,
-                    outcome.SmcHasFvg,
-                    outcome.OfDeltaRatio,
-                    outcome.OfState,
-                    outcome.DynamicHorizon,
-                    outcome.MarketRegime,
-                    outcome.VelocityRegime,
-                    outcome.AtrAtSignal,
-                    outcome.AdxAtSignal,
-                    outcome.RsiAtSignal,
-                    outcome.HigherTfAligned,
-                    outcome.MinutesToNews,
-                    outcome.Session,
-                    outcome.DayOfWeek,
-                    outcome.HourUtc,
-                    outcome.TaDirection,
-                    outcome.MlDirection,
-                    outcome.SmcDirection,
-                    outcome.OfDirection,
-                    outcome.ConflictCount,
-                    outcome.ConfidenceBucket,
-                    outcome.WasCloseCall,
-                    outcome.ConsecutiveLossesBefore,
-                    outcome.SecondsSinceLastTrade,
-                    outcome.ReasoningText,
-                    outcome.MlModelVersion,
-                    outcome.MlModelAccuracy,
-                    outcome.MaxFavorableBps,
-                    outcome.MaxAdverseBps,
-                    outcome.PriceEntropy,
-                    outcome.TrendMaturity,
-                    outcome.PricePositionPct,
-                    outcome.BbSqueeze,
-                    outcome.TaTelemetry,
-                    outcome.MlTelemetry,
-                    outcome.SmcTelemetry
+                        smc_telemetry = EXCLUDED.smc_telemetry;";
+
+                    await conn.ExecuteAsync(sql, new
+                    {
+                        PendingTradeId = pendingTradeIdToDelete,
+                        outcome.Id,
+                        outcome.Asset,
+                        outcome.Timeframe,
+                        outcome.Direction,
+                        outcome.Probability,
+                        outcome.EntryPrice,
+                        outcome.ExitPrice,
+                        outcome.PnlBps,
+                        outcome.WasWin,
+                        outcome.TaScore,
+                        outcome.OfScore,
+                        outcome.SmcScore,
+                        outcome.MlProb,
+                        outcome.MlScore,
+                        outcome.FeaturesJson,
+                        outcome.CreatedAt,
+                        outcome.VerifiedAt,
+                        outcome.SmcBosDir,
+                        outcome.SmcHasOb,
+                        outcome.SmcHasFvg,
+                        outcome.OfDeltaRatio,
+                        outcome.OfState,
+                        outcome.DynamicHorizon,
+                        outcome.MarketRegime,
+                        outcome.VelocityRegime,
+                        outcome.AtrAtSignal,
+                        outcome.AdxAtSignal,
+                        outcome.RsiAtSignal,
+                        outcome.HigherTfAligned,
+                        outcome.MinutesToNews,
+                        outcome.Session,
+                        outcome.DayOfWeek,
+                        outcome.HourUtc,
+                        outcome.TaDirection,
+                        outcome.MlDirection,
+                        outcome.SmcDirection,
+                        outcome.OfDirection,
+                        outcome.ConflictCount,
+                        outcome.ConfidenceBucket,
+                        outcome.WasCloseCall,
+                        outcome.ConsecutiveLossesBefore,
+                        outcome.SecondsSinceLastTrade,
+                        outcome.ReasoningText,
+                        outcome.MlModelVersion,
+                        outcome.MlModelAccuracy,
+                        outcome.MaxFavorableBps,
+                        outcome.MaxAdverseBps,
+                        price_entropy = outcome.PriceEntropy,
+                        trend_maturity = outcome.TrendMaturity,
+                        price_position_pct = outcome.PricePositionPct,
+                        bb_squeeze = outcome.BbSqueeze,
+                        outcome.TaTelemetry,
+                        outcome.MlTelemetry,
+                        outcome.SmcTelemetry
+                    }, transaction: tx);
+
+                    if (!string.IsNullOrEmpty(pendingTradeIdToDelete))
+                    {
+                        await conn.ExecuteAsync("DELETE FROM pending_trades WHERE id = @PendingTradeId;",
+                            new { PendingTradeId = pendingTradeIdToDelete }, transaction: tx);
+                    }
                 });
-                return;
             }
             catch (Exception ex)
             {
-                if (attempt == 1 && (ex is Npgsql.NpgsqlException || ex is System.IO.IOException))
-                {
-                    BotLogger.Warn($"[TradeRepository] Transient DB issue on save outcome ({ex.Message}), retrying...");
-                    await Task.Delay(150);
-                    continue;
-                }
                 BotLogger.Error("[PostgreSQL DB] Failed to save trade outcome record", ex);
             }
         }
-    }
 
         private static string TimestampToIso(object? value) => value switch
         {
@@ -398,41 +401,43 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<TradeOutcomeRecord>();
             try
             {
-                using var conn = DbConnectionFactory.GetConnection();
-                string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                    ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
-                    : "";
-                var rows = await conn.QueryAsync($@"
-                    SELECT id as ""Id"", asset as ""Asset"", timeframe as ""Timeframe"", direction as ""Direction"",
-                           entry_price as ""EntryPrice"", exit_price as ""ExitPrice"", pnl_bps as ""PnlBps"",
-                           was_win as ""WasWin"", ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"",
-                           ml_prob as ""MlProb"", ml_score as ""MlScore"", created_at as ""CreatedAt"", verified_at as ""VerifiedAt""
-                    FROM trade_outcomes
-                    WHERE direction IN ('BUY', 'PUT')
-                      AND was_win IS NOT NULL
-                      {eraFilter}
-                    ORDER BY verified_at DESC
-                    LIMIT @limit
-                ", new { limit });
-
-                return rows.Select(r => new TradeOutcomeRecord
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
-                    Id = r.Id,
-                    Asset = r.Asset,
-                    Timeframe = r.Timeframe,
-                    Direction = r.Direction,
-                    EntryPrice = r.EntryPrice != null ? Convert.ToDouble(r.EntryPrice) : 0.0,
-                    ExitPrice = r.ExitPrice != null ? Convert.ToDouble(r.ExitPrice) : 0.0,
-                    PnlBps = r.PnlBps != null ? Convert.ToDouble(r.PnlBps) : 0.0,
-                    WasWin = r.WasWin != null ? Convert.ToBoolean(r.WasWin) : null,
-                    TaScore = r.TaScore != null ? Convert.ToDouble(r.TaScore) : 0.0,
-                    OfScore = r.OfScore != null ? Convert.ToDouble(r.OfScore) : 0.0,
-                    SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,
-                    MlProb = r.MlProb != null ? Convert.ToDouble(r.MlProb) : 0.0,
-                    MlScore = r.MlScore != null ? Convert.ToDouble(r.MlScore) : 0.0,
-                    CreatedAt = TimestampToIso((object?)r.CreatedAt),
-                    VerifiedAt = TimestampToIso((object?)r.VerifiedAt)
-                }).ToList();
+                    string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        : "";
+                    var rows = await conn.QueryAsync($@"
+                        SELECT id as ""Id"", asset as ""Asset"", timeframe as ""Timeframe"", direction as ""Direction"",
+                               entry_price as ""EntryPrice"", exit_price as ""ExitPrice"", pnl_bps as ""PnlBps"",
+                               was_win as ""WasWin"", ta_score as ""TaScore"", of_score as ""OfScore"", smc_score as ""SmcScore"",
+                               ml_prob as ""MlProb"", ml_score as ""MlScore"", created_at as ""CreatedAt"", verified_at as ""VerifiedAt""
+                        FROM trade_outcomes
+                        WHERE direction IN ('BUY', 'PUT')
+                          AND was_win IS NOT NULL
+                          {eraFilter}
+                        ORDER BY verified_at DESC
+                        LIMIT @limit
+                    ", new { limit });
+
+                    return rows.Select(r => new TradeOutcomeRecord
+                    {
+                        Id = r.Id,
+                        Asset = r.Asset,
+                        Timeframe = r.Timeframe,
+                        Direction = r.Direction,
+                        EntryPrice = r.EntryPrice != null ? Convert.ToDouble(r.EntryPrice) : 0.0,
+                        ExitPrice = r.ExitPrice != null ? Convert.ToDouble(r.ExitPrice) : 0.0,
+                        PnlBps = r.PnlBps != null ? Convert.ToDouble(r.PnlBps) : 0.0,
+                        WasWin = r.WasWin != null ? Convert.ToBoolean(r.WasWin) : null,
+                        TaScore = r.TaScore != null ? Convert.ToDouble(r.TaScore) : 0.0,
+                        OfScore = r.OfScore != null ? Convert.ToDouble(r.OfScore) : 0.0,
+                        SmcScore = r.SmcScore != null ? Convert.ToDouble(r.SmcScore) : 0.0,
+                        MlProb = r.MlProb != null ? Convert.ToDouble(r.MlProb) : 0.0,
+                        MlScore = r.MlScore != null ? Convert.ToDouble(r.MlScore) : 0.0,
+                        CreatedAt = TimestampToIso((object?)r.CreatedAt),
+                        VerifiedAt = TimestampToIso((object?)r.VerifiedAt)
+                    }).ToList();
+                });
             }
             catch (Exception ex)
             {
@@ -446,52 +451,54 @@ FROM outcome_data;");
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             try
             {
-                using var conn = DbConnectionFactory.GetConnection();
-                await conn.ExecuteAsync(@"
-                INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
-                VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(@TaTelemetry, '')::jsonb, NULLIF(@MlTelemetry, '')::jsonb, NULLIF(@SmcTelemetry, '')::jsonb)
-                ON CONFLICT (id) DO NOTHING", 
-                new {
-                    Id = SanitizePrediction(record).Id,
-                    record.Direction,
-                    record.Asset,
-                    record.Timeframe,
-                    record.BrokerSymbol,
-                    record.EntryPrice,
-                    CreatedAtStr = record.CreatedAt.ToString("o"),
-                    VerifyAtStr = record.VerifyAt.ToString("o"),
-                    record.IsForex,
-                    record.Probability,
-                    SourceDirectionsStr = System.Text.Json.JsonSerializer.Serialize(record.SourceDirections, ValutaBotJsonContext.Default.DictionaryStringString),
-                    record.TaScore,
-                    record.OfScore,
-                    record.SmcScore,
-                    record.MlProb,
-                    record.MlScore,
-                    record.SmcBosDir,
-                    record.SmcHasOb,
-                    record.SmcHasFvg,
-                    record.OfDeltaRatio,
-                    record.OfState,
-                    record.DynamicHorizon,
-                    record.MarketRegime,
-                    record.VelocityRegime,
-                    record.AtrAtSignal,
-                    record.AdxAtSignal,
-                    record.RsiAtSignal,
-                    record.HigherTfAligned,
-                    record.MinutesToNews,
-                    record.ReasoningText,
-                    record.MlModelVersion,
-                    record.MlModelAccuracy,
-                    record.FeaturesJson,
-                    record.PriceEntropy,
-                    record.TrendMaturity,
-                    record.PricePositionPct,
-                    record.BbSqueeze,
-                    record.TaTelemetry,
-                    record.MlTelemetry,
-                    record.SmcTelemetry
+                await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    await conn.ExecuteAsync(@"
+                    INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
+                    VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(@TaTelemetry, '')::jsonb, NULLIF(@MlTelemetry, '')::jsonb, NULLIF(@SmcTelemetry, '')::jsonb)
+                    ON CONFLICT (id) DO NOTHING", 
+                    new {
+                        Id = SanitizePrediction(record).Id,
+                        record.Direction,
+                        record.Asset,
+                        record.Timeframe,
+                        record.BrokerSymbol,
+                        record.EntryPrice,
+                        CreatedAtStr = record.CreatedAt.ToString("o"),
+                        VerifyAtStr = record.VerifyAt.ToString("o"),
+                        record.IsForex,
+                        record.Probability,
+                        SourceDirectionsStr = System.Text.Json.JsonSerializer.Serialize(record.SourceDirections, ValutaBotJsonContext.Default.DictionaryStringString),
+                        record.TaScore,
+                        record.OfScore,
+                        record.SmcScore,
+                        record.MlProb,
+                        record.MlScore,
+                        record.SmcBosDir,
+                        record.SmcHasOb,
+                        record.SmcHasFvg,
+                        record.OfDeltaRatio,
+                        record.OfState,
+                        record.DynamicHorizon,
+                        record.MarketRegime,
+                        record.VelocityRegime,
+                        record.AtrAtSignal,
+                        record.AdxAtSignal,
+                        record.RsiAtSignal,
+                        record.HigherTfAligned,
+                        record.MinutesToNews,
+                        record.ReasoningText,
+                        record.MlModelVersion,
+                        record.MlModelAccuracy,
+                        record.FeaturesJson,
+                        record.PriceEntropy,
+                        record.TrendMaturity,
+                        record.PricePositionPct,
+                        record.BbSqueeze,
+                        record.TaTelemetry,
+                        record.MlTelemetry,
+                        record.SmcTelemetry
+                    });
                 });
             }
             catch (Exception ex)
@@ -583,136 +590,195 @@ FROM outcome_data;");
         public static async Task DeletePendingTradeAsync(string id)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            using var conn = DbConnectionFactory.GetConnection();
-            await conn.ExecuteAsync("DELETE FROM pending_trades WHERE id = @id", new { id });
+            try
+            {
+                await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    await conn.ExecuteAsync("DELETE FROM pending_trades WHERE id = @id", new { id });
+                });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] DeletePendingTradeAsync notice: {ex.Message}");
+            }
         }
 
         public static async Task<(int Total, int Verified, int Correct)> GetOverallStatsAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return (0, 0, 0);
-            using var conn = DbConnectionFactory.GetConnection();
-            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
-                : "";
-            int pending = (int)(await conn.ExecuteScalarAsync<long?>(
-                "SELECT COUNT(*) FROM pending_trades WHERE direction IN ('BUY', 'PUT')") ?? 0L);
-            var res = await conn.QueryFirstOrDefaultAsync($@"
-                SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
-                FROM trade_outcomes
-                WHERE direction IN ('BUY', 'PUT')
-                  AND was_win IS NOT NULL
-                  {eraFilter}");
-            
-            int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
-            int correct = res != null ? Convert.ToInt32(res.Correct) : 0;
-            return (pending + verified, verified, correct);
+            try
+            {
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        : "";
+                    int pending = (int)(await conn.ExecuteScalarAsync<long?>(
+                        "SELECT COUNT(*) FROM pending_trades WHERE direction IN ('BUY', 'PUT')") ?? 0L);
+                    var res = await conn.QueryFirstOrDefaultAsync($@"
+                        SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
+                        FROM trade_outcomes
+                        WHERE direction IN ('BUY', 'PUT')
+                          AND was_win IS NOT NULL
+                          {eraFilter}");
+                    
+                    int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
+                    int correct = res != null ? Convert.ToInt32(res.Correct) : 0;
+                    return (pending + verified, verified, correct);
+                });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] GetOverallStatsAsync notice: {ex.Message}");
+                return (0, 0, 0);
+            }
         }
 
         public static async Task<(int Total, int Verified, int Correct)> GetStatsAsync(string asset, string timeframe)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return (0, 0, 0);
-            using var conn = DbConnectionFactory.GetConnection();
-            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
-                : "";
-            int pending = (int)(await conn.ExecuteScalarAsync<long?>(
-                "SELECT COUNT(*) FROM pending_trades WHERE asset = @asset AND timeframe = @timeframe AND direction IN ('BUY', 'PUT')",
-                new { asset, timeframe }) ?? 0L);
-            var res = await conn.QueryFirstOrDefaultAsync($@"
-                SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
-                FROM trade_outcomes
-                WHERE asset = @asset AND timeframe = @timeframe
-                  AND direction IN ('BUY', 'PUT')
-                  AND was_win IS NOT NULL
-                  {eraFilter}",
-                new { asset, timeframe });
-            
-            int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
-            int correct = res != null ? Convert.ToInt32(res.Correct) : 0;
-            return (pending + verified, verified, correct);
+            try
+            {
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        : "";
+                    int pending = (int)(await conn.ExecuteScalarAsync<long?>(
+                        "SELECT COUNT(*) FROM pending_trades WHERE asset = @asset AND timeframe = @timeframe AND direction IN ('BUY', 'PUT')",
+                        new { asset, timeframe }) ?? 0L);
+                    var res = await conn.QueryFirstOrDefaultAsync($@"
+                        SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
+                        FROM trade_outcomes
+                        WHERE asset = @asset AND timeframe = @timeframe
+                          AND direction IN ('BUY', 'PUT')
+                          AND was_win IS NOT NULL
+                          {eraFilter}",
+                        new { asset, timeframe });
+                    
+                    int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
+                    int correct = res != null ? Convert.ToInt32(res.Correct) : 0;
+                    return (pending + verified, verified, correct);
+                });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] GetStatsAsync notice: {ex.Message}");
+                return (0, 0, 0);
+            }
         }
 
         public static async Task<List<(string asset, string timeframe, int total, int verified, int correct)>> GetAllStatsAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<(string, string, int, int, int)>();
-            using var conn = DbConnectionFactory.GetConnection();
-            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
-                : "";
-            
-            var pendingRows = await conn.QueryAsync(
-                "SELECT asset, timeframe, COUNT(*) as Pending FROM pending_trades WHERE direction IN ('BUY', 'PUT') GROUP BY asset, timeframe");
-            
-            var rows = await conn.QueryAsync($@"
-                SELECT asset, timeframe, COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
-                FROM trade_outcomes
-                WHERE direction IN ('BUY', 'PUT')
-                  AND was_win IS NOT NULL
-                  {eraFilter}
-                GROUP BY asset, timeframe");
-            
-            var result = new List<(string, string, int, int, int)>();
-            foreach (var r in rows)
+            try
             {
-                int verified = Convert.ToInt32(r.verified);
-                int pending = 0;
-                foreach (var p in pendingRows)
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
-                    if (p.asset == r.asset && p.timeframe == r.timeframe)
+                    string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        : "";
+                    
+                    var pendingRows = await conn.QueryAsync(
+                        "SELECT asset, timeframe, COUNT(*) as Pending FROM pending_trades WHERE direction IN ('BUY', 'PUT') GROUP BY asset, timeframe");
+                    
+                    var rows = await conn.QueryAsync($@"
+                        SELECT asset, timeframe, COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
+                        FROM trade_outcomes
+                        WHERE direction IN ('BUY', 'PUT')
+                          AND was_win IS NOT NULL
+                          {eraFilter}
+                        GROUP BY asset, timeframe");
+                    
+                    var result = new List<(string, string, int, int, int)>();
+                    foreach (var r in rows)
                     {
-                        pending = Convert.ToInt32(p.pending);
-                        break;
+                        int verified = Convert.ToInt32(r.verified);
+                        int pending = 0;
+                        foreach (var p in pendingRows)
+                        {
+                            if (p.asset == r.asset && p.timeframe == r.timeframe)
+                            {
+                                pending = Convert.ToInt32(p.pending);
+                                break;
+                            }
+                        }
+                        result.Add((r.asset, r.timeframe, verified + pending, verified, Convert.ToInt32(r.correct)));
                     }
-                }
-                result.Add((r.asset, r.timeframe, verified + pending, verified, Convert.ToInt32(r.correct)));
+                    return result;
+                });
             }
-            return result;
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] GetAllStatsAsync notice: {ex.Message}");
+                return new List<(string, string, int, int, int)>();
+            }
         }
 
         public static async Task<System.Collections.Generic.List<bool?>> GetRecentOutcomesAsync(int limit = 10, DateTime? sinceUtc = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool?>();
-            using var conn = DbConnectionFactory.GetConnection();
-            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
-                : "";
-            string sinceFilter = sinceUtc.HasValue
-                ? "AND verified_at::timestamptz > @SinceUtc"
-                : "";
-            var rows = await conn.QueryAsync<bool?>($@"
-                SELECT was_win 
-                FROM trade_outcomes 
-                WHERE verified_at IS NOT NULL 
-                  AND direction IN ('BUY', 'PUT')
-                  {eraFilter}
-                  {sinceFilter}
-                ORDER BY verified_at::timestamptz DESC 
-                LIMIT @Limit
-            ", new { Limit = limit, SinceUtc = sinceUtc });
-            return rows.ToList();
+            try
+            {
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        : "";
+                    string sinceFilter = sinceUtc.HasValue
+                        ? "AND verified_at::timestamptz > @SinceUtc"
+                        : "";
+                    var rows = await conn.QueryAsync<bool?>($@"
+                        SELECT was_win 
+                        FROM trade_outcomes 
+                        WHERE verified_at IS NOT NULL 
+                          AND direction IN ('BUY', 'PUT')
+                          {eraFilter}
+                          {sinceFilter}
+                        ORDER BY verified_at::timestamptz DESC 
+                        LIMIT @Limit
+                    ", new { Limit = limit, SinceUtc = sinceUtc });
+                    return rows.ToList();
+                });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] GetRecentOutcomesAsync notice: {ex.Message}");
+                return new System.Collections.Generic.List<bool?>();
+            }
         }
 
         public static async Task<System.Collections.Generic.List<bool>> GetRecentOutcomesForAssetAsync(string asset, string timeframe, int limit = 20, DateTime? sinceUtc = null)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new System.Collections.Generic.List<bool>();
-            using var conn = DbConnectionFactory.GetConnection();
-            string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
-                : "";
-            string sinceFilter = sinceUtc.HasValue
-                ? "AND verified_at::timestamptz > @SinceUtc"
-                : "";
-            var rows = await conn.QueryAsync<bool>($@"
-                SELECT was_win 
-                FROM trade_outcomes 
-                WHERE asset = @Asset AND timeframe = @Timeframe AND was_win IS NOT NULL 
-                  AND direction IN ('BUY', 'PUT')
-                  {eraFilter}
-                  {sinceFilter}
-                ORDER BY verified_at::timestamptz DESC 
-                LIMIT @Limit
-            ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtc = sinceUtc });
-            return rows.ToList();
+            try
+            {
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
+                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        : "";
+                    string sinceFilter = sinceUtc.HasValue
+                        ? "AND verified_at::timestamptz > @SinceUtc"
+                        : "";
+                    var rows = await conn.QueryAsync<bool>($@"
+                        SELECT was_win 
+                        FROM trade_outcomes 
+                        WHERE asset = @Asset AND timeframe = @Timeframe AND was_win IS NOT NULL 
+                          AND direction IN ('BUY', 'PUT')
+                          {eraFilter}
+                          {sinceFilter}
+                        ORDER BY verified_at::timestamptz DESC 
+                        LIMIT @Limit
+                    ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtc = sinceUtc });
+                    return rows.ToList();
+                });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] GetRecentOutcomesForAssetAsync notice: {ex.Message}");
+                return new System.Collections.Generic.List<bool>();
+            }
         }
 
         /// <summary>
@@ -725,13 +791,15 @@ FROM outcome_data;");
             try
             {
                 if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
-                using var conn = DbConnectionFactory.GetConnection();
-                if (ValutaBot.MiniApp.PriceFeed.UsePocketOption)
+                return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
-                    return await conn.ExecuteScalarAsync<int>(
-                        $"SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '{PoEraCutoff}'::timestamptz AND direction IN ('BUY', 'PUT');");
-                }
-                return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes WHERE direction IN ('BUY', 'PUT');");
+                    if (ValutaBot.MiniApp.PriceFeed.UsePocketOption)
+                    {
+                        return await conn.ExecuteScalarAsync<int>(
+                            $"SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '{PoEraCutoff}'::timestamptz AND direction IN ('BUY', 'PUT');");
+                    }
+                    return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes WHERE direction IN ('BUY', 'PUT');");
+                });
             }
             catch (Exception ex)
             {

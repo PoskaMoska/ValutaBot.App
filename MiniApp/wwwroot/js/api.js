@@ -35,6 +35,7 @@ function getSafeLocationUrl() {
 
 import { 
     updateLivePriceUI, 
+    resetLivePriceFlash, 
     renderError, 
     clearResults, 
     startStatusBar, 
@@ -123,8 +124,21 @@ export function resetWebSocketBackoff() {
     }
 }
 
-function scheduleWsReconnect(valEl) {
-    if (document.hidden) return;
+let _pendingReconnectOnWakeup = false;
+let stableBackoffTimer = null;
+
+export function handleWakeupReconnect() {
+    if (_pendingReconnectOnWakeup) {
+        _pendingReconnectOnWakeup = false;
+        initPriceWebSocket();
+    }
+}
+
+function scheduleWsReconnect(valEl, isPolling = false) {
+    if (document.hidden) {
+        _pendingReconnectOnWakeup = true;
+        return;
+    }
     
     // SRE-FIX: Prevent infinite reconnect loops & battery drain
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
@@ -132,22 +146,27 @@ function scheduleWsReconnect(valEl) {
         showNetworkBanner('Поток цен недоступен. Нажмите на пару для повтора.');
         return;
     }
-    reconnectAttempts++;
+    if (!isPolling) {
+        reconnectAttempts++;
+    }
     const baseDelay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 12000);
     const jitter = Math.floor(Math.random() * 500);
-    const finalDelay = baseDelay + jitter;
+    const finalDelay = isPolling ? 2000 : (baseDelay + jitter);
     
     if (valEl) valEl.innerText = 'ПЕРЕПОДКЛЮЧЕНИЕ...';
-    if (reconnectAttempts >= 2) {
+    if (reconnectAttempts >= 2 && !isPolling) {
         showNetworkBanner(`Переподключение к потоку цен (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
     }
     
     clearTimeout(reconnectTimeout);
     reconnectTimeout = setTimeout(() => {
-        if (document.hidden) return;
+        if (document.hidden) {
+            _pendingReconnectOnWakeup = true;
+            return;
+        }
         if (typeof navigator !== 'undefined' && !navigator.onLine) {
-            // Still offline: poll in 2000ms instead of permanently dying
-            reconnectTimeout = setTimeout(() => scheduleWsReconnect(valEl), 2000);
+            // Still offline: poll in 2000ms without incrementing reconnectAttempts
+            reconnectTimeout = setTimeout(() => scheduleWsReconnect(valEl, true), 2000);
             return;
         }
         initPriceWebSocket();
@@ -200,8 +219,12 @@ export function initPriceWebSocket() {
             if (priceSocket !== sock) return;
             hideNetworkBanner();
             armWatchdog();
-            // Reset backoff only after connection stays stable for 5s
-            setTimeout(() => { if (priceSocket === sock) reconnectAttempts = 0; }, 5000);
+            if (stableBackoffTimer) clearTimeout(stableBackoffTimer);
+            // Reset backoff only after connection stays stable for 5s (B7: cancellable timer to avoid leaking socket closure)
+            stableBackoffTimer = setTimeout(() => {
+                stableBackoffTimer = null;
+                if (priceSocket === sock) reconnectAttempts = 0;
+            }, 5000);
         };
 
         sock.onmessage = function(event) {
@@ -224,7 +247,15 @@ export function initPriceWebSocket() {
         sock.onclose = function(e) {
             if (priceSocket !== sock) return;
             clearWsWatchdog();
-            if (document.hidden) return; // Allow normal server closes to trigger reconnect
+            if (stableBackoffTimer) {
+                clearTimeout(stableBackoffTimer);
+                stableBackoffTimer = null;
+            }
+            // B6: When iOS suspends tab, mark pending wakeup so reconnect fires upon returning from BFCache
+            if (document.hidden) {
+                _pendingReconnectOnWakeup = true;
+                return;
+            }
             scheduleWsReconnect(valEl);
         };
 
@@ -239,10 +270,16 @@ export function initPriceWebSocket() {
 
 export function closePriceWebSocket() {
     clearWsWatchdog();
+    if (stableBackoffTimer) {
+        clearTimeout(stableBackoffTimer);
+        stableBackoffTimer = null;
+    }
     if (reconnectTimeout) {
         clearTimeout(reconnectTimeout);
         reconnectTimeout = null;
     }
+    _pendingReconnectOnWakeup = false;
+    resetLivePriceFlash();
     if (priceSocket) {
         try {
             priceSocket.onopen = null;

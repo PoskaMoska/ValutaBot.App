@@ -80,7 +80,7 @@ namespace IntegrationTests
 
         // 4. Custom InitData HMAC & AuthDate Compatibility Tests
         [Fact]
-        public void ValidateInitData_LegacyCustomTokenWithoutAuthDate_Succeeds()
+        public void ValidateInitData_LegacyCustomTokenWithoutAuthDate_Fails()
         {
             string botToken = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
             long userId = 987654321L;
@@ -92,25 +92,9 @@ namespace IntegrationTests
 
             var (ok, validatedUserId, error) = AuthService.ValidateInitData(initData, botToken);
 
-            Assert.True(ok);
-            Assert.Equal(userId, validatedUserId);
-            Assert.Null(error);
-        }
-
-        [Fact]
-        public void ValidateInitData_LegacyCustomTokenInvalidSign_Fails()
-        {
-            string botToken = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11";
-            long userId = 987654321L;
-            string fakeSign = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-            string initData = $"custom_user_id={userId}&custom_user_sign={fakeSign}";
-
-            var (ok, validatedUserId, error) = AuthService.ValidateInitData(initData, botToken);
-
             Assert.False(ok);
             Assert.Equal(0, validatedUserId);
-            Assert.Equal("Invalid custom authorization signature", error);
+            Assert.Equal("Legacy token without auth_date is deprecated and no longer accepted", error);
         }
 
         [Fact]

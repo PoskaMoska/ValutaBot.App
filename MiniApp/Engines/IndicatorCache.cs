@@ -66,17 +66,41 @@ internal sealed class IndicatorCache
 
     // ── RSI ──────────────────────────────────────────────────────────────────
 
-    // FIX C-3: LRU eviction — sort by LastAccess so the most recently used pairs survive.
-    // Previously used Take(toRemove) on unordered ConcurrentDictionary keys — random eviction.
+    private int _isPruning = 0;
+
+    // FIX C-3: Thread-safe, non-blocking LRU eviction with TOCTOU lock protection.
+    // Evicts only states idle for >= 30 minutes, preventing active state evictions.
     private void PruneStates()
     {
-        var toDelete = _states
-            .OrderBy(kv => kv.Value.LastAccess)
-            .Take(Math.Max(1, _states.Count / 4))
-            .Select(kv => kv.Key)
-            .ToList();
-        foreach (var k in toDelete)
-            _states.TryRemove(k, out _);
+        if (System.Threading.Interlocked.CompareExchange(ref _isPruning, 1, 0) != 0) return;
+        try
+        {
+            var cutoff = DateTime.UtcNow.AddMinutes(-30);
+            var toDelete = _states
+                .Where(kv => kv.Value.LastAccess < cutoff)
+                .OrderBy(kv => kv.Value.LastAccess)
+                .Take(Math.Max(1, _states.Count / 4))
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (var k in toDelete)
+            {
+                if (_states.TryGetValue(k, out var s))
+                {
+                    lock (s)
+                    {
+                        if (s.LastAccess < cutoff)
+                        {
+                            _states.TryRemove(new KeyValuePair<(string, string, string), CacheState>(k, s));
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _isPruning, 0);
+        }
     }
 
     /// <summary>

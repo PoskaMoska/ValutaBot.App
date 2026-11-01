@@ -282,4 +282,17 @@ def debug_prune_disk():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8765))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    # FIX R4-#4: limit_max_requests forces uvicorn to recycle the worker process after N
+    # requests, releasing accumulated CPython gen-2 garbage and fragmented RSS memory.
+    # This is the standard production pattern for Python HTTP services; 50_000 requests
+    # (~14h at 1 req/s, or ~80min at 10 req/s) is conservative enough to prevent OOM
+    # without adding observable restart latency (uvicorn drains in-flight requests first).
+    # timeout_keep_alive prevents idle connections from holding file descriptors.
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        limit_max_requests=50_000,
+        timeout_keep_alive=30,
+    )

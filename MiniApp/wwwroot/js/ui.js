@@ -4,8 +4,18 @@ let priceFlashTimeout = null;
 let cachedLivePriceEl = null;
 let cachedTrafficLightEl = null;
 
+export function resetLivePriceFlash() {
+    if (priceFlashTimeout) {
+        clearTimeout(priceFlashTimeout);
+        priceFlashTimeout = null;
+    }
+    if (cachedLivePriceEl && cachedLivePriceEl.isConnected) {
+        cachedLivePriceEl.className = 'live-price-value';
+    }
+}
+
 export function updateLivePriceUI(price) {
-    if (!cachedLivePriceEl) {
+    if (!cachedLivePriceEl || !cachedLivePriceEl.isConnected) {
         cachedLivePriceEl = document.getElementById('livePriceValue');
         if (!cachedLivePriceEl) return;
     }
@@ -220,6 +230,7 @@ export function startStatusBar() {
     sbIdx = 0;
 
     sbTimer = setInterval(() => {
+        if (document.hidden) return;
         const titleEl = document.getElementById('sbTitle');
         if (titleEl) {
             const m = titleEl.textContent.match(/\.+$/);
@@ -254,6 +265,16 @@ export function pricesToBars(prices, count) {
     const span = max - min;
     if (span < 1e-12) return tail.map(() => 0.5);
     return tail.map(p => 0.05 + 0.9 * (p - min) / span);
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
 }
 
 export function renderError(rawError, debugText) {
@@ -305,15 +326,6 @@ export function renderError(rawError, debugText) {
                 .replace(/internal server error/gi, 'Внутренняя ошибка сервера');
         }
     }
-    function escapeHtml(str) {
-        if (!str) return '';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-    }
     errDisp.innerHTML = `
         <div class="error-header">${escapeHtml(title)}</div>
         <div class="error-desc">${escapeHtml(desc)}</div>
@@ -337,7 +349,7 @@ let lastTrafficStatus = null;
 export function updateTrafficLight(status) {
     if (status === lastTrafficStatus) return;
     lastTrafficStatus = status;
-    if (!cachedTrafficLightEl) cachedTrafficLightEl = document.getElementById('trafficLight');
+    if (!cachedTrafficLightEl || !cachedTrafficLightEl.isConnected) cachedTrafficLightEl = document.getElementById('trafficLight');
     if (!cachedTrafficLightEl) return;
     if (status === 'action') {
         cachedTrafficLightEl.style.background = '#10b981';
@@ -431,6 +443,10 @@ export function hideAiChart() {
         cancelAnimationFrame(aiChartAnimationId);
         aiChartAnimationId = null;
     }
+    if (resizeRafId) {
+        cancelAnimationFrame(resizeRafId);
+        resizeRafId = null;
+    }
     if (hideChartTimer) clearTimeout(hideChartTimer);
     hideChartTimer = setTimeout(() => {
         container.style.display = 'none';
@@ -438,21 +454,28 @@ export function hideAiChart() {
     }, 350);
 }
 
-if (typeof document !== 'undefined') {
-    document.addEventListener('visibilitychange', () => {
-        const c = document.getElementById('aiChartContainer');
-        if (document.hidden) {
-            if (aiChartAnimationId) {
-                cancelAnimationFrame(aiChartAnimationId);
-                aiChartAnimationId = null;
-            }
-        } else {
-            if (!aiChartAnimationId && c && c.classList.contains('active')) {
-                updateCanvasDimensions();
-                renderAiChartLoop();
-            }
+function _onChartVisibilityChange() {
+    const c = document.getElementById('aiChartContainer');
+    if (document.hidden) {
+        if (aiChartAnimationId) {
+            cancelAnimationFrame(aiChartAnimationId);
+            aiChartAnimationId = null;
         }
-    });
+    } else {
+        if (!aiChartAnimationId && c && c.classList.contains('active')) {
+            updateCanvasDimensions();
+            renderAiChartLoop();
+        }
+    }
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', _onChartVisibilityChange);
+    if (typeof window !== 'undefined') {
+        window.addEventListener('pageshow', (e) => {
+            if (e.persisted) _onChartVisibilityChange();
+        });
+    }
 }
 
 function renderAiChartLoop() {

@@ -74,8 +74,9 @@ public class ConfluenceMatrixEngine(
             int maxAgree  = Math.Max(buyCount, putCount);
 
             double confluenceRatio = Math.Round(maxAgree / 3.0, 2);
-            string dominantDir     = buyCount == putCount ? "NEUTRAL"
-                                                            : buyCount > putCount ? "BUY" : "PUT";
+            string dominantDir     = (maxAgree >= 2 && buyCount != putCount)
+                                        ? (buyCount > putCount ? "BUY" : "PUT")
+                                        : "NEUTRAL";
             bool isGoldenSetup     = confluenceRatio >= 0.99;
 
             int boost = confluenceRatio switch
@@ -225,9 +226,13 @@ public class ConfluenceMatrixEngine(
                 }
             }
 
-            dirMicro = await ProcessTf(microTf);
-            dirPrimary = await ProcessTf(primaryTf);
-            dirMacro = await ProcessTf(macroTf);
+            var tMicro = ProcessTf(microTf);
+            var tPrimary = ProcessTf(primaryTf);
+            var tMacro = ProcessTf(macroTf);
+            await Task.WhenAll(tMicro, tPrimary, tMacro);
+            dirMicro = await tMicro;
+            dirPrimary = await tPrimary;
+            dirMacro = await tMacro;
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -242,8 +247,9 @@ public class ConfluenceMatrixEngine(
             int maxAgree  = Math.Max(buyCount, putCount);
 
             double confluenceRatio = Math.Round(maxAgree / 3.0, 2);
-            string dominantDir     = buyCount == putCount ? "NEUTRAL"
-                                                            : buyCount > putCount ? "BUY" : "PUT";
+            string dominantDir     = (maxAgree >= 2 && buyCount != putCount)
+                                        ? (buyCount > putCount ? "BUY" : "PUT")
+                                        : "NEUTRAL";
             bool isGoldenSetup     = confluenceRatio >= 0.99;
 
             int boost = confluenceRatio switch
@@ -298,10 +304,10 @@ public class ConfluenceMatrixEngine(
         double volRatio = 1.0,
         ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null)
     {
-        return EvaluateMatrixAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit);
+        return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, ofSignal);
     }
 
-    public async Task<ConsensusDecision> EvaluateMatrixAsync(
+    public Task<ConsensusDecision> EvaluateMatrixAsync(
         string asset,
         string timeframe,
         bool isSubMinute,
@@ -315,6 +321,24 @@ public class ConfluenceMatrixEngine(
         double volRatio = 1.0,
         ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null)
     {
+        return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, null);
+    }
+
+    private async Task<ConsensusDecision> EvaluateMatrixInternalAsync(
+        string asset,
+        string timeframe,
+        bool isSubMinute,
+        double conflictPenalty,
+        TaSignal taSignal,
+        SmcSignal smcSignal,
+        MlSignal mlSignal,
+        StateSignal stateSignal,
+        ConfluenceMatrixResult mtfResult,
+        int consecutiveLosses = 0,
+        double volRatio = 1.0,
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
+        OrderflowSignal? ofSignal = null)
+    {
         await Task.CompletedTask;
         double taScore = taSignal.Score;
         if (double.IsNaN(taScore) || double.IsInfinity(taScore))
@@ -322,8 +346,8 @@ public class ConfluenceMatrixEngine(
             taScore = 0.0;
         }
 
-        // OF DISABLED: 35.8% empirical win-rate (anti-signal on live data).
-        double ofScore = 0.0;
+        // OF DISABLED from live voting, but preserved in telemetry if passed via ofSignal
+        double ofScore = ofSignal?.ScoreContribution ?? 0.0;
 
         double smcScore = 0;
         if ((smcSignal.BosDirection ?? "").Contains("BULLISH")) smcScore += 0.5;

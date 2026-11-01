@@ -253,6 +253,15 @@ namespace ValutaBot.App.MiniApp.Data
             }, ct);
         }
 
+        public static Task WithRetryAsync(Func<NpgsqlConnection, NpgsqlTransaction, Task> action, CancellationToken ct = default)
+        {
+            return WithRetryAsync(async (conn, tx) =>
+            {
+                await action(conn, tx);
+                return true;
+            }, ct);
+        }
+
         public static async Task InitializeAsync()
         {
             if (string.IsNullOrEmpty(GetConnectionString())) return;
@@ -431,13 +440,15 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified ON trade_outcomes(asset, timeframe, verified_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes(created_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_real ON trade_outcomes(verified_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_uncompacted_json ON trade_outcomes(created_at) WHERE features_json IS NOT NULL AND octet_length(features_json) > 2500;
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_ml_export ON trade_outcomes(created_at ASC) WHERE features_json IS NOT NULL AND was_win IS NOT NULL AND entry_price > 0 AND exit_price > 0;
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
-                CREATE INDEX IF NOT EXISTS idx_subminute_opentime_asset ON subminute_candles(open_time, asset);
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
+                DROP INDEX IF EXISTS idx_subminute_opentime_asset;
                 DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf;
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_at;
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_at;
