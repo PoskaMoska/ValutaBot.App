@@ -422,6 +422,8 @@ class PatchTSTPredictor:
                     log.info("[PatchTSTPredictor] Centered directional logits on sequence classifier.")
 
                 self._temperature = float(checkpoint.get("temperature", 1.5)) if checkpoint.get("temperature") is not None else 1.5
+                self._eager_model = model
+                self._param_count = sum(p.numel() for p in model.parameters())
 
                 # TorchScript JIT freeze: 1.6x inference speedup on CPU with 0.0 logits drift
                 try:

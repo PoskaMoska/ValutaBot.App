@@ -74,7 +74,12 @@ def _generate_synthetic_candles(n=160, base_price=1.0800, trend="flat", vol=50.0
 # -----------------------------------------------------------------------------
 def test_01_model_loaded_and_healthy(predictor):
     assert predictor.model is not None
-    param_count = sum(p.numel() for p in predictor.model.parameters())
+    param_count = getattr(predictor, "_param_count", None)
+    if param_count is None or param_count == 0:
+        if hasattr(predictor, "_eager_model") and predictor._eager_model is not None:
+            param_count = sum(p.numel() for p in predictor._eager_model.parameters())
+        else:
+            param_count = sum(p.numel() for p in predictor.model.parameters())
     print(f"\n[OK] Model successfully loaded. Parameters: {param_count:,}")
     assert param_count > 100_000, f"Model seems too small: {param_count} parameters"
 
