@@ -19,7 +19,13 @@ public class SecurityAndUiAuditTests
         context.Request.Headers["X-Test-Bypass"] = "true";
 
         // Without Testing environment, bypass must NOT occur
+        string? prevEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+        string? prevRailwayEnv = Environment.GetEnvironmentVariable("RAILWAY_ENVIRONMENT");
+        string? prevRailwayProj = Environment.GetEnvironmentVariable("RAILWAY_PROJECT_ID");
+
         Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Staging");
+        Environment.SetEnvironmentVariable("RAILWAY_ENVIRONMENT", null);
+        Environment.SetEnvironmentVariable("RAILWAY_PROJECT_ID", null);
         try
         {
             var (isAuthorized, error) = await AuthService.IsRequestAuthorized(context);
@@ -28,7 +34,9 @@ public class SecurityAndUiAuditTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", null);
+            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", prevEnv);
+            Environment.SetEnvironmentVariable("RAILWAY_ENVIRONMENT", prevRailwayEnv);
+            Environment.SetEnvironmentVariable("RAILWAY_PROJECT_ID", prevRailwayProj);
         }
     }
 
@@ -41,7 +49,13 @@ public class SecurityAndUiAuditTests
         context.Connection.RemoteIpAddress = null;
         context.Request.Headers["X-Test-Bypass"] = "true";
 
+        string? prevEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+        string? prevRailwayEnv = Environment.GetEnvironmentVariable("RAILWAY_ENVIRONMENT");
+        string? prevRailwayProj = Environment.GetEnvironmentVariable("RAILWAY_PROJECT_ID");
+
         Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Testing");
+        Environment.SetEnvironmentVariable("RAILWAY_ENVIRONMENT", null);
+        Environment.SetEnvironmentVariable("RAILWAY_PROJECT_ID", null);
         try
         {
             var (isAuthorized, error) = await AuthService.IsRequestAuthorized(context);
@@ -50,7 +64,9 @@ public class SecurityAndUiAuditTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", null);
+            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", prevEnv);
+            Environment.SetEnvironmentVariable("RAILWAY_ENVIRONMENT", prevRailwayEnv);
+            Environment.SetEnvironmentVariable("RAILWAY_PROJECT_ID", prevRailwayProj);
         }
     }
 

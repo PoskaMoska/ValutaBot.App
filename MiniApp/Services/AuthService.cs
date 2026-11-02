@@ -15,10 +15,6 @@ public static class AuthService
         bool isProxiedExternal = context.Request.Headers.ContainsKey("X-Forwarded-For")
                               || context.Request.Headers.ContainsKey("Forwarded");
 
-        bool isProductionCloud = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_ENVIRONMENT"))
-            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_PROJECT_ID"))
-            || string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Production", StringComparison.OrdinalIgnoreCase);
-
         // SRE-FIX (F1): In production cloud or proxied environments, bypass is strictly prohibited.
         // Local/test bypass requires loopback/in-memory connection AND explicit Development/Testing host environment.
         bool isVerifiedLoopback = remoteIp != null && System.Net.IPAddress.IsLoopback(remoteIp);
@@ -27,6 +23,11 @@ public static class AuthService
         bool isExplicitDev = string.Equals(hostEnv, "Development", StringComparison.OrdinalIgnoreCase);
         bool isTestHost = string.Equals(hostEnv, "Testing", StringComparison.OrdinalIgnoreCase);
         bool hasDevBypassHeader = context.Request.Headers.TryGetValue("X-Test-Bypass", out var bypassVal) && bypassVal == "true";
+
+        bool isProductionCloud = !isTestHost && (
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_ENVIRONMENT"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RAILWAY_PROJECT_ID"))
+            || string.Equals(hostEnv, "Production", StringComparison.OrdinalIgnoreCase));
 
         if (!isProductionCloud && !isProxiedExternal && (isVerifiedLoopback || (isTestHost && remoteIp == null)) && (isExplicitDev || (isTestHost && hasDevBypassHeader)))
         {
