@@ -373,34 +373,41 @@ public class ConfluenceMatrixEngine(
         if ((smcSignal.FvgType ?? "").Contains("BEARISH")) smcScore -= 0.25;
         smcScore = Math.Clamp(smcScore, -1.0, 1.0);
 
-        // Properly signed P(BUY) in [0, 1]: > 0.5 for BUY, < 0.5 for PUT
-        double rawProb;
-        if (mlSignal.RawConfidence.HasValue && !double.IsNaN(mlSignal.RawConfidence.Value) && !double.IsInfinity(mlSignal.RawConfidence.Value))
-        {
-            rawProb = Math.Clamp(mlSignal.RawConfidence.Value, 0.01, 0.99);
-        }
-        else
-        {
-            double conf = double.IsNaN(mlSignal.Confidence) || double.IsInfinity(mlSignal.Confidence) ? 0.5 : mlSignal.Confidence;
-            double directionalConf = Math.Clamp(conf, 0.5, 0.99);
-            rawProb = mlSignal.Direction == "BUY" ? directionalConf : (mlSignal.Direction == "PUT" ? (1.0 - directionalConf) : 0.5);
-        }
-
-        double mlScore = (rawProb - 0.5) * 2.0; // Smooth signed scaling [-1.0, +1.0] (+ for BUY, - for PUT)
-        if (double.IsNaN(mlScore) || double.IsInfinity(mlScore)) mlScore = 0.0;
-
         bool isNeuralBrain = !string.IsNullOrEmpty(mlSignal.ModelVersion) &&
                              (mlSignal.ModelVersion.Contains("patch_tst", StringComparison.OrdinalIgnoreCase) ||
                               mlSignal.ModelVersion.Contains("seq_brain", StringComparison.OrdinalIgnoreCase) ||
                               mlSignal.ModelVersion.Contains("dual_stream", StringComparison.OrdinalIgnoreCase) ||
                               mlSignal.ModelVersion.Contains("neural", StringComparison.OrdinalIgnoreCase));
 
+        bool isMlExplicitHold = (isNeuralBrain && mlSignal != null && mlSignal.Direction is "HOLD" or "NEUTRAL")
+                             || (mlSignal != null && mlSignal.Direction == "HOLD");
+
+        // Properly signed P(BUY) in [0, 1]: > 0.5 for BUY, < 0.5 for PUT
+        double rawProb;
+        if (isMlExplicitHold)
+        {
+            rawProb = 0.5;
+        }
+        else if (mlSignal != null && mlSignal.RawConfidence.HasValue && double.IsFinite(mlSignal.RawConfidence.Value))
+        {
+            rawProb = Math.Clamp(mlSignal.RawConfidence.Value, 0.01, 0.99);
+        }
+        else
+        {
+            double conf = (mlSignal != null && double.IsFinite(mlSignal.Confidence)) ? mlSignal.Confidence : 0.5;
+            double directionalConf = Math.Clamp(conf, 0.5, 0.99);
+            rawProb = mlSignal?.Direction == "BUY" ? directionalConf : (mlSignal?.Direction == "PUT" ? (1.0 - directionalConf) : 0.5);
+        }
+
+        double mlScore = isMlExplicitHold ? 0.0 : (rawProb - 0.5) * 2.0; // Smooth signed scaling [-1.0, +1.0] (+ for BUY, - for PUT)
+        if (!double.IsFinite(mlScore)) mlScore = 0.0;
+
         // ══════════════════════════════════════════════════════════════════════════
         // TWO-STAGE HURDLE ARCHITECTURE
         // ══════════════════════════════════════════════════════════════════════════
         double normTa  = Math.Clamp(taScore, -1.0, 1.0);
         double normSmc = Math.Clamp(smcScore, -1.0, 1.0);
-        double normMl  = Math.Clamp(mlScore, -1.0, 1.0);
+        double normMl  = isMlExplicitHold ? 0.0 : Math.Clamp(mlScore, -1.0, 1.0);
 
         var safetyNotes = new List<string>();
         string finalDir;
@@ -408,7 +415,6 @@ public class ConfluenceMatrixEngine(
 
         const int RequiredProb = 58;
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
-        bool isMlExplicitHold = isNeuralBrain && mlSignal != null && mlSignal.Direction is "HOLD" or "NEUTRAL";
 
         // D-2 fix: проверка отсутствия направленного MTF-консенсуса (пустой словарь/null или все TF == NEUTRAL при отсутствии DominantDirection).
         bool mtfBlind = mtfResult == null ||

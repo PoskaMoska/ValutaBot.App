@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -91,6 +91,8 @@ public class AutoTradingScannerService : BackgroundService
         _logger.LogInformation("[AutoScanner] Event-driven Pocket Option scanner supervisor initialized (s5..m1).");
         ResetLastScannedTimes(); // Clean start: clear any stale in-memory deduplication keys
         int consecutiveFailures = 0;
+        try
+        {
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -118,7 +120,12 @@ public class AutoTradingScannerService : BackgroundService
                 }
             }
         }
-        _logger.LogInformation("[AutoScanner] Scanner service stopped cleanly.");
+        }
+        finally
+        {
+            ResetLastScannedTimes();
+            _logger.LogInformation("[AutoScanner] Scanner service stopped cleanly.");
+        }
     }
 
     private async Task RunSubminuteScannerAsync(CancellationToken stoppingToken)

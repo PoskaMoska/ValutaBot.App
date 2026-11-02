@@ -90,13 +90,71 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
     {
         private const string PoEraCutoff = "2026-10-15 21:55:00+00";
 
-        private static double Sanitize(double val, double fallback = 0.0) => double.IsFinite(val) ? val : fallback;
+        public static string NormalizeDirection(string? dir)
+        {
+            if (string.IsNullOrWhiteSpace(dir)) return "NEUTRAL";
+            dir = dir.Trim().ToUpperInvariant();
+            return dir switch
+            {
+                "CALL" or "UP" => "BUY",
+                "SELL" or "DOWN" => "PUT",
+                "SHADOW_CALL" or "SHADOW_UP" => "SHADOW_BUY",
+                "SHADOW_SELL" or "SHADOW_DOWN" => "SHADOW_PUT",
+                _ => dir
+            };
+        }
+
+        private static double Sanitize(double val, double fallback = 0.0)
+        {
+            if (!double.IsFinite(val)) return fallback;
+            // Prevent IEEE 754 negative zero (-0.0) and machine epsilon below double precision float floor
+            if (Math.Abs(val) < 1e-12) return 0.0;
+            return val;
+        }
+
+        private static string? SanitizeTelemetry(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            var trimmed = json.Trim();
+            if ((trimmed.StartsWith('{') && trimmed.EndsWith('}')) ||
+                (trimmed.StartsWith('[') && trimmed.EndsWith(']')))
+            {
+                return trimmed;
+            }
+            return null;
+        }
+
+        private static string NormalizeIsoDate(string? dateStr)
+        {
+            if (string.IsNullOrWhiteSpace(dateStr)) return DateTime.UtcNow.ToString("o");
+            if (DateTime.TryParse(dateStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+            {
+                return dt.ToUniversalTime().ToString("o");
+            }
+            return dateStr.Trim().Replace(' ', 'T');
+        }
 
         private static void SanitizeOutcome(TradeOutcomeRecord o)
         {
+            o.Direction = NormalizeDirection(o.Direction);
             o.EntryPrice = Sanitize(o.EntryPrice);
             o.ExitPrice = Sanitize(o.ExitPrice);
-            o.PnlBps = Sanitize(o.PnlBps);
+
+            // Financial PnL machine epsilon boundary guard:
+            // Prevent machine epsilon drift (e.g. 1e-15) from converting a refund/tie (Doji) into a micro-loss.
+            if (o.WasWin == null || Math.Abs(o.EntryPrice - o.ExitPrice) < 1e-7 || Math.Abs(o.PnlBps) < 1e-4)
+            {
+                o.PnlBps = 0.0;
+                if (Math.Abs(o.EntryPrice - o.ExitPrice) < 1e-7 && (o.Direction == "BUY" || o.Direction == "PUT"))
+                {
+                    o.WasWin = null;
+                }
+            }
+            else
+            {
+                o.PnlBps = Sanitize(Math.Round(o.PnlBps, 2));
+            }
+
             o.TaScore = Sanitize(o.TaScore);
             o.OfScore = Sanitize(o.OfScore);
             o.SmcScore = Sanitize(o.SmcScore);
@@ -111,10 +169,18 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             o.MaxAdverseBps = Sanitize(o.MaxAdverseBps);
             o.PriceEntropy = Sanitize(o.PriceEntropy);
             o.PricePositionPct = Sanitize(o.PricePositionPct, 0.5);
+
+            o.CreatedAt = NormalizeIsoDate(o.CreatedAt);
+            o.VerifiedAt = NormalizeIsoDate(o.VerifiedAt);
+
+            o.TaTelemetry = SanitizeTelemetry(o.TaTelemetry);
+            o.MlTelemetry = SanitizeTelemetry(o.MlTelemetry);
+            o.SmcTelemetry = SanitizeTelemetry(o.SmcTelemetry);
         }
 
         private static SignalTracker.PredictionRecord SanitizePrediction(SignalTracker.PredictionRecord r)
         {
+            r.Direction = NormalizeDirection(r.Direction);
             r.EntryPrice = Sanitize(r.EntryPrice);
             r.TaScore = Sanitize(r.TaScore);
             r.OfScore = Sanitize(r.OfScore);
@@ -128,6 +194,9 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             r.MlModelAccuracy = Sanitize(r.MlModelAccuracy);
             r.PriceEntropy = Sanitize(r.PriceEntropy);
             r.PricePositionPct = Sanitize(r.PricePositionPct, 0.5);
+            r.TaTelemetry = SanitizeTelemetry(r.TaTelemetry);
+            r.MlTelemetry = SanitizeTelemetry(r.MlTelemetry);
+            r.SmcTelemetry = SanitizeTelemetry(r.SmcTelemetry);
             return r;
         }
 
@@ -223,9 +292,9 @@ FROM outcome_data;");
                     await conn.ExecuteAsync(@"
                         INSERT INTO trade_outcomes 
                         (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
-                         smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon)
-                        VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
-                                @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon)
+                         smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, ta_telemetry, ml_telemetry, smc_telemetry)
+                        VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
+                                @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
                         ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; }), transaction: tx);
                 });
             }
@@ -253,14 +322,14 @@ FROM outcome_data;");
                      confidence_bucket, was_close_call, consecutive_losses_before, seconds_since_last_trade,
                      reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps,
                      price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
+                    VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
                             @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
                             @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
                             @Session, @DayOfWeek, @HourUtc,
                             @TaDirection, @MlDirection, @SmcDirection, @OfDirection, @ConflictCount,
                             @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
                             @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
-                            @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(@TaTelemetry, '')::jsonb, NULLIF(@MlTelemetry, '')::jsonb, NULLIF(@SmcTelemetry, '')::jsonb)
+                            @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
                     ON CONFLICT (id) DO UPDATE SET
                         asset = EXCLUDED.asset,
                         timeframe = EXCLUDED.timeframe,
@@ -276,8 +345,8 @@ FROM outcome_data;");
                         ml_prob = EXCLUDED.ml_prob,
                         ml_score = EXCLUDED.ml_score,
                         features_json = EXCLUDED.features_json,
-                        created_at = EXCLUDED.created_at::timestamptz,
-                        verified_at = EXCLUDED.verified_at::timestamptz,
+                        created_at = EXCLUDED.created_at,
+                        verified_at = EXCLUDED.verified_at,
                         smc_bos_dir = EXCLUDED.smc_bos_dir,
                         smc_has_ob = EXCLUDED.smc_has_ob,
                         smc_has_fvg = EXCLUDED.smc_has_fvg,
@@ -450,19 +519,20 @@ FROM outcome_data;");
             {
                 await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
+                    SanitizePrediction(record);
                     await conn.ExecuteAsync(@"
                     INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
-                    VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(@TaTelemetry, '')::jsonb, NULLIF(@MlTelemetry, '')::jsonb, NULLIF(@SmcTelemetry, '')::jsonb)
+                    VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
                     ON CONFLICT (id) DO NOTHING", 
                     new {
-                        Id = SanitizePrediction(record).Id,
+                        record.Id,
                         record.Direction,
                         record.Asset,
                         record.Timeframe,
                         record.BrokerSymbol,
                         record.EntryPrice,
-                        CreatedAtStr = record.CreatedAt.ToString("o"),
-                        VerifyAtStr = record.VerifyAt.ToString("o"),
+                        CreatedAtStr = record.CreatedAt.ToUniversalTime().ToString("o"),
+                        VerifyAtStr = record.VerifyAt.ToUniversalTime().ToString("o"),
                         record.IsForex,
                         record.Probability,
                         SourceDirectionsStr = System.Text.Json.JsonSerializer.Serialize(record.SourceDirections, ValutaBotJsonContext.Default.DictionaryStringString),

@@ -361,7 +361,21 @@ public static partial class MiniAppController
             }
 
             // 2. Per-IP and Global WebSocket Connection Limiting (DoS protection)
-            string clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            System.Net.IPAddress? clientRemoteIp = context.Connection.RemoteIpAddress;
+            if (clientRemoteIp == null || System.Net.IPAddress.IsLoopback(clientRemoteIp))
+            {
+                string rawForwarded = context.Request.Headers["X-Forwarded-For"].FirstOrDefault() ?? "";
+                string firstHop = rawForwarded.Split(',')[0].Trim();
+                if (System.Net.IPAddress.TryParse(firstHop, out var parsedForwarded))
+                {
+                    clientRemoteIp = parsedForwarded;
+                }
+            }
+            string clientIp = clientRemoteIp?.ToString() ?? "unknown";
+            if (context.Items.TryGetValue("userId", out var uidObj) && uidObj is long uid && uid > 0)
+            {
+                clientIp = $"user_{uid}";
+            }
             int currentIpCount = _wsConnectionsPerIp.AddOrUpdate(clientIp, 1, (_, count) => count + 1);
             if (currentIpCount > MaxWsPerIp)
             {

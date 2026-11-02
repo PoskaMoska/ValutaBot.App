@@ -1,5 +1,13 @@
 import { lastPriceVal } from './state.js?v=20261029_audit_v6';
 
+export function normalizeDirection(dir) {
+    if (!dir) return 'NEUTRAL';
+    const u = String(dir).trim().toUpperCase();
+    if (u === 'BUY' || u === 'CALL' || u === 'UP') return 'BUY';
+    if (u === 'PUT' || u === 'SELL' || u === 'DOWN') return 'PUT';
+    return 'NEUTRAL';
+}
+
 let priceFlashTimeout = null;
 let cachedLivePriceEl = null;
 let cachedTrafficLightEl = null;
@@ -15,20 +23,23 @@ export function resetLivePriceFlash() {
 }
 
 export function updateLivePriceUI(price) {
+    const numPrice = Number(price);
+    if (!Number.isFinite(numPrice) || numPrice <= 0) return;
+
     if (!cachedLivePriceEl || !cachedLivePriceEl.isConnected) {
         cachedLivePriceEl = document.getElementById('livePriceValue');
         if (!cachedLivePriceEl) return;
     }
 
-    const isHighVal = price > 100;
-    const formatted = price.toFixed(isHighVal ? 2 : 5);
+    const isHighVal = numPrice > 100;
+    const formatted = numPrice.toFixed(isHighVal ? 2 : 5);
 
     cachedLivePriceEl.innerText = formatted;
 
     if (lastPriceVal > 0) {
-        if (price > lastPriceVal) {
+        if (numPrice > lastPriceVal) {
             cachedLivePriceEl.className = 'live-price-value up';
-        } else if (price < lastPriceVal) {
+        } else if (numPrice < lastPriceVal) {
             cachedLivePriceEl.className = 'live-price-value down';
         }
         
@@ -130,12 +141,17 @@ export function renderExpiryCandles(containerId, ohlc, count) {
     const container = document.getElementById(containerId);
     if (!container || !ohlc || !ohlc.length) return;
     const n = Math.max(1, Math.min(count || ohlc.length, ohlc.length));
-    const tail = ohlc.slice(-n).map(k => ({
-        o: Number(k.o ?? k.open), 
-        h: Number(k.h ?? k.high), 
-        l: Number(k.l ?? k.low), 
-        c: Number(k.c ?? k.close)
-    })).filter(k => [k.o, k.h, k.l, k.c].every(Number.isFinite));
+    const tail = ohlc.slice(-n).map(k => {
+        if (!k || typeof k !== 'object') return null;
+        const o = Number(k.o ?? k.open ?? k.Open);
+        const h = Number(k.h ?? k.high ?? k.High);
+        const l = Number(k.l ?? k.low ?? k.Low);
+        const c = Number(k.c ?? k.close ?? k.Close);
+        if (!Number.isFinite(o) || !Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c) || l <= 0) {
+            return null;
+        }
+        return { o, h: Math.max(h, o, c), l: Math.min(l, o, c), c };
+    }).filter(Boolean);
     if (!tail.length) return;
     const H = 40;
     const lo = Math.min(...tail.map(k => k.l));
@@ -158,9 +174,10 @@ export function renderExpiryCandles(containerId, ohlc, count) {
 export function renderDirSvg(direction) {
     const chart = document.getElementById('dirChart');
     if (!chart) return;
-    if (direction === 'BUY') {
+    const norm = normalizeDirection(direction);
+    if (norm === 'BUY') {
         chart.innerHTML = `<svg viewBox='0 0 80 40'><path d='M10 35 L30 25 L45 30 L70 5' stroke='#00e676' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='70' cy='5' r='3.5' fill='#00e676'/></svg>`;
-    } else if (direction === 'PUT') {
+    } else if (norm === 'PUT') {
         chart.innerHTML = `<svg viewBox='0 0 80 40'><path d='M10 5 L30 15 L45 10 L70 35' stroke='#ff1744' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='70' cy='35' r='3.5' fill='#ff1744'/></svg>`;
     } else {
         chart.innerHTML = `<svg viewBox='0 0 80 40'><path d='M10 20 L70 20' stroke='var(--dim)' stroke-width='2.5' stroke-dasharray='4 4' fill='none' stroke-linecap='round' opacity='0.5'/><circle cx='40' cy='20' r='3.5' fill='var(--dim)'/></svg>`;
@@ -195,10 +212,11 @@ export function renderSparklinePrediction(containerId, normalizedPrices, directi
     let predColor = 'var(--dim)';
     const hasProj = Number.isFinite(projFrac) && projFrac > 0;
     const dashLen = hasProj ? Math.min(height - 8, Math.max(3, projFrac * height)) : null;
-    if (direction === 'BUY') {
+    const normDir = normalizeDirection(direction);
+    if (normDir === 'BUY') {
         predY = dashLen != null ? Math.max(4, lastY - dashLen) : 5;
         predColor = '#10b981';
-    } else if (direction === 'PUT') {
+    } else if (normDir === 'PUT') {
         predY = dashLen != null ? Math.min(height - 4, lastY + dashLen) : 35;
         predColor = '#ef4444';
     }
@@ -431,9 +449,23 @@ export function showAiChart(asset, tf) {
 }
 
 export function updateAiChartData(ohlcArray) {
-    if (ohlcArray && ohlcArray.length) {
-        aiChartData = ohlcArray.slice(-30);
-    }
+    if (!Array.isArray(ohlcArray)) return;
+    aiChartData = ohlcArray.map(c => {
+        if (!c || typeof c !== 'object') return null;
+        const o = Number(c.open ?? c.Open ?? c.o);
+        const h = Number(c.high ?? c.High ?? c.h);
+        const l = Number(c.low ?? c.Low ?? c.l);
+        const cl = Number(c.close ?? c.Close ?? c.c);
+        if (!Number.isFinite(o) || !Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(cl) || l <= 0) {
+            return null;
+        }
+        return {
+            open: o,
+            high: Math.max(h, o, cl),
+            low: Math.min(l, o, cl),
+            close: cl
+        };
+    }).filter(Boolean).slice(-30);
 }
 
 export function hideAiChart() {
@@ -547,16 +579,20 @@ function renderAiChartLoop() {
         let minP = Infinity, maxP = -Infinity;
         for (let i = 0; i < count; i++) {
             const c = aiChartData[i];
-            const low = Number(c.low ?? c.l);
-            const high = Number(c.high ?? c.h);
-            const open = Number(c.open ?? c.o);
-            const close = Number(c.close ?? c.c);
+            const low = Number.isFinite(c.low) ? c.low : Number(c.low ?? c.Low ?? c.l);
+            const high = Number.isFinite(c.high) ? c.high : Number(c.high ?? c.High ?? c.h);
+            const open = Number.isFinite(c.open) ? c.open : Number(c.open ?? c.Open ?? c.o);
+            const close = Number.isFinite(c.close) ? c.close : Number(c.close ?? c.Close ?? c.c);
             const trueLow = Math.min(low, open, close);
             const trueHigh = Math.max(high, open, close);
-            if (trueLow < minP) minP = trueLow;
-            if (trueHigh > maxP) maxP = trueHigh;
+            if (Number.isFinite(trueLow) && trueLow < minP) minP = trueLow;
+            if (Number.isFinite(trueHigh) && trueHigh > maxP) maxP = trueHigh;
         }
-        const range = maxP - minP || 1;
+        if (!Number.isFinite(minP) || !Number.isFinite(maxP) || maxP <= minP) {
+            minP = Number.isFinite(minP) && minP !== Infinity ? minP : 1.0;
+            maxP = minP + 0.0001;
+        }
+        const range = maxP - minP || 0.0001;
         const scaleY = (h - paddingY * 2) / range;
         
         // Батчинг отрисовки свечей (сокращение draw calls с 60+ до 4 для стабильных 60 FPS на 3x Retina)
@@ -567,10 +603,11 @@ function renderAiChartLoop() {
 
         for (let i = 0; i < count; i++) {
             const c = aiChartData[i];
-            const open = Number(c.open ?? c.o);
-            const close = Number(c.close ?? c.c);
-            const high = Number(c.high ?? c.h);
-            const low = Number(c.low ?? c.l);
+            const open = Number(c.open ?? c.Open ?? c.o);
+            const close = Number(c.close ?? c.Close ?? c.c);
+            const high = Number(c.high ?? c.High ?? c.h);
+            const low = Number(c.low ?? c.Low ?? c.l);
+            if (!Number.isFinite(open) || !Number.isFinite(close) || !Number.isFinite(high) || !Number.isFinite(low)) continue;
             const isBull = close >= open;
             const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
             

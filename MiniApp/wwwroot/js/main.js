@@ -316,7 +316,8 @@ initAssetGrid();
 
 function getTfSeconds() {
     const map = { s3:3, s5:5, s10:10, s15:15, s30:30, m1:60, m2:120, m3:180, m5:300, m15:900, m30:1800, h1:3600, h4:14400, d1:86400 };
-    return map[currentTf] || 60;
+    const tfClean = (currentTf || 'm1').toLowerCase();
+    return map[tfClean] || 60;
 }
 
 let cachedCandleTimeEl = null;
@@ -415,6 +416,7 @@ tickCountdown();
 // Page Visibility API - Battery and Railway Resource Protection
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
+        cancelAnalysis();
         closePriceWebSocket();
         cancelCopilotTimer();
         if (countdownTimerId) {
@@ -435,6 +437,23 @@ document.addEventListener('visibilitychange', () => {
 });
 
 window.addEventListener('pageshow', () => { resumeLive(); });
+window.addEventListener('pagehide', () => {
+    cancelAnalysis();
+    closePriceWebSocket();
+    cancelCopilotTimer();
+    if (countdownTimerId) {
+        clearTimeout(countdownTimerId);
+        countdownTimerId = null;
+    }
+});
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('freeze', () => {
+        cancelAnalysis();
+        closePriceWebSocket();
+        cancelCopilotTimer();
+    });
+}
 if (navigator.connection && typeof navigator.connection.addEventListener === 'function') {
     navigator.connection.addEventListener('change', () => { if (navigator.onLine) resumeLive(); });
 }

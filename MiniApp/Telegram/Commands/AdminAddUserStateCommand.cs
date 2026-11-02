@@ -30,7 +30,8 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             }
             else
             {
-                await TelegramBotService.SendMessage(token, chatId, "❌ <b>Неверный формат Chat ID. Действие отменено.</b>\n\nChat ID должен состоять только из цифр.");
+                string safeInput = System.Net.WebUtility.HtmlEncode(cleanText.Trim().Length > 50 ? cleanText.Trim()[..50] : cleanText.Trim());
+                await TelegramBotService.SendMessage(token, chatId, $"❌ <b>Неверный формат Chat ID: <code>{safeInput}</code>. Действие отменено.</b>\n\nChat ID должен состоять только из цифр.");
             }
         }
     }

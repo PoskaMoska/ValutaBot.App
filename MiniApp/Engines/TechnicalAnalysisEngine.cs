@@ -50,6 +50,12 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             return new TaScoringDetail(0.0, 50.0, 50.0, prices.Length > 0 ? prices[^1] : 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "NOT_ENOUGH_DATA", 0.0, 0.0, 0.0, 0.0, 0.0);
         }
 
+        if (prices.Length != candles.Length)
+        {
+            BotLogger.Warn($"[TAEngine] Boundary mismatch: prices.Length ({prices.Length}) != candles.Length ({candles.Length}). Returning neutral score.");
+            return new TaScoringDetail(0.0, 50.0, 50.0, prices[^1], 0.0, 0.0, 0.0, 0.0, 1.0, "CORRUPTED_DATA", 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+
         for (int i = 0; i < prices.Length; i++)
         {
             if (!double.IsFinite(prices[i]) || prices[i] <= 0)
@@ -378,9 +384,10 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         // Fix: when ATR = 0 (not yet warmed up), fallback to an asset-appropriate
         // minimum pip range so the dead-market check is never silently disabled.
         int zeroRangeCount = 0;
-        if (candles.Length >= prices.Length)
+        if (candles.Length > 0)
         {
-            for (int i = startIdx; i < prices.Length; i++)
+            int cStart = Math.Max(0, candles.Length - 15);
+            for (int i = cStart; i < candles.Length; i++)
             {
                 if (Math.Abs(candles[i].High - candles[i].Low) < 1e-10) zeroRangeCount++;
             }
@@ -437,7 +444,8 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         double longVol = StandardDeviationScalar(returns.Slice(0, 20));
 
         if (longVol < 1e-5) return 1.0;
-        return shortVol / longVol;
+        double ratio = shortVol / longVol;
+        return double.IsFinite(ratio) ? ratio : 1.0;
     }
 
     private static double StandardDeviationScalar(ReadOnlySpan<double> values)

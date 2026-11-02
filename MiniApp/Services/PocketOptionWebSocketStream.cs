@@ -709,7 +709,9 @@ public static class PocketOptionWebSocketStream
 
                 int delayMs = wasConnected ? ReconnectAfterConnectedMs : backoffMs;
                 backoffMs = wasConnected ? MinBackoffMs : Math.Min(backoffMs * 2, MaxBackoffMs);
-                await Task.Delay(delayMs, token);
+                // Jitter to eliminate thundering herd connection spikes against broker gateway
+                int jitterMs = Random.Shared.Next(0, Math.Min(1500, (delayMs / 2) + 1));
+                await Task.Delay(delayMs + jitterMs, token);
             }
         }
         catch (OperationCanceledException) { }
@@ -963,9 +965,28 @@ public static class PocketOptionWebSocketStream
                     if (!reader.Read()) break;
                     string rawAsset = reader.GetString() ?? "";
                     if (!reader.Read()) break;
-                    double srvTs = reader.GetDouble();
+                    double srvTs = 0;
+                    if (reader.TokenType == System.Text.Json.JsonTokenType.Number)
+                    {
+                        srvTs = reader.GetDouble();
+                    }
+                    else if (reader.TokenType == System.Text.Json.JsonTokenType.String &&
+                             double.TryParse(reader.GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedTs))
+                    {
+                        srvTs = parsedTs;
+                    }
+
                     if (!reader.Read()) break;
-                    double price = reader.GetDouble();
+                    double price = 0;
+                    if (reader.TokenType == System.Text.Json.JsonTokenType.Number)
+                    {
+                        price = reader.GetDouble();
+                    }
+                    else if (reader.TokenType == System.Text.Json.JsonTokenType.String &&
+                             double.TryParse(reader.GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedPrice))
+                    {
+                        price = parsedPrice;
+                    }
                     while (reader.Read() && reader.TokenType != System.Text.Json.JsonTokenType.EndArray) { }
 
                     if (!string.IsNullOrEmpty(rawAsset) && price > 0)
@@ -993,8 +1014,10 @@ public static class PocketOptionWebSocketStream
                 if (item.ValueKind == JsonValueKind.Array && item.GetArrayLength() >= 3)
                 {
                     string asset = item[0].GetString() ?? "";
-                    double srvTs = item[1].GetDouble();
-                    double price = item[2].GetDouble();
+                    double srvTs = item[1].ValueKind == JsonValueKind.Number ? item[1].GetDouble() :
+                        (item[1].ValueKind == JsonValueKind.String && double.TryParse(item[1].GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedTs) ? parsedTs : 0);
+                    double price = item[2].ValueKind == JsonValueKind.Number ? item[2].GetDouble() :
+                        (item[2].ValueKind == JsonValueKind.String && double.TryParse(item[2].GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedPrice) ? parsedPrice : 0);
                     if (!string.IsNullOrEmpty(asset) && price > 0)
                     {
                         HandleTick(asset, srvTs, price);
@@ -1025,8 +1048,10 @@ public static class PocketOptionWebSocketStream
                     {
                         if (pt.ValueKind == JsonValueKind.Array && pt.GetArrayLength() >= 2)
                         {
-                            double srvTs = pt[0].GetDouble();
-                            double price = pt[1].GetDouble();
+                            double srvTs = pt[0].ValueKind == JsonValueKind.Number ? pt[0].GetDouble() :
+                                (pt[0].ValueKind == JsonValueKind.String && double.TryParse(pt[0].GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedTs) ? parsedTs : 0);
+                            double price = pt[1].ValueKind == JsonValueKind.Number ? pt[1].GetDouble() :
+                                (pt[1].ValueKind == JsonValueKind.String && double.TryParse(pt[1].GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedPrice) ? parsedPrice : 0);
                             if (HandleTick(asset, srvTs, price, isBackfill: true))
                             {
                                 fedCount++;
@@ -1115,7 +1140,8 @@ public static class PocketOptionWebSocketStream
             {
                 _anchorSuspects.Remove(symbol);
                 _lastInToleranceSw = swNow;
-                if (lagTicks < 0)
+                // Only advance anchor if advance is modest (<= 500ms) to prevent single jitter spikes from jerking the clock forward
+                if (lagTicks < 0 && lagTicks >= -(long)(0.5 * TimeSpan.TicksPerSecond))
                 {
                     _clockAnchor = new BrokerClockAnchor(tickTimeUtc, swNow);
                 }

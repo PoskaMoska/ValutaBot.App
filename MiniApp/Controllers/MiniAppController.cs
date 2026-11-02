@@ -38,7 +38,12 @@ public static partial class MiniAppController
     public static string? LastExceptionMessage { get; set; }
     private static readonly string _internalApiSecretFallback = Guid.NewGuid().ToString();
 
-    public record OhlcCandle(double Open, double High, double Low, double Close, double Volume, DateTime Timestamp = default);
+    public record OhlcCandle(double Open, double High, double Low, double Close, double Volume, DateTime Timestamp = default)
+    {
+        public bool IsValid => double.IsFinite(Open) && double.IsFinite(High) && double.IsFinite(Low) &&
+                               double.IsFinite(Close) && double.IsFinite(Volume) &&
+                               Open > 0 && High >= Low && Low > 0 && Close > 0 && Volume >= 0;
+    }
     public record NotifyAdminsRequest(string Message, string ParseMode = "HTML");
 
     public static System.Net.Http.IHttpClientFactory? HttpFactory { get; set; }
@@ -136,6 +141,13 @@ public static partial class MiniAppController
         // Register Orchestrator
         builder.Services.AddTransient<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator, ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator>();
         builder.Services.AddSingleton<ValutaBot.MiniApp.Features.ChaosAudit.IChaosAuditService, ValutaBot.MiniApp.Features.ChaosAudit.ChaosAuditService>();
+
+        builder.Services.ConfigureHttpJsonOptions(options =>
+        {
+            options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+            options.SerializerOptions.PropertyNameCaseInsensitive = true;
+            options.SerializerOptions.NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals;
+        });
 
         builder.Services.AddCors(options =>
         {

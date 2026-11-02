@@ -1035,6 +1035,27 @@
             box-shadow: 0 0 16px rgba(255, 23, 68, 0.35), inset 0 0 16px rgba(255, 23, 68, 0.25);
         }
 
+        .sphere-container.neutral-signal .magic-ball {
+            box-shadow:
+                inset -10px 25px 45px rgba(255,255,255,0.06),
+                inset 15px -25px 50px rgba(100,116,139,0.30),
+                inset 0 -40px 50px rgba(0,0,0,0.40),
+                0 0 50px rgba(148,163,184,0.25);
+            animation: ball3dSpin 24s linear infinite;
+        }
+        .sphere-container.neutral-signal .orbit.o1 {
+            border-color: rgba(148, 163, 184, 0.4);
+            box-shadow: 0 0 15px rgba(148, 163, 184, 0.2);
+        }
+        .sphere-container.neutral-signal .orbit.o2 {
+            border-color: rgba(148, 163, 184, 0.3);
+            box-shadow: 0 0 10px rgba(148, 163, 184, 0.15);
+        }
+        .sphere-container.neutral-signal .orbit.o3 {
+            border-color: rgba(148, 163, 184, 0.2);
+            box-shadow: 0 0 8px rgba(148, 163, 184, 0.1);
+        }
+
         /* Floating particles inside the sphere */
         .sphere-particles {
             position: absolute;

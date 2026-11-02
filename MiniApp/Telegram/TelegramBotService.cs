@@ -435,6 +435,20 @@ public partial class TelegramBotService : BackgroundService
                 BotLogger.Warn($"[TG Bot] sendMessage 429 rate-limited. Retrying after {retrySec}s...");
                 await Task.Delay(TimeSpan.FromSeconds(retrySec));
             }
+            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 400 && apiEx.Message.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
+            {
+                BotLogger.Warn($"[TG Bot] sendMessage HTML entity parse failure on chat {chatId}. Falling back to plain text delivery: {apiEx.Message}");
+                try
+                {
+                    await client.SendTextMessageAsync(chatId, text, parseMode: null);
+                    return;
+                }
+                catch (Exception plainEx)
+                {
+                    Console.WriteLine($"[TG Bot] sendMessage plain text fallback exception: {plainEx.Message}");
+                    return;
+                }
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"[TG Bot] sendMessage SDK exception: {ex.Message}");
@@ -453,6 +467,14 @@ public partial class TelegramBotService : BackgroundService
             if (!resp.IsSuccessStatusCode)
             {
                 var err = await resp.Content.ReadAsStringAsync();
+                if (err.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
+                {
+                    BotLogger.Warn($"[TG Bot] SendMessageWithKeyboard HTML parse error on chat {chatId}. Retrying as plain text.");
+                    var fallbackPayload = new { chat_id = chatId, text, reply_markup = keyboard };
+                    var fallbackJson = JsonSerializer.Serialize(fallbackPayload);
+                    using var fbResp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/sendMessage", fallbackJson);
+                    return;
+                }
                 Console.WriteLine($"[TG Bot] sendMessage error: {err}");
             }
         }
@@ -480,6 +502,20 @@ public partial class TelegramBotService : BackgroundService
                 BotLogger.Warn($"[TG Bot] editMessageText 429 rate-limited. Retrying after {retrySec}s...");
                 await Task.Delay(TimeSpan.FromSeconds(retrySec));
             }
+            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 400 && apiEx.Message.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
+            {
+                BotLogger.Warn($"[TG Bot] editMessageText HTML parse failure on chat {chatId}. Falling back to plain text delivery.");
+                try
+                {
+                    await client.EditMessageTextAsync(chatId, messageId, text, parseMode: null);
+                    return;
+                }
+                catch (Exception plainEx)
+                {
+                    Console.WriteLine($"[TG Bot] editMessageText plain text fallback exception: {plainEx.Message}");
+                    return;
+                }
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"[TG Bot] editMessageText SDK exception: {ex.Message}");
@@ -498,6 +534,14 @@ public partial class TelegramBotService : BackgroundService
             if (!resp.IsSuccessStatusCode)
             {
                 var err = await resp.Content.ReadAsStringAsync();
+                if (err.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
+                {
+                    BotLogger.Warn($"[TG Bot] editMessageTextWithKeyboard HTML parse error on chat {chatId}. Retrying as plain text.");
+                    var fallbackPayload = new { chat_id = chatId, message_id = messageId, text, reply_markup = keyboard };
+                    var fallbackJson = JsonSerializer.Serialize(fallbackPayload);
+                    using var fbResp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/editMessageText", fallbackJson);
+                    return;
+                }
                 Console.WriteLine($"[TG Bot] editMessageTextWithKeyboard error: {err}");
             }
         }

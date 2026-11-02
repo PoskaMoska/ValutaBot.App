@@ -48,11 +48,11 @@ namespace ValutaBot.MiniApp
 
         private record struct TickEvent(string Asset, string Interval, double Price, DateTime OpenTime);
 
-        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s5  = new();
-        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s10 = new();
-        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s15 = new();
-        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s30 = new();
-        private static readonly ConcurrentDictionary<string, CandleAccumulator> _m1 = new();
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s5  = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s10 = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s15 = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _s30 = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, CandleAccumulator> _m1  = new(StringComparer.OrdinalIgnoreCase);
 
         public class CandleRingBuffer
         {
@@ -244,14 +244,31 @@ namespace ValutaBot.MiniApp
                 foreach (var g in records.GroupBy(r => $"{r.asset}:{r.interval}"))
                 {
                     var ring = _ringBuffers.GetOrAdd(g.Key, _ => new CandleRingBuffer(400));
-                    var candles = g.Select(r => new MiniAppController.OhlcCandle(
-                        Convert.ToDouble(r.Open),
-                        Convert.ToDouble(r.High),
-                        Convert.ToDouble(r.Low),
-                        Convert.ToDouble(r.Close),
-                        Convert.ToDouble(r.Volume),
-                        r.OpenTime is string s ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal) : Convert.ToDateTime(r.OpenTime).ToUniversalTime()
-                    )).ToList();
+                    var candles = g.Select(r =>
+                    {
+                        string intervalStr = (string)r.interval;
+                        long intervalTicks = intervalStr switch
+                        {
+                            "s5" => TimeSpan.FromSeconds(5).Ticks,
+                            "s10" => TimeSpan.FromSeconds(10).Ticks,
+                            "s15" => TimeSpan.FromSeconds(15).Ticks,
+                            "s30" => TimeSpan.FromSeconds(30).Ticks,
+                            _ => TimeSpan.FromSeconds(60).Ticks
+                        };
+                        DateTime rawTime = r.OpenTime is string s
+                            ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
+                            : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
+                        DateTime alignedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
+
+                        return new MiniAppController.OhlcCandle(
+                            Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.High, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
+                            alignedTime
+                        );
+                    }).ToList();
                     
                     ring.AddRange(candles);
                     loaded += candles.Count;
@@ -506,15 +523,23 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        private static readonly ConcurrentDictionary<string, (long TimestampTicks, int Limit, MiniAppController.OhlcCandle[] Candles)> _recentCandlesCache = new();
+        private static readonly ConcurrentDictionary<string, (long TimestampTicks, int Limit, MiniAppController.OhlcCandle[] Candles)> _recentCandlesCache = new(StringComparer.OrdinalIgnoreCase);
 
         public static async Task<MiniAppController.OhlcCandle[]> GetRecentCandles(string asset, string interval, int limit)
         {
+            string cleanAsset = PriceFeed.CandleKey(asset);
+            string dbInterval = interval == "m1" ? "1min" : interval;
+            string cacheKey = $"{cleanAsset}:{dbInterval}";
             try
             {
-                string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
-                string dbInterval = interval == "m1" ? "1min" : interval;
-                string cacheKey = $"{cleanAsset}:{dbInterval}";
+                long intervalTicks = dbInterval switch
+                {
+                    "s5" => TimeSpan.FromSeconds(5).Ticks,
+                    "s10" => TimeSpan.FromSeconds(10).Ticks,
+                    "s15" => TimeSpan.FromSeconds(15).Ticks,
+                    "s30" => TimeSpan.FromSeconds(30).Ticks,
+                    _ => TimeSpan.FromSeconds(60).Ticks
+                };
                 long nowTicks = DateTime.UtcNow.Ticks;
 
                 // Fast path: reuse recent SQL fetch within 1.5s if limit is satisfied (eliminates duplicate scanner -> orchestrator SQL queries)
@@ -614,10 +639,11 @@ namespace ValutaBot.MiniApp
                     long openTicks = liveOpenTime.Value.Ticks;
                     records.RemoveAll(r =>
                     {
-                        DateTime dbTime = r.OpenTime is string s
-                            ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal)
-                            : Convert.ToDateTime(r.OpenTime).ToUniversalTime();
-                        return dbTime.Ticks == openTicks;
+                        DateTime rawTime = r.OpenTime is string s
+                            ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
+                            : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
+                        long alignedTicks = rawTime.Ticks - (rawTime.Ticks % intervalTicks);
+                        return alignedTicks == openTicks;
                     });
 
                     if (liveLastClosed != null)
@@ -626,10 +652,11 @@ namespace ValutaBot.MiniApp
                         bool found = false;
                         foreach (var r in records)
                         {
-                            DateTime dbTime = r.OpenTime is string s
-                                ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal)
-                                : Convert.ToDateTime(r.OpenTime).ToUniversalTime();
-                            if (dbTime.Ticks == lastClosedTicks) { found = true; break; }
+                            DateTime rawTime = r.OpenTime is string s
+                                ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
+                                : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
+                            long alignedTicks = rawTime.Ticks - (rawTime.Ticks % intervalTicks);
+                            if (alignedTicks == lastClosedTicks) { found = true; break; }
                         }
                         if (!found) missedClosed = liveLastClosed;
                     }
@@ -645,16 +672,17 @@ namespace ValutaBot.MiniApp
                 for (int i = dbRecordsToTake - 1; i >= 0; i--)
                 {
                     var r = records[i];
-                    DateTime parsedTime = r.OpenTime is string s
-                        ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AdjustToUniversal)
-                        : Convert.ToDateTime(r.OpenTime);
+                    DateTime rawTime = r.OpenTime is string s
+                        ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
+                        : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
+                    DateTime parsedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
 
                     result[resultIdx++] = new MiniAppController.OhlcCandle(
-                        Convert.ToDouble(r.Open), 
-                        Convert.ToDouble(r.High), 
-                        Convert.ToDouble(r.Low), 
-                        Convert.ToDouble(r.Close), 
-                        Convert.ToDouble(r.Volume),
+                        Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture), 
+                        Convert.ToDouble(r.High, System.Globalization.CultureInfo.InvariantCulture), 
+                        Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture), 
+                        Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture), 
+                        Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
                         parsedTime);
                 }
 
@@ -678,6 +706,34 @@ namespace ValutaBot.MiniApp
             catch (Exception ex)
             {
                 BotLogger.Warn($"[RealtimeTickCollector] Failed to fetch recent {interval} candles for {asset}: {ex.Message}");
+                ConcurrentDictionary<string, CandleAccumulator>? fbDict = interval switch
+                {
+                    "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, "m1" => _m1, "1min" => _m1, _ => null
+                };
+                if (_ringBuffers.TryGetValue(cacheKey, out var ringFallback) || fbDict != null)
+                {
+                    MiniAppController.OhlcCandle? liveCandle = null;
+                    if (fbDict != null && fbDict.TryGetValue(cleanAsset, out var live))
+                    {
+                        lock (live)
+                        {
+                            if (live.Open.HasValue)
+                            {
+                                liveCandle = new MiniAppController.OhlcCandle(
+                                    live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
+                            }
+                        }
+                    }
+                    var closed = ringFallback != null ? ringFallback.GetRecent(liveCandle != null ? limit - 1 : limit) : Array.Empty<MiniAppController.OhlcCandle>();
+                    if (liveCandle != null)
+                    {
+                        var combined = new MiniAppController.OhlcCandle[closed.Length + 1];
+                        Array.Copy(closed, 0, combined, 0, closed.Length);
+                        combined[^1] = liveCandle;
+                        return combined;
+                    }
+                    if (closed.Length > 0) return closed;
+                }
                 return Array.Empty<MiniAppController.OhlcCandle>();
             }
         }
@@ -690,7 +746,7 @@ namespace ValutaBot.MiniApp
                 return Task.CompletedTask;
             }
 
-            string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+            string cleanAsset = PriceFeed.CandleKey(asset);
             long nowTicks = tickTimeUtc;
 
             QueueTick(cleanAsset, "s5", price, nowTicks, TimeSpan.FromSeconds(5).Ticks);
@@ -710,7 +766,7 @@ namespace ValutaBot.MiniApp
 
         public static bool IsAccumulatorCorrupted(string asset)
         {
-            string cleanAsset = asset.ToUpper().Replace("/", "").Replace("-", "").Replace("_OTC", "");
+            string cleanAsset = PriceFeed.CandleKey(asset);
             foreach (var dict in new[] { _s5, _s10, _s15, _s30, _m1 })
             {
                 if (dict.TryGetValue(cleanAsset, out var acc))

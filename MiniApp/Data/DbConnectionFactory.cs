@@ -62,7 +62,7 @@ namespace ValutaBot.App.MiniApp.Data
             builder.ConnectionPruningInterval = 5;     // Prune every 5s
             builder.Timeout = 15;                      // 15s connection timeout
             builder.CommandTimeout = 30;
-            builder.Options = "-c idle_in_transaction_session_timeout=60000 -c lock_timeout=5000";
+            builder.Options = "-c idle_in_transaction_session_timeout=15000 -c lock_timeout=5000";
 
             // Pool capacity 50 with warm minimum connections to avoid reconnect storms
             builder.MaxPoolSize = 50;
@@ -446,17 +446,17 @@ namespace ValutaBot.App.MiniApp.Data
                     UNIQUE(asset, interval, open_time)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_dir ON trade_outcomes(created_at DESC, direction);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified ON trade_outcomes(asset, timeframe, verified_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes(created_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_real ON trade_outcomes(verified_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_dir ON trade_outcomes(created_at DESC, direction) WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction) WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified ON trade_outcomes(asset, timeframe, verified_at DESC) WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes(created_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_real ON trade_outcomes(verified_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_uncompacted_json ON trade_outcomes(created_at) WHERE features_json IS NOT NULL AND octet_length(features_json) > 2500;
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_ml_export ON trade_outcomes(created_at ASC) WHERE features_json IS NOT NULL AND was_win IS NOT NULL AND entry_price > 0 AND exit_price > 0;
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
-                CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
-                CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC);
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC) WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_tz_expr;
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_tz_expr;
@@ -474,7 +474,7 @@ namespace ValutaBot.App.MiniApp.Data
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_tz;
                 DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf_verified_tz;
 
-                -- Table-level high-load tuning: fillfactor=80 enables HOT (Heap-Only Tuple) in-place updates for real-time ticks
+                -- Table-level high-load tuning: fillfactor enables HOT (Heap-Only Tuple) in-place updates
                 DO $$
                 BEGIN
                     BEGIN
@@ -489,6 +489,7 @@ namespace ValutaBot.App.MiniApp.Data
                     EXCEPTION WHEN others THEN END;
                     BEGIN
                         ALTER TABLE trade_outcomes SET (
+                            fillfactor = 85,
                             autovacuum_vacuum_scale_factor = 0.03,
                             autovacuum_analyze_scale_factor = 0.02,
                             autovacuum_vacuum_cost_limit = 2000,
@@ -505,6 +506,22 @@ namespace ValutaBot.App.MiniApp.Data
                             autovacuum_vacuum_cost_limit = 1000,
                             autovacuum_vacuum_cost_delay = 2
                         );
+                    EXCEPTION WHEN others THEN END;
+                    BEGIN
+                        UPDATE trade_outcomes SET created_at = replace(created_at, ' ', 'T') WHERE created_at LIKE '% %';
+                        UPDATE trade_outcomes SET verified_at = replace(verified_at, ' ', 'T') WHERE verified_at LIKE '% %';
+                        UPDATE pending_trades SET created_at = replace(created_at, ' ', 'T') WHERE created_at LIKE '% %';
+                        UPDATE pending_trades SET verify_at = replace(verify_at, ' ', 'T') WHERE verify_at LIKE '% %';
+                    EXCEPTION WHEN others THEN END;
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_trade_outcomes_direction') THEN
+                            ALTER TABLE trade_outcomes ADD CONSTRAINT chk_trade_outcomes_direction
+                                CHECK (direction IN ('BUY', 'PUT', 'SHADOW_BUY', 'SHADOW_PUT', 'HOLD', 'NEUTRAL', 'SHADOW_NEUTRAL'));
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pending_trades_direction') THEN
+                            ALTER TABLE pending_trades ADD CONSTRAINT chk_pending_trades_direction
+                                CHECK (direction IN ('BUY', 'PUT', 'SHADOW_BUY', 'SHADOW_PUT', 'HOLD', 'NEUTRAL', 'SHADOW_NEUTRAL'));
+                        END IF;
                     EXCEPTION WHEN others THEN END;
                 END $$;
 

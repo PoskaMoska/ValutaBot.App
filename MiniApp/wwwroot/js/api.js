@@ -54,7 +54,8 @@ import {
     updateAiCopilot,
     recordAnalysisPsychometrics,
     showNetworkBanner,
-    hideNetworkBanner
+    hideNetworkBanner,
+    normalizeDirection
 } from './ui.js?v=20261029_audit_v6';
 
 // Tracks the last signal to detect unchanged results
@@ -234,8 +235,9 @@ export function initPriceWebSocket() {
             armWatchdog();
             try {
                 const data = JSON.parse(event.data);
-                if (data && data.price !== undefined) {
-                    const newPrice = Number(data.price);
+                const rawPrice = data ? (data.price !== undefined ? data.price : data.p) : undefined;
+                if (rawPrice !== undefined) {
+                    const newPrice = Number(rawPrice);
                     if (Number.isFinite(newPrice) && newPrice > 0) {
                         updateLivePriceUI(newPrice);
                         setLastPriceVal(newPrice);
@@ -526,7 +528,8 @@ export async function executeAnalysis() {
         }
 
         const resDir = document.getElementById('resDir');
-        const signalKey = `${currentAsset}_${currentTf}_${data.direction}_${data.probability}`;
+        const normDir = normalizeDirection(data.direction);
+        const signalKey = `${currentAsset}_${currentTf}_${normDir}_${data.probability}`;
         const isRepeat = lastSignalKey !== null && signalKey === lastSignalKey;
         lastSignalKey = signalKey;
 
@@ -542,12 +545,13 @@ export async function executeAnalysis() {
         }
 
         if (resDir) {
-            if (data.direction === 'BUY') {
+            if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
+            if (normDir === 'BUY') {
                 resDir.innerHTML = 'ВВЕРХ';
                 resDir.innerText = 'ВВЕРХ';
                 resDir.style.color = '#00e676';
                 if (sphere) sphere.classList.add('buy-signal');
-            } else if (data.direction === 'PUT') {
+            } else if (normDir === 'PUT') {
                 resDir.innerHTML = 'ВНИЗ';
                 resDir.innerText = 'ВНИЗ';
                 resDir.style.color = '#ff1744';
@@ -712,8 +716,9 @@ export async function executeAnalysis() {
             }
             const dir = document.getElementById('mlEnsembleDir');
             if (dir && data.lgbmDirection) {
-                dir.innerText = data.lgbmDirection === 'BUY' ? 'ВВЕРХ' : data.lgbmDirection === 'PUT' ? 'ВНИЗ' : '—';
-                dir.style.color = data.lgbmDirection === 'BUY' ? '#a78bfa' : data.lgbmDirection === 'PUT' ? '#f472b6' : 'var(--subtext)';
+                const normLgbm = normalizeDirection(data.lgbmDirection);
+                dir.innerText = normLgbm === 'BUY' ? 'ВВЕРХ' : normLgbm === 'PUT' ? 'ВНИЗ' : '—';
+                dir.style.color = normLgbm === 'BUY' ? '#a78bfa' : normLgbm === 'PUT' ? '#f472b6' : 'var(--subtext)';
             }
             const conf = document.getElementById('mlEnsembleConf');
             if (conf && data.lgbmConfidence != null) {
@@ -777,10 +782,11 @@ export async function executeAnalysis() {
                 rCard.style.display = 'block';
 
                 const formatDir = (dir, conf) => {
+                    const norm = normalizeDirection(dir);
                     const confNum = Number(conf);
                     const confStr = Number.isFinite(confNum) && confNum > 0 ? ` (${Math.round(confNum)}%)` : '';
-                    if (dir === 'BUY') return `<span style='color:#10b981; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg> ВВЕРХ${confStr}</span>`;
-                    if (dir === 'PUT') return `<span style='color:#ef4444; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg> ВНИЗ${confStr}</span>`;
+                    if (norm === 'BUY') return `<span style='color:#10b981; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg> ВВЕРХ${confStr}</span>`;
+                    if (norm === 'PUT') return `<span style='color:#ef4444; display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg> ВНИЗ${confStr}</span>`;
                     return `<span style='color:var(--subtext); display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg> НЕЙТРАЛЬНО</span>`;
                 };
 
@@ -810,9 +816,9 @@ export async function executeAnalysis() {
                 projFrac = Math.min(0.9, Math.max(0.05, (data.atr * Math.sqrt(data.expiryCandles)) / spanP * 0.8));
             }
         }
-        if (probBars.length) renderSparklinePrediction('probChart', probBars, data.direction, projFrac);
+        if (probBars.length) renderSparklinePrediction('probChart', probBars, normDir, projFrac);
 
-        renderDirSvg(data.direction);
+        renderDirSvg(normDir);
 
         const durBars = pricesToBars(cleanPrices, 8);
         if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);

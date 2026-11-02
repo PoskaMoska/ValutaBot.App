@@ -233,11 +233,15 @@ public class MarketAnalysisOrchestrator(
         // Допуск 250мс для компенсации джиттера таймштампа тиков и монотонного Stopwatch
         bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= referenceNowUtc.AddMilliseconds(250);
         // C-3 FIX: Zero-alloc closed-candle slice using array copy instead of LINQ Take/TakeLast/Select chains
-        int closedLen = isLastClosed ? candles.Length : candles.Length - 1;
-        if (closedLen > limit) closedLen = limit;
-        int closedStart = candles.Length - closedLen; // TakeLast semantics
+        int availableClosed = isLastClosed ? candles.Length : candles.Length - 1;
+        if (availableClosed < 0) availableClosed = 0;
+        int closedLen = Math.Min(availableClosed, limit);
+        int closedStart = availableClosed - closedLen;
         var closedCandles = new MiniAppController.OhlcCandle[closedLen];
-        Array.Copy(candles, closedStart, closedCandles, 0, closedLen);
+        if (closedLen > 0)
+        {
+            Array.Copy(candles, closedStart, closedCandles, 0, closedLen);
+        }
         double[] closedPrices  = new double[closedLen];
         double[] closedVolumes = new double[closedLen];
         for (int i = 0; i < closedLen; i++) { closedPrices[i] = closedCandles[i].Close; closedVolumes[i] = closedCandles[i].Volume; }
@@ -619,12 +623,14 @@ public class MarketAnalysisOrchestrator(
         string mlDir = "NEUTRAL";
         double mlConf = 0.5;
         if (mlPrediction != null) {
-            mlDir = mlPrediction.Direction;
-            mlConf = mlPrediction.Confidence;
+            mlDir = string.IsNullOrWhiteSpace(mlPrediction.Direction) ? "NEUTRAL" : mlPrediction.Direction;
+            mlConf = double.IsFinite(mlPrediction.Confidence) ? Math.Clamp(mlPrediction.Confidence, 0.0, 1.0) : 0.5;
         }
         mlSw.Stop();
         ValutaMetrics.MlDuration.Observe(mlSw.Elapsed.TotalSeconds);
-        double mlRawProb = mlPrediction?.RawConfidence ?? 0.5;
+        double mlRawProb = (mlPrediction?.RawConfidence.HasValue == true && double.IsFinite(mlPrediction.RawConfidence.Value))
+            ? Math.Clamp(mlPrediction.RawConfidence.Value, 0.0, 1.0)
+            : 0.5;
 
         _logger.LogInformation("[TRACE {TraceId}] Neural Brain: Verdict={Dir} Conf={Conf:F4} (RawConf={RawConf:F4}) | Model={Version}",
             traceId, mlDir, mlConf, mlRawProb, mlPrediction?.ModelVersion ?? "null");
@@ -716,13 +722,19 @@ public class MarketAnalysisOrchestrator(
         }
         else if (consensus.FinalDirection == "NEUTRAL")
         {
-            string fallbackDir = prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT";
-            consensus = consensus with {
-                FinalDirection = fallbackDir,
-                CandidateDirection = fallbackDir,
-                Probability = 51,
-                CombinedReasoningText = consensus.CombinedReasoningText + $"\n🧭 Базовый дрейф: нейтральный консенсус приведен к {fallbackDir} (51%) по направлению закрытия последней свечи."
-            };
+            bool isExplicitHoldSignal = ml.Direction is "HOLD" or "NEUTRAL"
+                || (consensus.CombinedReasoningText != null && consensus.CombinedReasoningText.Contains("HOLD (flat market, entry blocked)"));
+
+            if (!isExplicitHoldSignal)
+            {
+                string fallbackDir = prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT";
+                consensus = consensus with {
+                    FinalDirection = fallbackDir,
+                    CandidateDirection = fallbackDir,
+                    Probability = 51,
+                    CombinedReasoningText = consensus.CombinedReasoningText + $"\n🧭 Базовый дрейф: нейтральный консенсус приведен к {fallbackDir} (51%) по направлению закрытия последней свечи."
+                };
+            }
         }
 
         string effectiveMarketRegime = !string.IsNullOrEmpty(sensors.TaDetail.Regime) && sensors.TaDetail.Regime != "UNKNOWN"
@@ -1293,7 +1305,7 @@ public class MarketAnalysisOrchestrator(
             uiMarketPhase = uiMarketPhase,
             uiMarketEntropy = uiMarketEntropy,
             direction = sensors.IsRiskBlocked ? "NEUTRAL" : (cm.Consensus.FinalDirection is "BUY" or "PUT" ? cm.Consensus.FinalDirection : "NEUTRAL"),
-            probability = sensors.IsRiskBlocked ? 0 : Math.Clamp(cm.Consensus.Probability, 50, 92),
+            probability = sensors.IsRiskBlocked ? 0 : (cm.Consensus.FinalDirection == "NEUTRAL" ? Math.Clamp(cm.Consensus.Probability, 0, 100) : Math.Clamp(cm.Consensus.Probability, 50, 92)),
             duration = cm.Timeout.TimeoutText,
             expiryCandles = cm.Timeout.TimeoutCandles,
             adaptiveReasoning = cm.Consensus.CombinedReasoningText ?? string.Empty,

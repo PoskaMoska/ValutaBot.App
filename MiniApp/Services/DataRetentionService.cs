@@ -162,9 +162,9 @@ public class DataRetentionService : BackgroundService
                 break;
         }
 
-        var subCutoff = DateTime.UtcNow.Subtract(subminuteRetention).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        var legacySubCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromHours(12)).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        var histCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromDays(30)).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        var subCutoff = DateTime.UtcNow.Subtract(subminuteRetention).ToString("o");
+        var legacySubCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromHours(12)).ToString("o");
+        var histCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromDays(30)).ToString("o");
         var shadowCutoff = DateTime.UtcNow.Subtract(shadowRetention);
         var stalePendingCutoff = DateTime.UtcNow.AddHours(-2).ToString("o");
 
@@ -240,13 +240,14 @@ public class DataRetentionService : BackgroundService
                       FOR UPDATE SKIP LOCKED
                   )", new { }, chunkSize: 3000);
 
-            var jsonCutoff = DateTime.UtcNow.AddHours(-24).ToString("yyyy-MM-dd HH:mm:ss+00");
+            var jsonCutoff = DateTime.UtcNow.AddHours(-24).ToString("o");
+            var jsonCutoffLegacy = DateTime.UtcNow.AddHours(-24).ToString("yyyy-MM-dd HH:mm:ss+00");
             jsonCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Features JSON Compaction)",
                 @"WITH targets AS (
                       SELECT ctid FROM trade_outcomes
                       WHERE features_json IS NOT NULL
                         AND octet_length(features_json) > 2500
-                        AND created_at < @cutoff
+                        AND (created_at < @cutoff OR created_at < @cutoffLegacy)
                         AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
                       LIMIT 3000
                       FOR UPDATE SKIP LOCKED
@@ -254,7 +255,7 @@ public class DataRetentionService : BackgroundService
                   UPDATE trade_outcomes
                   SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
                   WHERE ctid IN (SELECT ctid FROM targets)",
-                new { cutoff = jsonCutoff });
+                new { cutoff = jsonCutoff, cutoffLegacy = jsonCutoffLegacy });
         }
 
         // 7. Non-blocking VACUUM maintenance (or per-table disk-checked SafeVacuumFullAsync when explicitly requested)
@@ -318,7 +319,7 @@ public class DataRetentionService : BackgroundService
                   ORDER BY open_time ASC
                   LIMIT 5000
                   FOR UPDATE SKIP LOCKED
-              )", new { cutoff = DateTime.UtcNow.AddHours(-96).ToString("yyyy-MM-ddTHH:mm:ssZ") }, chunkSize: 5000);
+              )", new { cutoff = DateTime.UtcNow.AddHours(-96).ToString("o") }, chunkSize: 5000);
 
         // Step 3: Compact ALL features_json immediately (not just old ones)
         int emergencyCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: JSON Compaction ALL)",
@@ -343,7 +344,7 @@ public class DataRetentionService : BackgroundService
                   WHERE open_time < @cutoff
                   LIMIT 3000
                   FOR UPDATE SKIP LOCKED
-              )", new { cutoff = DateTime.UtcNow.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ") }, chunkSize: 3000);
+              )", new { cutoff = DateTime.UtcNow.AddDays(-7).ToString("o") }, chunkSize: 3000);
 
         BotLogger.Warn($"[SmartStorageGovernor] Emergency purge complete: {emergencyShadowDeleted} shadow/hold, {emergencySubDeleted} subminute candles, {emergencyCompacted} JSON compacted, {emergencyHistDeleted} historical.");
 
@@ -368,6 +369,7 @@ public class DataRetentionService : BackgroundService
             // fillfactor=80 on subminute_candles enables HOT updates for high-frequency ticks.
             await conn.ExecuteAsync(@"
                 ALTER TABLE trade_outcomes SET (
+                    fillfactor = 85,
                     autovacuum_vacuum_scale_factor = 0.03,
                     autovacuum_analyze_scale_factor = 0.02,
                     autovacuum_vacuum_cost_limit = 2000,

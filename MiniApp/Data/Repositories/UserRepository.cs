@@ -32,77 +32,81 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (SuperAdmins.Contains(chatId)) return true;
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return false;
             
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            return await conn.ExecuteScalarAsync<bool>(
-                "SELECT EXISTS(SELECT 1 FROM allowed_users WHERE chat_id = @chatId)", new { chatId });
+            return await DbConnectionFactory.WithRetryAsync(async conn =>
+                await conn.ExecuteScalarAsync<bool>(
+                    "SELECT EXISTS(SELECT 1 FROM allowed_users WHERE chat_id = @chatId)", new { chatId }));
         }
 
         public static async Task<bool> IsAdminAsync(long chatId)
         {
             if (SuperAdmins.Contains(chatId)) return true;
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return false;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            return await conn.ExecuteScalarAsync<bool>("SELECT EXISTS(SELECT 1 FROM admins WHERE chat_id = @chatId)", new { chatId });
+            return await DbConnectionFactory.WithRetryAsync(async conn =>
+                await conn.ExecuteScalarAsync<bool>("SELECT EXISTS(SELECT 1 FROM admins WHERE chat_id = @chatId)", new { chatId }));
         }
 
         public static async Task<List<long>> GetAdminChatIdsAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<long>();
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            var result = await conn.QueryAsync<long>("SELECT chat_id FROM admins");
-            return result.ToList();
+            return await DbConnectionFactory.WithRetryAsync(async conn =>
+            {
+                var result = await conn.QueryAsync<long>("SELECT chat_id FROM admins");
+                return result.ToList();
+            });
         }
 
         public static async Task<int> GetTotalUsersCountAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            return (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM all_users");
+            return await DbConnectionFactory.WithRetryAsync(async conn =>
+                (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM all_users"));
         }
 
         public static async Task<int> GetAllowedUsersCountAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            return (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM allowed_users");
+            return await DbConnectionFactory.WithRetryAsync(async conn =>
+                (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM allowed_users"));
         }
 
         public static async Task AddAllowedUserAsync(long chatId)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") });
+            await DbConnectionFactory.WithRetryAsync(async conn =>
+                await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") }));
         }
 
         public static async Task AddAdminAsync(long chatId)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            await conn.ExecuteAsync("INSERT INTO admins (chat_id) VALUES (@chatId) ON CONFLICT (chat_id) DO NOTHING", new { chatId });
-            await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") });
+            await DbConnectionFactory.WithRetryAsync(async conn =>
+            {
+                await conn.ExecuteAsync("INSERT INTO admins (chat_id) VALUES (@chatId) ON CONFLICT (chat_id) DO NOTHING", new { chatId });
+                await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") });
+            });
         }
 
         public static async Task RemoveAdminAsync(long chatId)
         {
             if (SuperAdmins.Contains(chatId)) return; // Prevent removal of SuperAdmins
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            await conn.ExecuteAsync("DELETE FROM admins WHERE chat_id = @chatId", new { chatId });
+            await DbConnectionFactory.WithRetryAsync(async conn =>
+                await conn.ExecuteAsync("DELETE FROM admins WHERE chat_id = @chatId", new { chatId }));
         }
 
         public static async Task RemoveAllowedUserAsync(long chatId)
         {
             if (SuperAdmins.Contains(chatId)) return; // Prevent removal of SuperAdmins
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            await conn.ExecuteAsync("DELETE FROM allowed_users WHERE chat_id = @chatId", new { chatId });
+            await DbConnectionFactory.WithRetryAsync(async conn =>
+                await conn.ExecuteAsync("DELETE FROM allowed_users WHERE chat_id = @chatId", new { chatId }));
         }
 
         public static async Task AddAllUserAsync(long chatId)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
-            await using var conn = await DbConnectionFactory.OpenConnectionAsync();
-            await conn.ExecuteAsync("INSERT INTO all_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") });
+            await DbConnectionFactory.WithRetryAsync(async conn =>
+                await conn.ExecuteAsync("INSERT INTO all_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") }));
         }
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, (UserSettings settings, DateTime cachedAt)> _settingsCache = new();

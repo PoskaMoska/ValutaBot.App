@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import time
+import concurrent.futures
 from typing import Any, Dict, List, Optional
 
 # Prevent OpenMP / MKL / OpenBLAS thread contention on fractional container vCPUs
@@ -25,6 +26,9 @@ from models.patch_tst_predictor import PatchTSTPredictor
 
 _API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
 START_TIME = time.time()
+
+# Dedicated worker pool for CPU-bound PyTorch inference tasks (prevents event loop starvation under burst load)
+inference_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="patch_tst_worker")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -220,7 +224,9 @@ async def predict(request: Request):
 
     if await request.is_disconnected():
         return Response(status_code=499)
-    neural_res = await asyncio.to_thread(
+    loop = asyncio.get_running_loop()
+    neural_res = await loop.run_in_executor(
+        inference_executor,
         patch_predictor.predict,
         symbol, interval, candles, mtf_candles,
         macro_ctx, smc_ctx
@@ -234,13 +240,16 @@ async def predict(request: Request):
     resp = {
         "direction": n_dir,
         "confidence": round(float(n_conf), 4),
+        "probability": round(float(n_conf), 4),
         "model_version": n_ver,
+        "version": n_ver,
         "horizon_candles": n_hor,
         "accuracy": m.get("accuracy"),
         "auc": None,
         "n_train": m.get("n_val"),
         "variance_estimate": None,
         "raw_confidence": round(float(n_raw), 4),
+        "ml_score": round(float((n_raw - 0.5) * 2.0), 4),
         "top_features": ["PatchTST_MicroCrossAttn", "DualStream_SequenceTransformer", "MacroContext", "SMCAnchors"],
     }
     return Response(content=orjson.dumps(resp), media_type="application/json")

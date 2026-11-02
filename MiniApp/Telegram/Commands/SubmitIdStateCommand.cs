@@ -22,6 +22,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             if (match.Success)
             {
                 string pocketId = match.Value;
+                string safePocketId = System.Net.WebUtility.HtmlEncode(pocketId);
                 try
                 {
                     TelegramBotService.UserSubmittedIds[chatId] = pocketId;
@@ -52,7 +53,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
                                 {
                                     int remainingHours = Math.Max(1, (int)Math.Ceiling((reg.TrialEndsAt.Value - DateTime.UtcNow).TotalHours));
                                     await TelegramBotService.SendMessage(token, chatId, 
-                                        $"ℹ️ <b>Для вашего аккаунта Pocket Option (ID: {pocketId}) уже активен пробный период.</b>\n\n" +
+                                        $"ℹ️ <b>Для вашего аккаунта Pocket Option (ID: {safePocketId}) уже активен пробный период.</b>\n\n" +
                                         $"Осталось времени: <b>{remainingHours} ч.</b>\n\n" +
                                         $"Используйте кнопку <b>📊 Открыть TradeAI</b> в меню внизу чата для запуска.");
                                     await TelegramBotService.SendUserWelcome(token, chatId, webAppUrl);
@@ -70,7 +71,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
                                         }
                                     };
                                     await TelegramBotService.SendMessageWithKeyboard(token, chatId,
-                                        $"🔒 <b>Пробный 3-дневный период для данного аккаунта Pocket Option (ID: {pocketId}) уже завершён.</b>\n\n" +
+                                        $"🔒 <b>Пробный 3-дневный период для данного аккаунта Pocket Option (ID: {safePocketId}) уже завершён.</b>\n\n" +
                                         "Чтобы продолжить пользоваться ботом и закрепить бессрочный доступ, пожалуйста, внесите депозит на ваш брокерский счёт и нажмите кнопку проверки ниже.",
                                         depositKeyboard);
                                 }
@@ -84,7 +85,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
                                 await RegistrationRepository.SaveRegistrationAsync(reg);
 
                                 string trialWelcomeText = 
-                                    $"🎉 <b>Добро пожаловать!</b> Вам открыт полный доступ к боту на 3 дня (ID: <code>{pocketId}</code>).\n\n" +
+                                    $"🎉 <b>Добро пожаловать!</b> Вам открыт полный доступ к боту на 3 дня (ID: <code>{safePocketId}</code>).\n\n" +
                                     "Рекомендуем протестировать первые сигналы на демо-счёте брокера, чтобы освоиться с таймфреймами и стратегией Smart Money. Удачных сделок!";
 
                                 await TelegramBotService.SendMessage(token, chatId, trialWelcomeText);

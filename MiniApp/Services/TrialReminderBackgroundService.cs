@@ -133,10 +133,12 @@ namespace ValutaBot.MiniApp.Services
         {
             var (winRate, topPairs, totalSignals) = await GetRecentMarketStatsAsync();
             int remainingHours = reg.TrialEndsAt.HasValue ? Math.Max(1, (int)Math.Round((reg.TrialEndsAt.Value - now).TotalHours)) : 48;
+            string safePocketId = System.Net.WebUtility.HtmlEncode(reg.PocketId ?? "");
+            string safeTopPairs = System.Net.WebUtility.HtmlEncode(topPairs ?? "EUR/USD и GBP/USD");
 
             string text =
-                $"📊 <b>Прошёл 1 день использования бота.</b> Сегодня наши алгоритмы показали винрейт <b>{winRate:0.#}%</b> по парам <b>{topPairs}</b>. Как ваши успехи?\n\n" +
-                $"Напоминаем: пробный период для вашего аккаунта <code>{reg.PocketId}</code> действует ещё <b>{remainingHours} часов</b>. Чтобы сохранить доступ навсегда и перейти на реальный счёт, просто пополните баланс у брокера.";
+                $"📊 <b>Прошёл 1 день использования бота.</b> Сегодня наши алгоритмы показали винрейт <b>{winRate:0.#}%</b> по парам <b>{safeTopPairs}</b>. Как ваши успехи?\n\n" +
+                $"Напоминаем: пробный период для вашего аккаунта <code>{safePocketId}</code> действует ещё <b>{remainingHours} часов</b>. Чтобы сохранить доступ навсегда и перейти на реальный счёт, просто пополните баланс у брокера.";
 
             var keyboard = new
             {
@@ -155,10 +157,11 @@ namespace ValutaBot.MiniApp.Services
         private static async Task SendDay3UrgencyReminderAsync(string token, TelegramBotService.PocketRegistration reg, DateTime now)
         {
             int remainingHours = reg.TrialEndsAt.HasValue ? Math.Max(1, (int)Math.Round((reg.TrialEndsAt.Value - now).TotalHours)) : 12;
+            string safePocketId = System.Net.WebUtility.HtmlEncode(reg.PocketId ?? "");
 
             string text =
                 $"⏳ <b>До окончания бесплатного доступа осталось {remainingHours} часов!</b>\n\n" +
-                $"После этого бот прекратит отправку сигналов для вашего аккаунта <code>{reg.PocketId}</code>. Чтобы не прерывать торговлю, пополните баланс в личном кабинете брокера и нажмите кнопку \"Проверить депозит\".";
+                $"После этого бот прекратит отправку сигналов для вашего аккаунта <code>{safePocketId}</code>. Чтобы не прерывать торговлю, пополните баланс в личном кабинете брокера и нажмите кнопку \"Проверить депозит\".";
 
             var keyboard = new
             {
@@ -177,6 +180,7 @@ namespace ValutaBot.MiniApp.Services
         private static async Task SendExpiredNoticeAsync(string token, TelegramBotService.PocketRegistration reg)
         {
             int signalsObserved = await GetTradeCountBetweenAsync(reg.TrialStartedAt, reg.TrialEndsAt);
+            string safePocketId = System.Net.WebUtility.HtmlEncode(reg.PocketId ?? "");
 
             string signalsContext = signalsObserved > 0 
                 ? $"За время вашего 3-дневного тест-драйва алгоритмы выдали <b>{signalsObserved} сигналов</b>.\n\n" 
@@ -185,7 +189,7 @@ namespace ValutaBot.MiniApp.Services
             string text =
                 $"🔒 <b>Пробный период завершён. Доступ к сигналам приостановлен.</b>\n\n" +
                 signalsContext +
-                $"Вы в любой момент можете активировать бота обратно — достаточно внести минимальный депозит на ваш зарегистрированный аккаунт (ID: <code>{reg.PocketId}</code>) и нажать кнопку ниже:";
+                $"Вы в любой момент можете активировать бота обратно — достаточно внести минимальный депозит на ваш зарегистрированный аккаунт (ID: <code>{safePocketId}</code>) и нажать кнопку ниже:";
 
             var keyboard = new
             {

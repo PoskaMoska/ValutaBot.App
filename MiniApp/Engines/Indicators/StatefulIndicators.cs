@@ -20,6 +20,9 @@ public sealed class StatefulRsi
     /// <summary>Returns RSI 0-100. Returns 50.0 during warm-up.</summary>
     public double Update(double price)
     {
+        if (!double.IsFinite(price))
+            return _count <= _period ? 50.0 : (_avgLoss < 1e-10 ? (_avgGain < 1e-10 ? 50.0 : 100.0) : 100.0 - (100.0 / (1.0 + (_avgGain / _avgLoss))));
+
         if (_count == 0)
         {
             _prevPrice = price;
@@ -84,6 +87,7 @@ public sealed class StatefulConnorsRsi
     /// <summary>Returns ConnorsRSI 0-100. Returns 50.0 during warm-up.</summary>
     public double Update(double price)
     {
+        if (!double.IsFinite(price)) return 50.0;
         double rsiVal = _rsi.Update(price);
         if (_count > 0)
         {
@@ -165,6 +169,7 @@ public sealed class StatefulHma
     /// <summary>Returns HMA. Returns raw price during warm-up.</summary>
     public double Update(double price)
     {
+        if (!double.IsFinite(price)) return price;
         if (_priceCount < _period)
         {
             _priceHistory[_priceCount++] = price;
@@ -236,6 +241,7 @@ public sealed class StatefulEma
     /// </summary>
     public double Update(double price)
     {
+        if (!double.IsFinite(price)) return _count < _period ? 0.0 : _ema;
         if (_count < _period)
         {
             _sum += price;
@@ -271,6 +277,9 @@ public sealed class StatefulAtr
     /// <summary>Returns ATR (Wilder). Returns 0.0 during warm-up.</summary>
     public double Update(double high, double low, double close)
     {
+        if (!double.IsFinite(high) || !double.IsFinite(low) || !double.IsFinite(close) || high < low)
+            return LastAtr;
+
         if (_count == 0)
         {
             _prevClose = close;
@@ -337,6 +346,9 @@ public sealed class StatefulTrueAdx
     /// <summary>Returns ADX 0-100. Returns 20.0 during warm-up.</summary>
     public double Update(double high, double low, double close)
     {
+        if (!double.IsFinite(high) || !double.IsFinite(low) || !double.IsFinite(close) || high < low)
+            return LastAdx;
+
         if (_count == 0)
         {
             _prevClose = close; _prevHigh = high; _prevLow = low;

@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using ValutaBot.App.MiniApp.Data.Repositories;
+using ValutaBot.MiniApp.Services;
 using Dapper;
 
 namespace ValutaBot.MiniApp;
@@ -24,12 +26,28 @@ public class PendingTradeVerificationService : BackgroundService
         // Сброс зависших блокировок после холодного перезапуска контейнера
         await TradeRepository.ResetAllOrphanedClaimsAsync();
         BotLogger.Info("[PendingVerifier] Started. Sweeping pending trades every 5s for strict grid verification.");
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            try { await SweepExpiredTradesAsync(stoppingToken); }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-            catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Sweep error: {ex.Message}"); }
-            await Task.Delay(_checkInterval, stoppingToken);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try { await SweepExpiredTradesAsync(stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+                catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Sweep error: {ex.Message}"); }
+                await Task.Delay(_checkInterval, stoppingToken);
+            }
+        }
+        finally
+        {
+            try
+            {
+                await TradeRepository.ResetAllOrphanedClaimsAsync();
+                BotLogger.Info("[PendingVerifier] Gracefully released all claimed_at locks on service shutdown.");
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[PendingVerifier] Failed to release claims on shutdown: {ex.Message}");
+            }
+            _awaitingCandleUntil.Clear();
         }
     }
 
@@ -40,6 +58,7 @@ public class PendingTradeVerificationService : BackgroundService
         {
             if (kvp.Value < nowUtc) _awaitingCandleUntil.TryRemove(kvp.Key, out _);
         }
+        if (_awaitingCandleUntil.Count > 1000) _awaitingCandleUntil.Clear();
 
         List<SignalTracker.PredictionRecord> expired;
         DateTime currentRefTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
@@ -72,8 +91,15 @@ public class PendingTradeVerificationService : BackgroundService
             {
                 await _verificationSemaphore.WaitAsync(ct).ConfigureAwait(false);
                 try { await VerifyTradeAsync(record, ct); }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-                catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Failed to verify {record.Id}: {ex.Message}"); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
+                }
+                catch (Exception ex)
+                {
+                    BotLogger.Warn($"[PendingVerifier] Failed to verify {record.Id}: {ex.Message}");
+                    await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
+                }
                 finally { _verificationSemaphore.Release(); }
             }, ct));
         }
@@ -89,6 +115,7 @@ public class PendingTradeVerificationService : BackgroundService
         {
             BotLogger.Warn($"[PendingVerifier] Invalid EntryPrice {record.EntryPrice} for trade {record.Id} — discarding.");
             await TradeRepository.DeletePendingTradeAsync(record.Id);
+            _awaitingCandleUntil.TryRemove(record.Id, out _);
             return;
         }
 
@@ -99,29 +126,28 @@ public class PendingTradeVerificationService : BackgroundService
         DateTime currentRefTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
-        double secondsOverdue = (currentRefTime - record.VerifyAt).TotalSeconds;
         double physicalSecondsOverdue = (DateTime.UtcNow - record.VerifyAt.ToUniversalTime()).TotalSeconds;
+
+        DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();
+        DateTime verifyUtc = record.VerifyAt.Kind == DateTimeKind.Utc ? record.VerifyAt : record.VerifyAt.ToUniversalTime();
+        long s5Ticks = TimeSpan.FromSeconds(5).Ticks;
+        DateTime createdBucket = new DateTime(createdUtc.Ticks - (createdUtc.Ticks % s5Ticks), DateTimeKind.Utc);
+        DateTime targetGrid = new DateTime(verifyUtc.Ticks - (verifyUtc.Ticks % s5Ticks), DateTimeKind.Utc);
+        if (targetGrid <= createdBucket) targetGrid = createdBucket.AddSeconds(5);
+
+        // Settle on Pocket Option OTC candle stream ("{ASSET}_PO").
+        string cleanAsset = PriceFeed.CandleKey(record.Asset);
 
         try
         {
-            // Settle on Pocket Option OTC candle stream ("{ASSET}_PO").
-            string cleanAsset = PriceFeed.CandleKey(record.Asset);
             await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync(ct);
-            
-            // Physical duration expiry: verifyUtc is the exact moment the contract expires.
-            DateTime createdUtc = record.CreatedAt.Kind == DateTimeKind.Utc ? record.CreatedAt : record.CreatedAt.ToUniversalTime();
-            DateTime verifyUtc = record.VerifyAt.Kind == DateTimeKind.Utc ? record.VerifyAt : record.VerifyAt.ToUniversalTime();
-            long s5Ticks = TimeSpan.FromSeconds(5).Ticks;
-            DateTime createdBucket = new DateTime(createdUtc.Ticks - (createdUtc.Ticks % s5Ticks), DateTimeKind.Utc);
-            DateTime targetGrid = new DateTime(verifyUtc.Ticks - (verifyUtc.Ticks % s5Ticks), DateTimeKind.Utc);
-            if (targetGrid <= createdBucket) targetGrid = createdBucket.AddSeconds(5);
-            DateTime minAllowedSub = createdBucket > targetGrid.AddSeconds(-20) ? createdBucket : targetGrid.AddSeconds(-20);
 
-            string minIsoPrimary = createdBucket.AddSeconds(-5).ToString("yyyy-MM-ddTHH:mm:ss");
-            string maxIsoPrimary = verifyUtc.AddMilliseconds(1500).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
+            string minIsoPrimary = targetGrid.AddSeconds(-15).ToString("yyyy-MM-ddTHH:mm:ss");
+            string maxIsoPrimary = targetGrid.AddSeconds(5).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
 
-            // Locate the s5 candle that closed at the contract expiry boundary (open_time + 5s <= VerifyAt + 1.5s entry tolerance)
-            // Two-stage Index-Only Seek on UNIQUE(asset, interval, open_time) + exact timestamptz filter on 5 candidates
+            // Locate the exact s5 candle that closed at the contract expiry boundary targetGrid.
+            // Strict fidelity: The candle's close (open_time + 5s) MUST match targetGrid within [-1.5s, +3.0s].
+            // Old candles (e.g. from 5s-20s prior) are STRICTLY REJECTED to prevent settling on pre-expiry ticks!
             exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
                 SELECT close_price
                 FROM (
@@ -133,50 +159,40 @@ public class PendingTradeVerificationService : BackgroundService
                     ORDER BY open_time DESC
                     LIMIT 5
                 ) sub
-                WHERE open_time::timestamptz + INTERVAL '5 seconds' <= @VerifyAt + INTERVAL '1500 milliseconds'
-                  AND open_time::timestamptz >= @MinAllowed
-                ORDER BY open_time DESC
+                WHERE open_time::timestamptz + INTERVAL '5 seconds' >= @TargetGrid - INTERVAL '1500 milliseconds'
+                  AND open_time::timestamptz + INTERVAL '5 seconds' <= @TargetGrid + INTERVAL '3000 milliseconds'
+                ORDER BY ABS(EXTRACT(EPOCH FROM (open_time::timestamptz + INTERVAL '5 seconds' - @TargetGrid))) ASC
                 LIMIT 1
             ", new { 
                 Asset = cleanAsset, 
                 Interval = verifyInterval, 
                 MinIso = minIsoPrimary,
                 MaxIso = maxIsoPrimary,
-                VerifyAt = verifyUtc,
-                MinAllowed = createdBucket
+                TargetGrid = targetGrid
             }, cancellationToken: ct));
 
+            // Fast-path In-Memory fallback: if DB writer is buffering ticks (micro-batching lag 250-400ms),
+            // inspect the real-time in-memory ring buffer in RealtimeTickCollector directly.
             if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
             {
-                string minIsoFallback = minAllowedSub.AddSeconds(-5).ToString("yyyy-MM-ddTHH:mm:ss");
-                string maxIsoFallback = verifyUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
-
-                // Fallback: nearest candle on or before verifyUtc within allowed window
-                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
-                    SELECT close_price
-                    FROM (
-                        SELECT close_price, open_time
-                        FROM subminute_candles
-                        WHERE asset = @Asset AND interval = @Interval
-                          AND open_time >= @MinIso
-                          AND open_time <= @MaxIso
-                        ORDER BY open_time DESC
-                        LIMIT 5
-                    ) sub
-                    WHERE open_time::timestamptz < @VerifyAt
-                      AND open_time::timestamptz >= @MinAllowed
-                    ORDER BY open_time DESC
-                    LIMIT 1
-                ", new { 
-                    Asset = cleanAsset, 
-                    Interval = verifyInterval, 
-                    MinIso = minIsoFallback,
-                    MaxIso = maxIsoFallback,
-                    VerifyAt = verifyUtc,
-                    MinAllowed = minAllowedSub
-                }, cancellationToken: ct));
+                try
+                {
+                    var recentCandles = await RealtimeTickCollector.GetRecentCandles(cleanAsset, verifyInterval, 10);
+                    if (recentCandles != null && recentCandles.Length > 0)
+                    {
+                        var match = recentCandles.FirstOrDefault(c =>
+                            Math.Abs((c.Timestamp.AddSeconds(5) - targetGrid).TotalSeconds) <= 2.5);
+                        if (match != null && match.Close > 1e-8 && !double.IsNaN(match.Close) && !double.IsInfinity(match.Close))
+                        {
+                            exitPrice = match.Close;
+                        }
+                    }
+                }
+                catch (Exception exCollector)
+                {
+                    BotLogger.Warn($"[PendingVerifier] In-memory RealtimeTickCollector lookup error: {exCollector.Message}");
+                }
             }
-
 
             // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] via Index Seek on UNIQUE(asset, interval, open_time)
             if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))
@@ -189,7 +205,7 @@ public class PendingTradeVerificationService : BackgroundService
                         WHERE asset = @Asset
                           AND interval = @Interval
                           AND open_time >= @CreatedIso
-                          AND open_time < @TargetIso
+                          AND open_time <= @TargetIso
                     ", new { 
                         Asset = cleanAsset, 
                         Interval = verifyInterval, 
@@ -237,6 +253,7 @@ public class PendingTradeVerificationService : BackgroundService
             {
                 // Освобождаем claimed_at, чтобы сделка сразу повторилась на следующем тике с новым коннектом
                 await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
+                _awaitingCandleUntil.TryRemove(record.Id, out _);
                 return;
             }
 
@@ -287,7 +304,10 @@ public class PendingTradeVerificationService : BackgroundService
             }
             else
             {
-                _awaitingCandleUntil[record.Id] = DateTime.UtcNow.AddSeconds(5);
+                // Broker candle is in transit (WebSocket latency or DB flush delay).
+                // Protect fidelity: wait for the correct expiry candle rather than picking an older bar!
+                _awaitingCandleUntil[record.Id] = DateTime.UtcNow.AddSeconds(3);
+                await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
             }
             return;
         }
@@ -307,16 +327,24 @@ public class PendingTradeVerificationService : BackgroundService
         
         record.ExitPrice = exitPrice.Value;
         
-        if (isExactDoji || record.Direction is "HOLD" or "SHADOW_HOLD") 
+        bool isBuy = !string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY");
+        bool isPut = !string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("PUT");
+
+        if (record.Direction is "HOLD" or "SHADOW_HOLD") 
         {
-            record.WasCorrect = null; // TIE or neutral HOLD sample
+            record.WasCorrect = null; // Neutral HOLD sample
             record.PnlBps = 0.0;
         } 
+        else if (isExactDoji)
+        {
+            // POCKET OPTION AT-THE-MONEY (ATM) TIE RULE:
+            // In binary options on Pocket Option, an exact tie (Entry == Exit) is a refund, NOT a win.
+            // WasWin MUST be false for BUY and PUT contracts, with PnL = 0 bps.
+            record.WasCorrect = false;
+            record.PnlBps = 0.0;
+        }
         else 
         {
-            bool isBuy = !string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY");
-            bool isPut = !string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("PUT");
-
             record.WasCorrect = (isBuy && exitPrice.Value > record.EntryPrice)
                              || (isPut && exitPrice.Value < record.EntryPrice);
 
@@ -330,7 +358,9 @@ public class PendingTradeVerificationService : BackgroundService
         await TradeOutcomeTracker.OnTradeVerifiedAsync(record);
         // Note: SaveTradeOutcomeAsync already deletes pending trade by ID atomically in the same SQL batch
 
-        string resultStr = record.WasCorrect.HasValue ? (record.WasCorrect.Value ? "WIN" : "LOSS") : "TIE";
+        string resultStr = record.WasCorrect.HasValue 
+            ? (record.WasCorrect.Value ? "WIN" : (isExactDoji ? "TIE(LOSS)" : "LOSS")) 
+            : "HOLD";
         BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {resultStr} @ {exitPrice.Value} (Target: {record.VerifyAt:HH:mm:ss}, PnL: {record.PnlBps:+#0.00;-#0.00;0.00} bps)");
     }
 }
