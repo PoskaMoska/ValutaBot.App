@@ -23,14 +23,15 @@ public class ConfluenceMatrixEngine(
 {
     private MiniAppController.OhlcCandle[] StripUnclosedCandle(MiniAppController.OhlcCandle[] candles, string tf)
     {
-        if (candles == null || candles.Length <= 1) return candles ?? Array.Empty<MiniAppController.OhlcCandle>();
+        if (candles == null || candles.Length == 0) return Array.Empty<MiniAppController.OhlcCandle>();
         int intervalSecs = fetcher.TimeframeSeconds(tf);
         DateTime refNow = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
-                // Синхронизация допуска 250мс с Orchestrator для компенсации джиттера таймштампа тиков
+        // Синхронизация допуска 250мс с Orchestrator для компенсации джиттера таймштампа тиков
         bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= refNow.AddMilliseconds(250);
         if (isLastClosed) return candles;
+        if (candles.Length == 1) return Array.Empty<MiniAppController.OhlcCandle>();
         var trimmed = new MiniAppController.OhlcCandle[candles.Length - 1];
         Array.Copy(candles, 0, trimmed, 0, candles.Length - 1);
         return trimmed;
@@ -61,9 +62,25 @@ public class ConfluenceMatrixEngine(
             primaryCandles = StripUnclosedCandle(primaryCandles, primaryTf);
             macroCandles   = StripUnclosedCandle(macroCandles, macroTf);
 
-            string dirMicro   = ScoreDirectionFromCandles(microCandles, microCandles.Select(c => c.Close).ToArray(), microCandles.Select(c => c.Volume).ToArray(), microTf, asset);
-            string dirPrimary = ScoreDirectionFromCandles(primaryCandles, primaryCandles.Select(c => c.Close).ToArray(), primaryCandles.Select(c => c.Volume).ToArray(), primaryTf, asset);
-            string dirMacro   = ScoreDirectionFromCandles(macroCandles, macroCandles.Select(c => c.Close).ToArray(), macroCandles.Select(c => c.Volume).ToArray(), macroTf, asset);
+            static (double[] prices, double[] volumes) ExtractPricesAndVolumes(MiniAppController.OhlcCandle[] candles)
+            {
+                double[] p = new double[candles.Length];
+                double[] v = new double[candles.Length];
+                for (int i = 0; i < candles.Length; i++)
+                {
+                    p[i] = candles[i].Close;
+                    v[i] = candles[i].Volume;
+                }
+                return (p, v);
+            }
+
+            var (microPrices, microVols) = ExtractPricesAndVolumes(microCandles);
+            var (primaryPrices, primaryVols) = ExtractPricesAndVolumes(primaryCandles);
+            var (macroPrices, macroVols) = ExtractPricesAndVolumes(macroCandles);
+
+            string dirMicro   = ScoreDirectionFromCandles(microCandles, microPrices, microVols, microTf, asset);
+            string dirPrimary = ScoreDirectionFromCandles(primaryCandles, primaryPrices, primaryVols, primaryTf, asset);
+            string dirMacro   = ScoreDirectionFromCandles(macroCandles, macroPrices, macroVols, macroTf, asset);
 
             var tfDirs = new Dictionary<string, string>
             {

@@ -280,8 +280,12 @@ namespace ValutaBot.MiniApp
             try
             {
                 Interlocked.Exchange(ref _isInitialized, 0);
-                _pendingBatchBuffer.Clear();
-                try { _collectorCts.Cancel(); } catch { }
+                if (acquired)
+                {
+                    _pendingBatchBuffer.Clear();
+                }
+                var oldCts = _collectorCts;
+                try { oldCts.Cancel(); oldCts.Dispose(); } catch { }
                 _tickChannel.Writer.TryComplete();
                 _collectorCts = new CancellationTokenSource();
                 _tickChannel = Channel.CreateBounded<TickEvent>(new BoundedChannelOptions(ChannelCapacity)
@@ -751,6 +755,8 @@ namespace ValutaBot.MiniApp
             var acc = dict.GetOrAdd(asset, _ => new CandleAccumulator());
             Action<string, string>? notifyCandleClosed = null;
             string? closedTf = null;
+            string? closedDbInterval = null;
+            MiniAppController.OhlcCandle? closedCandle = null;
 
             lock (acc)
             {
@@ -765,13 +771,8 @@ namespace ValutaBot.MiniApp
                 {
                     acc.Reset(openTime);
                     closedTf = dict == _s5 ? "s5" : dict == _s10 ? "s10" : dict == _s15 ? "s15" : dict == _s30 ? "s30" : "m1";
-                    string closedDbInterval = closedTf == "m1" ? "1min" : closedTf;
-                    if (acc.LastClosed != null)
-                    {
-                        var ring = _ringBuffers.GetOrAdd($"{asset}:{closedDbInterval}", _ => new CandleRingBuffer(400));
-                        ring.Add(acc.LastClosed);
-                    }
-                    _recentCandlesCache.TryRemove($"{asset}:{closedDbInterval}", out _);
+                    closedDbInterval = closedTf == "m1" ? "1min" : closedTf;
+                    closedCandle = acc.LastClosed;
                     if (!isBackfill)
                         notifyCandleClosed = OnCandleClosed;
                 }
@@ -779,6 +780,15 @@ namespace ValutaBot.MiniApp
                     acc.OpenTime = openTime;
 
                 acc.AddTick(price);
+            }
+
+            // D1 FIX: Update ring buffer and invalidate cache outside lock(acc) (<10ns under lock)
+            if (closedCandle != null && closedDbInterval != null)
+            {
+                string bufferKey = $"{asset}:{closedDbInterval}";
+                var ring = _ringBuffers.GetOrAdd(bufferKey, _ => new CandleRingBuffer(400));
+                ring.Add(closedCandle);
+                _recentCandlesCache.TryRemove(bufferKey, out _);
             }
 
             if (notifyCandleClosed != null && closedTf != null)

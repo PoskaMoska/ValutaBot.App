@@ -102,7 +102,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         // C-1 FIX: Hard clamp microVel — JPY pairs (price ~150) produce raw bps values
         // 100x larger than USD pairs, saturating score contributions and overriding all
         // other signals. Clamp to ±50 bps aligns with the scoring weight design contract.
-        microVel = Math.Clamp(microVel, -50.0, 50.0);
+        microVel = double.IsFinite(microVel) ? Math.Clamp(microVel, -50.0, 50.0) : 0.0;
 
         // Detect dead flat market (range < 35% of ATR over 10 bars)
         bool isDeadMarket = false;

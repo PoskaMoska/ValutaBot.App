@@ -166,9 +166,15 @@ def build_macro_vector_live(
     """
     Builds the macro context vector matching training features (23 or 31 elements).
     """
-    macro = macro_data or {}
-    smc = smc_data or {}
-    ta = ta_data or macro.get("Ta") or macro.get("ta") or {}
+    raw_macro = macro_data or {}
+    if "MacroContext" in raw_macro or "macro_context" in raw_macro:
+        macro = raw_macro.get("MacroContext") or raw_macro.get("macro_context") or {}
+        smc = smc_data or raw_macro.get("Smc") or raw_macro.get("smc") or {}
+        ta = ta_data or raw_macro.get("Ta") or raw_macro.get("ta") or macro.get("Ta") or macro.get("ta") or {}
+    else:
+        macro = raw_macro
+        smc = smc_data or {}
+        ta = ta_data or macro.get("Ta") or macro.get("ta") or {}
 
     day_pos = float(macro.get("DayRangePositionPct", 0.5))
     dist_high = float(macro.get("DistToDayHighBps", 0.0)) / 100.0
@@ -296,6 +302,7 @@ class PatchTSTPredictor:
         self._candle_features = 4  # Default to 4-channel (v3); overridden by checkpoint
         self._seq_len = 160
         self._seq_len_mtf = 30
+        self._macro_features = 31
         self._model_name = "unknown"
         self._arch_tag = "neural_brain"
         self.metrics: Dict = {}
@@ -443,7 +450,7 @@ class PatchTSTPredictor:
 
             # Use channel count from checkpoint (4, 5, or 8)
             x_micro_np = normalize_candles_live(candles, seq_len=self._seq_len, n_channels=self._candle_features, tf_sec=tf_sec)
-            x_macro_np = build_macro_vector_live(symbol, interval, candles, macro_context, smc_context, n_features=getattr(self, "_macro_features", 23))
+            x_macro_np = build_macro_vector_live(symbol, interval, candles, macro_context, smc_context, n_features=getattr(self, "_macro_features", 31))
 
             x_micro_t = torch.tensor(x_micro_np, dtype=torch.float32).unsqueeze(0).to(self.device)
             x_macro_t = torch.tensor(x_macro_np, dtype=torch.float32).unsqueeze(0).to(self.device)

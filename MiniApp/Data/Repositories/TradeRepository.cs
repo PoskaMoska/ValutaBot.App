@@ -318,9 +318,10 @@ FROM outcome_data;");
                     DELETE FROM pending_trades 
                     WHERE id = @PendingTradeId AND @PendingTradeId IS NOT NULL AND @PendingTradeId != '';";
 
+                    string pendingId = !string.IsNullOrEmpty(pendingTradeIdToDelete) ? pendingTradeIdToDelete : outcome.Id;
                     await conn.ExecuteAsync(sql, new
                     {
-                        PendingTradeId = pendingTradeIdToDelete ?? "",
+                        PendingTradeId = pendingId,
                         outcome.Id,
                         outcome.Asset,
                         outcome.Timeframe,
@@ -781,7 +782,7 @@ FROM outcome_data;");
                           AND direction IN ('BUY', 'PUT')
                           {eraFilter}
                           {sinceFilter}
-                        ORDER BY verified_at::timestamptz DESC 
+                        ORDER BY verified_at DESC 
                         LIMIT @Limit
                     ", new { Limit = limit, SinceUtc = sinceUtc });
                     return rows.ToList();
@@ -814,7 +815,7 @@ FROM outcome_data;");
                           AND direction IN ('BUY', 'PUT')
                           {eraFilter}
                           {sinceFilter}
-                        ORDER BY verified_at::timestamptz DESC 
+                        ORDER BY verified_at DESC 
                         LIMIT @Limit
                     ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtc = sinceUtc });
                     return rows.ToList();

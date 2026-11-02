@@ -398,7 +398,17 @@ namespace ValutaBot.App.MiniApp.Data
                     ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS higher_tf_aligned BOOLEAN NOT NULL DEFAULT FALSE;
                     ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS minutes_to_news INTEGER NOT NULL DEFAULT -1;
                     ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NULL;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS probability INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS features_json TEXT NULL;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS ta_telemetry JSONB NULL;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS ml_telemetry JSONB NULL;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS smc_telemetry JSONB NULL;
+
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS probability INTEGER NOT NULL DEFAULT 0;
                     ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS features_json TEXT;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ta_telemetry JSONB NULL;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ml_telemetry JSONB NULL;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS smc_telemetry JSONB NULL;
                 END $$;
 
                 CREATE TABLE IF NOT EXISTS subminute_candles (

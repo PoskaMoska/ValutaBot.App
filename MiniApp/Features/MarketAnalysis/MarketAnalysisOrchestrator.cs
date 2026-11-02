@@ -255,11 +255,25 @@ public class MarketAnalysisOrchestrator(
                 _logger.LogWarning("[TRACE {TraceId}] Higher TF {Htf} unavailable on cold start: {Msg}", traceId, higherTf, ex.Message);
             }
         }
-        var closedHigherCandles = (higherCandles != null && higherCandles.Length > 1 && higherTf != null) 
-            ? ((_fetcher.TimeframeSeconds(higherTf) > 0 && higherCandles[^1].Timestamp.AddSeconds(_fetcher.TimeframeSeconds(higherTf)) <= referenceNowUtc) 
-                ? higherCandles 
-                : higherCandles.Take(higherCandles.Length - 1).ToArray())
-            : [];
+        MiniAppController.OhlcCandle[] closedHigherCandles = [];
+        if (higherCandles != null && higherCandles.Length > 0 && higherTf != null)
+        {
+            int higherSecs = _fetcher.TimeframeSeconds(higherTf);
+            bool isHigherClosed = higherSecs > 0 && higherCandles[^1].Timestamp.AddSeconds(higherSecs) <= referenceNowUtc.AddMilliseconds(250);
+            int higherClosedLen = isHigherClosed ? higherCandles.Length : higherCandles.Length - 1;
+            if (higherClosedLen > 0)
+            {
+                if (higherClosedLen == higherCandles.Length)
+                {
+                    closedHigherCandles = higherCandles;
+                }
+                else
+                {
+                    closedHigherCandles = new MiniAppController.OhlcCandle[higherClosedLen];
+                    Array.Copy(higherCandles, 0, closedHigherCandles, 0, higherClosedLen);
+                }
+            }
+        }
 
         return new PreparedCandleData(
             cleanAsset,
@@ -768,9 +782,22 @@ public class MarketAnalysisOrchestrator(
             ConnorsContrib = S(sensors.TaDetail.ConnorsContrib), VolStrengthContrib = S(sensors.TaDetail.VolStrengthContrib)
         };
 
+        var candlesPayload = new object[prep.ClosedCandles.Length];
+        for (int i = 0; i < prep.ClosedCandles.Length; i++)
+        {
+            var c = prep.ClosedCandles[i];
+            candlesPayload[i] = new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) };
+        }
+        var mtfCandlesPayload = new object[prep.ClosedHigherCandles.Length];
+        for (int i = 0; i < prep.ClosedHigherCandles.Length; i++)
+        {
+            var c = prep.ClosedHigherCandles[i];
+            mtfCandlesPayload[i] = new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) };
+        }
+
         var mlFeatures = new {
-            Candles = prep.ClosedCandles.Select(c => new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) }).ToArray(),
-            MtfCandles = prep.ClosedHigherCandles.Select(c => new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) }).ToArray(),
+            Candles = candlesPayload,
+            MtfCandles = mtfCandlesPayload,
             Smc = sanitizedSmc,
             Ta = sanitizedTa,
             MacroContext = new {
@@ -1236,6 +1263,29 @@ public class MarketAnalysisOrchestrator(
             ml.Prediction?.ModelVersion ?? "NONE"
         ).Inc();
 
+        double[] chartData = new double[prep.MainPrices.Length];
+        for (int i = 0; i < prep.MainPrices.Length; i++)
+        {
+            chartData[i] = GetSafeLimit(prep.MainPrices[i]);
+        }
+
+        int rawCount = prep.RawCandles.Length;
+        int ohlcTake = Math.Min(80, rawCount);
+        int ohlcStart = rawCount - ohlcTake;
+        var chartOhlc = new object[ohlcTake];
+        for (int i = 0; i < ohlcTake; i++)
+        {
+            var c = prep.RawCandles[ohlcStart + i];
+            chartOhlc[i] = new
+            {
+                o = Math.Round(GetSafeLimit(c.Open), 8),
+                h = Math.Round(GetSafeLimit(c.High), 8),
+                l = Math.Round(GetSafeLimit(c.Low), 8),
+                c = Math.Round(GetSafeLimit(c.Close), 8),
+                v = Math.Round(GetSafeLimit(c.Volume), 2)
+            };
+        }
+
         return new AnalysisResponseDto
         {
             tfConflict = cm.ConflictPenalty < 1.0,
@@ -1262,8 +1312,8 @@ public class MarketAnalysisOrchestrator(
             ema = Math.Round(GetSafeLimit(sensors.TaResult.hmaVal), prep.IsForex ? 5 : 2),
             volumeStrength = Math.Round(GetSafeLimit(sensors.TaResult.volStrengthVal), 2),
             atr = Math.Round(GetSafeLimit(sensors.MainAtr), prep.IsForex ? 5 : 2),
-            chartData = prep.MainPrices.Select(p => GetSafeLimit(p)).ToArray(),
-            chartOhlc = prep.RawCandles.TakeLast(80).Select(c => new { o = Math.Round(GetSafeLimit(c.Open), 8), h = Math.Round(GetSafeLimit(c.High), 8), l = Math.Round(GetSafeLimit(c.Low), 8), c = Math.Round(GetSafeLimit(c.Close), 8), v = Math.Round(GetSafeLimit(c.Volume), 2) }).ToArray(),
+            chartData = chartData,
+            chartOhlc = chartOhlc,
             goldenSetup = exec.IsGoldenSetup,
             confluenceLabel = cm.MtfResult.ConfluenceLabel,
             confluenceRatio = cm.MtfResult.ConfluenceRatio,

@@ -283,10 +283,13 @@ def evaluate(
     max_cond_prob = np.maximum(p_buy_cond, p_put_cond)
     pred_dir = np.where(p_buy_cond >= p_put_cond, 1, 2)
 
+    # Full-Recall Flat Guard: align evaluate() with live inference in patch_tst_predictor.py
+    flat_guard = (probs[:, 0] >= np.maximum(probs[:, 1], probs[:, 2])) | (probs[:, 0] >= 0.45) | (np.abs(probs[:, 1] - probs[:, 2]) < 0.02)
+    stats["flat_guard_coverage"] = float(np.mean(flat_guard) * 100.0)
+
     for th in conf_thresholds:
-        # Honest evaluation: when the model enters BUY or PUT at confidence >= th,
-        # any outcome where price did not move (target 0) or went opposite is NOT a win.
-        dir_mask = (max_cond_prob >= th)
+        # Honest evaluation: when the model enters BUY or PUT at confidence >= th and not suppressed by Flat Guard
+        dir_mask = (max_cond_prob >= th) & (~flat_guard)
         n_trades = int(np.sum(dir_mask))
 
         if n_trades > 0:

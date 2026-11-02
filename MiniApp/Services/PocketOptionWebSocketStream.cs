@@ -31,6 +31,7 @@ public static class PocketOptionWebSocketStream
     private static int _loopRunning = 0;
     private static CancellationTokenSource? _connectionCts;
     private static readonly object _streamLifecycleLock = new(); // D5 FIX: Synchronize Start/Stop/Launch
+    private static bool _isDeferredStartPending = false;
     private static long _totalTicksIngested = 0;
 
     private static readonly string[] DefaultAssets = {
@@ -183,13 +184,31 @@ public static class PocketOptionWebSocketStream
     }
 
     /// <summary>
+    /// Thread-safe status updater synchronized under _streamLifecycleLock.
+    /// Prevents background unwinding tasks from overwriting "STOPPED" with "RECONNECTING" or "ONLINE".
+    /// </summary>
+    private static void SetStatus(string newStatus)
+    {
+        lock (_streamLifecycleLock)
+        {
+            if (Volatile.Read(ref _cts).IsCancellationRequested && newStatus != "STOPPED")
+                return;
+            Status = newStatus;
+        }
+    }
+
+    /// <summary>
     /// Actively forces a WebSocket reconnection (called by Watchdog or SelfDiagnosticService when feed stalls).
     /// </summary>
     private static void CancelConnection()
     {
-        // D4 FIX: Atomically extract and nullify to prevent race or re-cancelling disposed CTS
+        // Atomically extract and nullify to prevent race or re-cancelling disposed CTS
         var cts = Interlocked.Exchange(ref _connectionCts, null);
-        try { cts?.Cancel(); } catch (ObjectDisposedException) { }
+        if (cts != null)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { } catch (AggregateException) { }
+            try { cts.Dispose(); } catch { }
+        }
     }
 
     public static void ForceReconnect(string reason)
@@ -209,6 +228,13 @@ public static class PocketOptionWebSocketStream
         {
             await _sendLock.WaitAsync(linkedCts.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
+        {
+            BotLogger.Warn("[PO WS] SendTextAsync lock wait timed out (2s). Aborting socket to unblock send pipeline.");
+            try { ws.Abort(); } catch { }
+            CancelConnection();
+            return;
+        }
         catch (OperationCanceledException)
         {
             return;
@@ -224,6 +250,11 @@ public static class PocketOptionWebSocketStream
         {
             BotLogger.Warn("[PO WS] SendTextAsync timed out (2s). Aborting socket to unblock send pipeline.");
             try { ws.Abort(); } catch { }
+            CancelConnection();
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected cancellation on token cancellation
         }
         catch (ObjectDisposedException) { }
         catch (WebSocketException) { }
@@ -263,14 +294,19 @@ public static class PocketOptionWebSocketStream
             {
                 if (Volatile.Read(ref _cts).IsCancellationRequested)
                 {
-                    BotLogger.Warn("[PO WS] StartStream called while stream loop is unwinding after stop. Deferring start...");
-                    _ = DeferredStartAsync();
+                    if (!_isDeferredStartPending)
+                    {
+                        _isDeferredStartPending = true;
+                        BotLogger.Warn("[PO WS] StartStream called while stream loop is unwinding after stop. Deferring start...");
+                        _ = DeferredStartAsync();
+                    }
                     return;
                 }
                 BotLogger.Warn("[PO WS] StartStream called while stream loop is already running. Ignored.");
                 return;
             }
 
+            _isDeferredStartPending = false;
             LaunchStreamLocked();
         }
     }
@@ -282,11 +318,25 @@ public static class PocketOptionWebSocketStream
             await Task.Delay(50).ConfigureAwait(false);
             lock (_streamLifecycleLock)
             {
+                if (!_isDeferredStartPending)
+                {
+                    // Cancelled by StopStream()
+                    return;
+                }
                 if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) == 0)
                 {
+                    _isDeferredStartPending = false;
                     LaunchStreamLocked();
                     return;
                 }
+            }
+        }
+        lock (_streamLifecycleLock)
+        {
+            _isDeferredStartPending = false;
+            if (Interlocked.CompareExchange(ref _loopRunning, 0, 0) == 0)
+            {
+                Status = "STOPPED";
             }
         }
         BotLogger.Error("[PO WS] Deferred StartStream gave up: previous loop did not exit within 5s.");
@@ -309,6 +359,7 @@ public static class PocketOptionWebSocketStream
     {
         lock (_streamLifecycleLock)
         {
+            _isDeferredStartPending = false;
             try { Volatile.Read(ref _cts).Cancel(); } catch (ObjectDisposedException) { }
             CancelConnection();
             Status = "STOPPED";
@@ -506,7 +557,7 @@ public static class PocketOptionWebSocketStream
             _cachedTradingUrl = tradingUrl;
             Interlocked.Exchange(ref _consecutiveAuthFailures, 0);
 
-            try { _connectionCts?.Cancel(); } catch { }
+            CancelConnection();
             string sessStr = sessProp.GetString() ?? "";
             string sessPrefix = sessStr.Length > 6 ? sessStr[..6] : sessStr;
             return (true, $"Токен сохранён в po_collector_state (session={sessPrefix}***). Переподключение потока запущено.");
@@ -529,7 +580,12 @@ public static class PocketOptionWebSocketStream
 
                 double frameIdleSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(Volatile.Read(ref _lastMessageSw)).TotalSeconds;
                 double tickIdleSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(Volatile.Read(ref _lastTickSw)).TotalSeconds;
-                var connToken = _connectionCts?.Token ?? token;
+                CancellationToken connToken = token;
+                var currentConnCts = Volatile.Read(ref _connectionCts);
+                if (currentConnCts != null)
+                {
+                    try { connToken = currentConnCts.Token; } catch (ObjectDisposedException) { connToken = token; }
+                }
                 if (frameIdleSeconds > 3)
                 {
                     try { await SendTextAsync(ws, "2", connToken); } catch { }
@@ -553,7 +609,7 @@ public static class PocketOptionWebSocketStream
                 {
                     BotLogger.Warn($"[PO WS] Watchdog detected silent drop or feed stall (frameIdle={frameIdleSeconds:F1}s, tickIdle={tickIdleSeconds:F1}s). Dropping connection to reconnect immediately...");
                     Volatile.Write(ref _lastTickSw, System.Diagnostics.Stopwatch.GetTimestamp());
-                    try { _connectionCts?.Cancel(); } catch { }
+                    CancelConnection();
                 }
             }
         }
@@ -568,20 +624,20 @@ public static class PocketOptionWebSocketStream
         {
             while (!token.IsCancellationRequested)
             {
-                Status = "CONNECTING";
+                SetStatus("CONNECTING");
                 var (authPayloadJson, tradingUrl) = await LoadSessionFromDbAsync(token);
 
                 if (string.IsNullOrEmpty(authPayloadJson) || string.IsNullOrEmpty(tradingUrl))
                 {
                     BotLogger.Warn("[PO WS] No active session found in po_collector_state. Waiting 10s...");
-                    Status = "WAITING_SESSION";
+                    SetStatus("WAITING_SESSION");
                     await Task.Delay(10000, token);
                     continue;
                 }
 
                 bool wasConnected = false;
-                using var connCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                _connectionCts = connCts;
+                var connCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                Interlocked.Exchange(ref _connectionCts, connCts);
 
                 var ws = new ClientWebSocket();
                 ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
@@ -617,7 +673,7 @@ public static class PocketOptionWebSocketStream
                     BotLogger.Info("[PO WS] Authentication frame sent. Awaiting subscription confirmation...");
 
                     wasConnected = true;
-                    Status = "ONLINE";
+                    SetStatus("ONLINE");
                     long swConnected = System.Diagnostics.Stopwatch.GetTimestamp();
                     Volatile.Write(ref _lastMessageSw, swConnected);
                     Volatile.Write(ref _lastTickSw, swConnected);
@@ -631,14 +687,17 @@ public static class PocketOptionWebSocketStream
                 }
                 catch (Exception ex)
                 {
-                    Status = "RECONNECTING";
+                    SetStatus("RECONNECTING");
                     int retrySec = (wasConnected ? ReconnectAfterConnectedMs : backoffMs) / 1000;
                     BotLogger.Error($"[PO WS] Connection error: {ex.Message}. Retrying in {retrySec}s...");
                 }
                 finally
                 {
-                    // D4 FIX: Nullify _connectionCts if it matches connCts before disposing
-                    Interlocked.CompareExchange(ref _connectionCts, null, connCts);
+                    var activeCts = Interlocked.Exchange(ref _connectionCts, null);
+                    if (activeCts != null)
+                    {
+                        try { activeCts.Dispose(); } catch { }
+                    }
                     try { ws.Dispose(); } catch { }
                     if (ReferenceEquals(_webSocket, ws))
                     {
@@ -656,8 +715,15 @@ public static class PocketOptionWebSocketStream
         catch (OperationCanceledException) { }
         finally
         {
-            Interlocked.Exchange(ref _loopRunning, 0);
-            Status = "STOPPED";
+            lock (_streamLifecycleLock)
+            {
+                Interlocked.Exchange(ref _loopRunning, 0);
+                try { Volatile.Read(ref _cts).Cancel(); } catch { }
+                if (!_isDeferredStartPending)
+                {
+                    Status = "STOPPED";
+                }
+            }
         }
     }
 
@@ -712,7 +778,7 @@ public static class PocketOptionWebSocketStream
     private static async Task SubscribeAllAssetsAsync(ClientWebSocket ws, CancellationToken connectionToken)
     {
         Interlocked.Exchange(ref _consecutiveAuthFailures, 0);
-        Status = "ONLINE";
+        SetStatus("ONLINE");
         string assetList = string.Join(", ", _subscribedAssets);
         BotLogger.Info($"[PO WS] Authenticated! Subscribing to OTC assets: {assetList}");
         foreach (var asset in _subscribedAssets)
@@ -750,7 +816,7 @@ public static class PocketOptionWebSocketStream
 
         if (fails >= 3)
         {
-            Status = "AUTH_EXPIRED";
+            SetStatus("AUTH_EXPIRED");
             if ((DateTime.UtcNow - _lastAuthAlertUtc).TotalMinutes >= 30)
             {
                 _lastAuthAlertUtc = DateTime.UtcNow;

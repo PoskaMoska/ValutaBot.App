@@ -67,41 +67,64 @@ namespace ValutaBot.MiniApp.Services
                 if (reg.HasDeposited || reg.ChatId <= 0 || !reg.TrialStartedAt.HasValue || !reg.TrialEndsAt.HasValue)
                     continue;
 
-                // 1. Check Day 4 / Soft Expired Block
-                if (now >= reg.TrialEndsAt.Value && !reg.TrialExpiredSent)
+                bool messageAttempted = false;
+                try
                 {
-                    await SendExpiredNoticeAsync(token, reg);
-                    reg.TrialExpiredSent = true;
-                    await RegistrationRepository.SaveRegistrationAsync(reg);
-                    await Task.Delay(40, ct); // Rate limit guard: <= 25 msg/s global
-                    continue;
+                    // 1. Check Day 4 / Soft Expired Block
+                    if (now >= reg.TrialEndsAt.Value && !reg.TrialExpiredSent)
+                    {
+                        messageAttempted = true;
+                        await SendExpiredNoticeAsync(token, reg);
+                        reg.TrialExpiredSent = true;
+                        await RegistrationRepository.SaveRegistrationAsync(reg);
+                        continue;
+                    }
+
+                    // If trial is already expired and notice was sent, skip
+                    if (now >= reg.TrialEndsAt.Value)
+                        continue;
+
+                    double remainingHours = (reg.TrialEndsAt.Value - now).TotalHours;
+
+                    // 2. Check Day 3 Reminder (<= 12 hours remaining)
+                    if (remainingHours <= 12.0 && !reg.ReminderDay3Sent)
+                    {
+                        messageAttempted = true;
+                        await SendDay3UrgencyReminderAsync(token, reg, now);
+                        reg.ReminderDay3Sent = true;
+                        reg.ReminderDay2Sent = true; // Mark day 2 as well to prevent late out-of-order sending
+                        await RegistrationRepository.SaveRegistrationAsync(reg);
+                        continue;
+                    }
+
+                    // 3. Check Day 2 Reminder (>= 24 hours elapsed, remaining between 12 and 48 hours)
+                    double elapsedHours = (now - reg.TrialStartedAt.Value).TotalHours;
+                    if (elapsedHours >= 24.0 && remainingHours > 12.0 && !reg.ReminderDay2Sent)
+                    {
+                        messageAttempted = true;
+                        await SendDay2ValueReminderAsync(token, reg, now);
+                        reg.ReminderDay2Sent = true;
+                        await RegistrationRepository.SaveRegistrationAsync(reg);
+                    }
                 }
-
-                // If trial is already expired and notice was sent, skip
-                if (now >= reg.TrialEndsAt.Value)
-                    continue;
-
-                double remainingHours = (reg.TrialEndsAt.Value - now).TotalHours;
-
-                // 2. Check Day 3 Reminder (<= 12 hours remaining)
-                if (remainingHours <= 12.0 && !reg.ReminderDay3Sent)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    await SendDay3UrgencyReminderAsync(token, reg, now);
-                    reg.ReminderDay3Sent = true;
-                    reg.ReminderDay2Sent = true; // Mark day 2 as well to prevent late out-of-order sending
-                    await RegistrationRepository.SaveRegistrationAsync(reg);
-                    await Task.Delay(40, ct); // Rate limit guard: <= 25 msg/s global
-                    continue;
+                    break;
                 }
-
-                // 3. Check Day 2 Reminder (>= 24 hours elapsed, remaining between 12 and 48 hours)
-                double elapsedHours = (now - reg.TrialStartedAt.Value).TotalHours;
-                if (elapsedHours >= 24.0 && remainingHours > 12.0 && !reg.ReminderDay2Sent)
+                catch (Exception ex)
                 {
-                    await SendDay2ValueReminderAsync(token, reg, now);
-                    reg.ReminderDay2Sent = true;
-                    await RegistrationRepository.SaveRegistrationAsync(reg);
-                    await Task.Delay(40, ct); // Rate limit guard: <= 25 msg/s global
+                    BotLogger.Warn($"[TrialReminder] Failed processing reminder for chatId {reg.ChatId} (PocketId: {reg.PocketId}): {ex.Message}");
+                }
+                finally
+                {
+                    if (messageAttempted)
+                    {
+                        try
+                        {
+                            await Task.Delay(40, ct); // Rate limit guard: <= 25 msg/s global (Telegram limit: 30 msg/s)
+                        }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+                    }
                 }
             }
         }

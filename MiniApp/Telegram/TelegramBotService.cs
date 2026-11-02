@@ -130,11 +130,14 @@ public partial class TelegramBotService : BackgroundService
             try
             {
                 await SendMessage(token, adminId, payloadText);
-                await Task.Delay(40); // 40ms throttle
             }
             catch (Exception ex)
             {
                 BotLogger.Warn($"[Admins] Failed to deliver alert to {adminId}: {ex.GetType().Name}");
+            }
+            finally
+            {
+                await Task.Delay(40); // 40ms throttle (<= 25 msg/s, complies with Telegram 30 msg/s limit)
             }
         }
     }
@@ -204,12 +207,18 @@ public partial class TelegramBotService : BackgroundService
                         {
                             try
                             {
-                                var errJson = await response.Content.ReadAsStringAsync(stoppingToken);
-                                using var errDoc = JsonDocument.Parse(errJson);
-                                if (errDoc.RootElement.TryGetProperty("parameters", out var param) &&
-                                    param.TryGetProperty("retry_after", out var retryAfter))
+                                if (response.Content != null)
                                 {
-                                    backoffSeconds = Math.Max(1, retryAfter.GetInt32());
+                                    var errJson = await response.Content.ReadAsStringAsync(stoppingToken);
+                                    if (!string.IsNullOrWhiteSpace(errJson))
+                                    {
+                                        using var errDoc = JsonDocument.Parse(errJson);
+                                        if (errDoc.RootElement.TryGetProperty("parameters", out var param) &&
+                                            param.TryGetProperty("retry_after", out var retryAfter))
+                                        {
+                                            backoffSeconds = Math.Max(1, retryAfter.GetInt32());
+                                        }
+                                    }
                                 }
                             }
                             catch { }
@@ -333,7 +342,27 @@ public partial class TelegramBotService : BackgroundService
         {
             await WaitTgGateAsync(ct);
             using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-            var resp = await client.PostAsync(url, content, ct);
+            
+            HttpResponseMessage resp;
+            try
+            {
+                resp = await client.PostAsync(url, content, ct);
+            }
+            catch (Exception ex) when (attempt < 3 && (ex is HttpRequestException || ex is System.IO.IOException || ex is TimeoutException || ex is TaskCanceledException && !ct.IsCancellationRequested))
+            {
+                BotLogger.Warn($"[TG Bot API] Outbound call transient failure (attempt {attempt}/3): {ex.Message}");
+                await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+                continue;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                BotLogger.Warn($"[TG Bot API] Outbound call failed after retries: {ex.Message}");
+                return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable)
+                {
+                    Content = new StringContent($"{{\"ok\":false,\"description\":\"Network failure: {ex.Message}\"}}", Encoding.UTF8, "application/json")
+                };
+            }
+
             if ((int)resp.StatusCode == 429)
             {
                 int delaySec = 5;
@@ -345,12 +374,18 @@ public partial class TelegramBotService : BackgroundService
                 {
                     try
                     {
-                        var errJson = await resp.Content.ReadAsStringAsync(ct);
-                        using var doc = JsonDocument.Parse(errJson);
-                        if (doc.RootElement.TryGetProperty("parameters", out var p) &&
-                            p.TryGetProperty("retry_after", out var ra))
+                        if (resp.Content != null)
                         {
-                            delaySec = Math.Max(1, ra.GetInt32());
+                            var errJson = await resp.Content.ReadAsStringAsync(ct);
+                            if (!string.IsNullOrWhiteSpace(errJson))
+                            {
+                                using var doc = JsonDocument.Parse(errJson);
+                                if (doc.RootElement.TryGetProperty("parameters", out var p) &&
+                                    p.TryGetProperty("retry_after", out var ra))
+                                {
+                                    delaySec = Math.Max(1, ra.GetInt32());
+                                }
+                            }
                         }
                     }
                     catch { }
@@ -370,8 +405,12 @@ public partial class TelegramBotService : BackgroundService
                     Content = new StringContent("{\"ok\":false,\"description\":\"Too Many Requests: retry limit exceeded\"}", Encoding.UTF8, "application/json")
                 };
             }
+
+            // Гарантируем, что Content всегда инициализирован во избежание NRE у вызывающего кода
+            resp.Content ??= new StringContent("{\"ok\":true}", Encoding.UTF8, "application/json");
             return resp;
         }
+
         return new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests)
         {
             Content = new StringContent("{\"ok\":false,\"description\":\"Too Many Requests: retry limit exceeded\"}", Encoding.UTF8, "application/json")

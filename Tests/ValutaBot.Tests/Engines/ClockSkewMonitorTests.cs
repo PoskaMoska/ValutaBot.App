@@ -72,6 +72,7 @@ public class ClockSkewMonitorTests
         var (alerts2, now2) = Arrange();
         Feed(now2, 60, 200);
         ClockSkewMonitor.Evaluate(now2.AddSeconds(1));
+        await Settle();
         Feed(now2, 0.2, 600); // ring capacity 512 -> fully replaced
         var snap = ClockSkewMonitor.Evaluate(now2.AddSeconds(2));
         await Settle();

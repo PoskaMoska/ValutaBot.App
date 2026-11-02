@@ -22,9 +22,9 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             if (match.Success)
             {
                 string pocketId = match.Value;
-                TelegramBotService.UserSubmittedIds[chatId] = pocketId;
                 try
                 {
+                    TelegramBotService.UserSubmittedIds[chatId] = pocketId;
                     var reg = await RegistrationRepository.GetPocketRegistrationAsync(pocketId);
                     bool foundReg = reg != null && reg.HasRegistered;
                     bool hasDeposited = reg != null && reg.HasDeposited;

@@ -144,64 +144,65 @@ public class AutoTradingScannerService : BackgroundService
         };
 
         RealtimeTickCollector.OnCandleClosed += candleClosedHandler;
-
-        var workers = new List<Task>();
-        for (int i = 0; i < 6; i++) // 6 concurrent workers matching all 6 monitored OTC currency pairs
-        {
-            workers.Add(Task.Run(async () =>
-            {
-                try
-                {
-                    await foreach (var item in channel.Reader.ReadAllAsync(stoppingToken))
-                    {
-                        string key = $"{item.pair}:{item.tf}";
-                        queuedKeys.TryRemove(key, out _);
-                        if (stoppingToken.IsCancellationRequested) break;
-
-                        // D2 & D10 fix: drop stale events using monotonic Stopwatch before any scope/DB allocation
-                        int tfSecs = TfToSeconds(item.tf);
-                        double maxQueueWaitSec = GetAdmitWindowSec(tfSecs);
-                        if (Stopwatch.GetElapsedTime(item.queuedSw).TotalSeconds > maxQueueWaitSec)
-                        {
-                            continue;
-                        }
-                        if (!inFlightKeys.TryAdd(key, 1))
-                        {
-                            await Task.Delay(15, stoppingToken);
-                            if (Stopwatch.GetElapsedTime(item.queuedSw).TotalSeconds <= maxQueueWaitSec && queuedKeys.TryAdd(key, 1))
-                            {
-                                if (!channel.Writer.TryWrite(item)) queuedKeys.TryRemove(key, out _);
-                            }
-                            continue;
-                        }
-                        try
-                        {
-                            await ProcessSubminuteScanAsync(item.pair, item.tf, item.queuedSw, stoppingToken);
-                        }
-                        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                        {
-                            break;
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "[AutoScanner] Worker encountered unexpected error on {Pair}/{Tf}: {Message}", item.pair, item.tf, ex.Message);
-                        }
-                        finally
-                        {
-                            inFlightKeys.TryRemove(key, out _);
-                        }
-                    }
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-                catch (Exception ex)
-                {
-                    _logger.LogCritical(ex, "[AutoScanner] Fatal error in scanner worker: {Message}", ex.Message);
-                }
-            }, stoppingToken));
-        }
-
         try
         {
+            var workers = new List<Task>();
+            for (int i = 0; i < 6; i++) // 6 concurrent workers matching all 6 monitored OTC currency pairs
+            {
+                workers.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        await foreach (var item in channel.Reader.ReadAllAsync(stoppingToken))
+                        {
+                            string key = $"{item.pair}:{item.tf}";
+                            queuedKeys.TryRemove(key, out _);
+                            if (stoppingToken.IsCancellationRequested) break;
+
+                            // D2 & D10 fix: drop stale events using monotonic Stopwatch before any scope/DB allocation
+                            int tfSecs = TfToSeconds(item.tf);
+                            double maxQueueWaitSec = GetAdmitWindowSec(tfSecs);
+                            if (Stopwatch.GetElapsedTime(item.queuedSw).TotalSeconds > maxQueueWaitSec)
+                            {
+                                continue;
+                            }
+                            if (!inFlightKeys.TryAdd(key, 1))
+                            {
+                                await Task.Delay(15, stoppingToken);
+                                if (Stopwatch.GetElapsedTime(item.queuedSw).TotalSeconds <= maxQueueWaitSec && queuedKeys.TryAdd(key, 1))
+                                {
+                                    if (!channel.Writer.TryWrite(item)) queuedKeys.TryRemove(key, out _);
+                                }
+                                continue;
+                            }
+                            try
+                            {
+                                await ProcessSubminuteScanAsync(item.pair, item.tf, item.queuedSw, stoppingToken);
+                            }
+                            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                            {
+                                break;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "[AutoScanner] Worker encountered unexpected error on {Pair}/{Tf}: {Message}", item.pair, item.tf, ex.Message);
+                            }
+                            finally
+                            {
+                                inFlightKeys.TryRemove(key, out _);
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+                    catch (Exception ex)
+                    {
+                        _logger.LogCritical(ex, "[AutoScanner] Fatal error in scanner worker: {Message}", ex.Message);
+                        channel.Writer.TryComplete(ex);
+                        throw;
+                    }
+                }, stoppingToken));
+            }
+
             await Task.WhenAll(workers);
         }
         finally

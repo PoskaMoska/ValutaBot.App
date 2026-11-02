@@ -202,9 +202,9 @@ public class DataRetentionService : BackgroundService
               WHERE ctid IN (
                   SELECT ctid FROM pending_trades
                   WHERE verify_at < @cutoff
-                  LIMIT 1000
+                  LIMIT 3000
                   FOR UPDATE SKIP LOCKED
-              )", new { cutoff = stalePendingCutoff }, chunkSize: 1000);
+              )", new { cutoff = stalePendingCutoff }, chunkSize: 3000);
 
         // 6. Importance Sampling and Pruning for trade_outcomes
         int shadowDeleted = 0;
@@ -240,19 +240,21 @@ public class DataRetentionService : BackgroundService
                       FOR UPDATE SKIP LOCKED
                   )", new { }, chunkSize: 3000);
 
+            var jsonCutoff = DateTime.UtcNow.AddHours(-24).ToString("yyyy-MM-dd HH:mm:ss+00");
             jsonCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Features JSON Compaction)",
                 @"WITH targets AS (
                       SELECT ctid FROM trade_outcomes
                       WHERE features_json IS NOT NULL
                         AND octet_length(features_json) > 2500
-                        AND created_at < NOW() - INTERVAL '24 hours'
+                        AND created_at < @cutoff
                         AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
-                      LIMIT 2000
+                      LIMIT 3000
+                      FOR UPDATE SKIP LOCKED
                   )
                   UPDATE trade_outcomes
                   SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
                   WHERE ctid IN (SELECT ctid FROM targets)",
-                new { });
+                new { cutoff = jsonCutoff });
         }
 
         // 7. Non-blocking VACUUM maintenance (or per-table disk-checked SafeVacuumFullAsync when explicitly requested)
@@ -325,7 +327,8 @@ public class DataRetentionService : BackgroundService
                   WHERE features_json IS NOT NULL
                     AND octet_length(features_json) > 2500
                     AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
-                  LIMIT 5000
+                  LIMIT 3000
+                  FOR UPDATE SKIP LOCKED
               )
               UPDATE trade_outcomes
               SET features_json = (features_json::jsonb - 'Candles' - 'candles' - 'MtfCandles' - 'mtfCandles' - 'mtf_candles')::text
@@ -511,7 +514,7 @@ public class DataRetentionService : BackgroundService
         }
     }
 
-    private static async Task<int> ExecuteChunkedDeleteSubminuteAsync(System.Data.Common.DbConnection conn, string tableLabel, string sql, object param, int chunkSize = 10000)
+    private static async Task<int> ExecuteChunkedDeleteSubminuteAsync(System.Data.Common.DbConnection conn, string tableLabel, string sql, object param, int chunkSize = 3000)
     {
         int totalDeleted = 0;
         try

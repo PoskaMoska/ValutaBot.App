@@ -4,12 +4,31 @@ export { tg, getCustomInitData, currentAsset, currentTf };
 import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions } from './ui.js?v=20261029_audit_v6';
 
 // 1. Telegram WebApp Lifecycle, Viewport & Theme Synchronization
+const syncViewport = () => {
+    try {
+        const vh = (tg && tg.viewportHeight) ? tg.viewportHeight : window.innerHeight;
+        const vsh = (tg && tg.viewportStableHeight) ? tg.viewportStableHeight : vh;
+        if (vh) {
+            document.documentElement.style.setProperty('--tg-viewport-height', `${vh}px`);
+        }
+        if (vsh) {
+            document.documentElement.style.setProperty('--tg-viewport-stable-height', `${vsh}px`);
+        }
+    } catch (e) {}
+};
+
+// Синхронная установка высоты вьюпорта до первого кадра рендера (устраняет скачок 100vh на iOS Safari)
+syncViewport();
+
 if (tg) {
     try {
         tg.ready();
         tg.expand();
         if (typeof tg.enableClosingConfirmation === 'function') {
             tg.enableClosingConfirmation();
+        }
+        if (typeof tg.disableVerticalSwipes === 'function') {
+            tg.disableVerticalSwipes();
         }
         
         // Синхронизация системного бара и оверскролла Telegram с темой терминала
@@ -20,24 +39,16 @@ if (tg) {
             } catch (e) {}
         };
         syncTgTheme();
-        // Синхронная установка высоты вьюпорта до первого кадра рендера
-        if (tg.viewportHeight) {
-            document.documentElement.style.setProperty('--tg-viewport-height', `${tg.viewportHeight}px`);
-        }
-        if (tg.viewportStableHeight) {
-            document.documentElement.style.setProperty('--tg-viewport-stable-height', `${tg.viewportStableHeight}px`);
-        }
+
+        // Повторная синхронизация актуального вьюпорта после expand()
+        syncViewport();
+
         if (typeof tg.onEvent === 'function') {
             tg.onEvent('themeChanged', syncTgTheme);
             
             // Обработка открытия/закрытия виртуальной клавиатуры и изменения вьюпорта
             tg.onEvent('viewportChanged', (eventData) => {
-                if (tg.viewportHeight) {
-                    document.documentElement.style.setProperty('--tg-viewport-height', `${tg.viewportHeight}px`);
-                }
-                if (tg.viewportStableHeight) {
-                    document.documentElement.style.setProperty('--tg-viewport-stable-height', `${tg.viewportStableHeight}px`);
-                }
+                syncViewport();
                 if (typeof updateCanvasDimensions === 'function') {
                     updateCanvasDimensions();
                 }
@@ -53,6 +64,8 @@ if (tg) {
             Sentry.setTag('tg_platform', tg.platform || 'unknown');
         }
     } catch(e) {}
+} else {
+    window.addEventListener('resize', syncViewport, { passive: true });
 }
 
 onCopilotAction(applyCopilotRecommendation);

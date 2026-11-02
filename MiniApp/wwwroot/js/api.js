@@ -190,7 +190,7 @@ export function initPriceWebSocket() {
     if (livePriceContainer) livePriceContainer.style.display = 'flex';
     const valEl = document.getElementById('livePriceValue');
     if (valEl) {
-        valEl.innerText = 'ПОДКЛЮЧЕНИЕ...';
+        valEl.innerText = '--';
         valEl.className = 'live-price-value';
     }
 
