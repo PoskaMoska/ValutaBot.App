@@ -257,7 +257,14 @@ public static partial class MiniAppController
         builder.Environment.WebRootPath = System.IO.Path.Combine(AppContext.BaseDirectory, "MiniApp", "wwwroot");
         var app = builder.Build();
         // Initialize Database, Tables & Core Engines before starting services
-        await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync();
+        try
+        {
+            await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync();
+        }
+        catch (Exception dbInitEx)
+        {
+            BotLogger.Error("[Startup] Non-fatal DB initialization warning", dbInitEx);
+        }
 
         // Launch Autonomous Pocket Option OTC stream (24/7 direct socket feed)
         PocketOptionWebSocketStream.StartStream();

@@ -448,8 +448,8 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC);
                 CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_tz_expr ON trade_outcomes ((created_at::timestamptz) DESC);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_tz_expr ON trade_outcomes ((verified_at::timestamptz) DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
+                DROP INDEX IF EXISTS idx_trade_outcomes_created_tz_expr;
+                DROP INDEX IF EXISTS idx_trade_outcomes_verified_tz_expr;
                 CREATE INDEX IF NOT EXISTS idx_registrations_trial_reminders ON registrations (trial_started_at, trial_ends_at) WHERE has_deposited = FALSE AND chat_id > 0;
                 DROP INDEX IF EXISTS idx_subminute_opentime_asset;
                 DROP INDEX IF EXISTS idx_trade_outcomes_asset_tf;
