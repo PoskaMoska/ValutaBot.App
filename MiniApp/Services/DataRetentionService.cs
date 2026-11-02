@@ -189,8 +189,14 @@ public class DataRetentionService : BackgroundService
                   FOR UPDATE SKIP LOCKED
               )", new { cutoff = legacySubCutoff }, chunkSize: 5000);
 
-        int histDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles",
-            "DELETE FROM historical_candles WHERE open_time < @cutoff", new { cutoff = histCutoff });
+        int histDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "historical_candles",
+            @"DELETE FROM historical_candles
+              WHERE ctid IN (
+                  SELECT ctid FROM historical_candles
+                  WHERE open_time < @cutoff
+                  LIMIT 3000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = histCutoff }, chunkSize: 3000);
         int pendingDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "pending_trades (Stale)",
             @"DELETE FROM pending_trades
               WHERE ctid IN (
@@ -207,24 +213,32 @@ public class DataRetentionService : BackgroundService
 
         if (doRedZonePruning)
         {
-            shadowDeleted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Shadow Pruning)",
+            shadowDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "trade_outcomes (Shadow Pruning)",
                 @"DELETE FROM trade_outcomes
-                  WHERE direction NOT IN ('BUY', 'PUT')
-                    AND created_at::timestamptz < @cutoff",
-                new { cutoff = shadowCutoff });
+                  WHERE ctid IN (
+                      SELECT ctid FROM trade_outcomes
+                      WHERE direction NOT IN ('BUY', 'PUT')
+                        AND created_at::timestamptz < @cutoff
+                      LIMIT 3000
+                      FOR UPDATE SKIP LOCKED
+                  )", new { cutoff = shadowCutoff }, chunkSize: 3000);
         }
 
         if (doImportanceSampling)
         {
-            chopStrided = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Importance Sampling Stride)",
+            chopStrided = await ExecuteChunkedDeleteSubminuteAsync(conn, "trade_outcomes (Importance Sampling Stride)",
                 @"DELETE FROM trade_outcomes
-                  WHERE direction NOT IN ('BUY', 'PUT')
-                    AND created_at::timestamptz < NOW() - INTERVAL '24 hours'
-                    AND smc_bos_dir = 'NONE'
-                    AND smc_has_ob = false
-                    AND COALESCE(ABS(pnl_bps), 0) <= 1e-4
-                    AND MOD(ABS(hashtext(id)), 5) != 0",
-                new { });
+                  WHERE ctid IN (
+                      SELECT ctid FROM trade_outcomes
+                      WHERE direction NOT IN ('BUY', 'PUT')
+                        AND created_at::timestamptz < NOW() - INTERVAL '24 hours'
+                        AND smc_bos_dir = 'NONE'
+                        AND smc_has_ob = false
+                        AND COALESCE(ABS(pnl_bps), 0) <= 1e-4
+                        AND MOD(ABS(hashtext(id)), 5) != 0
+                      LIMIT 3000
+                      FOR UPDATE SKIP LOCKED
+                  )", new { }, chunkSize: 3000);
 
             jsonCompacted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Features JSON Compaction)",
                 @"WITH targets AS (
@@ -283,11 +297,15 @@ public class DataRetentionService : BackgroundService
         BotLogger.Warn($"[SmartStorageGovernor] EMERGENCY PURGE triggered at {telemetry.DatabaseSizeMb:F1} MB ({telemetry.UsagePercent:F1}%). Keeping only BUY/PUT trades and last 24h candles.");
 
         // Step 1: Aggressively delete all non-essential shadow/hold records (keep BUY/PUT forever)
-        int emergencyShadowDeleted = await ExecuteSafeDeleteAsync(conn, "trade_outcomes (Emergency: ALL SHADOW/HOLD)",
+        int emergencyShadowDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "trade_outcomes (Emergency: ALL SHADOW/HOLD)",
             @"DELETE FROM trade_outcomes
-              WHERE direction NOT IN ('BUY', 'PUT')
-                AND created_at::timestamptz < NOW() - INTERVAL '6 hours'",
-            new { });
+              WHERE ctid IN (
+                  SELECT ctid FROM trade_outcomes
+                  WHERE direction NOT IN ('BUY', 'PUT')
+                    AND created_at::timestamptz < NOW() - INTERVAL '6 hours'
+                  LIMIT 3000
+                  FOR UPDATE SKIP LOCKED
+              )", new { }, chunkSize: 3000);
 
         // Step 2: Delete subminute candles older than 4 days (preserve ML invariant of 4 days)
         int emergencySubDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (Emergency: >4d)",
@@ -315,9 +333,14 @@ public class DataRetentionService : BackgroundService
             new { });
 
         // Step 4: Delete old historical candles aggressively
-        int emergencyHistDeleted = await ExecuteSafeDeleteAsync(conn, "historical_candles (Emergency: >7d)",
-            "DELETE FROM historical_candles WHERE open_time < @cutoff",
-            new { cutoff = DateTime.UtcNow.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+        int emergencyHistDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "historical_candles (Emergency: >7d)",
+            @"DELETE FROM historical_candles
+              WHERE ctid IN (
+                  SELECT ctid FROM historical_candles
+                  WHERE open_time < @cutoff
+                  LIMIT 3000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = DateTime.UtcNow.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ") }, chunkSize: 3000);
 
         BotLogger.Warn($"[SmartStorageGovernor] Emergency purge complete: {emergencyShadowDeleted} shadow/hold, {emergencySubDeleted} subminute candles, {emergencyCompacted} JSON compacted, {emergencyHistDeleted} historical.");
 

@@ -192,7 +192,8 @@ def build_macro_vector_live(
     hr_raw = macro.get("HourUtc")
     hr = float(hr_raw if hr_raw is not None else 12.0)
     dow_raw = macro.get("DayOfWeek")
-    dow = float(dow_raw if dow_raw is not None else 2.0)
+    # C# sends Sunday=7 (ISO 8601); Python uses [0..6]. Normalize via % 7.
+    dow = float(dow_raw if dow_raw is not None else 2.0) % 7.0
     hr_sin = math.sin(2 * math.pi * hr / 24.0)
     hr_cos = math.cos(2 * math.pi * hr / 24.0)
     dow_sin = math.sin(2 * math.pi * dow / 7.0)
@@ -262,7 +263,10 @@ def build_macro_vector_live(
     hma_raw = _safe_float(ta.get("HmaSlope"), 0.0)
     hma_bps = (hma_raw / last_close) * 10000.0 if last_close > 0 else 0.0
     hma_slope = float(np.clip(hma_bps / 5.0, -2.0, 2.0))
-    vol_raw = ta.get("VolRatio") if ta.get("VolRatio") is not None else ta.get("VolStrengthVal", 1.0)
+    # Fix: VolRatio=0.0 is valid; fallback only when VolRatio is truly None
+    _vol_ratio_raw = ta.get("VolRatio")
+    _vol_strength_raw = ta.get("VolStrengthVal")
+    vol_raw = _vol_ratio_raw if _vol_ratio_raw is not None else (_vol_strength_raw if _vol_strength_raw is not None else 1.0)
     vol_ratio = min(3.0, max(0.0, _safe_float(vol_raw, 1.0))) / 3.0
     bb_sq = float(1.0 if macro.get("BbSqueeze") else 0.0)
     price_pos = min(1.0, max(0.0, float(macro.get("PricePositionPct", 0.5))))

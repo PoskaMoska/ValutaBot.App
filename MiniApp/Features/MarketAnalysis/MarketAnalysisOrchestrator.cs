@@ -219,7 +219,9 @@ public class MarketAnalysisOrchestrator(
             throw new Exception("Не удалось получить свечные данные от API.");
         }
         
-        double[] mainPrices = candles.Select(c => c.Close).ToArray();
+        // C-3 FIX: Replace LINQ .Select().ToArray() with for-loop — eliminates lambda closure alloc + iterator alloc per call
+        double[] mainPrices = new double[candles.Length];
+        for (int i = 0; i < candles.Length; i++) mainPrices[i] = candles[i].Close;
         double currentLivePrice = mainPrices[^1];
         string dataHash = ComputeHash(candles);
         traceLines.Add($"[1. Источник Данных] {candles.Length} свечей. Live Цена: {currentLivePrice} | Массив Hash: [{dataHash}] -> {fetchSw.ElapsedMilliseconds}ms");
@@ -230,11 +232,15 @@ public class MarketAnalysisOrchestrator(
             : DateTime.UtcNow;
         // Допуск 250мс для компенсации джиттера таймштампа тиков и монотонного Stopwatch
         bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= referenceNowUtc.AddMilliseconds(250);
-        var closedCandles = isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
-        if (closedCandles.Length > limit)
-            closedCandles = closedCandles.TakeLast(limit).ToArray();
-        double[] closedPrices = closedCandles.Select(c => c.Close).ToArray();
-        double[] closedVolumes = closedCandles.Select(c => c.Volume).ToArray();
+        // C-3 FIX: Zero-alloc closed-candle slice using array copy instead of LINQ Take/TakeLast/Select chains
+        int closedLen = isLastClosed ? candles.Length : candles.Length - 1;
+        if (closedLen > limit) closedLen = limit;
+        int closedStart = candles.Length - closedLen; // TakeLast semantics
+        var closedCandles = new MiniAppController.OhlcCandle[closedLen];
+        Array.Copy(candles, closedStart, closedCandles, 0, closedLen);
+        double[] closedPrices  = new double[closedLen];
+        double[] closedVolumes = new double[closedLen];
+        for (int i = 0; i < closedLen; i++) { closedPrices[i] = closedCandles[i].Close; closedVolumes[i] = closedCandles[i].Volume; }
 
         string? higherTf = _fetcher.HigherTf(timeframe);
         MiniAppController.OhlcCandle[]? higherCandles = null;
@@ -325,15 +331,25 @@ public class MarketAnalysisOrchestrator(
 
         if (prep.ClosedCandles.Length >= 20)
         {
-            var last20 = prep.ClosedCandles.Skip(prep.ClosedCandles.Length - 20).ToList();
-            double maxHigh = last20.Max(c => c.High);
-            double minLow = last20.Min(c => c.Low);
+            // C-3 FIX: Replace LINQ Skip+ToList+Max+Min with indexed for-loop (zero alloc)
+            int _l20Start = prep.ClosedCandles.Length - 20;
+            double maxHigh = double.MinValue, minLow = double.MaxValue;
+            for (int _i = _l20Start; _i < prep.ClosedCandles.Length; _i++)
+            {
+                if (prep.ClosedCandles[_i].High > maxHigh) maxHigh = prep.ClosedCandles[_i].High;
+                if (prep.ClosedCandles[_i].Low  < minLow)  minLow  = prep.ClosedCandles[_i].Low;
+            }
             if (maxHigh > minLow) {
                 pricePositionPct = Math.Clamp((prep.CurrentLivePrice - minLow) / (maxHigh - minLow), 0.0, 1.0);
             }
 
-            double sma20 = last20.Average(c => c.Close);
-            double stdev20 = Math.Sqrt(last20.Average(c => Math.Pow(c.Close - sma20, 2)));
+            // C-3 FIX: Replace LINQ .Average() calls with for-loops (eliminates 2 lambda allocs per call)
+            double sma20 = 0.0;
+            for (int _i = _l20Start; _i < prep.ClosedCandles.Length; _i++) sma20 += prep.ClosedCandles[_i].Close;
+            sma20 /= 20.0;
+            double _var20 = 0.0;
+            for (int _i = _l20Start; _i < prep.ClosedCandles.Length; _i++) { double _d = prep.ClosedCandles[_i].Close - sma20; _var20 += _d * _d; }
+            double stdev20 = Math.Sqrt(_var20 / 20.0);
             bbSqueeze = sma20 > 1e-6 && (stdev20 * 4.0) / sma20 < 0.0005;
 
             int streak = 0;
@@ -626,16 +642,31 @@ public class MarketAnalysisOrchestrator(
     {
         var matrixSw = Stopwatch.StartNew();
         double conflictPenalty = 1.0;
-        if (prep.ClosedHigherCandles.Length > 0 && prep.HigherTf != null) {
-            double[] higherPrices = prep.ClosedHigherCandles.Select(c => c.Close).ToArray();
-            double[] higherVolumes = prep.ClosedHigherCandles.Select(c => c.Volume).ToArray();
+        // C-6 FIX: Hoist HTF price/volume arrays to method scope so they are accessible outside
+        // the if-block and can be reused in Evaluate4DMatrixAsync without 4 extra .Select().ToArray() allocs.
+        double[] higherPrices  = Array.Empty<double>();
+        double[] higherVolumes = Array.Empty<double>();
+        if (prep.ClosedHigherCandles.Length > 0 && prep.HigherTf != null)
+        {
+            higherPrices  = new double[prep.ClosedHigherCandles.Length];
+            higherVolumes = new double[prep.ClosedHigherCandles.Length];
+            for (int i = 0; i < prep.ClosedHigherCandles.Length; i++)
+            {
+                higherPrices[i]  = prep.ClosedHigherCandles[i].Close;
+                higherVolumes[i] = prep.ClosedHigherCandles[i].Volume;
+            }
             var hAdx = _mathEngine.ComputeTrueAdx(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles);
             var hAtr = _mathEngine.ComputeAtr(prep.CleanAsset, prep.HigherTf, prep.ClosedHigherCandles);
             var hResult = _marketAnalyzer.ScoreTimeframe(prep.CleanAsset, prep.HigherTf, higherPrices, higherVolumes, candles: prep.ClosedHigherCandles, adxOverride: hAdx.adx, atrOverride: hAtr, isForex: prep.IsForex);
-            conflictPenalty *= (sensors.TaResult.score * hResult.score < -0.01) ? 0.7 : 1.0;
+            // A-5 FIX: Raise conflictPenalty threshold from -0.01 to -0.05.
+            // At -0.01 almost any pair of weak opposite-sign scores triggers the 30% penalty,
+            // making it a near-permanent throttle instead of a genuine conflict guard.
+            conflictPenalty *= (sensors.TaResult.score * hResult.score < -0.05) ? 0.7 : 1.0;
         }
-
-        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(prep.CleanAsset, timeframe, prep.IsForex, prep.Symbol, prep.ClosedCandles, prep.ClosedPrices, prep.ClosedVolumes, prep.ClosedHigherCandles, prep.ClosedHigherCandles.Length > 0 ? prep.ClosedHigherCandles.Select(c => c.Close).ToArray() : Array.Empty<double>(), prep.ClosedHigherCandles.Length > 0 ? prep.ClosedHigherCandles.Select(c => c.Volume).ToArray() : Array.Empty<double>());
+        var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(
+            prep.CleanAsset, timeframe, prep.IsForex, prep.Symbol,
+            prep.ClosedCandles, prep.ClosedPrices, prep.ClosedVolumes,
+            prep.ClosedHigherCandles, higherPrices, higherVolumes);
         
         var taSignal = new TaSignal(sensors.TaResult.score, sensors.TaResult.confidence, sensors.TaResult.rsiVal, sensors.TaResult.hmaVal, sensors.TaResult.volStrengthVal, sensors.MainAtr, sensors.MainAdx);
         var smcSignal = new SmcSignal(sensors.SmcResult.BosDirection ?? "", sensors.SmcResult.SweepDirection ?? "", sensors.SmcResult.OrderBlockType ?? "", sensors.SmcResult.FvgType ?? "", "");
@@ -809,10 +840,18 @@ public class MarketAnalysisOrchestrator(
         bool isExhaustedOnS5 = false;
         if (isS5 && prep.ClosedCandles != null && prep.ClosedCandles.Length >= 3)
         {
-            var last3 = prep.ClosedCandles.TakeLast(3).ToArray();
-            if (cm.Consensus.FinalDirection == "BUY" && last3.All(c => c.Close > c.Open) && sensors.TaResult.rsiVal >= 64.0)
+            // C-5 FIX: Replace TakeLast().ToArray() with direct index arithmetic (zero alloc)
+            int _last3Start = prep.ClosedCandles.Length - 3;
+            // C-5 FIX: Replace .All() LINQ with manual 3-element index check
+            bool _allBull = prep.ClosedCandles[_last3Start].Close > prep.ClosedCandles[_last3Start].Open
+                         && prep.ClosedCandles[_last3Start+1].Close > prep.ClosedCandles[_last3Start+1].Open
+                         && prep.ClosedCandles[_last3Start+2].Close > prep.ClosedCandles[_last3Start+2].Open;
+            bool _allBear = prep.ClosedCandles[_last3Start].Close < prep.ClosedCandles[_last3Start].Open
+                         && prep.ClosedCandles[_last3Start+1].Close < prep.ClosedCandles[_last3Start+1].Open
+                         && prep.ClosedCandles[_last3Start+2].Close < prep.ClosedCandles[_last3Start+2].Open;
+            if (cm.Consensus.FinalDirection == "BUY" && _allBull && sensors.TaResult.rsiVal >= 64.0)
                 isExhaustedOnS5 = true;
-            else if (cm.Consensus.FinalDirection == "PUT" && last3.All(c => c.Close < c.Open) && sensors.TaResult.rsiVal <= 36.0)
+            else if (cm.Consensus.FinalDirection == "PUT" && _allBear && sensors.TaResult.rsiVal <= 36.0)
                 isExhaustedOnS5 = true;
         }
 

@@ -89,7 +89,9 @@ class PayoutAsymmetricFocalLoss(nn.Module):
             torch.where(targets == 1, self.adverse_loss_mult * p[:, 2],
             torch.where(targets == 2, self.adverse_loss_mult * p[:, 1], torch.zeros_like(p[:, 0])))
         )
-        asymmetric_ev_penalty = self.adverse_loss_mult * adverse_exposure
+        # adverse_exposure already contains adverse_loss_mult inside torch.where branches,
+        # so applying it again would double-count (1.18^2 ≈ 1.39x instead of intended 1.18x).
+        asymmetric_ev_penalty = adverse_exposure
         loss = ce_focal + 0.5 * asymmetric_ev_penalty
 
         if sample_weights is not None:

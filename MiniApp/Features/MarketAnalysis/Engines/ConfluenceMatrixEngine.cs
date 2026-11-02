@@ -28,8 +28,12 @@ public class ConfluenceMatrixEngine(
         DateTime refNow = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
-        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= refNow;
-        return isLastClosed ? candles : candles.Take(candles.Length - 1).ToArray();
+                // Синхронизация допуска 250мс с Orchestrator для компенсации джиттера таймштампа тиков
+        bool isLastClosed = intervalSecs > 0 && candles[^1].Timestamp.AddSeconds(intervalSecs) <= refNow.AddMilliseconds(250);
+        if (isLastClosed) return candles;
+        var trimmed = new MiniAppController.OhlcCandle[candles.Length - 1];
+        Array.Copy(candles, 0, trimmed, 0, candles.Length - 1);
+        return trimmed;
     }
 
     private async Task<ConfluenceMatrixResult> Evaluate4DMatrixFetchAsync(

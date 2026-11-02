@@ -78,12 +78,19 @@ internal sealed class IndicatorCache
             try
             {
                 var cutoff = DateTime.UtcNow.AddMinutes(-30);
-                var toDelete = _states
-                    .Where(kv => kv.Value.LastAccess < cutoff)
-                    .OrderBy(kv => kv.Value.LastAccess)
-                    .Take(Math.Max(1, _states.Count / 4))
-                    .Select(kv => kv.Key)
-                    .ToList();
+                // C-4 FIX: Replace 4-iterator LINQ chain (Where+OrderBy+Take+Select+ToList)
+                // with a single foreach that stops after filling the cap — zero LINQ alloc.
+                int _pruneMax = Math.Max(1, _states.Count / 4);
+                long _cutoffTicks = cutoff.Ticks;
+                var toDelete = new List<(string, string, string)>(_pruneMax);
+                foreach (var kv in _states)
+                {
+                    if (kv.Value.LastAccess.Ticks < _cutoffTicks)
+                    {
+                        toDelete.Add(kv.Key);
+                        if (toDelete.Count >= _pruneMax) break;
+                    }
+                }
 
                 foreach (var k in toDelete)
                 {
@@ -288,7 +295,7 @@ internal sealed class IndicatorCache
             var liveHma = s.HmaBase.Clone();
             double currentHma = liveHma.Update(candles[^1].Close);
             s.HmaLast = currentHma;
-            return (currentHma, s.HmaPrev > 0 ? s.HmaPrev : currentHma);
+            return (currentHma, s.HmaPrev != 0.0 ? s.HmaPrev : currentHma); // C-2 FIX: > 0 sentinel fails for valid negative HMA on JPY/inverse pairs
         }
     }
 

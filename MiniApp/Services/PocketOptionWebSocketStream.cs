@@ -30,6 +30,7 @@ public static class PocketOptionWebSocketStream
     private static long _lastTickSw = System.Diagnostics.Stopwatch.GetTimestamp();
     private static int _loopRunning = 0;
     private static CancellationTokenSource? _connectionCts;
+    private static readonly object _streamLifecycleLock = new(); // D5 FIX: Synchronize Start/Stop/Launch
     private static long _totalTicksIngested = 0;
 
     private static readonly string[] DefaultAssets = {
@@ -186,7 +187,8 @@ public static class PocketOptionWebSocketStream
     /// </summary>
     private static void CancelConnection()
     {
-        var cts = Volatile.Read(ref _connectionCts);
+        // D4 FIX: Atomically extract and nullify to prevent race or re-cancelling disposed CTS
+        var cts = Interlocked.Exchange(ref _connectionCts, null);
         try { cts?.Cancel(); } catch (ObjectDisposedException) { }
     }
 
@@ -250,24 +252,27 @@ public static class PocketOptionWebSocketStream
 
     public static void StartStream(string[]? assets = null)
     {
-        if (assets != null && assets.Length > 0)
+        lock (_streamLifecycleLock)
         {
-            _subscribedAssets = assets;
-        }
-
-        if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) != 0)
-        {
-            if (Volatile.Read(ref _cts).IsCancellationRequested)
+            if (assets != null && assets.Length > 0)
             {
-                BotLogger.Warn("[PO WS] StartStream called while stream loop is unwinding after stop. Deferring start...");
-                _ = DeferredStartAsync();
+                _subscribedAssets = assets;
+            }
+
+            if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) != 0)
+            {
+                if (Volatile.Read(ref _cts).IsCancellationRequested)
+                {
+                    BotLogger.Warn("[PO WS] StartStream called while stream loop is unwinding after stop. Deferring start...");
+                    _ = DeferredStartAsync();
+                    return;
+                }
+                BotLogger.Warn("[PO WS] StartStream called while stream loop is already running. Ignored.");
                 return;
             }
-            BotLogger.Warn("[PO WS] StartStream called while stream loop is already running. Ignored.");
-            return;
-        }
 
-        LaunchStream();
+            LaunchStreamLocked();
+        }
     }
 
     private static async Task DeferredStartAsync()
@@ -275,21 +280,25 @@ public static class PocketOptionWebSocketStream
         for (int i = 0; i < 100; i++)
         {
             await Task.Delay(50).ConfigureAwait(false);
-            if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) == 0)
+            lock (_streamLifecycleLock)
             {
-                LaunchStream();
-                return;
+                if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) == 0)
+                {
+                    LaunchStreamLocked();
+                    return;
+                }
             }
         }
         BotLogger.Error("[PO WS] Deferred StartStream gave up: previous loop did not exit within 5s.");
     }
 
-    private static void LaunchStream()
+    private static void LaunchStreamLocked()
     {
         var cts = new CancellationTokenSource();
         var oldCts = Interlocked.Exchange(ref _cts, cts);
         try { oldCts.Cancel(); oldCts.Dispose(); } catch { }
 
+        Status = "INITIALIZING";
         _ = RunConnectionLoopAsync(cts.Token);
         _ = WatchdogLoopAsync(cts.Token);
         _ = DbBatchFlusherAsync(cts.Token);
@@ -298,9 +307,12 @@ public static class PocketOptionWebSocketStream
 
     public static void StopStream()
     {
-        try { Volatile.Read(ref _cts).Cancel(); } catch (ObjectDisposedException) { }
-        CancelConnection();
-        Status = "STOPPED";
+        lock (_streamLifecycleLock)
+        {
+            try { Volatile.Read(ref _cts).Cancel(); } catch (ObjectDisposedException) { }
+            CancelConnection();
+            Status = "STOPPED";
+        }
     }
 
     private static async Task<(string? authPayloadJson, string? tradingUrl)> LoadSessionFromDbAsync(CancellationToken token = default)
@@ -625,6 +637,8 @@ public static class PocketOptionWebSocketStream
                 }
                 finally
                 {
+                    // D4 FIX: Nullify _connectionCts if it matches connCts before disposing
+                    Interlocked.CompareExchange(ref _connectionCts, null, connCts);
                     try { ws.Dispose(); } catch { }
                     if (ReferenceEquals(_webSocket, ws))
                     {

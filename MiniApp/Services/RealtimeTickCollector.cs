@@ -302,7 +302,8 @@ namespace ValutaBot.MiniApp
 
         public static async Task<int> FlushAsync(CancellationToken ct = default)
         {
-            var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            // D3 FIX: Wrap timeoutToken in using to prevent timer leak on every flush (~3/sec)
+            using var timeoutToken = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutToken.Token);
 
             try
@@ -534,22 +535,23 @@ namespace ValutaBot.MiniApp
                     };
 
                     MiniAppController.OhlcCandle? liveCandle = null;
-                    MiniAppController.OhlcCandle[]? closedCandlesFromLock = null;
                     if (tDict != null && tDict.TryGetValue(cleanAsset, out var live))
                     {
+                        // D1 FIX: Lock accumulator only to snapshot scalar fields (fast, <10ns).
+                        // Never call ring.GetRecent() inside lock(live) to avoid nested lock contention
+                        // with incoming WebSocket ticks.
                         lock (live)
                         {
                             if (live.Open.HasValue)
                             {
                                 liveCandle = new MiniAppController.OhlcCandle(
                                     live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
-                            closedCandlesFromLock = ring.GetRecent(live.Open.HasValue ? limit - 1 : limit);
                             }
                         }
                     }
 
                     int closedToTake = liveCandle != null ? limit - 1 : limit;
-                    var closedCandles = closedCandlesFromLock ?? ring.GetRecent(closedToTake);
+                    var closedCandles = ring.GetRecent(closedToTake);
 
                     if (liveCandle != null)
                     {

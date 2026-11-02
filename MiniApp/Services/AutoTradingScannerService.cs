@@ -89,6 +89,7 @@ public class AutoTradingScannerService : BackgroundService
         }
 
         _logger.LogInformation("[AutoScanner] Event-driven Pocket Option scanner supervisor initialized (s5..m1).");
+        ResetLastScannedTimes(); // Clean start: clear any stale in-memory deduplication keys
         int consecutiveFailures = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -104,6 +105,7 @@ public class AutoTradingScannerService : BackgroundService
             catch (Exception ex)
             {
                 consecutiveFailures++;
+                ResetLastScannedTimes(); // Clear deduplication cache so resurrected loop rescans fresh candles
                 int delaySec = Math.Min(consecutiveFailures * 2, 30);
                 _logger.LogError(ex, "[AutoScanner] Scanner loop crashed (failure #{Count}). Resuscitating scanner in {Delay}s...", consecutiveFailures, delaySec);
                 try

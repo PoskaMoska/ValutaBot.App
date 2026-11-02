@@ -232,7 +232,8 @@ def extract_macro_vector(row_dict, feat_obj):
     hr_raw = row_dict.get("hour_utc")
     hr = float(hr_raw if hr_raw is not None else macro.get("HourUtc", 12.0))
     dow_raw = row_dict.get("day_of_week")
-    dow = float(dow_raw if dow_raw is not None else macro.get("DayOfWeek", 2.0))
+    # C# stores Sunday=7; normalize to Python [0..6] via % 7
+    dow = float(dow_raw if dow_raw is not None else macro.get("DayOfWeek", 2.0)) % 7.0
     hr_sin = math.sin(2 * math.pi * hr / 24.0)
     hr_cos = math.cos(2 * math.pi * hr / 24.0)
     dow_sin = math.sin(2 * math.pi * dow / 7.0)
@@ -292,7 +293,10 @@ def extract_macro_vector(row_dict, feat_obj):
     hma_raw = _safe_float(ta.get("HmaSlope"), 0.0)
     hma_bps = (hma_raw / en_price) * 10000.0 if en_price > 0 else 0.0
     hma_slope = float(np.clip(hma_bps / 5.0, -2.0, 2.0))
-    vol_raw = ta.get("VolRatio") if ta.get("VolRatio") is not None else ta.get("VolStrengthVal", 1.0)
+    # Fix: VolRatio=0.0 is valid; fallback only when VolRatio is truly None
+    _vol_ratio_raw = ta.get("VolRatio")
+    _vol_strength_raw = ta.get("VolStrengthVal")
+    vol_raw = _vol_ratio_raw if _vol_ratio_raw is not None else (_vol_strength_raw if _vol_strength_raw is not None else 1.0)
     vol_ratio = min(3.0, max(0.0, _safe_float(vol_raw, 1.0))) / 3.0
     bb_sq = float(1.0 if (macro.get("BbSqueeze") or row_dict.get("bb_squeeze")) else 0.0)
     price_pos = min(1.0, max(0.0, float(macro.get("PricePositionPct", row_dict.get("price_position_pct", 0.5) or 0.5))))

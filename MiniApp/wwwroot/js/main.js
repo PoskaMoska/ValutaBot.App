@@ -20,6 +20,13 @@ if (tg) {
             } catch (e) {}
         };
         syncTgTheme();
+        // Синхронная установка высоты вьюпорта до первого кадра рендера
+        if (tg.viewportHeight) {
+            document.documentElement.style.setProperty('--tg-viewport-height', `${tg.viewportHeight}px`);
+        }
+        if (tg.viewportStableHeight) {
+            document.documentElement.style.setProperty('--tg-viewport-stable-height', `${tg.viewportStableHeight}px`);
+        }
         if (typeof tg.onEvent === 'function') {
             tg.onEvent('themeChanged', syncTgTheme);
             

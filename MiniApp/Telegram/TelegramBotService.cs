@@ -130,6 +130,7 @@ public partial class TelegramBotService : BackgroundService
             try
             {
                 await SendMessage(token, adminId, payloadText);
+                await Task.Delay(40); // 40ms throttle
             }
             catch (Exception ex)
             {

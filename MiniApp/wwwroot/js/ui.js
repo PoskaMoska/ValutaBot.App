@@ -406,9 +406,7 @@ export function updateCanvasDimensions() {
         const ctx = canvas.getContext('2d');
         if (ctx) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            cachedFloorGrad = ctx.createLinearGradient(0, cachedCanvasH * 0.6, 0, cachedCanvasH);
-            cachedFloorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
-            cachedFloorGrad.addColorStop(1, 'rgba(184, 41, 255, 0.15)');
+            // cachedFloorGrad создается динамически в renderAiChartLoop внутри ctx.scale(dpr, dpr)
         }
     }
 }
@@ -519,6 +517,11 @@ function renderAiChartLoop() {
     ctx.fillStyle = '#0b0d1f';
     ctx.fillRect(0, 0, w, h);
     
+    if (!cachedFloorGrad && h > 0) {
+        cachedFloorGrad = ctx.createLinearGradient(0, h * 0.6, 0, h);
+        cachedFloorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
+        cachedFloorGrad.addColorStop(1, 'rgba(184, 41, 255, 0.15)');
+    }
     if (cachedFloorGrad) {
         ctx.fillStyle = cachedFloorGrad;
         ctx.fillRect(0, h * 0.6, w, h * 0.4);
