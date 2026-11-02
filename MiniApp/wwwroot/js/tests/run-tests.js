@@ -123,7 +123,8 @@ try {
         .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?/g, '/* mocked import */')
         .replace(/export\s+(async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(/g, 'window.$2 = $1function(')
         .replace(/export\s+const\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
-        .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =');
+        .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
+        .replace(/export\s*\{[^}]*\};?/g, '/* mocked export block */');
     window.eval(transformedUiCode);
 } catch (e) {
     console.error("UI setup error:", e);
@@ -160,7 +161,8 @@ try {
     const transformedCode = apiJsCode
         .replace(/export\s+(async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(/g, 'window.$2 = $1function(')
         .replace(/export\s+const\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
-        .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =');
+        .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
+        .replace(/export\s*\{[^}]*\};?/g, '/* mocked export block */');
     
     window.eval(transformedCode);
     executeAnalysis = window.executeAnalysis;

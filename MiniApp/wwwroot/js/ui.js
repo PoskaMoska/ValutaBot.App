@@ -387,7 +387,7 @@ let cachedCanvasH = 0;
 let cachedFloorGrad = null;
 let resizeRafId = null;
 
-function updateCanvasDimensions() {
+export function updateCanvasDimensions() {
     const canvas = document.getElementById('aiChartCanvas');
     if (!canvas || !canvas.parentElement) return;
     const rect = canvas.parentElement.getBoundingClientRect();
@@ -585,7 +585,7 @@ function renderAiChartLoop() {
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
 }
 // Экспорт для Telegram WebApp viewportChanged
-export { updateCanvasDimensions };
+/* updateCanvasDimensions is exported inline above */
 // Обработка ориентации и визуального вьюпорта
 if (typeof window !== 'undefined') {
     const onWindowOrViewportResize = () => {

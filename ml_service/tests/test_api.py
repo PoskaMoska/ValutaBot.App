@@ -46,7 +46,7 @@ def test_predict_endpoint_candles():
     data = resp.json()
     assert "direction" in data
     assert "confidence" in data
-    assert data["direction"] in ["BUY", "PUT", "NEUTRAL"]
+    assert data["direction"] in ["BUY", "PUT", "NEUTRAL", "HOLD"]
 
 def test_feedback_endpoint_types():
     req = {

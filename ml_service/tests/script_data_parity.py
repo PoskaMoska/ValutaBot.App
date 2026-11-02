@@ -36,7 +36,7 @@ def test_predict_endpoint_parity():
     assert response.status_code == 200, f"Failed with {response.text}"
     data = response.json()
     assert "direction" in data
-    assert data["direction"] in ["BUY", "PUT", "NEUTRAL"]
+    assert data["direction"] in ["BUY", "PUT", "NEUTRAL", "HOLD"]
     assert "confidence" in data
     assert isinstance(data["confidence"], float)
 

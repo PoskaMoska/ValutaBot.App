@@ -50,7 +50,8 @@ var applyCopilotRecommendation = window.applyCopilotRecommendation || function()
         let transformedUi = globalShim + '\n' + uiJs
             .replace(/export\s+(async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(/g, 'window.$2 = $1function(')
             .replace(/export\s+const\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
-            .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =');
+            .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
+            .replace(/export\s*\{[^}]*\};?/g, '/* mocked export block */');
         window.eval(transformedUi);
 
         // Headless safe stubs for canvas and animation (must be AFTER eval to avoid being overwritten)
@@ -65,7 +66,8 @@ var applyCopilotRecommendation = window.applyCopilotRecommendation || function()
         let transformedApi = globalShim + '\n' + apiJs
             .replace(/export\s+(async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(/g, 'window.$2 = $1function(')
             .replace(/export\s+const\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
-            .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =');
+            .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
+            .replace(/export\s*\{[^}]*\};?/g, '/* mocked export block */');
         window.eval(transformedApi);
     } catch (e) {
         console.error("Evaluation error during setup:", e);
