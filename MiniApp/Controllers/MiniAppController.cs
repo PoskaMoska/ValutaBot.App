@@ -33,6 +33,22 @@ public static partial class MiniAppController
         return CryptographicOperations.FixedTimeEquals(provHash, expHash);
     }
 
+    private static bool IsTransientSentryException(Exception? ex)
+    {
+        if (ex == null) return false;
+        if (ex is Polly.Timeout.TimeoutRejectedException) return true;
+        if (ex is System.Net.WebSockets.WebSocketException) return true;
+        if (ex is System.Net.Sockets.SocketException) return true;
+        if (ex is OperationCanceledException or TaskCanceledException) return true;
+        if (ex is System.IO.IOException ioEx && (ioEx.InnerException is System.Net.Sockets.SocketException ||
+            ioEx.Message.Contains("broken pipe", StringComparison.OrdinalIgnoreCase) ||
+            ioEx.Message.Contains("connection reset", StringComparison.OrdinalIgnoreCase) ||
+            ioEx.Message.Contains("transport connection", StringComparison.OrdinalIgnoreCase))) return true;
+        if (ex is System.Net.Http.HttpRequestException httpEx && (httpEx.InnerException is System.Net.Sockets.SocketException || httpEx.InnerException is System.IO.IOException)) return true;
+        if (ex is Npgsql.NpgsqlException npgEx && (npgEx.IsTransient || npgEx.InnerException is System.Net.Sockets.SocketException || npgEx.InnerException is System.IO.IOException)) return true;
+        return false;
+    }
+
     private static readonly IMemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
 
     public static string? LastExceptionMessage { get; set; }
@@ -82,18 +98,30 @@ public static partial class MiniAppController
                 options.TracesSampleRate = 0.2;
                 options.AutoSessionTracking = true;
 
-                // Filter out Polly resilience pipeline events (timeouts, retries) from triggering Sentry alarms.
-                // These are normal resilience operations gracefully handled by fallback indicators (TA+SMC).
+                // SRE-FIX: Filter out Polly events, transient broker disconnects, and network jitter to protect Sentry quota
                 options.AddExceptionFilterForType<Polly.Timeout.TimeoutRejectedException>();
+                options.AddExceptionFilterForType<System.Net.WebSockets.WebSocketException>();
+                options.AddExceptionFilterForType<System.Net.Sockets.SocketException>();
+                options.AddExceptionFilterForType<OperationCanceledException>();
                 options.SetBeforeSend((sentryEvent, hint) =>
                 {
                     if (sentryEvent.Logger != null && (sentryEvent.Logger.StartsWith("Polly") || sentryEvent.Logger.StartsWith("Microsoft.Extensions.Http.Resilience")))
                     {
                         return null; // Drop internal resilience logs
                     }
-                    if (sentryEvent.Exception is Polly.Timeout.TimeoutRejectedException)
+                    if (IsTransientSentryException(sentryEvent.Exception))
                     {
                         return null;
+                    }
+                    if (sentryEvent.Message?.Message is { } msg)
+                    {
+                        if (msg.Contains("[PO WS] Connection error", StringComparison.OrdinalIgnoreCase) ||
+                            msg.Contains("[PO WS] Watchdog detected silent drop", StringComparison.OrdinalIgnoreCase) ||
+                            msg.Contains("[PO WS] Receive frame timed out", StringComparison.OrdinalIgnoreCase) ||
+                            msg.Contains("Transient polling jitter", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return null;
+                        }
                     }
                     return sentryEvent;
                 });

@@ -163,7 +163,7 @@ namespace ValutaBot.App.MiniApp.Data
             return OpenConnectionAsync(ct);
         }
 
-        private static bool IsNetworkTransient(Exception ex) => ex switch
+        public static bool IsNetworkTransient(Exception ex) => ex switch
         {
             System.IO.IOException or System.Net.Sockets.SocketException or TimeoutException => true,
             NpgsqlException { InnerException: System.IO.IOException or System.Net.Sockets.SocketException or TimeoutException } => true,
@@ -181,9 +181,30 @@ namespace ValutaBot.App.MiniApp.Data
         private static bool IsRetryableSql(Exception ex) =>
             ex is PostgresException { SqlState: "40001" or "40P01" or "55P03" };
 
+        private static long _lastPoolClearTicks = 0;
+        private static void MaybeEvictDeadPool(Exception ex, NpgsqlConnection? conn)
+        {
+            if (conn == null) return;
+            bool isFatalClusterDown = ex is PostgresException pe &&
+                pe.SqlState is "57P01" or "57P02" or "57P03" or "08006";
+            if (!isFatalClusterDown && ex is System.IO.IOException && ex.Message.Contains("broken", StringComparison.OrdinalIgnoreCase))
+                isFatalClusterDown = true;
+
+            if (isFatalClusterDown)
+            {
+                long now = Environment.TickCount64;
+                long last = Interlocked.Read(ref _lastPoolClearTicks);
+                if (now - last > 5000 && Interlocked.CompareExchange(ref _lastPoolClearTicks, now, last) == last)
+                {
+                    BotLogger.Warn("[DbConnectionFactory] Fatal cluster disconnect detected. Clearing dead pooled sockets...");
+                    NpgsqlConnection.ClearPool(conn);
+                }
+            }
+        }
+
         /// <summary>
         /// Executes an idempotent database operation with automatic transient retry.
-        /// Relies on Npgsql automatic broken-socket eviction on Dispose instead of ClearPool to avoid Thundering Herd.
+        /// Relies on Npgsql automatic broken-socket eviction on Dispose, augmented with throttled ClearPool on cluster shutdown.
         /// </summary>
         public static async Task<T> WithRetryAsync<T>(Func<NpgsqlConnection, Task<T>> action, CancellationToken ct = default)
         {
@@ -195,12 +216,13 @@ namespace ValutaBot.App.MiniApp.Data
                     conn = await OpenConnectionAsync(ct);
                     return await action(conn);
                 }
-                catch (Exception ex) when (attempt < 4 && !ct.IsCancellationRequested &&
+                catch (Exception ex) when (attempt < 5 && !ct.IsCancellationRequested &&
                     (IsNetworkTransient(ex) || IsRetryableSql(ex)))
                 {
+                    MaybeEvictDeadPool(ex, conn);
                     bool isNet = IsNetworkTransient(ex);
-                    BotLogger.Warn($"[DbConnectionFactory] Transient DB error on attempt {attempt}/3 ({ex.Message}, net={isNet}). Retrying...");
-                    int delayMs = (int)(Math.Pow(2, attempt) * 100) + Random.Shared.Next(50, 150);
+                    BotLogger.Warn($"[DbConnectionFactory] Transient DB error on attempt {attempt}/4 ({ex.Message}, net={isNet}). Retrying...");
+                    int delayMs = (int)(Math.Pow(2, Math.Min(attempt, 4)) * 100) + Random.Shared.Next(50, 150);
                     await Task.Delay(delayMs, ct);
                 }
                 finally
@@ -226,12 +248,13 @@ namespace ValutaBot.App.MiniApp.Data
                     await tx.CommitAsync(ct);
                     return result;
                 }
-                catch (Exception ex) when (attempt < 4 && !ct.IsCancellationRequested &&
+                catch (Exception ex) when (attempt < 5 && !ct.IsCancellationRequested &&
                     (IsNetworkTransient(ex) || IsRetryableSql(ex)))
                 {
+                    MaybeEvictDeadPool(ex, conn);
                     bool isNet = IsNetworkTransient(ex);
-                    BotLogger.Warn($"[DbConnectionFactory] Transient transactional DB error on attempt {attempt}/3 ({ex.Message}, net={isNet}). Retrying...");
-                    int delayMs = (int)(Math.Pow(2, attempt) * 100) + Random.Shared.Next(50, 150);
+                    BotLogger.Warn($"[DbConnectionFactory] Transient transactional DB error on attempt {attempt}/4 ({ex.Message}, net={isNet}). Retrying...");
+                    int delayMs = (int)(Math.Pow(2, Math.Min(attempt, 4)) * 100) + Random.Shared.Next(50, 150);
                     await Task.Delay(delayMs, ct);
                 }
                 finally
@@ -457,6 +480,8 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC) WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_subminute_candles_covering ON subminute_candles(asset, interval, open_time DESC) INCLUDE (open_price, high_price, low_price, close_price, volume) WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified_real ON trade_outcomes(asset, timeframe, verified_at DESC) INCLUDE (was_win) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_tz_expr;
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_tz_expr;
@@ -577,6 +602,12 @@ namespace ValutaBot.App.MiniApp.Data
                     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS reminder_day3_sent BOOLEAN NOT NULL DEFAULT FALSE;
                     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS trial_expired_sent BOOLEAN NOT NULL DEFAULT FALSE;
                 END $$;
+
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
             ");
 
             BotLogger.Info("[PostgreSQL DB] Database tables initialized successfully.");
@@ -584,6 +615,29 @@ namespace ValutaBot.App.MiniApp.Data
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();
             RealtimeTickCollector.Initialize();
+        }
+
+        public static async Task<string?> GetBotStateAsync(string key, CancellationToken ct = default)
+        {
+            if (string.IsNullOrEmpty(GetConnectionString())) return null;
+            return await WithRetryAsync(async conn =>
+            {
+                return await conn.QueryFirstOrDefaultAsync<string>(
+                    "SELECT value FROM bot_state WHERE key = @key;", new { key });
+            }, ct);
+        }
+
+        public static async Task SetBotStateAsync(string key, string value, CancellationToken ct = default)
+        {
+            if (string.IsNullOrEmpty(GetConnectionString())) return;
+            await WithRetryAsync(async conn =>
+            {
+                await conn.ExecuteAsync(@"
+                    INSERT INTO bot_state (key, value, updated_at)
+                    VALUES (@key, @value, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = @value, updated_at = NOW();",
+                    new { key, value });
+            }, ct);
         }
     }
 }

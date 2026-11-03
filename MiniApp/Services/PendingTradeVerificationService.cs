@@ -23,8 +23,12 @@ public class PendingTradeVerificationService : BackgroundService
     {
         try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
-        
-        // Сброс зависших блокировок после холодного перезапуска контейнера
+
+        await using var leaderLock = new PostgresDistributedLock("valutabot_trade_verifier_leader");
+        await leaderLock.WaitAcquireAsync(TimeSpan.FromSeconds(3), stoppingToken);
+        if (stoppingToken.IsCancellationRequested) return;
+
+        // Сброс зависших блокировок только после подтвержденного получения статуса Leader
         try
         {
             await TradeRepository.ResetAllOrphanedClaimsAsync();
@@ -34,11 +38,19 @@ public class PendingTradeVerificationService : BackgroundService
             BotLogger.Warn($"[PendingVerifier] Initial claim reset warning: {ex.Message}");
         }
 
-        BotLogger.Info("[PendingVerifier] Started. Sweeping pending trades every 5s for strict grid verification.");
+        BotLogger.Info("[PendingVerifier] Started as active leader. Sweeping pending trades every 5s for strict grid verification.");
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
+                if (!leaderLock.IsHeld)
+                {
+                    if (!await leaderLock.TryAcquireAsync(stoppingToken))
+                    {
+                        await leaderLock.WaitAcquireAsync(TimeSpan.FromSeconds(3), stoppingToken);
+                    }
+                }
+
                 try { await SweepExpiredTradesAsync(stoppingToken); }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
                 catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Sweep error: {ex.Message}"); }
@@ -47,16 +59,20 @@ public class PendingTradeVerificationService : BackgroundService
         }
         finally
         {
-            try
+            if (leaderLock.IsHeld)
             {
-                await TradeRepository.ResetAllOrphanedClaimsAsync();
-                BotLogger.Info("[PendingVerifier] Gracefully released all claimed_at locks on service shutdown.");
-            }
-            catch (Exception ex)
-            {
-                BotLogger.Warn($"[PendingVerifier] Failed to release claims on shutdown: {ex.Message}");
+                try
+                {
+                    await TradeRepository.ResetAllOrphanedClaimsAsync();
+                    BotLogger.Info("[PendingVerifier] Gracefully released all claimed_at locks on service shutdown.");
+                }
+                catch (Exception ex)
+                {
+                    BotLogger.Warn($"[PendingVerifier] Failed to release claims on shutdown: {ex.Message}");
+                }
             }
             _awaitingCandleUntil.Clear();
+            await leaderLock.ReleaseAsync();
         }
     }
 
@@ -163,82 +179,83 @@ public class PendingTradeVerificationService : BackgroundService
 
         try
         {
-            await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync(ct);
-
             string minIsoPrimary = targetGrid.AddSeconds(-15).ToString("yyyy-MM-ddTHH:mm:ss");
             string maxIsoPrimary = targetGrid.AddSeconds(5).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
 
-            // Locate the exact s5 candle that closed at the contract expiry boundary targetGrid.
-            // Strict fidelity: The candle's close (open_time + 5s) MUST match targetGrid within [-1.5s, +3.0s].
-            // Old candles (e.g. from 5s-20s prior) are STRICTLY REJECTED to prevent settling on pre-expiry ticks!
-            exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
-                SELECT close_price
-                FROM (
-                    SELECT close_price, open_time
-                    FROM subminute_candles
-                    WHERE asset = @Asset AND interval = @Interval
-                      AND open_time >= @MinIso
-                      AND open_time <= @MaxIso
-                    ORDER BY open_time DESC
-                    LIMIT 5
-                ) sub
-                WHERE open_time::timestamptz + INTERVAL '5 seconds' >= @TargetGrid - INTERVAL '1500 milliseconds'
-                  AND open_time::timestamptz + INTERVAL '5 seconds' <= @TargetGrid + INTERVAL '3000 milliseconds'
-                ORDER BY ABS(EXTRACT(EPOCH FROM (open_time::timestamptz + INTERVAL '5 seconds' - @TargetGrid))) ASC
-                LIMIT 1
-            ", new { 
-                Asset = cleanAsset, 
-                Interval = verifyInterval, 
-                MinIso = minIsoPrimary,
-                MaxIso = maxIsoPrimary,
-                TargetGrid = targetGrid
-            }, cancellationToken: ct, commandTimeout: 8));
-
-            // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] via Index Seek on UNIQUE(asset, interval, open_time)
-            if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))
+            await ValutaBot.App.MiniApp.Data.DbConnectionFactory.WithRetryAsync(async conn =>
             {
-                try
-                {
-                    var exc = await conn.QueryFirstOrDefaultAsync<(double? max_high, double? min_low)>(new CommandDefinition(@"
-                        SELECT MAX(high_price) as max_high, MIN(low_price) as min_low
+                // Locate the exact s5 candle that closed at the contract expiry boundary targetGrid.
+                // Strict fidelity: The candle's close (open_time + 5s) MUST match targetGrid within [-1.5s, +3.0s].
+                // Old candles (e.g. from 5s-20s prior) are STRICTLY REJECTED to prevent settling on pre-expiry ticks!
+                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
+                    SELECT close_price
+                    FROM (
+                        SELECT close_price, open_time
                         FROM subminute_candles
-                        WHERE asset = @Asset
-                          AND interval = @Interval
-                          AND open_time >= @CreatedIso
-                          AND open_time <= @TargetIso
-                    ", new { 
-                        Asset = cleanAsset, 
-                        Interval = verifyInterval, 
-                        CreatedIso = createdBucket.ToString("yyyy-MM-ddTHH:mm:ss"), 
-                        TargetIso = targetGrid.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ") 
-                    }, cancellationToken: ct, commandTimeout: 8));
+                        WHERE asset = @Asset AND interval = @Interval
+                          AND open_time >= @MinIso
+                          AND open_time <= @MaxIso
+                        ORDER BY open_time DESC
+                        LIMIT 5
+                    ) sub
+                    WHERE open_time::timestamptz + INTERVAL '5 seconds' >= @TargetGrid - INTERVAL '1500 milliseconds'
+                      AND open_time::timestamptz + INTERVAL '5 seconds' <= @TargetGrid + INTERVAL '3000 milliseconds'
+                    ORDER BY ABS(EXTRACT(EPOCH FROM (open_time::timestamptz + INTERVAL '5 seconds' - @TargetGrid))) ASC
+                    LIMIT 1
+                ", new { 
+                    Asset = cleanAsset, 
+                    Interval = verifyInterval, 
+                    MinIso = minIsoPrimary,
+                    MaxIso = maxIsoPrimary,
+                    TargetGrid = targetGrid
+                }, cancellationToken: ct, commandTimeout: 8));
 
-                    double exitVal = exitPrice.Value;
-                    double excMax = exc.max_high.HasValue && !double.IsNaN(exc.max_high.Value) && !double.IsInfinity(exc.max_high.Value) 
-                        ? exc.max_high.Value 
-                        : exitVal;
-                    double excMin = exc.min_low.HasValue && !double.IsNaN(exc.min_low.Value) && !double.IsInfinity(exc.min_low.Value) 
-                        ? exc.min_low.Value 
-                        : exitVal;
-                    double maxH = Math.Max(excMax, Math.Max(exitVal, record.EntryPrice));
-                    double minL = Math.Min(excMin, Math.Min(exitVal, record.EntryPrice));
-
-                    if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY"))
-                    {
-                        record.MaxFavorableBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000.0, 2);
-                        record.MaxAdverseBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000.0, 2);
-                    }
-                    else if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("PUT"))
-                    {
-                        record.MaxFavorableBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000.0, 2);
-                        record.MaxAdverseBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000.0, 2);
-                    }
-                }
-                catch (Exception exMfe)
+                // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] via Index Seek on UNIQUE(asset, interval, open_time)
+                if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))
                 {
-                    BotLogger.Warn($"[PendingVerifier] MFE/MAE calculation warning: {exMfe.Message}");
+                    try
+                    {
+                        var exc = await conn.QueryFirstOrDefaultAsync<(double? max_high, double? min_low)>(new CommandDefinition(@"
+                            SELECT MAX(high_price) as max_high, MIN(low_price) as min_low
+                            FROM subminute_candles
+                            WHERE asset = @Asset
+                              AND interval = @Interval
+                              AND open_time >= @CreatedIso
+                              AND open_time <= @TargetIso
+                        ", new { 
+                            Asset = cleanAsset, 
+                            Interval = verifyInterval, 
+                            CreatedIso = createdBucket.ToString("yyyy-MM-ddTHH:mm:ss"), 
+                            TargetIso = targetGrid.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ") 
+                        }, cancellationToken: ct, commandTimeout: 8));
+
+                        double exitVal = exitPrice.Value;
+                        double excMax = exc.max_high.HasValue && !double.IsNaN(exc.max_high.Value) && !double.IsInfinity(exc.max_high.Value) 
+                            ? exc.max_high.Value 
+                            : exitVal;
+                        double excMin = exc.min_low.HasValue && !double.IsNaN(exc.min_low.Value) && !double.IsInfinity(exc.min_low.Value) 
+                            ? exc.min_low.Value 
+                            : exitVal;
+                        double maxH = Math.Max(excMax, Math.Max(exitVal, record.EntryPrice));
+                        double minL = Math.Min(excMin, Math.Min(exitVal, record.EntryPrice));
+
+                        if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("BUY"))
+                        {
+                            record.MaxFavorableBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000.0, 2);
+                            record.MaxAdverseBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000.0, 2);
+                        }
+                        else if (!string.IsNullOrEmpty(record.Direction) && record.Direction.EndsWith("PUT"))
+                        {
+                            record.MaxFavorableBps = Math.Round((record.EntryPrice - minL) / record.EntryPrice * 10000.0, 2);
+                            record.MaxAdverseBps = Math.Round((maxH - record.EntryPrice) / record.EntryPrice * 10000.0, 2);
+                        }
+                    }
+                    catch (Exception exMfe)
+                    {
+                        BotLogger.Warn($"[PendingVerifier] MFE/MAE calculation warning: {exMfe.Message}");
+                    }
                 }
-            }
+            }, ct);
             dbFailed = false;
         }
         catch (Exception ex)
@@ -331,7 +348,7 @@ public class PendingTradeVerificationService : BackgroundService
                 // Broker candle is in transit (WebSocket latency or DB flush delay).
                 // Protect fidelity: wait for the correct expiry candle rather than picking an older bar!
                 _awaitingCandleUntil[record.Id] = DateTime.UtcNow.AddSeconds(3);
-                await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
+                await TradeRepository.DeferPendingTradeClaimAsync(record.Id, seconds: 3);
             }
             return;
         }

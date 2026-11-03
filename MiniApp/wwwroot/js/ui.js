@@ -1,5 +1,32 @@
 import { lastPriceVal } from './state.js?v=20261029_audit_v6';
 
+export function hapticImpact(style = 'medium') {
+    try {
+        const activeTg = (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+        if (activeTg && activeTg.HapticFeedback && typeof activeTg.HapticFeedback.impactOccurred === 'function') {
+            activeTg.HapticFeedback.impactOccurred(style);
+        }
+    } catch (_) {}
+}
+
+export function hapticNotification(type = 'success') {
+    try {
+        const activeTg = (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+        if (activeTg && activeTg.HapticFeedback && typeof activeTg.HapticFeedback.notificationOccurred === 'function') {
+            activeTg.HapticFeedback.notificationOccurred(type);
+        }
+    } catch (_) {}
+}
+
+export function hapticSelection() {
+    try {
+        const activeTg = (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+        if (activeTg && activeTg.HapticFeedback && typeof activeTg.HapticFeedback.selectionChanged === 'function') {
+            activeTg.HapticFeedback.selectionChanged();
+        }
+    } catch (_) {}
+}
+
 export function normalizeDirection(dir) {
     if (!dir) return 'NEUTRAL';
     const u = String(dir).trim().toUpperCase();
@@ -310,9 +337,9 @@ export function renderError(rawError, debugText) {
             const match = String(rawError).match(/(\d+)s/);
             const sec = match ? ` на ${match[1]} сек.` : '';
             desc = `Слишком частые клики. Пожалуйста, подождите${sec} перед следующим сканированием.`;
-        } else if (errLower.includes('signature') || errLower.includes('initdata') || errLower.includes('unauthorized') || errLower.includes('401') || errLower.includes('403')) {
+        } else if (errLower.includes('signature') || errLower.includes('initdata') || errLower.includes('unauthorized') || errLower.includes('401') || errLower.includes('403') || errLower.includes('сесси')) {
             title = '⚠️ Ошибка авторизации';
-            desc = 'Пожалуйста, перезапустите бота через Telegram, чтобы обновить сессию.';
+            desc = 'Сессия авторизации устарела. Нажмите кнопку ниже для бесшовного обновления сессии без выхода из приложения.';
         } else if (errLower.includes('access denied') || errLower.includes('deposit required')) {
             title = '⚠️ Доступ ограничен';
             desc = 'Для использования бота необходима регистрация на Pocket Option и внесение депозита.';
@@ -342,13 +369,36 @@ export function renderError(rawError, debugText) {
                 .replace(/internal server error/gi, 'Внутренняя ошибка сервера');
         }
     }
+    const isAuth = rawError && (String(rawError).toLowerCase().includes('401') || String(rawError).toLowerCase().includes('unauthorized') || String(rawError).toLowerCase().includes('сесси') || String(rawError).toLowerCase().includes('signature') || String(rawError).toLowerCase().includes('initdata'));
+    const actionBtnHtml = isAuth 
+        ? `<div style="margin-top:10px;"><button class="error-action-btn" id="btnRefreshSession">🔄 Обновить сессию</button></div>`
+        : '';
     errDisp.innerHTML = `
         <div class="error-header">${escapeHtml(title)}</div>
         <div class="error-desc">${escapeHtml(desc)}</div>
+        ${actionBtnHtml}
         <div class="error-debug-toggle" id="errorDebugToggle">▸ Детали отладки</div>
         <div class="error-debug-content" id="errorDebugContent" style="display: none;">${escapeHtml(debugText)}</div>
     `;
     errDisp.style.display = 'block';
+    if (isAuth) {
+        const refreshBtn = document.getElementById('btnRefreshSession');
+        if (refreshBtn) {
+            refreshBtn.onclick = () => {
+                hapticImpact('medium');
+                refreshBtn.disabled = true;
+                refreshBtn.innerText = 'Обновление...';
+                if (typeof window !== 'undefined') {
+                    try {
+                        const url = new URL(window.location.href);
+                        ['custom_user_id', 'custom_user_sign', 'auth_date', 'userId', 'userSign'].forEach(k => url.searchParams.delete(k));
+                        window.history.replaceState({}, document.title, url.toString());
+                    } catch (_) {}
+                    window.location.reload();
+                }
+            };
+        }
+    }
     const debugToggleBtn = document.getElementById('errorDebugToggle');
     if (debugToggleBtn) {
         debugToggleBtn.onclick = () => {
@@ -370,6 +420,7 @@ export function updateTrafficLight(status) {
     if (status === 'action') {
         cachedTrafficLightEl.style.background = '#10b981';
         cachedTrafficLightEl.style.boxShadow = '0 0 10px #10b981';
+        hapticImpact('light');
     } else if (status === 'prepare') {
         cachedTrafficLightEl.style.background = '#f59e0b';
         cachedTrafficLightEl.style.boxShadow = '0 0 10px #f59e0b';
@@ -406,6 +457,35 @@ let cachedFloorGrad = null;
 let resizeRafId = null;
 let lastChartFrameTime = 0;
 
+let isContextLostListenersAttached = false;
+export function initCanvasContextLossHandlers() {
+    if (isContextLostListenersAttached || typeof document === 'undefined') return;
+    const canvas = document.getElementById('aiChartCanvas');
+    if (!canvas || typeof canvas.addEventListener !== 'function') return;
+    isContextLostListenersAttached = true;
+    canvas.addEventListener('contextlost', (e) => {
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        if (aiChartAnimationId) {
+            cancelAnimationFrame(aiChartAnimationId);
+            aiChartAnimationId = null;
+        }
+        cachedFloorGrad = null;
+    });
+    canvas.addEventListener('contextrestored', () => {
+        cachedFloorGrad = null;
+        updateCanvasDimensions();
+        const container = document.getElementById('aiChartContainer');
+        if (container && container.classList.contains('active')) {
+            if (aiChartData.length > 0) {
+                lastChartFrameTime = 0;
+                renderAiChartLoop();
+            } else {
+                renderAiChartStatic();
+            }
+        }
+    });
+}
+
 export function updateCanvasDimensions() {
     const canvas = document.getElementById('aiChartCanvas');
     if (!canvas || !canvas.parentElement) return;
@@ -420,20 +500,29 @@ export function updateCanvasDimensions() {
     if (displayW > 0 && displayH > 0) {
         const targetW = Math.round(displayW * dpr);
         const targetH = Math.round(displayH * dpr);
+        let sizeChanged = false;
         if (canvas.width !== targetW || canvas.height !== targetH) {
             canvas.width = targetW;
             canvas.height = targetH;
+            sizeChanged = true;
         }
         canvas.style.width = `${displayW}px`;
         canvas.style.height = `${displayH}px`;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
+        const ctx = canvas.getContext ? canvas.getContext('2d') : null;
+        if (ctx && sizeChanged) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        const container = document.getElementById('aiChartContainer');
+        if (container && container.classList.contains('active')) {
+            if (aiChartData.length === 0 || !aiChartAnimationId) {
+                renderAiChartStatic();
+            }
         }
     }
 }
 
 export function showAiChart(asset, tf) {
+    initCanvasContextLossHandlers();
     if (hideChartTimer) {
         clearTimeout(hideChartTimer);
         hideChartTimer = null;
@@ -497,8 +586,10 @@ export function hideAiChart() {
     lastChartFrameTime = 0;
     const canvas = document.getElementById('aiChartCanvas');
     if (canvas) {
-        const ctx = canvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const ctx = canvas.getContext ? canvas.getContext('2d') : null;
+        if (ctx && (!ctx.isContextLost || !ctx.isContextLost())) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
     }
     if (hideChartTimer) clearTimeout(hideChartTimer);
     hideChartTimer = setTimeout(() => {
@@ -543,8 +634,8 @@ function renderAiChartStatic() {
         updateCanvasDimensions();
         if (cachedCanvasW === 0 || cachedCanvasH === 0) return;
     }
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const ctx = canvas.getContext ? canvas.getContext('2d') : null;
+    if (!ctx || (ctx.isContextLost && ctx.isContextLost())) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
@@ -603,7 +694,11 @@ function renderAiChartLoop(timestamp = 0) {
     const deltaMs = lastChartFrameTime ? (timestamp - lastChartFrameTime) : 16.6;
     lastChartFrameTime = timestamp || performance.now();
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext ? canvas.getContext('2d') : null;
+    if (!ctx || (ctx.isContextLost && ctx.isContextLost())) {
+        aiChartAnimationId = null;
+        return;
+    }
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     
     // Hardware frame buffer reset
@@ -893,4 +988,8 @@ export function updateAiCopilot(data, onActionCallback) {
     } else if (actionWrap) {
         actionWrap.style.display = 'none';
     }
+}
+
+if (typeof document !== 'undefined') {
+    initCanvasContextLossHandlers();
 }

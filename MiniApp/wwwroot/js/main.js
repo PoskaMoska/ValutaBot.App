@@ -1,24 +1,40 @@
-import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261029_audit_v6';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState } from './state.js?v=20261029_audit_v6';
+import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261103_audit_v7';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState, clearExpiredAuthParams } from './state.js?v=20261103_audit_v7';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions } from './ui.js?v=20261029_audit_v6';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261103_audit_v7';
 
 // 1. Telegram WebApp Lifecycle, Viewport & Theme Synchronization
 const syncViewport = () => {
     try {
-        const vh = (tg && tg.viewportHeight) ? tg.viewportHeight : window.innerHeight;
-        const vsh = (tg && tg.viewportStableHeight) ? tg.viewportStableHeight : vh;
+        const vv = (typeof window !== 'undefined') ? window.visualViewport : null;
+        const vh = vv ? vv.height : ((tg && tg.viewportHeight) ? tg.viewportHeight : window.innerHeight);
+        const vsh = (tg && tg.viewportStableHeight) ? tg.viewportStableHeight : (window.innerHeight || vh);
         if (vh) {
-            document.documentElement.style.setProperty('--tg-viewport-height', `${vh}px`);
+            document.documentElement.style.setProperty('--tg-viewport-height', `${Math.round(vh)}px`);
         }
         if (vsh) {
-            document.documentElement.style.setProperty('--tg-viewport-stable-height', `${vsh}px`);
+            document.documentElement.style.setProperty('--tg-viewport-stable-height', `${Math.round(vsh)}px`);
+        }
+        if (vv) {
+            const keyboardHeight = Math.max(0, window.innerHeight - vv.height);
+            document.documentElement.style.setProperty('--keyboard-height', `${Math.round(keyboardHeight)}px`);
+            document.documentElement.style.setProperty('--visual-viewport-offset-top', `${Math.round(vv.offsetTop)}px`);
+            const isKeyboardOpen = keyboardHeight > 100;
+            document.body.classList.toggle('keyboard-visible', isKeyboardOpen);
         }
     } catch (e) {}
 };
 
 // Синхронная установка высоты вьюпорта до первого кадра рендера (устраняет скачок 100vh на iOS Safari)
 syncViewport();
+
+if (typeof window !== 'undefined' && window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => {
+        syncViewport();
+        if (typeof updateCanvasDimensions === 'function') updateCanvasDimensions();
+    }, { passive: true });
+    window.visualViewport.addEventListener('scroll', syncViewport, { passive: true });
+}
 
 if (tg) {
     try {
@@ -119,13 +135,37 @@ function renderAssets(arr) {
     }).join('');
 }
 
-function initAssetGrid() {
+function filterAssets(query) {
     const gridEl = document.getElementById('assetGrid');
-    if (gridEl) {
-        gridEl.innerHTML = `<div class='otc-scroll' style='grid-column:1/-1'><div class='asset-grid'>${renderAssets(assetsList)}</div></div>`;
-        const safeAsset = (window.CSS && CSS.escape) ? CSS.escape(currentAsset) : currentAsset.replace(/(["\\])/g, '\\$1');
-        const activeItem = gridEl.querySelector(`.asset-item[data-asset="${safeAsset}"]`);
-        if (activeItem) activeItem.classList.add('active');
+    if (!gridEl) return;
+    const q = (query || '').trim().toUpperCase();
+    const filtered = q ? assetsList.filter(a => a.toUpperCase().includes(q)) : assetsList;
+    if (filtered.length === 0) {
+        gridEl.innerHTML = `<div class='otc-scroll' style='grid-column:1/-1'><div style='text-align:center;padding:16px;color:var(--dim);font-size:12px;'>Активы не найдены</div></div>`;
+        return;
+    }
+    gridEl.innerHTML = `<div class='otc-scroll' style='grid-column:1/-1'><div class='asset-grid'>${renderAssets(filtered)}</div></div>`;
+    const safeAsset = (window.CSS && CSS.escape) ? CSS.escape(currentAsset) : currentAsset.replace(/(["\\])/g, '\\$1');
+    const activeItem = gridEl.querySelector(`.asset-item[data-asset="${safeAsset}"]`);
+    if (activeItem) activeItem.classList.add('active');
+}
+
+function initAssetGrid() {
+    filterAssets('');
+    const searchInput = document.getElementById('assetSearchInput');
+    if (searchInput && !searchInput.dataset.initialized) {
+        searchInput.dataset.initialized = 'true';
+        searchInput.addEventListener('input', (e) => {
+            filterAssets(e.target.value);
+        });
+        searchInput.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+        searchInput.addEventListener('focus', () => {
+            setTimeout(() => {
+                searchInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 100);
+        });
     }
 }
 
@@ -134,7 +174,16 @@ function toggleMenu(m) {
         if (menu.id !== m) menu.classList.remove('show'); 
     });
     const menuEl = document.getElementById(m);
-    if (menuEl) menuEl.classList.toggle('show');
+    if (menuEl) {
+        menuEl.classList.toggle('show');
+        if (m === 'assetMenu' && menuEl.classList.contains('show')) {
+            const searchInput = document.getElementById('assetSearchInput');
+            if (searchInput) {
+                searchInput.value = '';
+                filterAssets('');
+            }
+        }
+    }
 }
 
 let switchThrottleTimer = null;
@@ -165,6 +214,14 @@ function setAsset(el) {
     el = el.closest('.asset-item') || el;
     const a = el.getAttribute('data-asset');
     if (!a) return;
+    hapticSelection();
+    
+    const searchInput = document.getElementById('assetSearchInput');
+    if (searchInput) {
+        searchInput.value = '';
+        filterAssets('');
+        searchInput.blur();
+    }
     
     // Если актив не изменился — просто закрываем меню без сброса сокета и анализа
     if (a === currentAsset) {
@@ -191,6 +248,7 @@ function setTf(el) {
     el = el.closest('.tf-btn') || el;
     const tf = el.getAttribute('data-tf');
     if (!tf) return;
+    hapticSelection();
     
     // Если таймфрейм не изменился — закрываем меню без прерывания потока
     if (tf.toLowerCase() === currentTf.toLowerCase()) {
@@ -256,8 +314,14 @@ function handleGlobalInteraction(e) {
 
     const btnGet = target.closest('#btnGet');
     if (btnGet) {
+        hapticImpact('medium');
         executeAnalysis();
         return;
+    }
+
+    const copilotBtn = target.closest('#copilotActionBtn');
+    if (copilotBtn) {
+        hapticImpact('light');
     }
 
     const assetTrigger = target.closest('#assetBtn');
@@ -286,12 +350,14 @@ function handleGlobalInteraction(e) {
 
     const tabBtnChart = target.closest('#tabBtnChart');
     if (tabBtnChart) {
+        hapticSelection();
         switchResultTab('chart');
         return;
     }
 
     const tabBtnAI = target.closest('#tabBtnAI');
     if (tabBtnAI) {
+        hapticSelection();
         switchResultTab('ai');
         return;
     }
@@ -408,6 +474,7 @@ const netAlertEl = document.getElementById('networkAlert');
 if (netAlertEl) {
     netAlertEl.style.cursor = 'pointer';
     netAlertEl.addEventListener('click', () => {
+        hapticImpact('light');
         resumeLive();
     });
 }
@@ -439,6 +506,10 @@ document.addEventListener('visibilitychange', () => {
             countdownTimerId = null;
         }
     } else {
+        syncViewport();
+        if (typeof updateCanvasDimensions === 'function') {
+            updateCanvasDimensions();
+        }
         updateCountdown();
         if (!countdownTimerId) {
             tickCountdown();
@@ -451,7 +522,15 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-window.addEventListener('pageshow', () => { resumeLive(); });
+window.addEventListener('focus', () => {
+    syncViewport();
+    if (typeof updateCanvasDimensions === 'function') updateCanvasDimensions();
+});
+window.addEventListener('pageshow', () => {
+    syncViewport();
+    if (typeof updateCanvasDimensions === 'function') updateCanvasDimensions();
+    resumeLive();
+});
 window.addEventListener('pagehide', () => {
     cancelAnalysis();
     closePriceWebSocket();

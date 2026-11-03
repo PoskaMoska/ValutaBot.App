@@ -34,9 +34,34 @@ export function getCustomInitData() {
     return '';
 }
 
+export function getTg() {
+    if (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp) {
+        return window.Telegram.WebApp;
+    }
+    return tg;
+}
+
+export function clearExpiredAuthParams() {
+    if (typeof window === 'undefined' || !window.location) return;
+    try {
+        const url = new URL(window.location.href);
+        let modified = false;
+        ['custom_user_id', 'custom_user_sign', 'auth_date', 'userId', 'userSign'].forEach(k => {
+            if (url.searchParams.has(k)) {
+                url.searchParams.delete(k);
+                modified = true;
+            }
+        });
+        if (modified) {
+            window.history.replaceState({}, document.title, url.toString());
+        }
+    } catch (_) {}
+}
+
 export function getAuthHeader() {
-    if (tg && tg.initData && tg.initData.length > 0) {
-        return tg.initData;
+    const webApp = getTg();
+    if (webApp && webApp.initData && webApp.initData.length > 0) {
+        return webApp.initData;
     }
     return getCustomInitData();
 }

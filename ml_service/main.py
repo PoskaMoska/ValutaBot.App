@@ -141,7 +141,8 @@ async def health(full: bool = False):
         "patch_tst_version": patch_ver,
         "architecture": patch_pred._model_name if patch_ok else "offline",
         "metrics": patch_pred.metrics if patch_ok else {},
-        "models": [{"name": patch_pred._model_name, "version": patch_ver, "accuracy": patch_pred.metrics.get("accuracy")}] if patch_ok else []
+        "models": [{"name": patch_pred._model_name, "version": patch_ver, "accuracy": patch_pred.metrics.get("accuracy")}] if patch_ok else [],
+        "drift": patch_pred.drift_detector.get_status() if patch_ok else {}
     }
     return result
 
@@ -155,6 +156,13 @@ def reload_models():
         "architecture": patch_pred._model_name,
         "metrics": patch_pred.metrics
     }
+
+@app.get("/diagnostics/drift")
+def get_drift_diagnostics():
+    patch_pred = PatchTSTPredictor.get_instance()
+    if not patch_pred.is_available():
+        raise HTTPException(status_code=503, detail="Neural Brain model not available")
+    return patch_pred.drift_detector.get_status()
 
 @app.get("/models")
 def list_models():
@@ -218,6 +226,15 @@ async def predict(request: Request):
     macro_ctx = data.get("macro_context")
     interval = normalize_interval(interval_raw)
 
+    payout_raw = data.get("payout") or data.get("payout_rate") or data.get("payout_pct")
+    payout = None
+    if payout_raw is not None:
+        try:
+            p_val = float(payout_raw)
+            payout = p_val / 100.0 if p_val > 1.0 else p_val
+        except (ValueError, TypeError):
+            payout = None
+
     patch_predictor = PatchTSTPredictor.get_instance()
     if not patch_predictor.is_available():
         raise HTTPException(status_code=503, detail="Neural Brain model not available")
@@ -229,7 +246,7 @@ async def predict(request: Request):
         inference_executor,
         patch_predictor.predict,
         symbol, interval, candles, mtf_candles,
-        macro_ctx, smc_ctx
+        macro_ctx, smc_ctx, payout
     )
 
     if neural_res is None:

@@ -454,11 +454,41 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
         if (count < 2) return 0.0;
         
         double sum = 0;
-        for (int i = 0; i < count; i++) sum += values[i];
+        int i = 0;
+
+        if (Vector.IsHardwareAccelerated && count >= Vector<double>.Count)
+        {
+            var sumVec = Vector<double>.Zero;
+            int vecLimit = count - Vector<double>.Count;
+            while (i <= vecLimit)
+            {
+                sumVec += new Vector<double>(values.Slice(i));
+                i += Vector<double>.Count;
+            }
+            sum = Vector.Sum(sumVec);
+        }
+
+        for (; i < count; i++) sum += values[i];
         double mean = sum / count;
         
         double sqSum = 0;
-        for (int i = 0; i < count; i++)
+        i = 0;
+
+        if (Vector.IsHardwareAccelerated && count >= Vector<double>.Count)
+        {
+            var sqSumVec = Vector<double>.Zero;
+            var meanVec = new Vector<double>(mean);
+            int vecLimit = count - Vector<double>.Count;
+            while (i <= vecLimit)
+            {
+                var diffVec = new Vector<double>(values.Slice(i)) - meanVec;
+                sqSumVec += diffVec * diffVec;
+                i += Vector<double>.Count;
+            }
+            sqSum = Vector.Sum(sqSumVec);
+        }
+
+        for (; i < count; i++)
         {
             double diff = values[i] - mean;
             sqSum += diff * diff;

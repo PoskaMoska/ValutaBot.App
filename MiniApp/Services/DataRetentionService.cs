@@ -450,6 +450,13 @@ public class DataRetentionService : BackgroundService
 
     private static async Task<bool> SafeVacuumFullAsync(System.Data.Common.DbConnection conn, string table)
     {
+        // High-frequency ingest tables must NEVER undergo VACUUM FULL: AccessExclusiveLock blocks NpgsqlBatch inserts and drops ticks!
+        if (table is "subminute_candles" or "pending_trades")
+        {
+            BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} rejected: AccessExclusiveLock would block streaming live tick ingestion. Running non-blocking VACUUM (ANALYZE) instead.");
+            return false;
+        }
+
         try
         {
             long capacityMb = long.TryParse(Environment.GetEnvironmentVariable("RAILWAY_VOLUME_CAPACITY_MB"), out var cap) ? cap : (long)MaxVolumeCapacityMb;
@@ -484,7 +491,8 @@ public class DataRetentionService : BackgroundService
                 return false;
             }
 
-            await conn.ExecuteAsync("SET lock_timeout = '2s';");
+            // Protective sub-second lock timeout: abort immediately if active queries would cause lock queuing
+            await conn.ExecuteAsync("SET lock_timeout = '1s';");
             await conn.ExecuteAsync("SET statement_timeout = '120s';");
             await conn.ExecuteAsync($"VACUUM FULL {table};", commandTimeout: 150);
             BotLogger.Info($"[SmartStorageGovernor] VACUUM FULL {table} succeeded.");

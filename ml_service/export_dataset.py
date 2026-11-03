@@ -22,7 +22,7 @@ import math
 import bisect
 import numpy as np
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     import orjson
@@ -652,22 +652,25 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
 
         # Strict Anti-Leakage: микро-свеча ОБЯЗАНА быть 100% закрыта ДО created_at
         created_dt = row_dict.get("created_at")
-        created_ts = created_dt.timestamp() if hasattr(created_dt, "timestamp") else None
+        created_ts = None
+        if isinstance(created_dt, datetime):
+            created_ts = created_dt.replace(tzinfo=timezone.utc).timestamp() if created_dt.tzinfo is None else created_dt.timestamp()
+        elif isinstance(created_dt, str):
+            try:
+                created_ts = datetime.fromisoformat(created_dt.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                pass
+        elif isinstance(created_dt, (int, float)) and created_dt > 0:
+            created_ts = float(created_dt) / 1000.0 if float(created_dt) > 1e11 else float(created_dt)
+
         tf_sec_row = TF_SECONDS.get(tf_str_row, 5)
-        
-        if len(candles) > 1 and created_ts is not None:
-            last_c = candles[-1]
-            last_ts_raw = last_c.get("Timestamp") or last_c.get("timestamp") or last_c.get("openTime")
-            last_open_ts = None
-            if isinstance(last_ts_raw, (int, float)) and last_ts_raw > 0:
-                last_open_ts = float(last_ts_raw) / 1000.0 if float(last_ts_raw) > 1e11 else float(last_ts_raw)
-            elif isinstance(last_ts_raw, str) and len(last_ts_raw) >= 19:
-                try:
-                    last_open_ts = datetime.fromisoformat(last_ts_raw.replace("Z", "+00:00")).timestamp()
-                except Exception:
-                    pass
-            if last_open_ts is not None and (last_open_ts + tf_sec_row) > created_ts:
-                candles = candles[:-1]
+        if created_ts is not None and len(candles) > 0:
+            while len(candles) > 0:
+                last_open_ts = _extract_candle_ts(candles[-1])
+                if last_open_ts is not None and (last_open_ts + tf_sec_row) > created_ts:
+                    candles = candles[:-1]
+                else:
+                    break
 
         # Strip trailing unclosed 1-tick candle if present from legacy orchestrator serialization
         if len(candles) > 10:
@@ -697,17 +700,15 @@ def export_dataset(db_url, output_path, limit=None, seq_len=160, seq_len_mtf=30,
         if not mtf_candles:
             htf = higher_tf_map.get(tf_str_row, "m1")
             mtf_candles = candle_store.get_candles_before(str(row_dict.get("asset") or ""), htf, row_dict.get("created_at"), seq_len_mtf)
-        elif len(mtf_candles) > 1:
-            # Strip trailing unclosed MTF candle if its close time exceeds created_at
-            last_mtf_ts = mtf_candles[-1].get("Timestamp") or mtf_candles[-1].get("timestamp") or mtf_candles[-1].get("openTime")
-            created_dt = row_dict.get("created_at")
-            if isinstance(last_mtf_ts, str) and len(last_mtf_ts) >= 19 and hasattr(created_dt, "timestamp"):
-                try:
-                    mtf_open_ts = datetime.fromisoformat(last_mtf_ts.replace("Z", "+00:00")).timestamp()
-                    if mtf_open_ts + mtf_tf_sec > created_dt.timestamp():
+        elif len(mtf_candles) > 0:
+            # Strip trailing unclosed MTF candle(s) if their close time exceeds created_at
+            if created_ts is not None:
+                while len(mtf_candles) > 0:
+                    mtf_open_ts = _extract_candle_ts(mtf_candles[-1])
+                    if mtf_open_ts is not None and (mtf_open_ts + mtf_tf_sec) > created_ts:
                         mtf_candles = mtf_candles[:-1]
-                except Exception:
-                    pass
+                    else:
+                        break
         mtf_tensor = normalize_candles(mtf_candles, seq_len=seq_len_mtf, channels=channels, tf_sec=mtf_tf_sec) if len(mtf_candles) > 0 else np.zeros((seq_len_mtf, channels), dtype=np.float32)
         if np.isnan(mtf_tensor).any() or np.isinf(mtf_tensor).any():
             mtf_tensor = np.zeros((seq_len_mtf, channels), dtype=np.float32)

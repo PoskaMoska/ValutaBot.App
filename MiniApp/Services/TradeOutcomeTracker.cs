@@ -145,7 +145,12 @@ public static class TradeOutcomeTracker
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };
 
-            await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord, record.Id);
+            bool saved = await ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.SaveTradeOutcomeAsync(outcomeRecord, record.Id);
+            if (!saved)
+            {
+                BotLogger.Warn($"[TradeOutcomeTracker] Trade {record.Id} was already finalized by another worker. Skipping duplicate metrics and state updates.");
+                return;
+            }
 
             // Background neutral samples (HOLD) are strictly for offline Transformer training (export_dataset.py).
             // They must never affect Circuit Breaker, consecutive loss streaks, post-mortem dumps, or online RL weights.

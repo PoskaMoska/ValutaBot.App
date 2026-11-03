@@ -5,17 +5,102 @@ namespace ValutaBot.MiniApp.Indicators;
 
 /// <summary>
 /// Thread-safe stateful Smart Money Concepts indicator.
-///
-/// FIX: All public methods and the Update method now use a shared _lockObj.
-/// Previously _activeFvgs and _activeObs were modified by Update() while
-/// GetNearestFvg/GetNearestOb iterated them concurrently, causing
-/// InvalidOperationException ("Collection was modified").
+/// Readers access an immutable volatile snapshot without acquiring locks (lock-free read path),
+/// preventing monitor contention during high-frequency parallel evaluations.
 /// </summary>
 public class StatefulSmc
 {
     public readonly record struct FvgZone(double Top, double Bottom, bool IsBullish, DateTime CreationTime);
     public readonly record struct OrderBlockZone(double Top, double Bottom, bool IsBullish, DateTime CreationTime);
     public readonly record struct Fractal(double Price, bool IsHigh, DateTime Time);
+
+    public sealed class SmcSnapshot
+    {
+        public bool HasLiquiditySweep { get; }
+        public string SweepDirection { get; }
+        public bool HasBos { get; }
+        public string BosDirection { get; }
+        public string CurrentTrend { get; }
+        public FvgZone[] ActiveFvgs { get; }
+        public OrderBlockZone[] ActiveObs { get; }
+        public DateTime LastProcessedTime { get; }
+        public TimeSpan TfEstimate { get; }
+
+        public SmcSnapshot(
+            bool hasLiquiditySweep, string sweepDirection,
+            bool hasBos, string bosDirection, string currentTrend,
+            FvgZone[] activeFvgs, OrderBlockZone[] activeObs,
+            DateTime lastProcessedTime, TimeSpan tfEstimate)
+        {
+            HasLiquiditySweep = hasLiquiditySweep;
+            SweepDirection = sweepDirection;
+            HasBos = hasBos;
+            BosDirection = bosDirection;
+            CurrentTrend = currentTrend;
+            ActiveFvgs = activeFvgs;
+            ActiveObs = activeObs;
+            LastProcessedTime = lastProcessedTime;
+            TfEstimate = tfEstimate;
+        }
+
+        public (bool hasBullishFvg, bool hasBearishFvg, FvgZone? nearestFvg) GetNearestFvg(double currentPrice)
+        {
+            bool bull = false;
+            bool bear = false;
+            FvgZone? nearest = null;
+            double minDistance = double.MaxValue;
+
+            var fvgs = ActiveFvgs;
+            for (int i = 0; i < fvgs.Length; i++)
+            {
+                var fvg = fvgs[i];
+                if (fvg.IsBullish) bull = true;
+                else               bear = true;
+
+                double dist = Math.Min(
+                    Math.Abs(currentPrice - fvg.Top),
+                    Math.Abs(currentPrice - fvg.Bottom));
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    nearest     = fvg;
+                }
+            }
+            return (bull, bear, nearest);
+        }
+
+        public (bool hasBullishOb, bool hasBearishOb, OrderBlockZone? nearestOb) GetNearestOb(double currentPrice, int maxAgeBars = 30)
+        {
+            bool bull = false;
+            bool bear = false;
+            OrderBlockZone? nearest = null;
+            double minDistance = double.MaxValue;
+
+            DateTime cutoff = LastProcessedTime != default
+                ? LastProcessedTime - (TfEstimate * maxAgeBars)
+                : DateTime.MinValue;
+
+            var obs = ActiveObs;
+            for (int i = 0; i < obs.Length; i++)
+            {
+                var ob = obs[i];
+                if (ob.CreationTime < cutoff) continue;
+
+                if (ob.IsBullish) bull = true;
+                else              bear = true;
+
+                double dist = Math.Min(
+                    Math.Abs(currentPrice - ob.Top),
+                    Math.Abs(currentPrice - ob.Bottom));
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    nearest     = ob;
+                }
+            }
+            return (bull, bear, nearest);
+        }
+    }
 
     private readonly object _lockObj = new();
 
@@ -30,11 +115,12 @@ public class StatefulSmc
     private double   _recentAtr;
     private TimeSpan _tfEstimate = TimeSpan.FromMinutes(1);
 
-    // Output state — backing fields accessed under lock
     private bool   _hasLiquiditySweep;
     private string _sweepDirection = "NONE";
     private bool   _hasBos;
     private string _bosDirection   = "NONE";
+
+    private volatile SmcSnapshot _snapshot = new(false, "NONE", false, "NONE", "NEUTRAL", Array.Empty<FvgZone>(), Array.Empty<OrderBlockZone>(), default, TimeSpan.FromMinutes(1));
 
     public StatefulSmc Clone()
     {
@@ -43,15 +129,17 @@ public class StatefulSmc
             var clone = (StatefulSmc)this.MemberwiseClone();
             clone._activeFvgs = new List<FvgZone>(this._activeFvgs);
             clone._activeObs = new List<OrderBlockZone>(this._activeObs);
+            clone._snapshot = this._snapshot;
             return clone;
         }
     }
 
-    public bool   HasLiquiditySweep { get { lock (_lockObj) { return _hasLiquiditySweep; } } }
-    public string SweepDirection    { get { lock (_lockObj) { return _sweepDirection;    } } }
-    public bool   HasBos            { get { lock (_lockObj) { return _hasBos;            } } }
-    public string BosDirection      { get { lock (_lockObj) { return _bosDirection;      } } }
-    public string CurrentTrend      { get { lock (_lockObj) { return _currentTrend;      } } }
+    public bool   HasLiquiditySweep => _snapshot.HasLiquiditySweep;
+    public string SweepDirection    => _snapshot.SweepDirection;
+    public bool   HasBos            => _snapshot.HasBos;
+    public string BosDirection      => _snapshot.BosDirection;
+    public string CurrentTrend      => _snapshot.CurrentTrend;
+    public SmcSnapshot CurrentSnapshot => _snapshot;
 
     public void Update(ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
     {
@@ -59,9 +147,6 @@ public class StatefulSmc
 
         lock (_lockObj)
         {
-            // FIX M-07: Process up to candles.Length to include the most recently closed candle.
-            // Previously `i < candles.Length - 1` double-stripped the latest candle, meaning
-            // Order Blocks and FVGs were recognized with a 1-candle lag.
             for (int i = 2; i < candles.Length; i++)
             {
                 var c = candles[i];
@@ -74,13 +159,13 @@ public class StatefulSmc
                 _hasBos            = false;
                 _bosDirection      = "NONE";
 
-                _recentAtr = GetAtrAt(candles, i, 14); // B13-FIX: Point-in-time ATR, no lookahead bias
+                _recentAtr = GetAtrAt(candles, i, 14);
 
                 if (i >= 4) DetectFractalAt(candles, i - 2);
                 DetectFvgAt(candles, i);
                 DetectOrderBlockAt(candles, i - 1, i);
                 DetectStructureBreak(c);
-                DetectLiquiditySweep(c);  // FIX: sweep detection moved outside fractal block
+                DetectLiquiditySweep(c);
                 MitigateZones(c);
 
                 _lastProcessedTime = c.Timestamp;
@@ -89,27 +174,32 @@ public class StatefulSmc
             // Live mitigation on current open candle
             MitigateZones(candles[^1]);
 
-            // W-05 FIX: Instead of hardcoded -50 minutes (which breaks higher TFs),
-            // estimate timeframe from the last two candles and prune 50 candles back.
             if (_lastProcessedTime != default)
             {
                 TimeSpan tf = candles.Length > 1 
                     ? candles[^1].Timestamp - candles[^2].Timestamp 
                     : TimeSpan.FromMinutes(1);
                 
-                // Fallback to sane limits if timestamps are exactly the same or wildly apart
                 if (tf.TotalSeconds < 1 || tf.TotalDays > 1) tf = TimeSpan.FromMinutes(1);
                 _tfEstimate = tf;
                 
                 PruneStaleZones(_lastProcessedTime.Subtract(tf * 50));
             }
+
+            // Publish immutable snapshot for lock-free concurrent readers
+            _snapshot = new SmcSnapshot(
+                _hasLiquiditySweep,
+                _sweepDirection,
+                _hasBos,
+                _bosDirection,
+                _currentTrend,
+                _activeFvgs.ToArray(),
+                _activeObs.ToArray(),
+                _lastProcessedTime,
+                _tfEstimate);
         }
     }
 
-    /// <summary>
-    /// Удаляет FVG и OrderBlock зоны, созданные раньше cutoffTime.
-    /// Вызывается под _lockObj.
-    /// </summary>
     private void PruneStaleZones(DateTime cutoffTime)
     {
         _activeFvgs.RemoveAll(z => z.CreationTime < cutoffTime);
@@ -142,7 +232,6 @@ public class StatefulSmc
         bool isSwingHigh = c.High > cM2.High && c.High > cM1.High && c.High > cP1.High && c.High > cP2.High;
         bool isSwingLow  = c.Low  < cM2.Low  && c.Low  < cM1.Low  && c.Low  < cP1.Low  && c.Low  < cP2.Low;
 
-        // Record swing fractals only — sweep detection moved to DetectLiquiditySweep()
         if (isSwingHigh)
             _lastSwingHigh = new Fractal(c.High, true, c.Timestamp);
 
@@ -150,16 +239,8 @@ public class StatefulSmc
             _lastSwingLow = new Fractal(c.Low, false, c.Timestamp);
     }
 
-    /// <summary>
-    /// Detects liquidity sweeps: current candle's wick exceeded a prior swing,
-    /// but price rejected and closed back inside — classic stop-hunt pattern.
-    /// FIX: Previously this logic was inside DetectFractalAt() inside the isSwingHigh
-    /// block, checking cP2.High > c.High — which is mathematically impossible
-    /// (isSwingHigh requires c.High > cP2.High). Sweep was NEVER detected.
-    /// </summary>
     private void DetectLiquiditySweep(MiniAppController.OhlcCandle c)
     {
-        // Bearish sweep: wick above prior swing high, but close back below it
         if (_lastSwingHigh.Time != default
             && c.High  > _lastSwingHigh.Price
             && c.Close < _lastSwingHigh.Price)
@@ -168,7 +249,6 @@ public class StatefulSmc
             _sweepDirection    = "BEARISH_SWEEP";
         }
 
-        // Bullish sweep: wick below prior swing low, but close back above it
         if (_lastSwingLow.Time != default
             && c.Low   < _lastSwingLow.Price
             && c.Close > _lastSwingLow.Price)
@@ -248,76 +328,14 @@ public class StatefulSmc
             (f.IsBullish  && c.Low  <= f.Bottom) ||
             (!f.IsBullish && c.High >= f.Top));
 
-        // FIX: Order Blocks are invalidated only when price closes beyond their extreme.
-        // Previously they were removed on the first touch (c.Low <= o.Top), erasing them
-        // right before they could act as support/resistance.
         _activeObs.RemoveAll(o =>
             (o.IsBullish  && c.Close < o.Bottom) ||
             (!o.IsBullish && c.Close > o.Top));
     }
 
     public (bool hasBullishFvg, bool hasBearishFvg, FvgZone? nearestFvg) GetNearestFvg(double currentPrice)
-    {
-        lock (_lockObj)
-        {
-            bool  bull        = false;
-            bool  bear        = false;
-            FvgZone? nearest  = null;
-            double minDistance = double.MaxValue;
-
-            foreach (var fvg in _activeFvgs)
-            {
-                if (fvg.IsBullish) bull = true;
-                else               bear = true;
-
-                double dist = Math.Min(
-                    Math.Abs(currentPrice - fvg.Top),
-                    Math.Abs(currentPrice - fvg.Bottom));
-                if (dist < minDistance)
-                {
-                    minDistance = dist;
-                    nearest     = fvg;
-                }
-            }
-            return (bull, bear, nearest);
-        }
-    }
+        => _snapshot.GetNearestFvg(currentPrice);
 
     public (bool hasBullishOb, bool hasBearishOb, OrderBlockZone? nearestOb) GetNearestOb(double currentPrice, int maxAgeBars = 30)
-    {
-        lock (_lockObj)
-        {
-            bool  bull        = false;
-            bool  bear        = false;
-            OrderBlockZone? nearest = null;
-            double minDistance = double.MaxValue;
-
-            // Временной фильтр: OB старше maxAgeBars свечей исключается из скоринга.
-            // CreationTime хранится как DateTime последней свечи в момент формирования OB.
-            // Для m1: 30 свечей = 30 минут; для m5: 30 свечей = 2.5 часа.
-            // OB, сформированный давно, с высокой вероятностью уже отработан или стал неактуальным.
-            DateTime cutoff = _lastProcessedTime != default
-                ? _lastProcessedTime - (_tfEstimate * maxAgeBars)
-                : DateTime.MinValue;
-
-            foreach (var ob in _activeObs)
-            {
-                // Пропускаем устаревшие OB
-                if (ob.CreationTime < cutoff) continue;
-
-                if (ob.IsBullish) bull = true;
-                else              bear = true;
-
-                double dist = Math.Min(
-                    Math.Abs(currentPrice - ob.Top),
-                    Math.Abs(currentPrice - ob.Bottom));
-                if (dist < minDistance)
-                {
-                    minDistance = dist;
-                    nearest     = ob;
-                }
-            }
-            return (bull, bear, nearest);
-        }
-    }
+        => _snapshot.GetNearestOb(currentPrice, maxAgeBars);
 }

@@ -304,15 +304,24 @@ FROM outcome_data;", commandTimeout: 10);
             }
         }
 
-        public static async Task SaveTradeOutcomeAsync(TradeOutcomeRecord outcome, string? pendingTradeIdToDelete = null)
+        public static async Task<bool> SaveTradeOutcomeAsync(TradeOutcomeRecord outcome, string? pendingTradeIdToDelete = null)
         {
-            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return false;
             SanitizeOutcome(outcome);
             try
             {
-                await DbConnectionFactory.WithRetryAsync(async (conn, tx) =>
+                return await DbConnectionFactory.WithRetryAsync(async (conn, tx) =>
                 {
+                    string? pendingId = !string.IsNullOrEmpty(pendingTradeIdToDelete) ? pendingTradeIdToDelete : null;
+
+                    // Atomic CTE: delete pending trade and insert outcome only if pending trade existed (or direct outcome with no pending ID).
+                    // Prevents duplicate outcome records and concurrent duplicate processing across multiple workers.
                     const string sql = @"
+                    WITH del AS (
+                        DELETE FROM pending_trades 
+                        WHERE id = @PendingTradeId AND @PendingTradeId IS NOT NULL AND @PendingTradeId != ''
+                        RETURNING id
+                    )
                     INSERT INTO trade_outcomes 
                     (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
                      smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon,
@@ -322,73 +331,21 @@ FROM outcome_data;", commandTimeout: 10);
                      confidence_bucket, was_close_call, consecutive_losses_before, seconds_since_last_trade,
                      reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps,
                      price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
-                    VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
-                            @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
-                            @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
-                            @Session, @DayOfWeek, @HourUtc,
-                            @TaDirection, @MlDirection, @SmcDirection, @OfDirection, @ConflictCount,
-                            @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
-                            @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
-                            @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
-                    ON CONFLICT (id) DO UPDATE SET
-                        asset = EXCLUDED.asset,
-                        timeframe = EXCLUDED.timeframe,
-                        direction = EXCLUDED.direction,
-                        probability = EXCLUDED.probability,
-                        entry_price = EXCLUDED.entry_price,
-                        exit_price = EXCLUDED.exit_price,
-                        pnl_bps = EXCLUDED.pnl_bps,
-                        was_win = EXCLUDED.was_win,
-                        ta_score = EXCLUDED.ta_score,
-                        of_score = EXCLUDED.of_score,
-                        smc_score = EXCLUDED.smc_score,
-                        ml_prob = EXCLUDED.ml_prob,
-                        ml_score = EXCLUDED.ml_score,
-                        features_json = EXCLUDED.features_json,
-                        created_at = EXCLUDED.created_at,
-                        verified_at = EXCLUDED.verified_at,
-                        smc_bos_dir = EXCLUDED.smc_bos_dir,
-                        smc_has_ob = EXCLUDED.smc_has_ob,
-                        smc_has_fvg = EXCLUDED.smc_has_fvg,
-                        of_delta_ratio = EXCLUDED.of_delta_ratio,
-                        of_state = EXCLUDED.of_state,
-                        dynamic_horizon = EXCLUDED.dynamic_horizon,
-                        market_regime = EXCLUDED.market_regime,
-                        velocity_regime = EXCLUDED.velocity_regime,
-                        atr_at_signal = EXCLUDED.atr_at_signal,
-                        adx_at_signal = EXCLUDED.adx_at_signal,
-                        rsi_at_signal = EXCLUDED.rsi_at_signal,
-                        higher_tf_aligned = EXCLUDED.higher_tf_aligned,
-                        minutes_to_news = EXCLUDED.minutes_to_news,
-                        session = EXCLUDED.session,
-                        day_of_week = EXCLUDED.day_of_week,
-                        hour_utc = EXCLUDED.hour_utc,
-                        ta_direction = EXCLUDED.ta_direction,
-                        ml_direction = EXCLUDED.ml_direction,
-                        smc_direction = EXCLUDED.smc_direction,
-                        of_direction = EXCLUDED.of_direction,
-                        conflict_count = EXCLUDED.conflict_count,
-                        confidence_bucket = EXCLUDED.confidence_bucket,
-                        was_close_call = EXCLUDED.was_close_call,
-                        consecutive_losses_before = EXCLUDED.consecutive_losses_before,
-                        seconds_since_last_trade = EXCLUDED.seconds_since_last_trade,
-                        reasoning_text = EXCLUDED.reasoning_text,
-                        ml_model_version = EXCLUDED.ml_model_version,
-                        ml_model_accuracy = EXCLUDED.ml_model_accuracy,
-                        max_favorable_bps = EXCLUDED.max_favorable_bps,
-                        max_adverse_bps = EXCLUDED.max_adverse_bps,
-                        price_entropy = EXCLUDED.price_entropy,
-                        trend_maturity = EXCLUDED.trend_maturity,
-                        price_position_pct = EXCLUDED.price_position_pct,
-                        bb_squeeze = EXCLUDED.bb_squeeze,
-                        ta_telemetry = EXCLUDED.ta_telemetry,
-                        ml_telemetry = EXCLUDED.ml_telemetry,
-                        smc_telemetry = EXCLUDED.smc_telemetry;
-                    DELETE FROM pending_trades 
-                    WHERE id = @PendingTradeId AND @PendingTradeId IS NOT NULL AND @PendingTradeId != '';";
+                    SELECT @Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
+                           @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
+                           @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
+                           @Session, @DayOfWeek, @HourUtc,
+                           @TaDirection, @MlDirection, @SmcDirection, @OfDirection, @ConflictCount,
+                           @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
+                           @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
+                           @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze,
+                           NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb
+                    WHERE (@PendingTradeId IS NOT NULL AND @PendingTradeId != '' AND EXISTS (SELECT 1 FROM del))
+                       OR (@PendingTradeId IS NULL OR @PendingTradeId = '')
+                    ON CONFLICT (id) DO NOTHING
+                    RETURNING id;";
 
-                    string pendingId = !string.IsNullOrEmpty(pendingTradeIdToDelete) ? pendingTradeIdToDelete : outcome.Id;
-                    await conn.ExecuteAsync(sql, new
+                    var insertedId = await conn.ExecuteScalarAsync<string>(sql, new
                     {
                         PendingTradeId = pendingId,
                         outcome.Id,
@@ -446,11 +403,13 @@ FROM outcome_data;", commandTimeout: 10);
                         outcome.MlTelemetry,
                         outcome.SmcTelemetry
                     }, transaction: tx, commandTimeout: 10);
+                    return !string.IsNullOrEmpty(insertedId);
                 });
             }
             catch (Exception ex)
             {
                 BotLogger.Error("[PostgreSQL DB] Failed to save trade outcome record", ex);
+                return false;
             }
         }
 
@@ -590,7 +549,7 @@ FROM outcome_data;", commandTimeout: 10);
                         SELECT id
                         FROM pending_trades
                         WHERE verify_at <= @UpToIso
-                          AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '15 seconds')
+                          AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '60 seconds')
                           AND (cardinality(@ExcludedArray) = 0 OR id != ALL(@ExcludedArray))
                         ORDER BY verify_at ASC
                         LIMIT @Limit
@@ -681,6 +640,29 @@ FROM outcome_data;", commandTimeout: 10);
             catch (Exception ex)
             {
                 BotLogger.Warn($"[TradeRepository] Failed to release claim for {id}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Defers a pending trade's claim eligibility across all workers by adjusting claimed_at in the database.
+        /// Prevents other parallel workers from picking up the trade before broker candles arrive.
+        /// </summary>
+        public static async Task DeferPendingTradeClaimAsync(string id, int seconds = 3)
+        {
+            if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            try
+            {
+                await DbConnectionFactory.WithRetryAsync(async conn =>
+                {
+                    await conn.ExecuteAsync(@"
+                        UPDATE pending_trades 
+                        SET claimed_at = NOW() - INTERVAL '60 seconds' + (INTERVAL '1 second' * @seconds)
+                        WHERE id = @id;", new { id, seconds }, commandTimeout: 8);
+                });
+            }
+            catch (Exception ex)
+            {
+                BotLogger.Warn($"[TradeRepository] Failed to defer claim for {id}: {ex.Message}");
             }
         }
 
@@ -843,8 +825,9 @@ FROM outcome_data;", commandTimeout: 10);
                         ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     string sinceFilter = sinceUtc.HasValue
-                        ? "AND verified_at::timestamptz > @SinceUtc"
+                        ? "AND verified_at > @SinceUtcStr"
                         : "";
+                    string sinceUtcStr = sinceUtc?.ToUniversalTime().ToString("o") ?? "";
                     var rows = await conn.QueryAsync<bool?>($@"
                         SELECT was_win 
                         FROM trade_outcomes 
@@ -854,7 +837,7 @@ FROM outcome_data;", commandTimeout: 10);
                           {sinceFilter}
                         ORDER BY verified_at DESC 
                         LIMIT @Limit
-                    ", new { Limit = limit, SinceUtc = sinceUtc }, commandTimeout: 8);
+                    ", new { Limit = limit, SinceUtcStr = sinceUtcStr }, commandTimeout: 8);
                     return rows.ToList();
                 });
             }
@@ -876,8 +859,9 @@ FROM outcome_data;", commandTimeout: 10);
                         ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     string sinceFilter = sinceUtc.HasValue
-                        ? "AND verified_at::timestamptz > @SinceUtc"
+                        ? "AND verified_at > @SinceUtcStr"
                         : "";
+                    string sinceUtcStr = sinceUtc?.ToUniversalTime().ToString("o") ?? "";
                     var rows = await conn.QueryAsync<bool>($@"
                         SELECT was_win 
                         FROM trade_outcomes 
@@ -887,7 +871,7 @@ FROM outcome_data;", commandTimeout: 10);
                           {sinceFilter}
                         ORDER BY verified_at DESC 
                         LIMIT @Limit
-                    ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtc = sinceUtc }, commandTimeout: 8);
+                    ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtcStr = sinceUtcStr }, commandTimeout: 8);
                     return rows.ToList();
                 });
             }

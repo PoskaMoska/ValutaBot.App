@@ -134,5 +134,92 @@ namespace ValutaBot.Tests.Engines
             var decisionNeg = await cm.EvaluateMatrixAsync("EURUSD", "s10", true, -0.5, ta, smc, ml, state, mtf);
             Assert.True(decisionNeg.Probability >= 50 && decisionNeg.Probability <= 92);
         }
+
+        [Fact]
+        public void ContinuousStateEngine_5DigitQuotes_NoCatastrophicCancellation()
+        {
+            // 5-digit EURUSD_otc quotes where price changes by 1 pip (0.00001)
+            double basePrice = 1.08542;
+            double[] prices = new double[20];
+            for (int i = 0; i < prices.Length; i++)
+            {
+                prices[i] = basePrice + (i % 2 == 0 ? 0.00001 : -0.00001);
+            }
+
+            var result = ContinuousStateEngine.EvaluateContinuousState(prices, "EURUSD_otc", "s5", isAlreadyClosed: true);
+
+            Assert.True(double.IsFinite(result.VelocityBpsPerSec));
+            Assert.True(double.IsFinite(result.AccelerationBpsPerSec2));
+            Assert.True(double.IsFinite(result.KalmanFilteredState));
+            Assert.NotEqual("UNKNOWN", result.VelocityRegime);
+        }
+
+        [Fact]
+        public void StatefulConnorsRsi_And_StatefulHma_ComputeLive_MatchesUpdate()
+        {
+            var crsi = new StatefulConnorsRsi();
+            var hma = new StatefulHma(9);
+
+            double p = 1.08500;
+            for (int i = 0; i < 25; i++)
+            {
+                p += (i % 2 == 0 ? 0.00010 : -0.00005);
+                crsi.Update(p);
+                hma.Update(p);
+            }
+
+            double livePrice = p + 0.00020;
+
+            // ComputeLive must match Clone().Update() without mutating the base instance
+            double liveHmaExpected = hma.Clone().Update(livePrice);
+            double liveHmaActual = hma.ComputeLive(livePrice);
+            Assert.Equal(liveHmaExpected, liveHmaActual, precision: 6);
+
+            double liveCrsiExpected = crsi.Clone().Update(livePrice);
+            double liveCrsiActual = crsi.ComputeLive(livePrice);
+            Assert.Equal(liveCrsiExpected, liveCrsiActual, precision: 6);
+        }
+
+        [Fact]
+        public async Task ConfluenceMatrix_AbnormalVolatilitySpike_BlocksTradeAndLowersProbability()
+        {
+            var cm = new ConfluenceMatrixEngine(new MarketDataFetcher(), new TechnicalAnalysisEngine());
+            var ta = new TaSignal(1.5, 80.0, 65, 100, 2.0, 10);
+            var smc = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish");
+            var ml = new MlSignal("BUY", 0.85, 0.75, "neural_brain");
+            var state = new StateSignal("TREND_BULLISH", 8.0, 0.6);
+            var mtf = new ConfluenceMatrixResult(1.0, true, 15, "Golden", "MTF", new Dictionary<string, string>(), "BUY");
+
+            // Abnormal spike / squeeze where TR (12.0 bps) >> NoiseFloor (1.0 bps) and IsTradeableImpulse = false
+            var spikeAudit = new SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: false,
+                ZScore: 3.5,
+                LocalAtrBps: 12.0,
+                NoiseFloorBps: 1.0,
+                RegimeDescription: "Аномальный спайк волатильности: вход заблокирован во избежание ложного пробоя"
+            );
+
+            var decision = await cm.EvaluateMatrixAsync("EURUSD_otc", "s10", true, 1.0, ta, smc, ml, state, mtf, noiseAudit: spikeAudit);
+
+            Assert.Equal(50, decision.Probability);
+            Assert.Contains("Спайк волатильности", decision.CombinedReasoningText);
+        }
+
+        [Fact]
+        public async Task ConfluenceMatrix_DecelerationImpulse_AppliesRiskDampener()
+        {
+            var cm = new ConfluenceMatrixEngine(new MarketDataFetcher(), new TechnicalAnalysisEngine());
+            var ta = new TaSignal(1.2, 75.0, 60, 100, 1.5, 8);
+            var smc = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish");
+            var ml = new MlSignal("BUY", 0.80, 0.70, "neural_brain");
+            // Velocity is positive (+12.0) but regime is DECELERATING (acceleration opposes velocity)
+            var state = new StateSignal("DECELERATING", 12.0, -0.2);
+            var mtf = new ConfluenceMatrixResult(0.67, false, 7, "Normal", "MTF", new Dictionary<string, string>(), "BUY");
+
+            var decision = await cm.EvaluateMatrixAsync("EURUSD_otc", "s10", true, 1.0, ta, smc, ml, state, mtf);
+
+            Assert.True(decision.Probability <= 55, $"Expected probability <= 55% during deceleration, got {decision.Probability}");
+            Assert.Contains("Затухание импульса", decision.CombinedReasoningText);
+        }
     }
 }

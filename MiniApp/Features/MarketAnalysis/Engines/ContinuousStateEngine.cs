@@ -16,10 +16,10 @@ public record ContinuousStateResult(
 /// Continuous Latent State Engine (Wall Street HFT Standard).
 /// Eliminates discrete candle boundaries (M1/M5) by treating market price as a continuous 
 /// physical state vector with instantaneous velocity (dp/dt) and acceleration (d2p/dt2).
+/// Immunized against Catastrophic Cancellation on close 5-digit OTC quotes.
 /// </summary>
 public static class ContinuousStateEngine
 {
-
     /// <summary>
     /// Computes continuous physical velocity, acceleration, and Kalman state vector.
     /// </summary>
@@ -77,10 +77,16 @@ public static class ContinuousStateEngine
         for (int i = 4; i < n; i++)
         {
             double pMid = Math.Max(1e-8, prices[i-2]);
-            double sgV = (-2.0 * prices[i-4] - 1.0 * prices[i-3] + 0.0 * prices[i-2] + 1.0 * prices[i-1] + 2.0 * prices[i]) / 10.0;
+            // Catastrophic cancellation fix: express Savitzky-Golay via price differences
+            double sgV = (2.0 * (prices[i] - prices[i - 4]) + (prices[i - 1] - prices[i - 3])) / 10.0;
             double instV = (sgV / pMid) * 10_000.0;
 
-            double sgA = (2.0 * prices[i-4] - 1.0 * prices[i-3] - 2.0 * prices[i-2] - 1.0 * prices[i-1] + 2.0 * prices[i]) / 7.0;
+            // Center acceleration differences around pMid = prices[i-2] (Sterbenz delta)
+            double d0 = prices[i - 4] - pMid;
+            double d1 = prices[i - 3] - pMid;
+            double d3 = prices[i - 1] - pMid;
+            double d4 = prices[i] - pMid;
+            double sgA = (2.0 * (d4 + d0) - (d3 + d1)) / 7.0;
             double instA = (sgA / pMid) * 10_000.0;
 
             velCount++;
@@ -101,14 +107,23 @@ public static class ContinuousStateEngine
         double minStdDevA = isSubMinute ? 0.01 : 0.1;
         stdDevAccel = Math.Max(minStdDevA, stdDevAccel);
 
-        // 3. Current Instantaneous State
-        double sgVelocity = (-2.0 * prices[^5] - 1.0 * prices[^4] + 0.0 * prices[^3] + 1.0 * prices[^2] + 2.0 * prices[^1]) / 10.0;
-        double instantVelocity = (sgVelocity / Math.Max(1e-8, prices[^3])) * 10_000.0;
+        // 3. Current Instantaneous State with Catastrophic Cancellation Immunity & Winsorization
+        double pCenter = Math.Max(1e-8, prices[^3]);
+        double sgVelocity = (2.0 * (prices[^1] - prices[^5]) + (prices[^2] - prices[^4])) / 10.0;
+        double instantVelocity = (sgVelocity / pCenter) * 10_000.0;
+        instantVelocity = double.IsFinite(instantVelocity) ? Math.Clamp(instantVelocity, -1000.0, 1000.0) : 0.0;
         double zScoreVel = (instantVelocity - meanVel) / stdDevVel;
+        zScoreVel = double.IsFinite(zScoreVel) ? Math.Clamp(zScoreVel, -10.0, 10.0) : 0.0;
 
-        double sgAccel = (2.0 * prices[^5] - 1.0 * prices[^4] - 2.0 * prices[^3] - 1.0 * prices[^2] + 2.0 * prices[^1]) / 7.0;
-        double instantAcceleration = (sgAccel / Math.Max(1e-8, prices[^3])) * 10_000.0;
+        double curD0 = prices[^5] - pCenter;
+        double curD1 = prices[^4] - pCenter;
+        double curD3 = prices[^2] - pCenter;
+        double curD4 = prices[^1] - pCenter;
+        double sgAccel = (2.0 * (curD4 + curD0) - (curD3 + curD1)) / 7.0;
+        double instantAcceleration = (sgAccel / pCenter) * 10_000.0;
+        instantAcceleration = double.IsFinite(instantAcceleration) ? Math.Clamp(instantAcceleration, -1000.0, 1000.0) : 0.0;
         double zScoreAccel = (instantAcceleration - meanAccel) / stdDevAccel;
+        zScoreAccel = double.IsFinite(zScoreAccel) ? Math.Clamp(zScoreAccel, -10.0, 10.0) : 0.0;
 
         // 4. 4th-Order Adaptive Continuous Kalman State Filtering
         double kalmanState = FilterKalmanContinuous(prices, dynamicAtr, tfSeconds);
@@ -187,4 +202,3 @@ public static class ContinuousStateEngine
         return est;
     }
 }
-

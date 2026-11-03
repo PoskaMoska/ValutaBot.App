@@ -7,6 +7,7 @@ namespace ValutaBot.MiniApp;
 /// Manages per-(asset, timeframe) stateful indicator instances and their
 /// incremental update logic. Only processes unseen candles on each call,
 /// resetting the state machine if candles arrive out of order or in bulk.
+/// Immunized against heap allocation via struct CacheKey and non-allocating live computations.
 /// </summary>
 internal sealed class IndicatorCache
 {
@@ -38,7 +39,6 @@ internal sealed class IndicatorCache
         public double              HmaLast;
         public double              HmaPrev;   // предыдущий HMA — для slope-based сравнения (FIX-HMA-SLOPE)
 
-
         public StatefulEma?        EmaBase;
         public long                EmaLastClosedTick;
         public double              EmaLast;
@@ -57,12 +57,22 @@ internal sealed class IndicatorCache
     // 4 hours covers: London→NY session transition, cold-start synthetic contamination.
     private const double MaxCacheAgeHours = 4.0;
 
-    private readonly ConcurrentDictionary<(string asset, string tf, string indicatorKey), CacheState> _states = new();
+    internal enum IndicatorType : byte
+    {
+        Rsi,
+        ConnorsRsi,
+        Hma,
+        Ema,
+        Adx,
+        Atr,
+        Smc
+    }
 
-    // ORDER FLOW REMOVED: StatefulOrderFlow cache deleted.
-    // OF gave 35.8% win-rate (anti-signal) on live forex data.
-    // Forex has no centralized exchange - tick count ≠ real volume.
-    // ML (LightGBM) implicitly captures order flow through price-action features.
+    internal readonly record struct CacheKey(string Asset, string Timeframe, IndicatorType Type, int Period);
+
+    private readonly ConcurrentDictionary<CacheKey, CacheState> _states = new();
+    private static readonly Func<CacheKey, CacheState> StateFactory = static _ => new CacheState();
+    private long _accessCounter;
 
     // ── RSI ──────────────────────────────────────────────────────────────────
 
@@ -82,7 +92,7 @@ internal sealed class IndicatorCache
                 // with a single foreach that stops after filling the cap — zero LINQ alloc.
                 int _pruneMax = Math.Max(1, _states.Count / 4);
                 long _cutoffTicks = cutoff.Ticks;
-                var toDelete = new List<(string, string, string)>(_pruneMax);
+                var toDelete = new List<CacheKey>(_pruneMax);
                 foreach (var kv in _states)
                 {
                     if (kv.Value.LastAccess.Ticks < _cutoffTicks)
@@ -100,7 +110,7 @@ internal sealed class IndicatorCache
                         {
                             if (s.LastAccess < cutoff)
                             {
-                                _states.TryRemove(new KeyValuePair<(string, string, string), CacheState>(k, s));
+                                _states.TryRemove(new KeyValuePair<CacheKey, CacheState>(k, s));
                             }
                         }
                     }
@@ -111,6 +121,14 @@ internal sealed class IndicatorCache
                 System.Threading.Interlocked.Exchange(ref _isPruning, 0);
             }
         });
+    }
+
+    private void CheckPeriodicPrune()
+    {
+        if ((System.Threading.Interlocked.Increment(ref _accessCounter) & 511) == 0 && _states.Count > 1000)
+        {
+            SchedulePruneStates();
+        }
     }
 
     /// <summary>
@@ -130,8 +148,8 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
         if (candles.Length <= period) return 50.0;
-        if (_states.Count > 1000) SchedulePruneStates();
-        var s = _states.GetOrAdd((asset, tf, $"RSI_{period}"), _ => new CacheState());
+        CheckPeriodicPrune();
+        var s = _states.GetOrAdd(new CacheKey(asset, tf, IndicatorType.Rsi, period), StateFactory);
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -168,8 +186,8 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles)
     {
         if (candles.Length < 20) return GetRsi(asset, tf, candles, 14);
-        if (_states.Count > 1000) SchedulePruneStates();
-        var s = _states.GetOrAdd((asset, tf, "CONNORS_RSI"), _ => new CacheState());
+        CheckPeriodicPrune();
+        var s = _states.GetOrAdd(new CacheKey(asset, tf, IndicatorType.ConnorsRsi, 0), StateFactory);
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -195,8 +213,7 @@ internal sealed class IndicatorCache
                 }
             }
 
-            var liveRsi = s.ConnorsRsiBase.Clone();
-            s.ConnorsRsiLast = liveRsi.Update(candles[^1].Close);
+            s.ConnorsRsiLast = s.ConnorsRsiBase.ComputeLive(candles[^1].Close);
             return s.ConnorsRsiLast;
         }
     }
@@ -219,8 +236,8 @@ internal sealed class IndicatorCache
         if (candles.Length < period + 1)
             return (candles.Length > 0 ? candles[^1].Close : 0.0, candles.Length > 1 ? candles[^2].Close : 0.0);
 
-        if (_states.Count > 1000) SchedulePruneStates();
-        var s = _states.GetOrAdd((asset, tf, $"HMA_{period}"), _ => new CacheState());
+        CheckPeriodicPrune();
+        var s = _states.GetOrAdd(new CacheKey(asset, tf, IndicatorType.Hma, period), StateFactory);
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -250,9 +267,8 @@ internal sealed class IndicatorCache
                 }
             }
 
-            // Live clone: вычисляем текущий HMA
-            var liveHma = s.HmaBase.Clone();
-            double currentHma = liveHma.Update(candles[^1].Close);
+            // Zero-allocation live HMA calculation without heap cloning
+            double currentHma = s.HmaBase.ComputeLive(candles[^1].Close);
             s.HmaLast = currentHma;
             return (currentHma, (double.IsFinite(s.HmaPrev) && s.HmaPrev != 0.0) ? s.HmaPrev : currentHma); // C-2 FIX: > 0 sentinel fails for valid negative HMA on JPY/inverse pairs
         }
@@ -264,8 +280,8 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 9)
     {
         if (candles.Length == 0) return 0.0;
-        if (_states.Count > 1000) SchedulePruneStates();
-        var s = _states.GetOrAdd((asset, tf, $"EMA_{period}"), _ => new CacheState());
+        CheckPeriodicPrune();
+        var s = _states.GetOrAdd(new CacheKey(asset, tf, IndicatorType.Ema, period), StateFactory);
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -302,8 +318,8 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
         if (candles.Length <= period) return (20.0, 0.0, 0.0);
-        if (_states.Count > 1000) SchedulePruneStates();
-        var s = _states.GetOrAdd((asset, tf, $"ADX_{period}"), _ => new CacheState());
+        CheckPeriodicPrune();
+        var s = _states.GetOrAdd(new CacheKey(asset, tf, IndicatorType.Adx, period), StateFactory);
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -339,8 +355,8 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
         if (candles.Length <= period) return 0.0;
-        if (_states.Count > 1000) SchedulePruneStates();
-        var s = _states.GetOrAdd((asset, tf, $"ATR_{period}"), _ => new CacheState());
+        CheckPeriodicPrune();
+        var s = _states.GetOrAdd(new CacheKey(asset, tf, IndicatorType.Atr, period), StateFactory);
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -374,8 +390,8 @@ internal sealed class IndicatorCache
 
     public StatefulSmc GetSmcState(string asset, string tf, ReadOnlySpan<MiniAppController.OhlcCandle> candles, double currentPrice)
     {
-        if (_states.Count > 1000) SchedulePruneStates();
-        var s = _states.GetOrAdd((asset, tf, "SMC"), _ => new CacheState());
+        CheckPeriodicPrune();
+        var s = _states.GetOrAdd(new CacheKey(asset, tf, IndicatorType.Smc, 0), StateFactory);
         lock (s)
         {
             s.LastAccess = DateTime.UtcNow;
@@ -450,5 +466,3 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, long lastTick)
         => candles.Length > 0 && candles[^1].Timestamp.Ticks < lastTick;
 }
-
-

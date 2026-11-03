@@ -326,3 +326,61 @@ def test_08_train_serve_feature_parity():
     assert math.isclose(float(train_macro[12]), 1.0, abs_tol=1e-5), f"MinutesToNews=-1 should map to 1.0, got {train_macro[12]}"
     # Feature 13 & 14 are sin(0)=0.0 and cos(0)=1.0 for HourUtc == 0
     assert math.isclose(float(train_macro[13]), 0.0, abs_tol=1e-5) and math.isclose(float(train_macro[14]), 1.0, abs_tol=1e-5)
+
+
+
+# -----------------------------------------------------------------------------
+# 9. Dynamic Payout Adaptation & Negative EV Guard Test
+# -----------------------------------------------------------------------------
+def test_09_dynamic_payout_adaptation(predictor):
+    # At standard payout (0.85): break_even = 54.05%, hurdle = 54.5%
+    # At lower payout (0.50): break_even = 66.67%, hurdle = 67.12%
+    candles = _generate_synthetic_candles(160, trend="bullish", vol=100.0)
+    mtf = _generate_synthetic_candles(30, trend="bullish", vol=250.0)
+    macro = {
+        "DayRangePositionPct": 0.75,
+        "DistToDayHighBps": 10.0,
+        "DistToDayLowBps": 80.0,
+        "DxyMomentum1mBps": -2.0,
+        "BasketSyncScore": 0.85,
+        "Rsi": 62.0,
+        "Adx": 35.0
+    }
+    smc = {"smc_bos_dir": "BULLISH", "smc_has_ob": True}
+
+    # At 85% payout
+    res_85 = predictor.predict("EURUSD", "s5", candles, mtf, macro_context=macro, smc_context=smc, payout=0.85)
+    assert res_85 is not None
+    dir_85, conf_85, _, _, raw_85 = res_85
+
+    # At 50% payout: hurdle is 1/1.50 + 0.0045 = 67.12%! Since model confidence is ~58%, must suppress to HOLD
+    res_50 = predictor.predict("EURUSD", "s5", candles, mtf, macro_context=macro, smc_context=smc, payout=0.50)
+    assert res_50 is not None
+    dir_50, conf_50, _, _, raw_50 = res_50
+    assert dir_50 == "HOLD", "Negative EV guard must suppress trade when payout is too low for positive EV!"
+    assert conf_50 == 0.50
+    assert raw_50 == 0.50
+
+
+# -----------------------------------------------------------------------------
+# 10. Online Concept Drift Detection Test
+# -----------------------------------------------------------------------------
+def test_10_online_drift_detector(predictor, api_client):
+    from models.patch_tst_predictor import OnlineDriftDetector
+
+    detector = OnlineDriftDetector(window_size=20, entropy_noise_threshold=0.92)
+    # Feed uniform chop distributions: p_hold=0.334, p_buy=0.333, p_put=0.333
+    for _ in range(15):
+        detector.record_prediction((0.334, 0.333, 0.333), "HOLD", payout=0.85)
+
+    status = detector.get_status()
+    assert status["drift_detected"] is True
+    assert status["drift_type"] == "OTC_VOLATILITY_NOISE_COLLAPSE"
+    assert status["mean_entropy"] >= 0.92
+
+    # Check FastAPI diagnostics endpoint
+    resp = api_client.get("/diagnostics/drift")
+    assert resp.status_code == 200
+    diag = resp.json()
+    assert "mean_entropy" in diag
+    assert "drift_detected" in diag

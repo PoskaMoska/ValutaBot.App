@@ -239,16 +239,20 @@ namespace ValutaBot.MiniApp
                 await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync();
                 
                 var records = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(@"
-                    WITH ranked AS (
-                        SELECT asset, interval, open_time, open_price, high_price, low_price, close_price, volume,
-                               ROW_NUMBER() OVER (PARTITION BY asset, interval ORDER BY open_time DESC) as rn
-                        FROM subminute_candles
+                    SELECT c.asset, c.interval, c.open_time as ""OpenTime"", c.open_price as ""Open"", c.high_price as ""High"", c.low_price as ""Low"", c.close_price as ""Close"", c.volume as ""Volume""
+                    FROM (
+                        SELECT DISTINCT asset, interval 
+                        FROM subminute_candles 
                         WHERE interval IN ('s5', 's10', 's15', 's30', '1min')
-                    )
-                    SELECT asset, interval, open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume""
-                    FROM ranked
-                    WHERE rn <= 250
-                    ORDER BY asset, interval, open_time ASC;", commandTimeout: 10))).ToList();
+                    ) pairs
+                    CROSS JOIN LATERAL (
+                        SELECT open_time, open_price, high_price, low_price, close_price, volume
+                        FROM subminute_candles s
+                        WHERE s.asset = pairs.asset AND s.interval = pairs.interval
+                        ORDER BY open_time DESC
+                        LIMIT 250
+                    ) c
+                    ORDER BY c.asset, c.interval, c.open_time ASC;", commandTimeout: 10))).ToList();
 
                 int loaded = 0;
                 foreach (var g in records.GroupBy(r => $"{r.asset}:{r.interval}"))
@@ -356,7 +360,7 @@ namespace ValutaBot.MiniApp
 
                 if (drainList.Count == 0) return 0;
 
-                bool ok = await WriteBatchInternalAsync(drainList, linkedCts.Token);
+                var (ok, _) = await WriteBatchInternalAsync(drainList, linkedCts.Token);
                 if (ok)
                 {
                     int flushedCount = drainList.Count;
@@ -373,9 +377,9 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        private static async Task<bool> WriteBatchInternalAsync(List<TickEvent> buffer, CancellationToken ct = default)
+        private static async Task<(bool Success, bool IsTransient)> WriteBatchInternalAsync(List<TickEvent> buffer, CancellationToken ct = default)
         {
-            if (buffer.Count == 0) return true;
+            if (buffer.Count == 0) return (true, false);
 
             try
             {
@@ -446,12 +450,13 @@ namespace ValutaBot.MiniApp
                 await batch.ExecuteNonQueryAsync(ct);
                 
                 await tx.CommitAsync(ct);
-                return true;
+                return (true, false);
             }
             catch (Exception ex)
             {
-                BotLogger.Warn($"[TickSync] Failed to batch save ticks: {ex.Message}. Retrying...");
-                return false;
+                bool isTransient = DbConnectionFactory.IsNetworkTransient(ex);
+                BotLogger.Warn($"[TickSync] Failed to batch save ticks (isTransient={isTransient}): {ex.Message}. Retrying...");
+                return (false, isTransient);
             }
         }
 
@@ -471,8 +476,6 @@ namespace ValutaBot.MiniApp
                         try { await Task.Delay(250, token); } catch (OperationCanceledException) { }
                     }
 
-
-                    bool success = false;
                     await _dbWriteLock.WaitAsync(token);
                     try
                     {
@@ -482,24 +485,28 @@ namespace ValutaBot.MiniApp
                         }
                         if (buffer.Count > 0)
                         {
-
-                            success = await WriteBatchInternalAsync(buffer, token);
-                            if (success)
+                            var (batchOk, isTransient) = await WriteBatchInternalAsync(buffer, token);
+                            if (batchOk)
                             {
                                 buffer.Clear();
                                 consecutiveBatchFailures = 0;
+                            }
+                            else if (isTransient)
+                            {
+                                // Cluster restart or temporary network blink: do NOT count towards poisoned threshold!
+                                BotLogger.Warn($"[TickCollector] Transient DB disconnect during batch write. Preserving {buffer.Count} ticks in buffer for cluster recovery.");
+                                try { await Task.Delay(500, token); } catch (OperationCanceledException) { }
                             }
                             else
                             {
                                 consecutiveBatchFailures++;
                                 if (consecutiveBatchFailures >= 5)
                                 {
-                                    BotLogger.Error($"[TickCollector] Batch write failed {consecutiveBatchFailures} times consecutively. Discarding {buffer.Count} poisoned ticks to restore channel ingestion.");
+                                    BotLogger.Error($"[TickCollector] Batch write failed {consecutiveBatchFailures} times consecutively with non-transient error. Discarding {buffer.Count} poisoned ticks to restore channel ingestion.");
                                     buffer.Clear();
                                     consecutiveBatchFailures = 0;
                                 }
                             }
-
                         }
                     }
                     finally
@@ -569,29 +576,31 @@ namespace ValutaBot.MiniApp
                 }
 
                 // --- FAST PATH: IN-MEMORY RING BUFFER (0.001ms, NO DB, NO LOCKS) ---
-                if (_ringBuffers.TryGetValue(cacheKey, out var ring) && ring.Count >= Math.Min(limit - 1, 40))
-                {
-                    ConcurrentDictionary<string, CandleAccumulator>? tDict = interval switch
-                    {
-                        "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, "m1" => _m1, "1min" => _m1, _ => null
-                    };
+                bool hasRing = _ringBuffers.TryGetValue(cacheKey, out var ring);
 
-                    MiniAppController.OhlcCandle? liveCandle = null;
-                    if (tDict != null && tDict.TryGetValue(cleanAsset, out var live))
+                ConcurrentDictionary<string, CandleAccumulator>? tDict = interval switch
+                {
+                    "s5" => _s5, "s10" => _s10, "s15" => _s15, "s30" => _s30, "m1" => _m1, "1min" => _m1, _ => null
+                };
+
+                MiniAppController.OhlcCandle? liveCandle = null;
+                if (tDict != null && tDict.TryGetValue(cleanAsset, out var live))
+                {
+                    // D1 FIX: Lock accumulator only to snapshot scalar fields (fast, <10ns).
+                    // Never call ring.GetRecent() inside lock(live) to avoid nested lock contention
+                    // with incoming WebSocket ticks.
+                    lock (live)
                     {
-                        // D1 FIX: Lock accumulator only to snapshot scalar fields (fast, <10ns).
-                        // Never call ring.GetRecent() inside lock(live) to avoid nested lock contention
-                        // with incoming WebSocket ticks.
-                        lock (live)
+                        if (live.Open.HasValue)
                         {
-                            if (live.Open.HasValue)
-                            {
-                                liveCandle = new MiniAppController.OhlcCandle(
-                                    live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
-                            }
+                            liveCandle = new MiniAppController.OhlcCandle(
+                                live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
                         }
                     }
+                }
 
+                if (hasRing && ring != null && (ring.Count > 0 || liveCandle != null))
+                {
                     int closedToTake = liveCandle != null ? limit - 1 : limit;
                     var closedCandles = ring.GetRecent(closedToTake);
 
@@ -612,6 +621,11 @@ namespace ValutaBot.MiniApp
                     return closedCandles;
                 }
 
+                if (!hasRing && liveCandle != null)
+                {
+                    return new[] { liveCandle };
+                }
+
                 await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync();
                 
                 var records = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(@"
@@ -620,7 +634,28 @@ namespace ValutaBot.MiniApp
                     WHERE asset = @Asset AND interval = @Interval
                     ORDER BY open_time DESC
                     LIMIT @Limit;
-                ", new { Asset = cleanAsset, Interval = dbInterval, Limit = limit }, commandTimeout: 8))).ToList();
+                ", new { Asset = cleanAsset, Interval = dbInterval, Limit = limit }, commandTimeout: 4))).ToList();
+
+                // Warm up the ring buffer with the loaded historical candles so subsequent queries hit the in-memory fast path
+                if (records.Count > 0)
+                {
+                    var ringToWarm = _ringBuffers.GetOrAdd(cacheKey, _ => new CandleRingBuffer(400));
+                    var parsedList = records.Select(r =>
+                    {
+                        DateTime rawTime = r.OpenTime is string s
+                            ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
+                            : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
+                        DateTime alignedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
+                        return new MiniAppController.OhlcCandle(
+                            Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.High, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture),
+                            Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
+                            alignedTime);
+                    }).OrderBy(c => c.Timestamp).ToList();
+                    ringToWarm.AddRange(parsedList);
+                }
 
                 ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch
                 {

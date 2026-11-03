@@ -61,6 +61,64 @@ public static class PocketOptionWebSocketStream
     private static int _consecutiveAuthFailures = 0;
     private static DateTime _lastAuthAlertUtc = DateTime.MinValue;
 
+    private static readonly ReadOnlyMemory<byte> PongBytes = Encoding.UTF8.GetBytes("3");
+    private static readonly ReadOnlyMemory<byte> PingBytes = Encoding.UTF8.GetBytes("2");
+    private static readonly ReadOnlyMemory<byte> ConnectBytes = Encoding.UTF8.GetBytes("40");
+    private static readonly ReadOnlyMemory<byte> PsBytes = Encoding.UTF8.GetBytes("42[\"ps\"]");
+
+    private static readonly ConcurrentDictionary<string, string> _canonicalAssetCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, (string BaseAsset, string CandleKey)> _assetKeysCache = new(StringComparer.OrdinalIgnoreCase);
+
+    public static (string BaseAsset, string CandleKey) GetAssetKeys(string asset)
+    {
+        return _assetKeysCache.GetOrAdd(asset, static a =>
+        {
+            string b = PriceFeed.BaseAsset(a);
+            string c = b + PriceFeed.PoSuffix;
+            return (b, c);
+        });
+    }
+
+    public static string ResolveCanonicalAsset(ReadOnlySpan<byte> span)
+    {
+        if (span.SequenceEqual("EURUSD_otc"u8)) return "EURUSD_otc";
+        if (span.SequenceEqual("GBPUSD_otc"u8)) return "GBPUSD_otc";
+        if (span.SequenceEqual("USDJPY_otc"u8)) return "USDJPY_otc";
+        if (span.SequenceEqual("AUDUSD_otc"u8)) return "AUDUSD_otc";
+        if (span.SequenceEqual("USDCAD_otc"u8)) return "USDCAD_otc";
+        if (span.SequenceEqual("USDCHF_otc"u8)) return "USDCHF_otc";
+
+        string assetStr = Encoding.UTF8.GetString(span);
+        return _canonicalAssetCache.GetOrAdd(assetStr, assetStr);
+    }
+
+    private readonly struct ReceivedFrame : IDisposable
+    {
+        public readonly WebSocketMessageType MessageType;
+        public readonly ReadOnlyMemory<byte> Memory;
+        private readonly byte[]? _rented;
+
+        public ReceivedFrame(WebSocketMessageType messageType, ReadOnlyMemory<byte> memory, byte[]? rented)
+        {
+            MessageType = messageType;
+            Memory = memory;
+            _rented = rented;
+        }
+
+        public static ReceivedFrame Empty => new(WebSocketMessageType.Close, ReadOnlyMemory<byte>.Empty, null);
+
+        public bool IsEmpty => Memory.IsEmpty;
+        public ReadOnlySpan<byte> Span => Memory.Span;
+
+        public void Dispose()
+        {
+            if (_rented != null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(_rented);
+            }
+        }
+    }
+
     public static (string authPayloadJson, string tradingUrl) GenerateTryDemoSession()
     {
         Span<char> chars = stackalloc char[10];
@@ -218,11 +276,15 @@ public static class PocketOptionWebSocketStream
         CancelConnection();
     }
 
-    private static async Task SendTextAsync(ClientWebSocket ws, string payload, CancellationToken token)
+    private static async Task SendPongAsync(ClientWebSocket ws, CancellationToken token)
+    {
+        await SendRawAsync(ws, PongBytes, token, timeoutSec: 5).ConfigureAwait(false);
+    }
+
+    private static async Task SendRawAsync(ClientWebSocket ws, ReadOnlyMemory<byte> bytes, CancellationToken token, int timeoutSec = 5)
     {
         if (ws.State != WebSocketState.Open) return;
-        byte[] bytes = Encoding.UTF8.GetBytes(payload);
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, timeoutCts.Token);
         try
         {
@@ -230,7 +292,7 @@ public static class PocketOptionWebSocketStream
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
         {
-            BotLogger.Warn("[PO WS] SendTextAsync lock wait timed out (2s). Aborting socket to unblock send pipeline.");
+            BotLogger.Warn($"[PO WS] SendRawAsync lock wait timed out ({timeoutSec}s). Aborting socket to unblock send pipeline.");
             try { ws.Abort(); } catch { }
             CancelConnection();
             return;
@@ -243,12 +305,12 @@ public static class PocketOptionWebSocketStream
         {
             if (ws.State == WebSocketState.Open)
             {
-                await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, linkedCts.Token).ConfigureAwait(false);
+                await ws.SendAsync(bytes, WebSocketMessageType.Text, true, linkedCts.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
         {
-            BotLogger.Warn("[PO WS] SendTextAsync timed out (2s). Aborting socket to unblock send pipeline.");
+            BotLogger.Warn($"[PO WS] SendRawAsync timed out ({timeoutSec}s). Aborting socket to unblock send pipeline.");
             try { ws.Abort(); } catch { }
             CancelConnection();
         }
@@ -262,6 +324,18 @@ public static class PocketOptionWebSocketStream
         {
             try { _sendLock.Release(); } catch { }
         }
+    }
+
+    private static async Task SendTextAsync(ClientWebSocket ws, string payload, CancellationToken token)
+    {
+        if (ws.State != WebSocketState.Open) return;
+        if (payload == "3") { await SendPongAsync(ws, token).ConfigureAwait(false); return; }
+        if (payload == "2") { await SendRawAsync(ws, PingBytes, token).ConfigureAwait(false); return; }
+        if (payload == "40") { await SendRawAsync(ws, ConnectBytes, token).ConfigureAwait(false); return; }
+        if (payload == "42[\"ps\"]") { await SendRawAsync(ws, PsBytes, token).ConfigureAwait(false); return; }
+
+        byte[] bytes = Encoding.UTF8.GetBytes(payload);
+        await SendRawAsync(ws, bytes, token).ConfigureAwait(false);
     }
 
     public static bool TryGetLivePrice(string symbol, out double price, double maxAgeSeconds = 2.0)
@@ -661,20 +735,22 @@ public static class PocketOptionWebSocketStream
                     Volatile.Write(ref _lastPsSw, swConnected);
 
                     // Step 1: Wait for server handshake packet: '0{"sid":...}'
-                    var (handshake, _) = await ReceiveFrameAsync(ws, handshakeToken);
-                    if (handshake == null || !handshake.StartsWith("0"))
+                    using var handshakeFrame = await ReceiveFrameAsync(ws, handshakeToken).ConfigureAwait(false);
+                    if (handshakeFrame.IsEmpty || handshakeFrame.Span.Length == 0 || handshakeFrame.Span[0] != (byte)'0')
                     {
-                        throw new InvalidOperationException($"Invalid server handshake: {handshake}");
+                        string handshakeStr = handshakeFrame.Span.Length > 0 ? Encoding.UTF8.GetString(handshakeFrame.Span) : "empty";
+                        throw new InvalidOperationException($"Invalid server handshake: {handshakeStr}");
                     }
 
                     // Step 2: Send Socket.IO connect packet: '40'
-                    await SendTextAsync(ws, "40", handshakeToken);
+                    await SendRawAsync(ws, ConnectBytes, handshakeToken).ConfigureAwait(false);
 
                     // Step 3: Wait for server connect ACK: '40{"sid":...}'
-                    var (ack, _) = await ReceiveFrameAsync(ws, handshakeToken);
-                    if (ack == null || !ack.StartsWith("40"))
+                    using var ackFrame = await ReceiveFrameAsync(ws, handshakeToken).ConfigureAwait(false);
+                    if (ackFrame.IsEmpty || !ackFrame.Span.StartsWith("40"u8))
                     {
-                        throw new InvalidOperationException($"Invalid connect ACK: {ack}");
+                        string ackStr = ackFrame.Span.Length > 0 ? Encoding.UTF8.GetString(ackFrame.Span) : "empty";
+                        throw new InvalidOperationException($"Invalid connect ACK: {ackStr}");
                     }
 
                     // Step 4: Send auth packet: 42["auth", <payload>]
@@ -716,11 +792,12 @@ public static class PocketOptionWebSocketStream
                     }
                 }
 
-                int delayMs = wasConnected ? ReconnectAfterConnectedMs : backoffMs;
+                // Exponential Backoff with Full Jitter to eliminate thundering herd connection storms
+                int ceiling = wasConnected ? MinBackoffMs : backoffMs;
+                int minDelay = wasConnected ? ReconnectAfterConnectedMs : (MinBackoffMs / 2);
+                int delayMs = Random.Shared.Next(minDelay, ceiling + 1);
                 backoffMs = wasConnected ? MinBackoffMs : Math.Min(backoffMs * 2, MaxBackoffMs);
-                // Jitter to eliminate thundering herd connection spikes against broker gateway
-                int jitterMs = Random.Shared.Next(0, Math.Min(1500, (delayMs / 2) + 1));
-                await Task.Delay(delayMs + jitterMs, token);
+                await Task.Delay(delayMs, token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
@@ -738,51 +815,64 @@ public static class PocketOptionWebSocketStream
         }
     }
 
-    private static async Task<(string? text, byte[]? binary)> ReceiveFrameAsync(ClientWebSocket ws, CancellationToken token)
+    private static async Task<ReceivedFrame> ReceiveFrameAsync(ClientWebSocket ws, CancellationToken token)
     {
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(16384);
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(32768);
         try
         {
-            var firstResult = await ws.ReceiveAsync(new ArraySegment<byte>(rented), token);
-            if (firstResult.MessageType == WebSocketMessageType.Close) return (null, null);
+            var firstResult = await ws.ReceiveAsync(new ArraySegment<byte>(rented), token).ConfigureAwait(false);
+            if (firstResult.MessageType == WebSocketMessageType.Close)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+                return ReceivedFrame.Empty;
+            }
 
             if (firstResult.EndOfMessage)
             {
-                if (firstResult.MessageType == WebSocketMessageType.Binary)
-                {
-                    byte[] binary = new byte[firstResult.Count];
-                    Buffer.BlockCopy(rented, 0, binary, 0, firstResult.Count);
-                    return (null, binary);
-                }
-                return (Encoding.UTF8.GetString(rented, 0, firstResult.Count), null);
+                return new ReceivedFrame(firstResult.MessageType, rented.AsMemory(0, firstResult.Count), rented);
             }
 
             const int maxFrameBytes = 4 * 1024 * 1024; // 4 MB safety limit
-            using var ms = new MemoryStream(Math.Min(65536, firstResult.Count * 2));
-            ms.Write(rented, 0, firstResult.Count);
+            int totalBytes = firstResult.Count;
+            byte[] currentBuffer = rented;
+
             WebSocketReceiveResult nextResult;
             do
             {
-                if (ms.Length > maxFrameBytes)
+                if (totalBytes >= currentBuffer.Length)
                 {
-                    BotLogger.Error("[PO WS] Frame exceeded 4MB limit, aborting frame receive.");
-                    return (null, null);
+                    int newCap = currentBuffer.Length * 2;
+                    if (newCap > maxFrameBytes)
+                    {
+                        BotLogger.Error("[PO WS] Frame exceeded 4MB limit, aborting frame receive.");
+                        System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
+                        return ReceivedFrame.Empty;
+                    }
+                    byte[] newBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(newCap);
+                    Buffer.BlockCopy(currentBuffer, 0, newBuffer, 0, totalBytes);
+                    System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
+                    currentBuffer = newBuffer;
                 }
-                nextResult = await ws.ReceiveAsync(new ArraySegment<byte>(rented), token);
-                if (nextResult.MessageType == WebSocketMessageType.Close) return (null, null);
-                ms.Write(rented, 0, nextResult.Count);
+
+                nextResult = await ws.ReceiveAsync(
+                    new ArraySegment<byte>(currentBuffer, totalBytes, currentBuffer.Length - totalBytes),
+                    token).ConfigureAwait(false);
+
+                if (nextResult.MessageType == WebSocketMessageType.Close)
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
+                    return ReceivedFrame.Empty;
+                }
+
+                totalBytes += nextResult.Count;
             } while (!nextResult.EndOfMessage);
 
-            byte[] bytes = ms.ToArray();
-            if (nextResult.MessageType == WebSocketMessageType.Binary)
-            {
-                return (null, bytes);
-            }
-            return (Encoding.UTF8.GetString(bytes), null);
+            return new ReceivedFrame(nextResult.MessageType, currentBuffer.AsMemory(0, totalBytes), currentBuffer);
         }
-        finally
+        catch
         {
             System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            throw;
         }
     }
 
@@ -869,31 +959,31 @@ public static class PocketOptionWebSocketStream
             {
                 frameTimeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
 
-                var (text, binary) = await ReceiveFrameAsync(ws, frameTimeoutCts.Token);
+                using var frame = await ReceiveFrameAsync(ws, frameTimeoutCts.Token).ConfigureAwait(false);
                 if (!frameTimeoutCts.TryReset())
                 {
                     break;
                 }
 
-                if (text == null && binary == null)
+                if (frame.IsEmpty || frame.Span.Length == 0)
                 {
                     BotLogger.Warn("[PO WS] Stream closed by server.");
                     break;
                 }
 
                 Volatile.Write(ref _lastMessageSw, System.Diagnostics.Stopwatch.GetTimestamp());
+                var span = frame.Span;
 
                 // 1. Binary attachment payload (follows a 451- packet)
-                if (binary != null)
+                if (frame.MessageType == WebSocketMessageType.Binary)
                 {
                     if (pendingEvent == "updateStream")
                     {
-                        ParseUpdateStreamUtf8(binary);
+                        ParseUpdateStreamUtf8(span);
                     }
                     else if (pendingEvent == "updateHistoryNewFast")
                     {
-                        string json = Encoding.UTF8.GetString(binary);
-                        ParseHistoryJson(json);
+                        ParseHistoryUtf8(frame.Memory);
                     }
                     else if (pendingEvent == "successauth" && !subscribed)
                     {
@@ -904,61 +994,37 @@ public static class PocketOptionWebSocketStream
                     continue;
                 }
 
-                // 2. Socket.IO ping/pong heartbeat & 41 namespace disconnect (Auth Rejected)
-                if (text == "2")
+                // 2. Engine.IO ping/pong heartbeat & 41 namespace disconnect (Auth Rejected)
+                if (span.Length == 1 && span[0] == (byte)'2')
                 {
-                    await SendTextAsync(ws, "3", connectionToken);
+                    // Immediate zero-copy pong reply without blocking on tick queue
+                    await SendPongAsync(ws, connectionToken).ConfigureAwait(false);
                     continue;
                 }
-                if (text == "3") continue;
-                if (text == "41")
+                if (span.Length == 1 && span[0] == (byte)'3')
+                {
+                    continue;
+                }
+                if (span.StartsWith("41"u8))
                 {
                     if (!subscribed)
                     {
-                        await HandleAuthRejectedAsync(connectionToken);
+                        await HandleAuthRejectedAsync(connectionToken).ConfigureAwait(false);
                     }
                     break;
                 }
 
                 // 3. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
-                if (text != null && text.StartsWith("451-"))
+                if (span.StartsWith("451-"u8))
                 {
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(text.Substring(4));
-                        if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
-                        {
-                            pendingEvent = doc.RootElement[0].GetString();
-                        }
-                    }
-                    catch { pendingEvent = null; }
+                    pendingEvent = ExtractPlaceholderEvent(span[4..]);
                     continue;
                 }
 
                 // 4. Regular JSON event: 42["<event>", ...]
-                if (text != null && text.StartsWith("42"))
+                if (span.StartsWith("42"u8))
                 {
-                    if (!subscribed && text.Contains("successauth"))
-                    {
-                        subscribed = true;
-                        _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
-                    }
-
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(text.Substring(2));
-                        if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 1)
-                        {
-                            string ev = doc.RootElement[0].GetString() ?? "";
-                            if (ev == "updateStream")
-                            {
-                                var dataElem = doc.RootElement[1];
-                                string dataRaw = dataElem.ValueKind == JsonValueKind.String ? dataElem.GetString()! : dataElem.GetRawText();
-                                ParseUpdateStreamJson(dataRaw);
-                            }
-                        }
-                    }
-                    catch { }
+                    ParseSocketIoMessage(span[2..], frame.Memory.Slice(2), ws, connectionToken, ref subscribed);
                 }
             }
         }
@@ -972,53 +1038,120 @@ public static class PocketOptionWebSocketStream
         }
     }
 
-    private static void ParseUpdateStreamUtf8(ReadOnlyMemory<byte> utf8Json)
+    private static string? ExtractPlaceholderEvent(ReadOnlySpan<byte> span)
     {
         try
         {
-            var reader = new System.Text.Json.Utf8JsonReader(utf8Json.Span);
-            if (!reader.Read() || reader.TokenType != System.Text.Json.JsonTokenType.StartArray) return;
-            while (reader.Read() && reader.TokenType != System.Text.Json.JsonTokenType.EndArray)
+            var reader = new Utf8JsonReader(span);
+            if (reader.Read() && reader.TokenType == JsonTokenType.StartArray &&
+                reader.Read() && reader.TokenType == JsonTokenType.String)
             {
-                if (reader.TokenType == System.Text.Json.JsonTokenType.StartArray)
+                if (reader.ValueTextEquals("updateStream"u8)) return "updateStream";
+                if (reader.ValueTextEquals("updateHistoryNewFast"u8)) return "updateHistoryNewFast";
+                if (reader.ValueTextEquals("successauth"u8)) return "successauth";
+                return reader.GetString();
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static void ParseSocketIoMessage(ReadOnlySpan<byte> span, ReadOnlyMemory<byte> memory, ClientWebSocket ws, CancellationToken connectionToken, ref bool subscribed)
+    {
+        if (!subscribed && span.IndexOf("successauth"u8) >= 0)
+        {
+            subscribed = true;
+            _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
+        }
+
+        try
+        {
+            var reader = new Utf8JsonReader(span);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray) return;
+            if (!reader.Read() || reader.TokenType != JsonTokenType.String) return;
+
+            if (reader.ValueTextEquals("updateStream"u8))
+            {
+                if (!reader.Read()) return;
+                if (reader.TokenType == JsonTokenType.StartArray)
                 {
-                    if (!reader.Read()) break;
-                    string rawAsset = reader.GetString() ?? "";
-                    if (!reader.Read()) break;
-                    double srvTs = 0;
-                    if (reader.TokenType == System.Text.Json.JsonTokenType.Number)
-                    {
-                        srvTs = reader.GetDouble();
-                    }
-                    else if (reader.TokenType == System.Text.Json.JsonTokenType.String &&
-                             double.TryParse(reader.GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedTs))
-                    {
-                        srvTs = parsedTs;
-                    }
-
-                    if (!reader.Read()) break;
-                    double price = 0;
-                    if (reader.TokenType == System.Text.Json.JsonTokenType.Number)
-                    {
-                        price = reader.GetDouble();
-                    }
-                    else if (reader.TokenType == System.Text.Json.JsonTokenType.String &&
-                             double.TryParse(reader.GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedPrice))
-                    {
-                        price = parsedPrice;
-                    }
-                    while (reader.Read() && reader.TokenType != System.Text.Json.JsonTokenType.EndArray) { }
-
-                    if (!string.IsNullOrEmpty(rawAsset) && price > 0)
-                    {
-                        HandleTick(rawAsset, srvTs, price);
-                    }
+                    ParseUpdateStreamArray(ref reader);
                 }
+                else if (reader.TokenType == JsonTokenType.String)
+                {
+                    string rawJson = reader.GetString() ?? "";
+                    ParseUpdateStreamJson(rawJson);
+                }
+            }
+            else if (reader.ValueTextEquals("updateHistoryNewFast"u8))
+            {
+                ParseHistoryUtf8(memory);
             }
         }
         catch (Exception ex)
         {
+            BotLogger.Warn($"[PO WS] Error parsing 42 frame: {ex.Message}");
+        }
+    }
+
+    private static void ParseUpdateStreamUtf8(ReadOnlySpan<byte> utf8Json)
+    {
+        try
+        {
+            var reader = new Utf8JsonReader(utf8Json);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray) return;
+            ParseUpdateStreamArray(ref reader);
+        }
+        catch (Exception ex)
+        {
             BotLogger.Warn($"[PO WS] Error parsing updateStream UTF8 frame: {ex.Message}");
+        }
+    }
+
+    private static void ParseUpdateStreamArray(ref Utf8JsonReader reader)
+    {
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (reader.TokenType == JsonTokenType.StartArray)
+            {
+                if (!reader.Read()) break;
+                string rawAsset = ResolveCanonicalAsset(reader.ValueSpan);
+
+                if (!reader.Read()) break;
+                double srvTs = 0;
+                if (reader.TokenType == JsonTokenType.Number)
+                {
+                    srvTs = reader.GetDouble();
+                }
+                else if (reader.TokenType == JsonTokenType.String)
+                {
+                    if (!System.Buffers.Text.Utf8Parser.TryParse(reader.ValueSpan, out srvTs, out _))
+                    {
+                        double.TryParse(Encoding.UTF8.GetString(reader.ValueSpan), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out srvTs);
+                    }
+                }
+
+                if (!reader.Read()) break;
+                double price = 0;
+                if (reader.TokenType == JsonTokenType.Number)
+                {
+                    price = reader.GetDouble();
+                }
+                else if (reader.TokenType == JsonTokenType.String)
+                {
+                    if (!System.Buffers.Text.Utf8Parser.TryParse(reader.ValueSpan, out price, out _))
+                    {
+                        double.TryParse(Encoding.UTF8.GetString(reader.ValueSpan), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out price);
+                    }
+                }
+
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray) { }
+
+                if (!string.IsNullOrEmpty(rawAsset) && price > 0)
+                {
+                    HandleTick(rawAsset, srvTs, price);
+                }
+            }
         }
     }
 
@@ -1033,7 +1166,8 @@ public static class PocketOptionWebSocketStream
             {
                 if (item.ValueKind == JsonValueKind.Array && item.GetArrayLength() >= 3)
                 {
-                    string asset = item[0].GetString() ?? "";
+                    string rawAsset = item[0].GetString() ?? "";
+                    string asset = ResolveCanonicalAsset(Encoding.UTF8.GetBytes(rawAsset));
                     double srvTs = item[1].ValueKind == JsonValueKind.Number ? item[1].GetDouble() :
                         (item[1].ValueKind == JsonValueKind.String && double.TryParse(item[1].GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedTs) ? parsedTs : 0);
                     double price = item[2].ValueKind == JsonValueKind.Number ? item[2].GetDouble() :
@@ -1051,15 +1185,47 @@ public static class PocketOptionWebSocketStream
         }
     }
 
+    private static void ParseHistoryUtf8(ReadOnlyMemory<byte> memory)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(memory);
+            ParseHistoryDoc(doc);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PO WS] Error parsing history UTF8 frame: {ex.Message}");
+        }
+    }
+
     private static void ParseHistoryJson(string json)
     {
         try
         {
             using var doc = JsonDocument.Parse(json);
+            ParseHistoryDoc(doc);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PO WS] Error parsing history JSON frame: {ex.Message}");
+        }
+    }
+
+    private static void ParseHistoryDoc(JsonDocument doc)
+    {
+        try
+        {
             var root = doc.RootElement;
-            if (root.TryGetProperty("asset", out var aProp) && root.TryGetProperty("history", out var hProp))
+            JsonElement target = root;
+            if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() > 1)
             {
-                string asset = aProp.GetString() ?? "";
+                target = root[1];
+            }
+
+            if (target.TryGetProperty("asset", out var aProp) && target.TryGetProperty("history", out var hProp))
+            {
+                string rawAsset = aProp.GetString() ?? "";
+                string asset = ResolveCanonicalAsset(Encoding.UTF8.GetBytes(rawAsset));
                 if (hProp.ValueKind == JsonValueKind.Array)
                 {
                     var points = new List<(double srvTs, double price)>();
@@ -1093,7 +1259,10 @@ public static class PocketOptionWebSocketStream
                 }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PO WS] Error in ParseHistoryDoc: {ex.Message}");
+        }
     }
 
     private static readonly ConcurrentDictionary<string, double> _lastBackfillSrvTs = new(StringComparer.OrdinalIgnoreCase);
@@ -1257,8 +1426,7 @@ public static class PocketOptionWebSocketStream
         }
 
         long swNow = System.Diagnostics.Stopwatch.GetTimestamp();
-        string baseAsset = PriceFeed.BaseAsset(asset);          // EURUSD_otc -> EURUSD
-        string candleKey = baseAsset + PriceFeed.PoSuffix;      // -> EURUSD_PO
+        var (baseAsset, candleKey) = GetAssetKeys(asset);
 
         if (!isBackfill)
         {
@@ -1288,8 +1456,9 @@ public static class PocketOptionWebSocketStream
             // D5 fix: store broker tick timestamp and prevent out-of-order overwrite
             _livePrices.AddOrUpdate(
                 baseAsset,
-                _ => (price, tickTimeUtc, swNow),
-                (_, old) => tickTimeUtc >= old.BrokerUtcTicks ? (price, tickTimeUtc, swNow) : old);
+                static (_, arg) => (arg.price, arg.tickTimeUtc, arg.swNow),
+                static (_, old, arg) => arg.tickTimeUtc >= old.BrokerUtcTicks ? (arg.price, arg.tickTimeUtc, arg.swNow) : old,
+                (price, tickTimeUtc, swNow));
             _lastTickTicksBySymbol[baseAsset] = swNow;
 
             Volatile.Write(ref _lastMessageSw, swNow);

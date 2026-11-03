@@ -16,6 +16,7 @@ import os
 import math
 import logging
 import threading
+import collections
 from typing import Optional, List, Dict, Tuple, Any
 from pathlib import Path
 import numpy as np
@@ -312,7 +313,84 @@ def build_macro_vector_live(
         ta_score, micro_vel, hma_slope, vol_ratio,
         bb_sq, price_pos, trend_mat, tick_density
     ]
-    return np.array(ext_31, dtype=np.float32)
+    arr = np.nan_to_num(np.array(ext_31, dtype=np.float32), nan=0.0, posinf=10.0, neginf=-10.0)
+    return np.clip(arr, -15.0, 15.0)
+
+
+class OnlineDriftDetector:
+    """
+    Online Concept Drift & Volatility Detector.
+    Tracks a sliding window of model predictions to monitor:
+    1. Volatility / Noise Drift: Rolling normalized Shannon entropy H_bar >= 0.92 indicates market regime
+       where model cannot discern directional edges (e.g., OTC weekend noise collapse).
+    2. Mode Collapse / Saturation: Rolling normalized Shannon entropy H_bar <= 0.25 or single-direction frequency >= 0.85.
+    """
+    def __init__(self, window_size: int = 100, entropy_noise_threshold: float = 0.92, entropy_sat_threshold: float = 0.25):
+        self.window_size = window_size
+        self.entropy_noise_threshold = entropy_noise_threshold
+        self.entropy_sat_threshold = entropy_sat_threshold
+        self._lock = threading.Lock()
+        self._history = collections.deque(maxlen=window_size)
+        self._ln3 = math.log(3.0)
+
+    def record_prediction(self, probs: Tuple[float, float, float], direction: str, payout: float = 0.85):
+        p0, p1, p2 = probs
+        eps = 1e-12
+        h = -(p0 * math.log(max(p0, eps)) + p1 * math.log(max(p1, eps)) + p2 * math.log(max(p2, eps))) / self._ln3
+        h_norm = max(0.0, min(1.0, h))
+
+        with self._lock:
+            self._history.append({
+                "entropy": h_norm,
+                "probs": (p0, p1, p2),
+                "direction": direction,
+                "payout": payout
+            })
+
+    def get_status(self) -> Dict[str, Any]:
+        with self._lock:
+            n = len(self._history)
+            if n < 10:
+                return {
+                    "sample_count": n,
+                    "window_size": self.window_size,
+                    "mean_entropy": 0.0,
+                    "drift_detected": False,
+                    "drift_type": "NONE",
+                    "class_frequencies": {"HOLD": 0.0, "BUY": 0.0, "PUT": 0.0}
+                }
+
+            mean_entropy = sum(item["entropy"] for item in self._history) / n
+            hold_count = sum(1 for item in self._history if item["direction"] == "HOLD")
+            buy_count = sum(1 for item in self._history if item["direction"] == "BUY")
+            put_count = sum(1 for item in self._history if item["direction"] == "PUT")
+
+            f_hold = hold_count / n
+            f_buy = buy_count / n
+            f_put = put_count / n
+
+            drift_detected = False
+            drift_type = "NONE"
+
+            if mean_entropy >= self.entropy_noise_threshold:
+                drift_detected = True
+                drift_type = "OTC_VOLATILITY_NOISE_COLLAPSE"
+            elif mean_entropy <= self.entropy_sat_threshold or max(f_buy, f_put) >= 0.85:
+                drift_detected = True
+                drift_type = "DIRECTIONAL_MODE_COLLAPSE"
+
+            return {
+                "sample_count": n,
+                "window_size": self.window_size,
+                "mean_entropy": round(mean_entropy, 4),
+                "drift_detected": drift_detected,
+                "drift_type": drift_type,
+                "class_frequencies": {
+                    "HOLD": round(f_hold, 4),
+                    "BUY": round(f_buy, 4),
+                    "PUT": round(f_put, 4)
+                }
+            }
 
 
 class PatchTSTPredictor:
@@ -334,6 +412,7 @@ class PatchTSTPredictor:
         self._macro_features = 31
         self._model_name = "unknown"
         self._arch_tag = "neural_brain"
+        self.drift_detector = OnlineDriftDetector(window_size=100)
         self.metrics: Dict = {}
         self._load_model()
 
@@ -475,7 +554,8 @@ class PatchTSTPredictor:
         candles: List[Dict],
         mtf_candles: Optional[List[Dict]] = None,
         macro_context: Optional[Dict] = None,
-        smc_context: Optional[Dict] = None
+        smc_context: Optional[Dict] = None,
+        payout: Optional[float] = None
     ) -> Optional[Tuple[str, float, str, int, float]]:
         """
         Runs neural inference.
@@ -490,6 +570,21 @@ class PatchTSTPredictor:
         try:
             import torch
             import torch.nn.functional as F
+
+            # Broker payout rate (defaults to 85%, clamped between 50% and 98%)
+            payout_rate = float(payout) if payout is not None else 0.85
+            payout_rate = max(0.50, min(0.98, payout_rate))
+
+            # Dynamic Break-Even & Hurdle Calculation:
+            # Expected value EV = p * payout_rate - (1 - p) * 1.0 = p * (1 + payout_rate) - 1.0
+            # EV >= 0 <=> p >= 1 / (1 + payout_rate)
+            # Safety hurdle delta = 0.0045 guarantees exactly 54.5% threshold at 85% payout (Invariant 4)
+            break_even_p = 1.0 / (1.0 + payout_rate)
+            hurdle_p = break_even_p + 0.0045
+
+            drift_status = self.drift_detector.get_status()
+            if drift_status.get("drift_detected") and drift_status.get("drift_type") == "OTC_VOLATILITY_NOISE_COLLAPSE":
+                hurdle_p += 0.015
 
             tf_sec = TF_SECONDS.get(str(interval).lower(), 5)
             mtf_tf_sec = 60 if tf_sec < 60 else 300
@@ -565,9 +660,9 @@ class PatchTSTPredictor:
                 if str(interval).lower() == "s5":
                     calibrated_prob = min(0.59, 0.50 + (calibrated_prob - 0.50) * 0.85)
 
-                # Negative EV Guard: If calibrated probability is below 54.5%, mathematical expectation on Pocket Option
+                # Negative EV Guard: If calibrated probability is below dynamic hurdle, mathematical expectation on Pocket Option
                 # is strictly negative -> suppress to HOLD to preserve capital!
-                if calibrated_prob < 0.545:
+                if calibrated_prob < hurdle_p:
                     direction = "HOLD"
                     calibrated_prob = 0.50
                     raw_prob = 0.50
@@ -575,11 +670,13 @@ class PatchTSTPredictor:
                     calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
                     raw_prob = round(float(p_buy_cond), 4)
 
+            self.drift_detector.record_prediction((p_hold, p_buy, p_put), direction, payout=payout_rate)
+
             arch_tag = self._arch_tag
             log.info(
                 f"[Neural Brain] {symbol} {interval} -> {direction} | "
-                f"Calibrated: {calibrated_prob*100:.1f}% | P(BUY|dir): {raw_prob*100:.1f}% | "
-                f"HOLD: {p_hold*100:.1f}% | Temp: {temp:.2f} | Arch: {self._model_name}"
+                f"Calibrated: {calibrated_prob*100:.1f}% (Hurdle: {hurdle_p*100:.1f}%, Payout: {payout_rate*100:.0f}%) | "
+                f"P(BUY|dir): {raw_prob*100:.1f}% | HOLD: {p_hold*100:.1f}% | Temp: {temp:.2f} | Arch: {self._model_name}"
             )
 
             return direction, calibrated_prob, arch_tag, 1, raw_prob

@@ -4,6 +4,7 @@ import {
     currentTf, 
     getCustomInitData,
     getAuthHeader, 
+    clearExpiredAuthParams,
     timeOffset, 
     setTimeOffset, 
     setLastPriceVal, 
@@ -11,7 +12,7 @@ import {
     setPriceSocket, 
     triggerCopilotAction,
     setCircuitBreakerState
-} from './state.js?v=20261029_audit_v6';
+} from './state.js?v=20261103_audit_v7';
 
 function resolveAuthData() {
     try {
@@ -53,10 +54,14 @@ import {
     updateAiChartData, 
     updateAiCopilot,
     recordAnalysisPsychometrics,
+    getSessionPsychometrics,
     showNetworkBanner,
     hideNetworkBanner,
-    normalizeDirection
-} from './ui.js?v=20261029_audit_v6';
+    normalizeDirection,
+    hapticImpact,
+    hapticNotification,
+    hapticSelection
+} from './ui.js?v=20261103_audit_v7';
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -501,12 +506,14 @@ export async function executeAnalysis() {
         // 1. Explicit Circuit Breaker Check First
         if (data.reason === 'CIRCUIT_BREAKER_ACTIVE' || (data.message && data.message.includes('Circuit Breaker'))) {
             if (typeof setCircuitBreakerState === 'function') setCircuitBreakerState(true);
+            hapticNotification('warning');
             renderError('circuit_breaker: ' + (data.message || 'Предохранитель депозита активен'));
             return;
         }
 
         // 2. Generic Error Check
         if (data.error) {
+            hapticNotification('error');
             const safeLoc = getSafeLocationUrl();
             const debugMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${safeLoc}`;
             renderError(data.error, debugMsg);
@@ -833,11 +840,27 @@ export async function executeAnalysis() {
         if (tabReg) tabReg.style.display = 'flex';
         switchResultTab('chart');
         flashResults();
+
+        // Trader Psychometrics & Haptic Feedback Integration
+        const psycho = (typeof getSessionPsychometrics === 'function') ? getSessionPsychometrics() : { speedPenalty: 0 };
+        const probNum = Number(data.probability) || 0;
+        if (data.goldenSetup || (probNum >= 60 && !data.tfConflict && psycho.speedPenalty < 25)) {
+            hapticNotification('success');
+        } else if (psycho.speedPenalty >= 25 || (data.copilotAdvice && (data.copilotAdvice.status === 'CIRCUIT_BREAKER' || data.copilotAdvice.status === 'NOISE_GUARD'))) {
+            hapticNotification('warning');
+        } else {
+            if (normDir === 'BUY' || normDir === 'PUT') {
+                hapticImpact('heavy');
+            } else {
+                hapticImpact('soft');
+            }
+        }
     } catch(e) {
         if (isStale()) return;
         cleanupUi();
         if (e.name === 'AbortError' && !timedOut) return; // Graceful exit on intentional abort
         if (e.name === 'AbortError' && timedOut) {
+            hapticNotification('warning');
             showNetworkBanner('Таймаут соединения. Нажмите для повтора');
             renderError('Превышен лимит времени ответа сервера (14с)', 'Сервер не успел рассчитать консенсус за отведенное время (14с). Проверьте интернет-соединение или повторите попытку.');
             return;
@@ -848,10 +871,14 @@ export async function executeAnalysis() {
         if (e instanceof TypeError && (e.message.includes('fetch') || e.message.includes('NetworkError') || e.message.includes('Failed to fetch'))) {
             errorMsg = 'Сетевая ошибка: проверьте интернет-соединение или доступ к серверу';
             showNetworkBanner('Нет интернет-соединения. Нажмите для повтора');
+            hapticNotification('error');
         } else if (isAuthError) {
-            errorMsg = 'Сессия устарела или доступ не авторизован. Перезапустите бота командой /start в Telegram.';
+            clearExpiredAuthParams();
+            errorMsg = 'Сессия авторизации устарела. Нажмите «Обновить сессию» для мгновенного восстановления без выхода из приложения.';
+            hapticNotification('warning');
         } else {
             errorMsg = e.message || 'Ошибка обработки анализа';
+            hapticNotification('error');
         }
         const safeLoc = getSafeLocationUrl();
         const catchMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${safeLoc}`;

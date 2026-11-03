@@ -64,4 +64,30 @@ public class TradeVerificationIntegrityTests
         Assert.DoesNotContain(">", safePair);
         Assert.Equal("EUR/USD &amp; GBP/USD &lt;OTC&gt;", safePair);
     }
+
+    [Theory]
+    [InlineData("08006", true)]  // Connection failure (broken socket)
+    [InlineData("57P01", true)]  // Admin shutdown (cluster restarting)
+    [InlineData("57P02", true)]  // Crash shutdown
+    [InlineData("57P03", true)]  // Cannot connect now
+    [InlineData("53300", true)]  // Too many connections
+    [InlineData("42P01", false)] // Undefined table (not transient, permanent schema defect)
+    [InlineData("23505", false)] // Unique violation (not transient)
+    [InlineData("42601", false)] // Syntax error (not transient)
+    public void DbConnectionFactory_IsNetworkTransient_ClassifiesCorrectly(string sqlState, bool expectedTransient)
+    {
+        var ex = new Npgsql.PostgresException("msg", "severity", "invariantSeverity", sqlState);
+        bool actual = ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsNetworkTransient(ex);
+        Assert.Equal(expectedTransient, actual);
+    }
+
+    [Fact]
+    public void DbConnectionFactory_IOException_And_TimeoutException_AreTransient()
+    {
+        var ioEx = new System.IO.IOException("The socket is broken");
+        var timeoutEx = new TimeoutException("Database connection wait timeout");
+
+        Assert.True(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsNetworkTransient(ioEx));
+        Assert.True(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsNetworkTransient(timeoutEx));
+    }
 }

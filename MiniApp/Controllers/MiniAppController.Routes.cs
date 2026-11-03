@@ -83,9 +83,11 @@ public static partial class MiniAppController
         }).RequireRateLimiting("Global");
 
         app.MapGet("/api/health/live", () => Results.Ok(new { status = "Healthy" }));
+        app.MapGet("/healthz", () => Results.Ok(new { status = "Healthy" }));
+        app.MapGet("/live", () => Results.Ok(new { status = "Healthy" }));
 
-        // Health endpoint for Railway and external uptime probes (with 3s in-memory cache to prevent DB connection pool exhaustion)
-        app.MapGet("/api/health", async (HttpContext context) =>
+        // SRE-FIX: Health endpoint for Railway, Kubernetes and external uptime probes (covers DB, ML, WS, TG)
+        Func<HttpContext, Task<IResult>> healthHandler = async (HttpContext context) =>
         {
             var cached = _cachedHealthResult;
             if (cached != null && DateTime.UtcNow < cached.ExpiresUtc)
@@ -96,7 +98,7 @@ public static partial class MiniAppController
             string dbStatus = "Unknown";
             string mlStatus = "Unknown";
 
-            // 1. Check DB
+            // 1. Check PostgreSQL Database
             try
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
@@ -107,7 +109,7 @@ public static partial class MiniAppController
             {
                 BotLogger.Error("[HealthCheck] Database check failed", ex);
                 ValutaMetrics.HealthCheckFailures.WithLabels("db").Inc();
-                return Results.Json(new { status = "Unhealthy", db = "Error" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return Results.Json(new { status = "Unhealthy", db = "Error", ws = "Unknown", tg = "Unknown", ml = "Unknown" }, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
             // 2. Check ML service ping
@@ -135,10 +137,28 @@ public static partial class MiniAppController
                 ValutaMetrics.HealthCheckFailures.WithLabels("ml").Inc();
             }
 
-            var payload = new { status = "Healthy", db = dbStatus, ml = mlStatus };
+            // 3. Check Pocket Option Broker WebSocket stream
+            string wsStatus = PocketOptionWebSocketStream.IsConnected ? "Ok" : (PriceFeed.UsePocketOption ? "Connecting" : "Disabled");
+
+            // 4. Check Telegram Bot Poller
+            string tgStatus = TelegramBotService.IsPollerHealthy ? "Ok" : (TelegramBotService.IsLeader ? "Degraded" : "Standby");
+
+            bool isHealthy = dbStatus == "Ok";
+            string overallStatus = isHealthy ? (wsStatus == "Ok" && (tgStatus == "Ok" || tgStatus == "Standby") ? "Healthy" : "Degraded") : "Unhealthy";
+
+            var payload = new { status = overallStatus, db = dbStatus, ml = mlStatus, ws = wsStatus, tg = tgStatus };
             _cachedHealthResult = new CachedHealth(DateTime.UtcNow.AddSeconds(3), payload);
+
+            if (!isHealthy)
+            {
+                return Results.Json(payload, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
             return Results.Ok(payload);
-        });
+        };
+
+        app.MapGet("/api/health", healthHandler);
+        app.MapGet("/health", healthHandler);
+        app.MapGet("/ready", healthHandler);
 
         app.MapGet("/api/fear-greed", async Task<IResult> (HttpContext context) =>
         {

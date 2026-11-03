@@ -112,11 +112,31 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, (UserSettings settings, DateTime cachedAt)> _settingsCache = new();
         private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
 
+        /// <summary>
+        /// Evicts stale entries from the settings cache to prevent unbounded heap memory leaks.
+        /// </summary>
+        public static void PruneExpiredSettings()
+        {
+            var cutoff = DateTime.UtcNow - CacheTtl;
+            foreach (var kvp in _settingsCache)
+            {
+                if (kvp.Value.cachedAt < cutoff)
+                {
+                    _settingsCache.TryRemove(kvp.Key, out _);
+                }
+            }
+        }
+
         public static async Task<UserSettings> GetSettingsAsync(long chatId)
         {
             if (_settingsCache.TryGetValue(chatId, out var cached) && (DateTime.UtcNow - cached.cachedAt) < CacheTtl)
             {
                 return cached.settings;
+            }
+
+            if (_settingsCache.Count > 500)
+            {
+                PruneExpiredSettings();
             }
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new UserSettings();
             try

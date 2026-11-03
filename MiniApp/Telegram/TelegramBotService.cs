@@ -30,6 +30,26 @@ public partial class TelegramBotService : BackgroundService
     private static long _lastGlobalSendTick = 0;
     private static readonly object _globalThrottleLock = new();
 
+    private static long _lastSuccessfulPollUtcTicks = 0;
+    private static volatile bool _isLeader = false;
+    public static bool IsLeader => _isLeader;
+    public static bool IsPollerHealthy => (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastSuccessfulPollUtcTicks)) < TimeSpan.FromSeconds(90).Ticks;
+
+    /// <summary>
+    /// Evicts stale per-chat throttling timestamps older than 5 minutes to prevent memory leaks.
+    /// </summary>
+    public static void PruneOutboundThrottleCache()
+    {
+        long cutoffTicks = DateTime.UtcNow.AddMinutes(-5).Ticks;
+        foreach (var kvp in _lastOutboundTicksPerChat)
+        {
+            if (kvp.Value < cutoffTicks)
+            {
+                _lastOutboundTicksPerChat.TryRemove(kvp.Key, out _);
+            }
+        }
+    }
+
     internal static async Task WaitTgGateAsync(CancellationToken ct = default)
     {
         long blockedUntil = Interlocked.Read(ref _tgBlockedUntilTicks);
@@ -205,6 +225,70 @@ public partial class TelegramBotService : BackgroundService
 
     internal static readonly ConcurrentDictionary<long, UserState> UserStates = new();
     internal static readonly ConcurrentDictionary<long, string> UserSubmittedIds = new();
+    private static readonly ConcurrentDictionary<long, DateTime> _userStateTimestamps = new();
+
+    internal static void SetUserState(long chatId, UserState state)
+    {
+        UserStates[chatId] = state;
+        _userStateTimestamps[chatId] = DateTime.UtcNow;
+    }
+
+    public static bool TryClearUserState(long chatId)
+    {
+        _userStateTimestamps.TryRemove(chatId, out _);
+        UserSubmittedIds.TryRemove(chatId, out _);
+        return UserStates.TryRemove(chatId, out _);
+    }
+
+    /// <summary>
+    /// Evicts expired FSM user states (default 15 minutes TTL) to prevent memory leaks and zombie sessions.
+    /// </summary>
+    public static void PruneExpiredUserStates(TimeSpan? ttl = null)
+    {
+        var stateTtl = ttl ?? TimeSpan.FromMinutes(15);
+        var cutoff = DateTime.UtcNow - stateTtl;
+        foreach (var kvp in _userStateTimestamps)
+        {
+            if (kvp.Value < cutoff)
+            {
+                UserStates.TryRemove(kvp.Key, out _);
+                UserSubmittedIds.TryRemove(kvp.Key, out _);
+                _userStateTimestamps.TryRemove(kvp.Key, out _);
+                BotLogger.Info($"[TG Bot FSM] Evicted expired user state for chatId {kvp.Key}");
+            }
+        }
+    }
+
+    private static async Task<long> LoadPersistedOffsetAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            string? raw = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetBotStateAsync("telegram_update_offset", ct);
+            if (long.TryParse(raw, out long dbOffset) && dbOffset > 0)
+            {
+                BotLogger.Info($"[TG Bot] Loaded persistent Telegram offset from database: {dbOffset}");
+                return dbOffset;
+            }
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[TG Bot] Failed to load persistent offset from database: {ex.Message}");
+        }
+        return 0;
+    }
+
+    private static async Task SavePersistedOffsetAsync(long offset, CancellationToken ct = default)
+    {
+        if (offset <= 0) return;
+        try
+        {
+            await ValutaBot.App.MiniApp.Data.DbConnectionFactory.SetBotStateAsync("telegram_update_offset", offset.ToString(), ct);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[TG Bot] Failed to persist offset {offset} to database: {ex.Message}");
+        }
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -222,12 +306,11 @@ public partial class TelegramBotService : BackgroundService
             _webAppUrl = Environment.GetEnvironmentVariable("WEBAPP_URL") ?? "https://chowder-dreamland-spotlight.ngrok-free.dev";
         }
 
-        Console.WriteLine($"[TG Bot] Service started. WebApp URL: {_webAppUrl}");
+        Console.WriteLine($"[TG Bot] Service initialized. WebApp URL: {_webAppUrl}");
 
         try { await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync(); } catch (Exception dbEx) { BotLogger.Warn($"[TG Bot] Startup DB init warning: {dbEx.Message}"); }
 
         // Auto-seed admin IDs from env ADMIN_CHAT_ID / ADMIN_IDS
-
         string envAdmin = Environment.GetEnvironmentVariable("ADMIN_CHAT_ID") ?? Environment.GetEnvironmentVariable("ADMIN_IDS") ?? "";
         foreach (var part in envAdmin.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
         {
@@ -237,20 +320,59 @@ public partial class TelegramBotService : BackgroundService
             }
         }
 
-        long offset = 0;
+        // SRE-FIX: Single-Instance Distributed Lock during Kubernetes rolling update
+        await using var leaderLock = new ValutaBot.MiniApp.Services.PostgresDistributedLock("valutabot_telegram_leader");
+        await leaderLock.WaitAcquireAsync(TimeSpan.FromSeconds(2), stoppingToken);
+        if (stoppingToken.IsCancellationRequested) return;
+
+        _isLeader = true;
+        BotLogger.Info("[TG Bot] Active Leader role acquired. Starting long-polling update loop.");
+
+        try
+        {
+            long initialOffset = await LoadPersistedOffsetAsync(stoppingToken);
+            await PollUpdatesLoopAsync(token, initialOffset, stoppingToken);
+        }
+        finally
+        {
+            _isLeader = false;
+            await leaderLock.ReleaseAsync();
+        }
+    }
+
+    private async Task PollUpdatesLoopAsync(string token, long initialOffset, CancellationToken stoppingToken)
+    {
+        long offset = initialOffset;
         var inFlightHandlers = new ConcurrentDictionary<Task, byte>();
+        DateTime lastPruneTime = DateTime.UtcNow;
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
+                // Periodic TTL eviction across per-chat rate limits and orphaned user states
+                if (DateTime.UtcNow - lastPruneTime > TimeSpan.FromMinutes(2))
+                {
+                    lastPruneTime = DateTime.UtcNow;
+                    PruneOutboundThrottleCache();
+                    PruneExpiredUserStates();
+                    ValutaBot.App.MiniApp.Data.Repositories.UserRepository.PruneExpiredSettings();
+                }
+
                 string url = $"https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30";
                 var client = MiniAppController.HttpFactory?.CreateClient("Telegram") ?? _httpClient;
                 var response = await client.GetAsync(url, stoppingToken);
                 if (!response.IsSuccessStatusCode)
                 {
+                    int statusCode = (int)response.StatusCode;
                     int backoffSeconds = 5;
-                    if ((int)response.StatusCode == 429)
+
+                    if (statusCode == 409)
+                    {
+                        backoffSeconds = 10 + Random.Shared.Next(1, 5);
+                        BotLogger.Warn($"[TG Bot] 409 Conflict: another bot instance is polling Telegram updates. Backing off for {backoffSeconds}s...");
+                    }
+                    else if (statusCode == 429)
                     {
                         backoffSeconds = 30;
                         if (response.Headers.RetryAfter?.Delta is { } d)
@@ -287,13 +409,17 @@ public partial class TelegramBotService : BackgroundService
                     continue;
                 }
 
+                Interlocked.Exchange(ref _lastSuccessfulPollUtcTicks, DateTime.UtcNow.Ticks);
+
                 var jsonStr = await response.Content.ReadAsStringAsync(stoppingToken);
                 using var doc = JsonDocument.Parse(jsonStr);
                 if (doc.RootElement.TryGetProperty("result", out var resultArr) && resultArr.ValueKind == JsonValueKind.Array)
                 {
+                    long highestBatchUpdateId = -1;
                     foreach (var update in resultArr.EnumerateArray())
                     {
                         long updateId = update.GetProperty("update_id").GetInt64();
+                        if (updateId > highestBatchUpdateId) highestBatchUpdateId = updateId;
                         offset = updateId + 1;
 
                         if (update.TryGetProperty("message", out var message))
@@ -366,6 +492,11 @@ public partial class TelegramBotService : BackgroundService
                             _ = cbTask.ContinueWith(t => inFlightHandlers.TryRemove(t, out _), TaskContinuationOptions.ExecuteSynchronously);
                         }
                     }
+
+                    if (highestBatchUpdateId >= 0)
+                    {
+                        await SavePersistedOffsetAsync(offset, stoppingToken);
+                    }
                 }
             }
             catch (TaskCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -378,14 +509,19 @@ public partial class TelegramBotService : BackgroundService
                     BotLogger.Warn($"[TG Bot] Transient polling jitter: {ex.Message}");
                 else
                     BotLogger.Error($"[TG Bot] Error in polling loop: {ex.Message}", ex);
-                await Task.Delay(5000, stoppingToken);
+                await Task.Delay(2000, stoppingToken);
             }
         }
 
         if (!inFlightHandlers.IsEmpty)
         {
-            BotLogger.Info($"[TG Bot] Graceful Shutdown: waiting up to 5s for {inFlightHandlers.Count} in-flight Telegram handlers...");
-            await Task.WhenAny(Task.WhenAll(inFlightHandlers.Keys), Task.Delay(TimeSpan.FromSeconds(5)));
+            BotLogger.Info($"[TG Bot] Graceful Shutdown: waiting up to 12s for {inFlightHandlers.Count} in-flight Telegram handlers...");
+            await Task.WhenAny(Task.WhenAll(inFlightHandlers.Keys), Task.Delay(TimeSpan.FromSeconds(12)));
+        }
+
+        if (offset > 0)
+        {
+            await SavePersistedOffsetAsync(offset, CancellationToken.None);
         }
     }
 

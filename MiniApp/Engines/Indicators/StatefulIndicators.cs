@@ -72,10 +72,7 @@ public sealed class StatefulRsi
             return _count <= _period ? 50.0 : (_avgLoss < 1e-10 ? (_avgGain < 1e-10 ? 50.0 : 100.0) : 100.0 - (100.0 / (1.0 + (_avgGain / _avgLoss))));
 
         if (_count <= _period)
-        {
-            var clone = Clone();
-            return clone.Update(price);
-        }
+            return 50.0;
 
         double diff = price - _prevPrice;
         double gain = diff > 0 ? diff : 0;
@@ -148,6 +145,37 @@ public sealed class StatefulConnorsRsi
 
         _prevPrice = price;
         _count++;
+        return (rsiVal + streakRsiVal + pctRank) / 3.0;
+    }
+
+    /// <summary>
+    /// Computes ConnorsRSI for the live unclosed candle without modifying indicator state and without heap allocations.
+    /// </summary>
+    public double ComputeLive(double price)
+    {
+        if (!double.IsFinite(price)) return 50.0;
+        if (_count == 0) return 50.0;
+
+        double rsiVal = _rsi.ComputeLive(price);
+
+        double liveStreak = _currentStreak;
+        if (price > _prevPrice) liveStreak = liveStreak > 0 ? liveStreak + 1 : 1;
+        else if (price < _prevPrice) liveStreak = liveStreak < 0 ? liveStreak - 1 : -1;
+        else liveStreak = 0;
+
+        double streakRsiVal = _streakRsi.ComputeLive(liveStreak);
+
+        double currentReturn = (Math.Abs(_prevPrice) > 1e-10)
+            ? (price - _prevPrice) / _prevPrice
+            : 0.0;
+
+        int winCount = 0;
+        for (int i = 0; i < _returnsCount; i++)
+        {
+            if (currentReturn > _returnsHistory[i]) winCount++;
+        }
+        double pctRank = _returnsCount > 0 ? (winCount / (double)_returnsCount) * 100.0 : 50.0;
+
         return (rsiVal + streakRsiVal + pctRank) / 3.0;
     }
 
@@ -229,9 +257,26 @@ public sealed class StatefulHma
         return price;
     }
 
+    /// <summary>
+    /// Computes HMA for the live unclosed candle without modifying indicator state and without heap allocations.
+    /// </summary>
+    public double ComputeLive(double price)
+    {
+        if (!double.IsFinite(price)) return price;
+        if (_priceCount < _period) return price;
+
+        double diff = 2.0 * WmaLive(_priceHistory, _priceIndex, _halfPeriod, price) - WmaLive(_priceHistory, _priceIndex, _period, price);
+
+        if (_diffCount == _sqrtPeriod)
+            return WmaLive(_diffHistory, _diffIndex, _sqrtPeriod, diff);
+
+        return price;
+    }
+
     private static double Wma(double[] arr, int index, int period)
     {
-        double sum = 0, weightSum = 0;
+        double sum = 0;
+        double weightSum = (period * (period + 1)) * 0.5;
         int len = arr.Length;
         int startIdx = (index - period + len) % len;
         
@@ -240,7 +285,24 @@ public sealed class StatefulHma
             double w = i + 1;
             int currIdx = (startIdx + i) % len;
             sum       += arr[currIdx] * w;
-            weightSum += w;
+        }
+        return weightSum > 0 ? sum / weightSum : 0;
+    }
+
+    private static double WmaLive(double[] arr, int index, int period, double liveVal)
+    {
+        double sum = 0;
+        double weightSum = (period * (period + 1)) * 0.5;
+        int len = arr.Length;
+        int newIndex = (index + 1) % len;
+        int startIdx = (newIndex - period + len) % len;
+
+        for (int i = 0; i < period; i++)
+        {
+            double w = i + 1;
+            int currIdx = (startIdx + i) % len;
+            double val = (currIdx == index) ? liveVal : arr[currIdx];
+            sum += val * w;
         }
         return weightSum > 0 ? sum / weightSum : 0;
     }
@@ -476,12 +538,11 @@ public sealed class StatefulTrueAdx
     /// </summary>
     public (double adx, double pdi, double mdi) ComputeLive(double high, double low, double close)
     {
-        if (!double.IsFinite(high) || !double.IsFinite(low) || !double.IsFinite(close) || high < low || _count <= _period * 2)
-        {
-            var clone = Clone();
-            clone.Update(high, low, close);
-            return (clone.LastAdx, clone.LastPdi, clone.LastMdi);
-        }
+        if (!double.IsFinite(high) || !double.IsFinite(low) || !double.IsFinite(close) || high < low || _count == 0)
+            return (_count > _period * 2 ? _adx : 20.0, LastPdi, LastMdi);
+
+        if (_count <= _period)
+            return (20.0, 0.0, 0.0);
 
         double tr = Math.Max(high - low,
                     Math.Max(Math.Abs(high - _prevClose),
@@ -502,6 +563,10 @@ public sealed class StatefulTrueAdx
 
         double lastPdi = smoothTr == 0 ? 0 : 100.0 * smoothPdm / smoothTr;
         double lastMdi = smoothTr == 0 ? 0 : 100.0 * smoothMdm / smoothTr;
+
+        if (_count <= _period * 2)
+            return (20.0, lastPdi, lastMdi);
+
         double dx = (lastPdi + lastMdi) == 0
             ? 0
             : 100.0 * Math.Abs(lastPdi - lastMdi) / (lastPdi + lastMdi);

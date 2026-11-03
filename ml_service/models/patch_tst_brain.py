@@ -48,7 +48,9 @@ class PatchEmbedding(nn.Module):
         # Preserve physical impulse amplitude across LayerNorm (eps=1e-6 prevents 0/0 NaN gradient on flat/zero-padded patches)
         patch_norm = torch.sqrt((patches ** 2).sum(dim=-1, keepdim=True) + 1e-6)
         amp = torch.tanh(patch_norm / 10.0)
-        out = self.norm(self.proj(patches)) * (0.5 + amp)
+        proj_out = self.proj(patches)
+        proj_out = torch.clamp(proj_out, -50.0, 50.0)
+        out = self.norm(proj_out) * (0.5 + amp)
         return out
 
 
@@ -68,6 +70,9 @@ class DualStreamPatchBrain(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.candle_features = candle_features
+        self.macro_features = macro_features
+        self.seq_len_micro = seq_len_micro
+        self.seq_len_mtf = seq_len_mtf
         self.geom_channels = candle_features + 3
 
         # 1. Micro-stream Patch Embedding (160 candles -> patch 8, stride 4 => 39 patches)
@@ -159,7 +164,7 @@ class DualStreamPatchBrain(nn.Module):
         self.temperature = nn.Parameter(torch.tensor(1.0))
 
     @staticmethod
-    def _transform_candles_atr_geometry(x: torch.Tensor) -> torch.Tensor:
+    def _transform_candles_atr_geometry(x: torch.Tensor, candle_features: int = 8, seq_len: int = 160) -> torch.Tensor:
         """
         Transforms raw bps candles [B, T, C] into ATR-normalized (sigma-scaled) candles
         and appends 3 structural geometry channels [B, T, C + 3]:
@@ -168,7 +173,7 @@ class DualStreamPatchBrain(nn.Module):
           - wick_dom: Net wick rejection dominance (l_wick - u_wick) / ATR in [-1, +1]
         """
         c_body = x[:, :, 0]
-        if x.size(2) >= 8:
+        if candle_features >= 8:
             u_wick = x[:, :, 5]
             l_wick = x[:, :, 6]
             rng = x[:, :, 7]
@@ -180,18 +185,18 @@ class DualStreamPatchBrain(nn.Module):
             rng = hi - lo
 
         # Window ATR in bps (trailing 20 bars, clamped >= 0.35 bps)
-        tail_len = min(20, x.size(1))
+        tail_len = min(20, seq_len)
         atr = rng[:, -tail_len:].mean(dim=1, keepdim=True) + 0.35  # [B, 1]
         atr_3d = atr.unsqueeze(-1)  # [B, 1, 1]
 
         x_norm = x.clone()
         x_norm[:, :, 0:4] = torch.clamp(x[:, :, 0:4] / atr_3d, -8.0, 8.0)
-        if x.size(2) >= 8:
+        if candle_features >= 8:
             x_norm[:, :, 5:8] = torch.clamp(x[:, :, 5:8] / atr_3d, -8.0, 8.0)
 
         # Cumulative relative price curve for 20-bar channel geometry
         cum_c = torch.cumsum(c_body, dim=1)  # [B, T]
-        win_k = min(20, x.size(1))
+        win_k = min(20, seq_len)
         padded = F.pad(cum_c, (win_k - 1, 0), mode="replicate")
         win20 = padded.unfold(dimension=1, size=win_k, step=1)  # [B, T, win_k]
 
@@ -209,19 +214,19 @@ class DualStreamPatchBrain(nn.Module):
         return torch.cat([x_norm, geom], dim=-1)
 
     @staticmethod
-    def _flip_candles(x: torch.Tensor) -> torch.Tensor:
+    def _flip_candles(x: torch.Tensor, candle_features: int = 8) -> torch.Tensor:
         out = x.clone()
         out[:, :, 0] = -x[:, :, 0]
         out[:, :, 1] = -x[:, :, 2]
         out[:, :, 2] = -x[:, :, 1]
         out[:, :, 3] = -x[:, :, 3]
-        if x.size(2) >= 8:
+        if candle_features >= 8:
             out[:, :, 5] = x[:, :, 6]
             out[:, :, 6] = x[:, :, 5]
         return out
 
     @staticmethod
-    def _sanitize_and_flip_macro(xm: torch.Tensor):
+    def _sanitize_and_flip_macro(xm: torch.Tensor, macro_features: int = 31):
         """
         Sanitizes macro features, zeroes non-stationary multi-hour session anchors
         (day/asian high/low distances, calendar clock, ordinal asset_id) to prevent session-drift overfitting,
@@ -230,12 +235,12 @@ class DualStreamPatchBrain(nn.Module):
         pos = xm.clone()
         # Zero out non-stationary session drift & calendar features so deep MLP cannot memorize time-of-day trends
         for idx in (0, 1, 2, 7, 8, 12, 13, 14, 15, 16):
-            if xm.size(1) > idx:
+            if macro_features > idx:
                 pos[:, idx] = 0.0
         pos[:, 9] = torch.clamp(xm[:, 9], 0.0, 3.0) / 3.0  # bound price_entropy
-        if xm.size(1) > 22:
+        if macro_features > 22:
             pos[:, 22] = 0.0  # neutralize ordinal asset_id in deep MLP
-        if xm.size(1) >= 31:
+        if macro_features >= 31:
             pos[:, 24] = torch.tanh(xm[:, 24] * 1.5)
             pos[:, 25] = torch.tanh(xm[:, 25] * 1.0)
             pos[:, 28] = torch.clamp(xm[:, 28] - 0.5, -1.0, 1.0)
@@ -249,7 +254,7 @@ class DualStreamPatchBrain(nn.Module):
         neg[:, 19] = -pos[:, 19]
         neg[:, 20] = -pos[:, 20]
         neg[:, 21] = -pos[:, 21]
-        if xm.size(1) >= 31:
+        if macro_features >= 31:
             neg[:, 23] = -pos[:, 23]
             neg[:, 24] = -pos[:, 24]
             neg[:, 25] = -pos[:, 25]
@@ -257,9 +262,15 @@ class DualStreamPatchBrain(nn.Module):
         return pos, neg
 
     @staticmethod
-    def _extract_odd_features(x_micro: torch.Tensor, x_mtf: torch.Tensor, x_macro: torch.Tensor):
+    def _extract_odd_features(
+        x_micro: torch.Tensor,
+        x_mtf: torch.Tensor,
+        x_macro: torch.Tensor,
+        candle_features: int = 8,
+        macro_features: int = 31
+    ):
         c_body = x_micro[:, :, 0]
-        if x_micro.size(2) >= 8:
+        if candle_features >= 8:
             u_wick = x_micro[:, :, 5]
             l_wick = x_micro[:, :, 6]
             rng = x_micro[:, :, 7]
@@ -312,29 +323,29 @@ class DualStreamPatchBrain(nn.Module):
         adap40 = -edge40 * z1 * 4.0
 
         mtf_body = x_mtf[:, :, 0]
-        mtf_rng = x_mtf[:, :, 7] if x_mtf.size(2) >= 8 else (x_mtf[:, :, 1] - x_mtf[:, :, 2])
+        mtf_rng = x_mtf[:, :, 7] if candle_features >= 8 else (x_mtf[:, :, 1] - x_mtf[:, :, 2])
         mtf_vol5 = mtf_rng[:, -5:].mean(dim=1) + 0.5
         zm1 = torch.tanh(mtf_body[:, -1] / (mtf_vol5 * 1.5))
         zm2 = torch.tanh(mtf_body[:, -2:].sum(dim=1) / (mtf_vol5 * 2.0))
         zm3 = torch.tanh(mtf_body[:, -3:].sum(dim=1) / (mtf_vol5 * 2.5))
         zm6 = torch.tanh(mtf_body[:, -6:].sum(dim=1) / (mtf_vol5 * 3.5))
-        mtf_w1 = torch.tanh((x_mtf[:, -1, 6] - x_mtf[:, -1, 5]) / (mtf_vol5 * 1.2)) if x_mtf.size(2) >= 8 else torch.zeros_like(zm1)
+        mtf_w1 = torch.tanh((x_mtf[:, -1, 6] - x_mtf[:, -1, 5]) / (mtf_vol5 * 1.2)) if candle_features >= 8 else torch.zeros_like(zm1)
 
         bsync = torch.clamp(x_macro[:, 5], 0.0, 1.0)
         pe = torch.clamp(x_macro[:, 9], 0.0, 3.0) / 3.0
-        adx = torch.clamp(x_macro[:, 10], 0.0, 1.0) if x_macro.size(1) > 10 else torch.zeros_like(bsync)
-        rsi = torch.clamp(x_macro[:, 11], -1.0, 1.0) if x_macro.size(1) > 11 else torch.zeros_like(bsync)
+        adx = torch.clamp(x_macro[:, 10], 0.0, 1.0) if macro_features > 10 else torch.zeros_like(bsync)
+        rsi = torch.clamp(x_macro[:, 11], -1.0, 1.0) if macro_features > 11 else torch.zeros_like(bsync)
         tf_sec = torch.round(x_macro[:, 17] * 60.0)
         ob = torch.clamp(x_macro[:, 18], -1.0, 1.0)
         fvg = torch.clamp(x_macro[:, 19], -1.0, 1.0)
         swp = torch.clamp(x_macro[:, 20], -1.0, 1.0)
         bos = torch.clamp(x_macro[:, 21], -1.0, 1.0)
-        asset_id = torch.round(x_macro[:, 22]) if x_macro.size(1) > 22 else torch.zeros_like(bsync)
+        asset_id = torch.round(x_macro[:, 22]) if macro_features > 22 else torch.zeros_like(bsync)
         usd_sign = torch.where(asset_id <= 2.0, -1.0, 1.0)
         dxy1 = usd_sign * x_macro[:, 3]
         dxy5 = usd_sign * x_macro[:, 4]
 
-        if x_macro.size(1) >= 31:
+        if macro_features >= 31:
             ta_score = torch.clamp(x_macro[:, 23], -1.0, 1.0)
             mvel = torch.tanh(x_macro[:, 24] * 1.5)
             hma = torch.tanh(x_macro[:, 25] * 1.0)
@@ -387,9 +398,16 @@ class DualStreamPatchBrain(nn.Module):
         return F_odd, base_tf_score, tf_sec, asset_id
 
     @staticmethod
-    def _extract_even_gates(x_micro: torch.Tensor, x_mtf: torch.Tensor, x_macro: torch.Tensor, dir_s: torch.Tensor):
+    def _extract_even_gates(
+        x_micro: torch.Tensor,
+        x_mtf: torch.Tensor,
+        x_macro: torch.Tensor,
+        dir_s: torch.Tensor,
+        candle_features: int = 8,
+        macro_features: int = 31
+    ):
         c_body = x_micro[:, :, 0]
-        if x_micro.size(2) >= 8:
+        if candle_features >= 8:
             u_wick, l_wick, rng = x_micro[:, :, 5], x_micro[:, :, 6], x_micro[:, :, 7]
         else:
             hi, lo = x_micro[:, :, 1], x_micro[:, :, 2]
@@ -409,18 +427,18 @@ class DualStreamPatchBrain(nn.Module):
         ch_pos20 = torch.clamp((cum_c[:, -1] - 0.5 * (hi20 + lo20)) / (0.5 * (hi20 - lo20).clamp(min=0.5)), -1.0, 1.0)
 
         mtf_body = x_mtf[:, :, 0]
-        mtf_rng = x_mtf[:, :, 7] if x_mtf.size(2) >= 8 else (x_mtf[:, :, 1] - x_mtf[:, :, 2])
+        mtf_rng = x_mtf[:, :, 7] if candle_features >= 8 else (x_mtf[:, :, 1] - x_mtf[:, :, 2])
         mtf_vol5 = mtf_rng[:, -5:].mean(dim=1) + 0.5
         zm1 = torch.tanh(mtf_body[:, -1] / (mtf_vol5 * 1.5))
 
         bsync = torch.clamp(x_macro[:, 5], 0.0, 1.0)
         pe = torch.clamp(x_macro[:, 9], 0.0, 3.0) / 3.0
-        adx = torch.clamp(x_macro[:, 10], 0.0, 1.0) if x_macro.size(1) > 10 else torch.zeros_like(bsync)
-        asset_id = torch.round(x_macro[:, 22]) if x_macro.size(1) > 22 else torch.zeros_like(bsync)
+        adx = torch.clamp(x_macro[:, 10], 0.0, 1.0) if macro_features > 10 else torch.zeros_like(bsync)
+        asset_id = torch.round(x_macro[:, 22]) if macro_features > 22 else torch.zeros_like(bsync)
         usd_sign = torch.where(asset_id <= 2.0, -1.0, 1.0)
         dxy5 = usd_sign * x_macro[:, 4]
 
-        if x_macro.size(1) >= 31:
+        if macro_features >= 31:
             ta_score = torch.clamp(x_macro[:, 23], -1.0, 1.0)
             vol_ratio = torch.clamp(x_macro[:, 26], 0.0, 1.0)
             bb_sq = torch.clamp(x_macro[:, 27], 0.0, 1.0)
@@ -462,7 +480,7 @@ class DualStreamPatchBrain(nn.Module):
         Computes the strictly sign-symmetric (odd-function) 30-Cell (6 Pairs x 5 Timeframes)
         SOTA Non-Linear Regime-Conditioned Microstructure Expert + Cell Sniper Gate score.
         """
-        F_odd, base_tf_score, tf_sec, asset_id = self._extract_odd_features(x_micro, x_mtf, x_macro)
+        F_odd, base_tf_score, tf_sec, asset_id = self._extract_odd_features(x_micro, x_mtf, x_macro, self.candle_features, self.macro_features)
 
         aid_idx = torch.clamp(asset_id.long(), 0, 5)
         tf_idx = torch.where(
@@ -489,19 +507,20 @@ class DualStreamPatchBrain(nn.Module):
         dir_s = (1.0 - alpha_blend) * base_tf_score + alpha_blend * cd
 
         # Cell Sniper Gate: G_even normalized by training std, projected by cell_gate_weights
-        G_even = self._extract_even_gates(x_micro, x_mtf, x_macro, dir_s)
+        G_even = self._extract_even_gates(x_micro, x_mtf, x_macro, dir_s, self.candle_features, self.macro_features)
         G_even_n = G_even / self.cell_even_std.to(G_even.device).clamp(min=1e-4)
         gw_cell = self.cell_gate_weights[aid_idx, tf_idx]  # [B, 25]
         gate_mult = torch.exp(torch.clamp((G_even_n * gw_cell).sum(dim=-1), -1.5, 1.5) * g_scale)
 
         # Goldilocks sweet spot saturation + Sniper Gate modulation
-        sat_s = dir_s / (1.0 + (dir_s / tau) ** 4)
+        dir_tau_ratio = torch.clamp(dir_s / tau, -8.0, 8.0)
+        sat_s = dir_s / (1.0 + dir_tau_ratio ** 4)
         final_s = sat_s * gate_mult
 
         # Calibrated uniform probability scale across all 30 cells (clamped against cubic explosion)
         s_norm = torch.clamp(final_s / cell_p85, -4.0, 4.0)
         alpha_dir = torch.clamp(0.20 * s_norm + 0.14 * (s_norm ** 3), -3.0, 3.0)
-        sniper_gate = gate_mult / (1.0 + (dir_s / tau) ** 4)
+        sniper_gate = gate_mult / (1.0 + dir_tau_ratio ** 4)
 
         return alpha_dir, sniper_gate
 
@@ -515,7 +534,7 @@ class DualStreamPatchBrain(nn.Module):
         even Sniper Gates, and Goldilocks hyperparameters using split-invariant correlations.
         """
         with torch.no_grad():
-            F_odd, base_tf_score, tf_sec, asset_id = self._extract_odd_features(x_micro, x_mtf, x_macro)
+            F_odd, base_tf_score, tf_sec, asset_id = self._extract_odd_features(x_micro, x_mtf, x_macro, self.candle_features, self.macro_features)
             n_total = len(y)
 
             # Compute and store training feature standard deviations
@@ -591,7 +610,7 @@ class DualStreamPatchBrain(nn.Module):
                         for alpha in [0.0, 0.16, 0.50, 0.85, 1.0]:
                             dir_s = (1.0 - alpha) * base_tf_score + alpha * cd
                             d_sign = torch.where(dir_s >= 0.0, 1.0, -1.0)
-                            G_cell = self._extract_even_gates(x_micro, x_mtf, x_macro, dir_s)
+                            G_cell = self._extract_even_gates(x_micro, x_mtf, x_macro, dir_s, self.candle_features, self.macro_features)
                             G_cell_n = G_cell / even_std
 
                             hit = ((d_sign * y_signed) > 0).float() - 0.5
@@ -644,8 +663,8 @@ class DualStreamPatchBrain(nn.Module):
             self.cell_hyper.data.copy_(Hyper_cell)
 
     def _forward_single(self, x_micro: torch.Tensor, x_mtf: torch.Tensor, x_macro: torch.Tensor, asset_ids: torch.Tensor):
-        x_micro_geom = self._transform_candles_atr_geometry(x_micro)
-        x_mtf_geom = self._transform_candles_atr_geometry(x_mtf)
+        x_micro_geom = self._transform_candles_atr_geometry(x_micro, self.candle_features, self.seq_len_micro)
+        x_mtf_geom = self._transform_candles_atr_geometry(x_mtf, self.candle_features, self.seq_len_mtf)
 
         p_micro = self.micro_patcher(x_micro_geom)
         p_micro = p_micro + self.micro_pos[:, :p_micro.size(1), :]
@@ -656,6 +675,7 @@ class DualStreamPatchBrain(nn.Module):
         h_mtf = self.mtf_transformer(p_mtf)
 
         attn_out, _ = self.cross_attn(query=h_micro, key=h_mtf, value=h_mtf)
+        attn_out = torch.nan_to_num(attn_out, nan=0.0)
         h_cross = self.cross_norm(h_micro + attn_out)
 
         pool_micro = 0.5 * h_micro.mean(dim=1) + 0.5 * h_micro[:, -1, :]
@@ -704,18 +724,31 @@ class DualStreamPatchBrain(nn.Module):
         x_mtf:   [B, 30, 8]
         x_macro: [B, 31]
         """
-        asset_ids = torch.clamp(torch.round(x_macro[:, 22]).long(), 0, 9) if x_macro.size(1) > 22 else torch.zeros(x_macro.size(0), dtype=torch.long, device=x_macro.device)
-        xm_pos, xm_neg = self._sanitize_and_flip_macro(x_macro)
+        # Numerical stability & NaN/Inf guard against extreme broker gaps
+        x_micro = torch.nan_to_num(x_micro, nan=0.0, posinf=50.0, neginf=-50.0)
+        x_mtf = torch.nan_to_num(x_mtf, nan=0.0, posinf=50.0, neginf=-50.0)
+        x_macro = torch.nan_to_num(x_macro, nan=0.0, posinf=10.0, neginf=-10.0)
+
+        if self.macro_features > 22:
+            asset_ids = torch.clamp(torch.round(x_macro[:, 22]).long(), 0, 9)
+        else:
+            asset_ids = torch.zeros(x_macro.size(0), dtype=torch.long, device=x_macro.device)
+
+        xm_pos, xm_neg = self._sanitize_and_flip_macro(x_macro, self.macro_features)
 
         # 1. Siamese Antisymmetric Deep PatchTST Stream (with Asset Embedding + Sigmoid Gate + Multi-Head TF Readout)
         logits_pos, pnl_pos = self._forward_single(x_micro, x_mtf, xm_pos, asset_ids)
-        logits_neg, pnl_neg = self._forward_single(self._flip_candles(x_micro), self._flip_candles(x_mtf), xm_neg, asset_ids)
+        logits_neg, pnl_neg = self._forward_single(self._flip_candles(x_micro, self.candle_features), self._flip_candles(x_mtf, self.candle_features), xm_neg, asset_ids)
 
         deep_dir_raw = 0.5 * ((logits_pos[:, 1] - logits_pos[:, 2]) - (logits_neg[:, 1] - logits_neg[:, 2]))
         deep_tanh = torch.tanh(deep_dir_raw)
-        # Full 0.25 gradient flow into deep PatchTST/Sigmoid Gate/Multi-Head during training via STE,
-        # with calibrated 0.015 residual influence during forward evaluation
-        deep_dir = 0.015 * deep_tanh + (0.25 * deep_tanh - 0.25 * deep_tanh.detach())
+
+        # Full 0.25 gradient flow into deep PatchTST/Sigmoid Gate/Multi-Head during training via STE;
+        # Clean 0.015 residual without dead detach graph nodes during inference (leak-free frozen graph)
+        if self.training:
+            deep_dir = 0.015 * deep_tanh + (0.25 * deep_tanh - 0.25 * deep_tanh.detach())
+        else:
+            deep_dir = 0.015 * deep_tanh
 
         # 2. Orthogonal 48-Feature + 30-Cell (Pair x Timeframe) Non-Linear Regime-Conditioned Alpha Stream
         alpha_dir, _ = self._compute_orthogonal_alpha(x_micro, x_mtf, x_macro)

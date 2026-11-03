@@ -190,8 +190,8 @@ public class ConfluenceMatrixEngine(
             return "NEUTRAL";
         }
 
-        Span<double> prices = ohlcCandles.Length <= 64 ? stackalloc double[ohlcCandles.Length] : new double[ohlcCandles.Length];
-        Span<double> vols   = ohlcCandles.Length <= 64 ? stackalloc double[ohlcCandles.Length] : new double[ohlcCandles.Length];
+        Span<double> prices = ohlcCandles.Length <= 256 ? stackalloc double[ohlcCandles.Length] : new double[ohlcCandles.Length];
+        Span<double> vols   = ohlcCandles.Length <= 256 ? stackalloc double[ohlcCandles.Length] : new double[ohlcCandles.Length];
         for (int i = 0; i < ohlcCandles.Length; i++)
         {
             prices[i] = ohlcCandles[i].Close;
@@ -566,6 +566,13 @@ public class ConfluenceMatrixEngine(
                     probCeiling = Math.Min(probCeiling, 52);
                     safetyNotes.Add($"⚠️ Шумовой флэт: размах свечей ({na.LocalAtrBps:F2} bps) ниже порога шума брокера ({na.NoiseFloorBps:F1} bps). Уверенность ограничена 52%.");
                 }
+                else if (na.LocalAtrBps >= na.NoiseFloorBps)
+                {
+                    // Аномальный спайк волатильности / ложный пробой (Squeeze / Flash Crash)
+                    finalProbPct = Math.Min(finalProbPct, 50);
+                    probCeiling = Math.Min(probCeiling, 50);
+                    safetyNotes.Add($"⚠️ Ложный пробой / Спайк волатильности: {na.RegimeDescription}. Вход нейтрализован риск-контролем.");
+                }
             }
             else
             {
@@ -619,6 +626,18 @@ public class ConfluenceMatrixEngine(
             }
         }
 
+        if (stateSignal != null && stateSignal.Regime == "DECELERATING" && finalDir is "BUY" or "PUT")
+        {
+            bool isOpposing = (finalDir == "BUY" && stateSignal.VelocityBpsPerSec > 0) ||
+                              (finalDir == "PUT" && stateSignal.VelocityBpsPerSec < 0);
+            if (isOpposing)
+            {
+                finalProbPct = Math.Min(finalProbPct, 55);
+                probCeiling = Math.Min(probCeiling, 55);
+                safetyNotes.Add("⚠️ Затухание импульса (Deceleration): вектор ускорения d2p/dt2 направлен против движения — риск отката перед экспирацией.");
+            }
+        }
+
         finalProbPct = Math.Min(finalProbPct, probCeiling);
 
         var coPilot = new System.Text.StringBuilder();
@@ -637,7 +656,7 @@ public class ConfluenceMatrixEngine(
         coPilot.AppendLine("[Показания датчиков C# (Телеметрия)]");
         coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
         coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult?.DominantDirection ?? "NEUTRAL"}{(mtfResult?.IsGoldenSetup == true ? " [GOLDEN]" : "")}");
-        coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal.VelocityBpsPerSec:F2} bps/s");
+        coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal?.VelocityBpsPerSec ?? 0.0:F2} bps/s");
         if (safetyNotes.Count > 0)
         {
             coPilot.AppendLine();
