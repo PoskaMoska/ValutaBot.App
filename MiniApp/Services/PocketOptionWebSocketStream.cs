@@ -61,10 +61,10 @@ public static class PocketOptionWebSocketStream
     private static int _consecutiveAuthFailures = 0;
     private static DateTime _lastAuthAlertUtc = DateTime.MinValue;
 
-    private static readonly ReadOnlyMemory<byte> PongBytes = Encoding.UTF8.GetBytes("3");
-    private static readonly ReadOnlyMemory<byte> PingBytes = Encoding.UTF8.GetBytes("2");
-    private static readonly ReadOnlyMemory<byte> ConnectBytes = Encoding.UTF8.GetBytes("40");
-    private static readonly ReadOnlyMemory<byte> PsBytes = Encoding.UTF8.GetBytes("42[\"ps\"]");
+    private static readonly ReadOnlyMemory<byte> PongBytes = "3"u8.ToArray();
+    private static readonly ReadOnlyMemory<byte> PingBytes = "2"u8.ToArray();
+    private static readonly ReadOnlyMemory<byte> ConnectBytes = "40"u8.ToArray();
+    private static readonly ReadOnlyMemory<byte> PsBytes = "42[\"ps\"]"u8.ToArray();
 
     private static readonly ConcurrentDictionary<string, string> _canonicalAssetCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, (string BaseAsset, string CandleKey)> _assetKeysCache = new(StringComparer.OrdinalIgnoreCase);
@@ -995,7 +995,7 @@ public static class PocketOptionWebSocketStream
                 }
 
                 // 2. Engine.IO ping/pong heartbeat & 41 namespace disconnect (Auth Rejected)
-                if (span.Length == 1 && span[0] == (byte)'2')
+                if (span.Length == 1 && (span[0] == 0x32 || span[0] == (byte)'2'))
                 {
                     // Immediate zero-copy pong reply without blocking on tick queue
                     await SendPongAsync(ws, connectionToken).ConfigureAwait(false);
