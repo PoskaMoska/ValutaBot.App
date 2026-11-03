@@ -62,25 +62,9 @@ public class ConfluenceMatrixEngine(
             primaryCandles = StripUnclosedCandle(primaryCandles, primaryTf);
             macroCandles   = StripUnclosedCandle(macroCandles, macroTf);
 
-            static (double[] prices, double[] volumes) ExtractPricesAndVolumes(MiniAppController.OhlcCandle[] candles)
-            {
-                double[] p = new double[candles.Length];
-                double[] v = new double[candles.Length];
-                for (int i = 0; i < candles.Length; i++)
-                {
-                    p[i] = candles[i].Close;
-                    v[i] = candles[i].Volume;
-                }
-                return (p, v);
-            }
-
-            var (microPrices, microVols) = ExtractPricesAndVolumes(microCandles);
-            var (primaryPrices, primaryVols) = ExtractPricesAndVolumes(primaryCandles);
-            var (macroPrices, macroVols) = ExtractPricesAndVolumes(macroCandles);
-
-            string dirMicro   = ScoreDirectionFromCandles(microCandles, microPrices, microVols, microTf, asset);
-            string dirPrimary = ScoreDirectionFromCandles(primaryCandles, primaryPrices, primaryVols, primaryTf, asset);
-            string dirMacro   = ScoreDirectionFromCandles(macroCandles, macroPrices, macroVols, macroTf, asset);
+            string dirMicro   = ScoreDirectionFromCandles(microCandles, microTf, asset);
+            string dirPrimary = ScoreDirectionFromCandles(primaryCandles, primaryTf, asset);
+            string dirMacro   = ScoreDirectionFromCandles(macroCandles, macroTf, asset);
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -167,14 +151,14 @@ public class ConfluenceMatrixEngine(
     /// </summary>
     private string ScoreDirectionFromCandles(
         MiniAppController.OhlcCandle[] ohlcCandles,
-        double[] prices,
-        double[] volumes,
+        ReadOnlySpan<double> prices,
+        ReadOnlySpan<double> volumes,
         string tf,
         string asset = "global")
     {
-        if (prices == null || prices.Length < 10 || ohlcCandles == null || ohlcCandles.Length < 10)
+        if (prices.Length < 10 || ohlcCandles == null || ohlcCandles.Length < 10)
         {
-            BotLogger.Info($"[MTF Alignment] Not enough real OHLC candles for {tf} ({prices?.Length ?? 0}) — returning NEUTRAL.");
+            BotLogger.Info($"[MTF Alignment] Not enough real OHLC candles for {tf} ({prices.Length}) — returning NEUTRAL.");
             return "NEUTRAL";
         }
 
@@ -193,6 +177,27 @@ public class ConfluenceMatrixEngine(
             BotLogger.Warn($"[MTF Alignment] ScoreDirectionFromCandles failed for {tf}: {ex.Message}");
             return "NEUTRAL";
         }
+    }
+
+    private string ScoreDirectionFromCandles(
+        MiniAppController.OhlcCandle[] ohlcCandles,
+        string tf,
+        string asset = "global")
+    {
+        if (ohlcCandles == null || ohlcCandles.Length < 10)
+        {
+            BotLogger.Info($"[MTF Alignment] Not enough real OHLC candles for {tf} ({ohlcCandles?.Length ?? 0}) — returning NEUTRAL.");
+            return "NEUTRAL";
+        }
+
+        Span<double> prices = ohlcCandles.Length <= 64 ? stackalloc double[ohlcCandles.Length] : new double[ohlcCandles.Length];
+        Span<double> vols   = ohlcCandles.Length <= 64 ? stackalloc double[ohlcCandles.Length] : new double[ohlcCandles.Length];
+        for (int i = 0; i < ohlcCandles.Length; i++)
+        {
+            prices[i] = ohlcCandles[i].Close;
+            vols[i]   = ohlcCandles[i].Volume;
+        }
+        return ScoreDirectionFromCandles(ohlcCandles, prices, vols, tf, asset);
     }
 
     public async Task<ConfluenceMatrixResult> Evaluate4DMatrixAsync(
@@ -222,31 +227,31 @@ public class ConfluenceMatrixEngine(
 
         try
         {
-            string dirMicro = "NEUTRAL";
-            string dirPrimary = "NEUTRAL";
-            string dirMacro = "NEUTRAL";
-
-            Task<string> FetchAndScoreAsync(string targetTf) => Task.Run(async () =>
+            async Task<string> FetchAndScoreAsync(string targetTf)
             {
                 var candlesRaw = await fetcher.FetchOhlcWithFallbackAsync(binanceSymbol, targetTf, asset, 50);
                 candlesRaw = StripUnclosedCandle(candlesRaw, targetTf);
-                double[] pricesRaw = new double[candlesRaw.Length];
-                double[] volsRaw = new double[candlesRaw.Length];
-                for (int i = 0; i < candlesRaw.Length; i++) { pricesRaw[i] = candlesRaw[i].Close; volsRaw[i] = candlesRaw[i].Volume; }
-                return ScoreDirectionFromCandles(candlesRaw, pricesRaw, volsRaw, targetTf, asset);
-            });
+                return ScoreDirectionFromCandles(candlesRaw, targetTf, asset);
+            }
 
-            dirMicro = microTf == currentTf ? ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), microTf, asset)
-                     : microTf == hTf ? ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), microTf, asset)
-                     : await FetchAndScoreAsync(microTf);
+            Task<string> GetTfTask(string targetTf)
+            {
+                if (targetTf == currentTf)
+                    return Task.FromResult(ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), targetTf, asset));
+                if (targetTf == hTf)
+                    return Task.FromResult(ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), targetTf, asset));
+                return FetchAndScoreAsync(targetTf);
+            }
 
-            dirPrimary = primaryTf == currentTf ? ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), primaryTf, asset)
-                       : primaryTf == hTf ? ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), primaryTf, asset)
-                       : await FetchAndScoreAsync(primaryTf);
+            var microTask = GetTfTask(microTf);
+            var primaryTask = GetTfTask(primaryTf);
+            var macroTask = GetTfTask(macroTf);
 
-            dirMacro = macroTf == currentTf ? ScoreDirectionFromCandles(currentCandles, currentPrices, currentVolumes ?? Array.Empty<double>(), macroTf, asset)
-                     : macroTf == hTf ? ScoreDirectionFromCandles(higherCandles, higherPrices, higherVolumes ?? Array.Empty<double>(), macroTf, asset)
-                     : await FetchAndScoreAsync(macroTf);
+            await Task.WhenAll(microTask, primaryTask, macroTask);
+
+            string dirMicro = await microTask;
+            string dirPrimary = await primaryTask;
+            string dirMacro = await macroTask;
 
             var tfDirs = new Dictionary<string, string>
             {
@@ -417,10 +422,20 @@ public class ConfluenceMatrixEngine(
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
 
         // D-2 fix: проверка отсутствия направленного MTF-консенсуса (пустой словарь/null или все TF == NEUTRAL при отсутствии DominantDirection).
+        bool hasMtfDirection = false;
+        if (mtfResult?.TimeframeDirections != null)
+        {
+            foreach (var d in mtfResult.TimeframeDirections.Values)
+            {
+                if (d is "BUY" or "PUT")
+                {
+                    hasMtfDirection = true;
+                    break;
+                }
+            }
+        }
         bool mtfBlind = mtfResult == null ||
-                        (mtfResult.DominantDirection is not ("BUY" or "PUT") &&
-                         (mtfResult.TimeframeDirections is not { Count: > 0 } ||
-                          !mtfResult.TimeframeDirections.Values.Any(d => d is "BUY" or "PUT")));
+                        (mtfResult.DominantDirection is not ("BUY" or "PUT") && !hasMtfDirection);
 
         int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
         int probCeiling = 100; // жёсткий потолок вероятности, применяется после всех стадий

@@ -13,6 +13,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
 
         public async Task ExecuteAsync(long chatId, string command, string cleanText, bool isAdmin, string token, string webAppUrl)
         {
+            TelegramBotService.UserStates.TryRemove(chatId, out _);
             bool isAllowedUser = await TelegramBotService.IsUserAllowed(chatId);
 
             if (isAdmin)
@@ -30,4 +31,3 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
         }
     }
 }
-

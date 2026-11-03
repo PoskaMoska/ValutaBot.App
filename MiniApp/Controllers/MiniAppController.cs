@@ -110,7 +110,11 @@ public static partial class MiniAppController
         var botSettings = builder.Configuration.GetSection("TradingBotSettings").Get<TradingBotSettings>() ?? new TradingBotSettings();
         builder.Services.Configure<TradingBotSettings>(builder.Configuration.GetSection("TradingBotSettings"));
         builder.Services.Configure<Microsoft.Extensions.Hosting.HostOptions>(options =>
-            options.BackgroundServiceExceptionBehavior = Microsoft.Extensions.Hosting.BackgroundServiceExceptionBehavior.Ignore);
+        {
+            options.BackgroundServiceExceptionBehavior = Microsoft.Extensions.Hosting.BackgroundServiceExceptionBehavior.Ignore;
+            options.ShutdownTimeout = TimeSpan.FromSeconds(15);
+            options.ServicesStopConcurrently = true;
+        });
 
         // Register Engines and Services in DI
         builder.Services.AddSingleton<MarketDataFetcher>();
@@ -351,7 +355,7 @@ public static partial class MiniAppController
             try
             {
                 Console.WriteLine("[TickCollector] Application stopping: performing final tick flush to DB...");
-                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 RealtimeTickCollector.StopAsync(shutdownCts.Token).GetAwaiter().GetResult();
             }
             catch (Exception ex)

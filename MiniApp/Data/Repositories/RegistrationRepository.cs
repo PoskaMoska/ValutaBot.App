@@ -13,7 +13,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
             return await DbConnectionFactory.WithRetryAsync(async conn =>
-                await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM registrations"));
+                await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM registrations", commandTimeout: 8));
         }
 
         public static async Task<List<TelegramBotService.PocketRegistration>> GetLatestRegistrationsAsync(int limit = 15)
@@ -26,7 +26,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                              trial_started_at as TrialStartedAt, trial_ends_at as TrialEndsAt,
                              reminder_day2_sent as ReminderDay2Sent, reminder_day3_sent as ReminderDay3Sent, trial_expired_sent as TrialExpiredSent
                       FROM registrations ORDER BY pocket_id DESC LIMIT @limit",
-                    new { limit });
+                    new { limit }, commandTimeout: 8);
                 return result.ToList();
             });
         }
@@ -40,7 +40,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                              trial_started_at as TrialStartedAt, trial_ends_at as TrialEndsAt,
                              reminder_day2_sent as ReminderDay2Sent, reminder_day3_sent as ReminderDay3Sent, trial_expired_sent as TrialExpiredSent
                       FROM registrations WHERE pocket_id = @pocketId",
-                    new { pocketId }));
+                    new { pocketId }, commandTimeout: 8));
         }
 
         public static async Task<TelegramBotService.PocketRegistration?> GetRegistrationByChatIdAsync(long chatId)
@@ -52,7 +52,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                              trial_started_at as TrialStartedAt, trial_ends_at as TrialEndsAt,
                              reminder_day2_sent as ReminderDay2Sent, reminder_day3_sent as ReminderDay3Sent, trial_expired_sent as TrialExpiredSent
                       FROM registrations WHERE chat_id = @chatId ORDER BY trial_started_at DESC NULLS LAST LIMIT 1",
-                    new { chatId }));
+                    new { chatId }, commandTimeout: 8));
         }
 
         public static async Task<List<TelegramBotService.PocketRegistration>> GetActiveTrialsForRemindersAsync()
@@ -68,7 +68,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                       WHERE has_deposited = FALSE 
                         AND chat_id > 0 
                         AND trial_started_at IS NOT NULL 
-                        AND trial_ends_at IS NOT NULL");
+                        AND trial_ends_at IS NOT NULL", commandTimeout: 8);
                 return result.ToList();
             });
         }
@@ -102,7 +102,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                     reg.ReminderDay2Sent,
                     reg.ReminderDay3Sent,
                     reg.TrialExpiredSent 
-                });
+                }, commandTimeout: 8);
             });
         }
     }

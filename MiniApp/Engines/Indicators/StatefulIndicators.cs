@@ -63,6 +63,33 @@ public sealed class StatefulRsi
         return 100.0 - (100.0 / (1.0 + (_avgGain / _avgLoss)));
     }
 
+    /// <summary>
+    /// Computes RSI for the live unclosed candle without modifying indicator state and without heap cloning.
+    /// </summary>
+    public double ComputeLive(double price)
+    {
+        if (!double.IsFinite(price))
+            return _count <= _period ? 50.0 : (_avgLoss < 1e-10 ? (_avgGain < 1e-10 ? 50.0 : 100.0) : 100.0 - (100.0 / (1.0 + (_avgGain / _avgLoss))));
+
+        if (_count <= _period)
+        {
+            var clone = Clone();
+            return clone.Update(price);
+        }
+
+        double diff = price - _prevPrice;
+        double gain = diff > 0 ? diff : 0;
+        double loss = diff < 0 ? -diff : 0;
+        double avgGain = (_avgGain * (_period - 1) + gain) / _period;
+        double avgLoss = (_avgLoss * (_period - 1) + loss) / _period;
+
+        if (avgGain < 1e-10) avgGain = 0;
+        if (avgLoss < 1e-10) avgLoss = 0;
+
+        if (avgLoss < 1e-10) return avgGain < 1e-10 ? 50.0 : 100.0;
+        return 100.0 - (100.0 / (1.0 + (avgGain / avgLoss)));
+    }
+
     public bool IsWarm => _count > _period;
 
     public StatefulRsi Clone() => (StatefulRsi)this.MemberwiseClone();
@@ -255,6 +282,16 @@ public sealed class StatefulEma
         return _ema;
     }
 
+    /// <summary>
+    /// Computes EMA for the live unclosed candle without modifying indicator state and without heap cloning.
+    /// </summary>
+    public double ComputeLive(double price)
+    {
+        if (!double.IsFinite(price)) return _count < _period ? 0.0 : _ema;
+        if (_count < _period) return 0.0;
+        return (price - _ema) * _k + _ema;
+    }
+
     public bool IsWarm => _count >= _period;
 
     public StatefulEma Clone() => (StatefulEma)this.MemberwiseClone();
@@ -307,6 +344,22 @@ public sealed class StatefulAtr
         _count++;
         LastAtr = _atr;
         return _atr;
+    }
+
+    /// <summary>
+    /// Computes ATR for the live unclosed candle without modifying indicator state and without heap cloning.
+    /// </summary>
+    public double ComputeLive(double high, double low, double close)
+    {
+        if (!double.IsFinite(high) || !double.IsFinite(low) || !double.IsFinite(close) || high < low || _count <= _period)
+            return LastAtr;
+
+        double tr = Math.Max(high - low,
+                    Math.Max(Math.Abs(high - _prevClose),
+                             Math.Abs(low  - _prevClose)));
+        double atr = (_atr * (_period - 1) + tr) / _period;
+        if (atr < 1e-10) atr = 0;
+        return atr;
     }
 
     public bool IsWarm => _count > _period;
@@ -416,6 +469,45 @@ public sealed class StatefulTrueAdx
         _count++;
         LastAdx = isWarm ? _adx : 20.0;
         return LastAdx;
+    }
+
+    /// <summary>
+    /// Computes ADX for the live unclosed candle without modifying indicator state and without heap cloning.
+    /// </summary>
+    public (double adx, double pdi, double mdi) ComputeLive(double high, double low, double close)
+    {
+        if (!double.IsFinite(high) || !double.IsFinite(low) || !double.IsFinite(close) || high < low || _count <= _period * 2)
+        {
+            var clone = Clone();
+            clone.Update(high, low, close);
+            return (clone.LastAdx, clone.LastPdi, clone.LastMdi);
+        }
+
+        double tr = Math.Max(high - low,
+                    Math.Max(Math.Abs(high - _prevClose),
+                             Math.Abs(low  - _prevClose)));
+        double upMove   = high - _prevHigh;
+        double downMove = _prevLow - low;
+
+        double pdm = (upMove   > downMove && upMove   > 0) ? upMove   : 0;
+        double mdm = (downMove > upMove   && downMove > 0) ? downMove : 0;
+
+        double smoothTr  = _smoothTr  - (_smoothTr  / _period) + tr;
+        double smoothPdm = _smoothPdm - (_smoothPdm / _period) + pdm;
+        double smoothMdm = _smoothMdm - (_smoothMdm / _period) + mdm;
+
+        if (smoothTr < 1e-10) smoothTr = 0;
+        if (smoothPdm < 1e-10) smoothPdm = 0;
+        if (smoothMdm < 1e-10) smoothMdm = 0;
+
+        double lastPdi = smoothTr == 0 ? 0 : 100.0 * smoothPdm / smoothTr;
+        double lastMdi = smoothTr == 0 ? 0 : 100.0 * smoothMdm / smoothTr;
+        double dx = (lastPdi + lastMdi) == 0
+            ? 0
+            : 100.0 * Math.Abs(lastPdi - lastMdi) / (lastPdi + lastMdi);
+
+        double adx = (_adx * (_period - 1) + dx) / _period;
+        return (adx, lastPdi, lastMdi);
     }
 
     public bool IsWarm => _count > _period * 2;

@@ -26,6 +26,9 @@ public partial class TelegramBotService : BackgroundService
     private static string _webAppUrl = "https://chowder-dreamland-spotlight.ngrok-free.dev";
 
     private static long _tgBlockedUntilTicks = 0;
+    private static readonly ConcurrentDictionary<long, long> _lastOutboundTicksPerChat = new();
+    private static long _lastGlobalSendTick = 0;
+    private static readonly object _globalThrottleLock = new();
 
     internal static async Task WaitTgGateAsync(CancellationToken ct = default)
     {
@@ -36,6 +39,56 @@ public partial class TelegramBotService : BackgroundService
             if (remaining > TimeSpan.Zero)
             {
                 await Task.Delay(remaining, ct);
+            }
+        }
+    }
+
+    internal static async Task ThrottleOutboundAsync(long chatId, CancellationToken ct = default)
+    {
+        // 1. Reactive 429 circuit-breaker wait
+        await WaitTgGateAsync(ct);
+
+        // 2. Global rate throttle: enforce <= 25 msg/s globally (minimum 40ms interval between outbound HTTP requests)
+        long globalDelayMs = 0;
+        lock (_globalThrottleLock)
+        {
+            long now = DateTime.UtcNow.Ticks;
+            long nextAllowed = Math.Max(now, _lastGlobalSendTick + TimeSpan.FromMilliseconds(40).Ticks);
+            if (nextAllowed > now)
+            {
+                globalDelayMs = (long)TimeSpan.FromTicks(nextAllowed - now).TotalMilliseconds;
+            }
+            _lastGlobalSendTick = nextAllowed;
+        }
+        if (globalDelayMs > 0)
+        {
+            await Task.Delay((int)globalDelayMs, ct);
+        }
+
+        // 3. Per-chat rate limit: enforce at most 1 msg/s per specific chat (1050ms interval)
+        if (chatId != 0)
+        {
+            while (true)
+            {
+                long nowTicks = DateTime.UtcNow.Ticks;
+                long lastTicks = _lastOutboundTicksPerChat.GetOrAdd(chatId, 0);
+                long elapsedTicks = nowTicks - lastTicks;
+                long minIntervalTicks = TimeSpan.FromMilliseconds(1050).Ticks;
+
+                if (elapsedTicks < minIntervalTicks)
+                {
+                    int delayMs = (int)TimeSpan.FromTicks(minIntervalTicks - elapsedTicks).TotalMilliseconds;
+                    if (delayMs > 0)
+                    {
+                        await Task.Delay(delayMs, ct);
+                        continue;
+                    }
+                }
+
+                if (_lastOutboundTicksPerChat.TryUpdate(chatId, DateTime.UtcNow.Ticks, lastTicks))
+                {
+                    break;
+                }
             }
         }
     }
@@ -192,7 +245,8 @@ public partial class TelegramBotService : BackgroundService
             try
             {
                 string url = $"https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30";
-                var response = await MiniAppController.HttpFactory!.CreateClient("Telegram").GetAsync(url, stoppingToken);
+                var client = MiniAppController.HttpFactory?.CreateClient("Telegram") ?? _httpClient;
+                var response = await client.GetAsync(url, stoppingToken);
                 if (!response.IsSuccessStatusCode)
                 {
                     int backoffSeconds = 5;
@@ -417,147 +471,194 @@ public partial class TelegramBotService : BackgroundService
         };
     }
 
-    internal static async Task SendMessage(string token, long chatId, string text)
+    internal static async Task<bool> SendMessage(string token, long chatId, string text)
     {
-        await WaitTgGateAsync();
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
-        for (int attempt = 1; attempt <= 2; attempt++)
+        for (int attempt = 1; attempt <= 3; attempt++)
         {
+            await ThrottleOutboundAsync(chatId);
             try
             {
                 await client.SendTextMessageAsync(chatId, text, parseMode: ParseMode.Html);
-                return;
+                return true;
             }
-            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429 && attempt == 1)
+            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429)
             {
                 int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 120);
                 RegisterTgBlock(retrySec);
-                BotLogger.Warn($"[TG Bot] sendMessage 429 rate-limited. Retrying after {retrySec}s...");
-                await Task.Delay(TimeSpan.FromSeconds(retrySec));
+                BotLogger.Warn($"[TG Bot] sendMessage 429 rate-limited (attempt {attempt}/3). Retrying after {retrySec}s...");
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(retrySec));
+                    continue;
+                }
+                return false;
             }
             catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 400 && apiEx.Message.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
             {
                 BotLogger.Warn($"[TG Bot] sendMessage HTML entity parse failure on chat {chatId}. Falling back to plain text delivery: {apiEx.Message}");
                 try
                 {
+                    await ThrottleOutboundAsync(chatId);
                     await client.SendTextMessageAsync(chatId, text, parseMode: null);
-                    return;
+                    return true;
                 }
                 catch (Exception plainEx)
                 {
                     Console.WriteLine($"[TG Bot] sendMessage plain text fallback exception: {plainEx.Message}");
-                    return;
+                    return false;
                 }
+            }
+            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 403)
+            {
+                BotLogger.Warn($"[TG Bot] Chat {chatId} blocked the bot (403 Forbidden).");
+                return false;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TG Bot] sendMessage SDK exception: {ex.Message}");
-                return;
+                Console.WriteLine($"[TG Bot] sendMessage SDK exception (attempt {attempt}/3): {ex.Message}");
+                if (attempt < 3)
+                {
+                    await Task.Delay(1000 * attempt);
+                    continue;
+                }
+                return false;
             }
         }
+        return false;
     }
 
-    internal static async Task SendMessageWithKeyboard(string token, long chatId, string text, object keyboard)
+    internal static async Task<bool> SendMessageWithKeyboard(string token, long chatId, string text, object keyboard)
     {
         try
         {
+            await ThrottleOutboundAsync(chatId);
             var payload = new { chat_id = chatId, text, parse_mode = "HTML", reply_markup = keyboard };
             var json = JsonSerializer.Serialize(payload);
             using var resp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/sendMessage", json);
-            if (!resp.IsSuccessStatusCode)
+            if (resp.IsSuccessStatusCode)
             {
-                var err = await resp.Content.ReadAsStringAsync();
-                if (err.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
-                {
-                    BotLogger.Warn($"[TG Bot] SendMessageWithKeyboard HTML parse error on chat {chatId}. Retrying as plain text.");
-                    var fallbackPayload = new { chat_id = chatId, text, reply_markup = keyboard };
-                    var fallbackJson = JsonSerializer.Serialize(fallbackPayload);
-                    using var fbResp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/sendMessage", fallbackJson);
-                    return;
-                }
-                Console.WriteLine($"[TG Bot] sendMessage error: {err}");
+                return true;
             }
+
+            var err = await resp.Content.ReadAsStringAsync();
+            if (err.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
+            {
+                BotLogger.Warn($"[TG Bot] SendMessageWithKeyboard HTML parse error on chat {chatId}. Retrying as plain text.");
+                await ThrottleOutboundAsync(chatId);
+                var fallbackPayload = new { chat_id = chatId, text, reply_markup = keyboard };
+                var fallbackJson = JsonSerializer.Serialize(fallbackPayload);
+                using var fbResp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/sendMessage", fallbackJson);
+                return fbResp.IsSuccessStatusCode;
+            }
+            Console.WriteLine($"[TG Bot] sendMessage error: {err}");
+            return false;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[TG Bot] sendMessage exception: {ex.Message}");
+            return false;
         }
     }
 
-    internal static async Task EditMessageText(string token, long chatId, int messageId, string text)
+    internal static async Task<bool> EditMessageText(string token, long chatId, int messageId, string text)
     {
-        await WaitTgGateAsync();
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
-        for (int attempt = 1; attempt <= 2; attempt++)
+        for (int attempt = 1; attempt <= 3; attempt++)
         {
+            await ThrottleOutboundAsync(chatId);
             try
             {
                 await client.EditMessageTextAsync(chatId, messageId, text, parseMode: ParseMode.Html);
-                return;
+                return true;
             }
-            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429 && attempt == 1)
+            catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429)
             {
                 int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 120);
                 RegisterTgBlock(retrySec);
-                BotLogger.Warn($"[TG Bot] editMessageText 429 rate-limited. Retrying after {retrySec}s...");
-                await Task.Delay(TimeSpan.FromSeconds(retrySec));
+                BotLogger.Warn($"[TG Bot] editMessageText 429 rate-limited (attempt {attempt}/3). Retrying after {retrySec}s...");
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(retrySec));
+                    continue;
+                }
+                return false;
             }
             catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 400 && apiEx.Message.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
             {
                 BotLogger.Warn($"[TG Bot] editMessageText HTML parse failure on chat {chatId}. Falling back to plain text delivery.");
                 try
                 {
+                    await ThrottleOutboundAsync(chatId);
                     await client.EditMessageTextAsync(chatId, messageId, text, parseMode: null);
-                    return;
+                    return true;
                 }
                 catch (Exception plainEx)
                 {
                     Console.WriteLine($"[TG Bot] editMessageText plain text fallback exception: {plainEx.Message}");
-                    return;
+                    return false;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TG Bot] editMessageText SDK exception: {ex.Message}");
-                return;
+                Console.WriteLine($"[TG Bot] editMessageText SDK exception (attempt {attempt}/3): {ex.Message}");
+                if (attempt < 3)
+                {
+                    await Task.Delay(1000 * attempt);
+                    continue;
+                }
+                return false;
             }
         }
+        return false;
     }
 
-    internal static async Task EditMessageTextWithKeyboard(string token, long chatId, int messageId, string text, object keyboard)
+    internal static async Task<bool> EditMessageTextWithKeyboard(string token, long chatId, int messageId, string text, object keyboard)
     {
         try
         {
+            await ThrottleOutboundAsync(chatId);
             var payload = new { chat_id = chatId, message_id = messageId, text, parse_mode = "HTML", reply_markup = keyboard };
             var json = JsonSerializer.Serialize(payload);
             using var resp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/editMessageText", json);
-            if (!resp.IsSuccessStatusCode)
+            if (resp.IsSuccessStatusCode)
             {
-                var err = await resp.Content.ReadAsStringAsync();
-                if (err.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
-                {
-                    BotLogger.Warn($"[TG Bot] editMessageTextWithKeyboard HTML parse error on chat {chatId}. Retrying as plain text.");
-                    var fallbackPayload = new { chat_id = chatId, message_id = messageId, text, reply_markup = keyboard };
-                    var fallbackJson = JsonSerializer.Serialize(fallbackPayload);
-                    using var fbResp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/editMessageText", fallbackJson);
-                    return;
-                }
-                Console.WriteLine($"[TG Bot] editMessageTextWithKeyboard error: {err}");
+                return true;
             }
+
+            var err = await resp.Content.ReadAsStringAsync();
+            if (err.Contains("can't parse entities", StringComparison.OrdinalIgnoreCase))
+            {
+                BotLogger.Warn($"[TG Bot] editMessageTextWithKeyboard HTML parse error on chat {chatId}. Retrying as plain text.");
+                await ThrottleOutboundAsync(chatId);
+                var fallbackPayload = new { chat_id = chatId, message_id = messageId, text, reply_markup = keyboard };
+                var fallbackJson = JsonSerializer.Serialize(fallbackPayload);
+                using var fbResp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/editMessageText", fallbackJson);
+                return fbResp.IsSuccessStatusCode;
+            }
+            Console.WriteLine($"[TG Bot] editMessageTextWithKeyboard error: {err}");
+            return false;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[TG Bot] editMessageTextWithKeyboard exception: {ex.Message}");
+            return false;
         }
     }
 
     private static async Task AnswerCallbackQuery(string token, string callbackQueryId, string text)
     {
-        await WaitTgGateAsync();
+        await ThrottleOutboundAsync(0);
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
         try
         {
             await client.AnswerCallbackQueryAsync(callbackQueryId, text);
+        }
+        catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429)
+        {
+            int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 120);
+            RegisterTgBlock(retrySec);
+            BotLogger.Warn($"[TG Bot] answerCallbackQuery 429 rate-limited. Global gate engaged for {retrySec}s.");
         }
         catch (Exception ex)
         {
@@ -569,14 +670,14 @@ public partial class TelegramBotService : BackgroundService
     {
         try
         {
+            await ThrottleOutboundAsync(chatId);
             var payload = new
             {
                 chat_id = chatId,
                 menu_button = new { type = "default" }
             };
             var json = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            await MiniAppController.HttpFactory!.CreateClient("Telegram").PostAsync($"https://api.telegram.org/bot{token}/setChatMenuButton", content);
+            using var resp = await PostTelegramJsonWithRetryAsync($"https://api.telegram.org/bot{token}/setChatMenuButton", json);
         }
         catch { }
     }
@@ -592,12 +693,19 @@ public partial class TelegramBotService : BackgroundService
         var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
         try
         {
+            await ThrottleOutboundAsync(chatId);
             await using var stream = File.OpenRead(filePath);
             await client.SendDocumentAsync(
                 chatId: chatId,
                 document: InputFile.FromStream(stream, Path.GetFileName(filePath)),
                 caption: caption
             );
+        }
+        catch (Telegram.Bot.Exceptions.ApiRequestException apiEx) when (apiEx.ErrorCode == 429)
+        {
+            int retrySec = Math.Clamp(apiEx.Parameters?.RetryAfter ?? 5, 1, 120);
+            RegisterTgBlock(retrySec);
+            BotLogger.Warn($"[TG Bot] sendDocument 429 rate-limited. Global gate engaged for {retrySec}s.");
         }
         catch (Exception ex)
         {

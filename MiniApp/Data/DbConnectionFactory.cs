@@ -61,11 +61,11 @@ namespace ValutaBot.App.MiniApp.Data
             builder.ConnectionIdleLifetime = 30;       // Evict idle connections after 30s (below proxy ~60s timeout)
             builder.ConnectionPruningInterval = 5;     // Prune every 5s
             builder.Timeout = 15;                      // 15s connection timeout
-            builder.CommandTimeout = 30;
+            builder.CommandTimeout = 10;
             builder.Options = "-c idle_in_transaction_session_timeout=15000 -c lock_timeout=5000";
 
             // Pool capacity 50 with warm minimum connections to avoid reconnect storms
-            builder.MaxPoolSize = 50;
+            builder.MaxPoolSize = 100;
             builder.MinPoolSize = 2;
 
             string built = builder.ToString();
@@ -502,8 +502,8 @@ namespace ValutaBot.App.MiniApp.Data
                         ALTER TABLE pending_trades SET (
                             fillfactor = 70,
                             autovacuum_vacuum_threshold = 20,
-                            autovacuum_vacuum_scale_factor = 0.01,
-                            autovacuum_vacuum_cost_limit = 1000,
+                            autovacuum_vacuum_scale_factor = 0.05,
+                            autovacuum_vacuum_cost_limit = 500,
                             autovacuum_vacuum_cost_delay = 2
                         );
                     EXCEPTION WHEN others THEN END;

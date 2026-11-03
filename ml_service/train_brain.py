@@ -58,7 +58,7 @@ class PayoutAsymmetricFocalLoss(nn.Module):
         super().__init__()
         self.alpha = alpha  # tensor of shape [3]: [w_hold, w_buy, w_put]
         self.gamma = gamma
-        self.label_smoothing = label_smoothing
+        self.label_smoothing = min(0.05, max(0.0, label_smoothing))
         self.adverse_loss_mult = 1.0 / max(0.50, payout_ratio)  # ~1.1765x loss penalty
 
     def forward(self, inputs, targets, sample_weights=None):
@@ -74,25 +74,28 @@ class PayoutAsymmetricFocalLoss(nn.Module):
 
         one_hot = torch.zeros_like(inputs_fp32).scatter_(1, targets.unsqueeze(1), 1.0)
         if self.label_smoothing > 0.0:
-            targets_smooth = one_hot * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
+            # Directional-safe smoothing: directional classes (BUY/PUT) smooth ONLY towards HOLD (class 0),
+            # NEVER into the opposite losing direction!
+            targets_smooth = one_hot * (1.0 - self.label_smoothing)
+            targets_smooth[:, 0] += self.label_smoothing * (targets > 0).float()
+            targets_smooth[:, 1:] += (self.label_smoothing / 2.0) * (targets == 0).float().unsqueeze(1)
         else:
             targets_smooth = one_hot
 
         ce_focal = -(targets_smooth * focal_weight * log_p).sum(dim=-1)
 
-        # Asymmetric binary option EV penalty on false entries & opposite directional predictions:
-        # 1. Если рынок во флэте (target=0), вход в BUY (p1) или PUT (p2) наказывается полной ставкой
-        # 2. Если рынок BUY (target=1), вход в противоположный PUT (p2) наказывается с мультипликатором adverse_loss_mult
-        # 3. Если рынок PUT (target=2), вход в противоположный BUY (p1) наказывается с мультипликатором adverse_loss_mult
+        # Strict Binary Option Cost-Sensitive Penalty:
+        # 1. False Positive on Chop (target=0): taking BUY (p1) or PUT (p2) loses 100% of stake -> penalized with full adverse_loss_mult!
+        # 2. Directional Reversal (target=1 vs p2, target=2 vs p1): losing trade -> penalized with adverse_loss_mult
+        # 3. False Negative / Missed trade (target=1 or 2 with p0): capital preserved ($0 PnL) -> zero adverse penalty
         adverse_exposure = torch.where(
-            targets == 0, (p[:, 1] + p[:, 2]),
+            targets == 0, self.adverse_loss_mult * (p[:, 1] + p[:, 2]),
             torch.where(targets == 1, self.adverse_loss_mult * p[:, 2],
             torch.where(targets == 2, self.adverse_loss_mult * p[:, 1], torch.zeros_like(p[:, 0])))
         )
-        # adverse_exposure already contains adverse_loss_mult inside torch.where branches,
-        # so applying it again would double-count (1.18^2 ≈ 1.39x instead of intended 1.18x).
-        asymmetric_ev_penalty = adverse_exposure
-        loss = ce_focal + 0.5 * asymmetric_ev_penalty
+
+        # Full 1.0 weight on adverse exposure aligns loss with mathematical expectation of Pocket Option payouts
+        loss = ce_focal + adverse_exposure
 
         if sample_weights is not None:
             loss = loss * sample_weights.float()

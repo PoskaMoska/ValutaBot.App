@@ -27,6 +27,15 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
                 {
                     TelegramBotService.UserSubmittedIds[chatId] = pocketId;
                     var reg = await RegistrationRepository.GetPocketRegistrationAsync(pocketId);
+
+                    // SECURITY: Prevent Pocket ID hijacking via manual text submission
+                    if (reg != null && reg.ChatId > 0 && reg.ChatId != chatId)
+                    {
+                        BotLogger.Warn($"[Security 🛡️] Chat {chatId} attempted to claim Pocket ID {pocketId} belonging to chat {reg.ChatId}");
+                        await TelegramBotService.SendMessage(token, chatId, "❌ <b>Этот Pocket ID уже привязан к другому Telegram-аккаунту.</b>");
+                        return;
+                    }
+
                     bool foundReg = reg != null && reg.HasRegistered;
                     bool hasDeposited = reg != null && reg.HasDeposited;
 

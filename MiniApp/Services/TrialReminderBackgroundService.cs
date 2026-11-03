@@ -74,9 +74,12 @@ namespace ValutaBot.MiniApp.Services
                     if (now >= reg.TrialEndsAt.Value && !reg.TrialExpiredSent)
                     {
                         messageAttempted = true;
-                        await SendExpiredNoticeAsync(token, reg);
-                        reg.TrialExpiredSent = true;
-                        await RegistrationRepository.SaveRegistrationAsync(reg);
+                        bool sent = await SendExpiredNoticeAsync(token, reg);
+                        if (sent)
+                        {
+                            reg.TrialExpiredSent = true;
+                            await RegistrationRepository.SaveRegistrationAsync(reg);
+                        }
                         continue;
                     }
 
@@ -90,10 +93,13 @@ namespace ValutaBot.MiniApp.Services
                     if (remainingHours <= 12.0 && !reg.ReminderDay3Sent)
                     {
                         messageAttempted = true;
-                        await SendDay3UrgencyReminderAsync(token, reg, now);
-                        reg.ReminderDay3Sent = true;
-                        reg.ReminderDay2Sent = true; // Mark day 2 as well to prevent late out-of-order sending
-                        await RegistrationRepository.SaveRegistrationAsync(reg);
+                        bool sent = await SendDay3UrgencyReminderAsync(token, reg, now);
+                        if (sent)
+                        {
+                            reg.ReminderDay3Sent = true;
+                            reg.ReminderDay2Sent = true; // Mark day 2 as well to prevent late out-of-order sending
+                            await RegistrationRepository.SaveRegistrationAsync(reg);
+                        }
                         continue;
                     }
 
@@ -102,9 +108,12 @@ namespace ValutaBot.MiniApp.Services
                     if (elapsedHours >= 24.0 && remainingHours > 12.0 && !reg.ReminderDay2Sent)
                     {
                         messageAttempted = true;
-                        await SendDay2ValueReminderAsync(token, reg, now);
-                        reg.ReminderDay2Sent = true;
-                        await RegistrationRepository.SaveRegistrationAsync(reg);
+                        bool sent = await SendDay2ValueReminderAsync(token, reg, now);
+                        if (sent)
+                        {
+                            reg.ReminderDay2Sent = true;
+                            await RegistrationRepository.SaveRegistrationAsync(reg);
+                        }
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -129,7 +138,7 @@ namespace ValutaBot.MiniApp.Services
             }
         }
 
-        private static async Task SendDay2ValueReminderAsync(string token, TelegramBotService.PocketRegistration reg, DateTime now)
+        private static async Task<bool> SendDay2ValueReminderAsync(string token, TelegramBotService.PocketRegistration reg, DateTime now)
         {
             var (winRate, topPairs, totalSignals) = await GetRecentMarketStatsAsync();
             int remainingHours = reg.TrialEndsAt.HasValue ? Math.Max(1, (int)Math.Round((reg.TrialEndsAt.Value - now).TotalHours)) : 48;
@@ -151,10 +160,10 @@ namespace ValutaBot.MiniApp.Services
                 }
             };
 
-            await TelegramBotService.SendMessageWithKeyboard(token, reg.ChatId, text, keyboard);
+            return await TelegramBotService.SendMessageWithKeyboard(token, reg.ChatId, text, keyboard);
         }
 
-        private static async Task SendDay3UrgencyReminderAsync(string token, TelegramBotService.PocketRegistration reg, DateTime now)
+        private static async Task<bool> SendDay3UrgencyReminderAsync(string token, TelegramBotService.PocketRegistration reg, DateTime now)
         {
             int remainingHours = reg.TrialEndsAt.HasValue ? Math.Max(1, (int)Math.Round((reg.TrialEndsAt.Value - now).TotalHours)) : 12;
             string safePocketId = System.Net.WebUtility.HtmlEncode(reg.PocketId ?? "");
@@ -174,10 +183,10 @@ namespace ValutaBot.MiniApp.Services
                 }
             };
 
-            await TelegramBotService.SendMessageWithKeyboard(token, reg.ChatId, text, keyboard);
+            return await TelegramBotService.SendMessageWithKeyboard(token, reg.ChatId, text, keyboard);
         }
 
-        private static async Task SendExpiredNoticeAsync(string token, TelegramBotService.PocketRegistration reg)
+        private static async Task<bool> SendExpiredNoticeAsync(string token, TelegramBotService.PocketRegistration reg)
         {
             int signalsObserved = await GetTradeCountBetweenAsync(reg.TrialStartedAt, reg.TrialEndsAt);
             string safePocketId = System.Net.WebUtility.HtmlEncode(reg.PocketId ?? "");
@@ -202,7 +211,7 @@ namespace ValutaBot.MiniApp.Services
                 }
             };
 
-            await TelegramBotService.SendMessageWithKeyboard(token, reg.ChatId, text, keyboard);
+            return await TelegramBotService.SendMessageWithKeyboard(token, reg.ChatId, text, keyboard);
         }
 
         public static async Task<(double WinRate, string TopPairs, int TotalTrades)> GetRecentMarketStatsAsync()

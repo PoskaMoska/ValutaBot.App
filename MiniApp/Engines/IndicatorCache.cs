@@ -157,8 +157,7 @@ internal sealed class IndicatorCache
                 }
             }
 
-            var liveRsi = s.RsiBase.Clone();
-            s.RsiLast = liveRsi.Update(candles[^1].Close);
+            s.RsiLast = s.RsiBase.ComputeLive(candles[^1].Close);
             return s.RsiLast;
         }
     }
@@ -235,12 +234,7 @@ internal sealed class IndicatorCache
                     s.HmaBase.Update(candles[i].Close);
 
                 // Одно обновление candles[^2] → текущий base = previous HMA
-                var tempBase = s.HmaBase.Clone();
-                double prevHmaVal = tempBase.Update(candles[^2].Close);
-                s.HmaPrev = prevHmaVal;
-
-                // Полный прогрев до candles[^2] включительно
-                s.HmaBase.Update(candles[^2].Close);
+                s.HmaPrev = s.HmaBase.Update(candles[^2].Close);
                 s.HmaLastClosedTick = candles.Length > 1 ? candles[^2].Timestamp.Ticks : 0;
                 s.LastFullReset = DateTime.UtcNow;
             }
@@ -250,9 +244,7 @@ internal sealed class IndicatorCache
                 {
                     if (candles[i].Timestamp.Ticks > s.HmaLastClosedTick)
                     {
-                        var prev = s.HmaBase.Clone();
-                        s.HmaPrev = prev.Update(candles[i].Close);
-                        s.HmaBase.Update(candles[i].Close);
+                        s.HmaPrev = s.HmaBase.Update(candles[i].Close);
                         s.HmaLastClosedTick = candles[i].Timestamp.Ticks;
                     }
                 }
@@ -299,8 +291,7 @@ internal sealed class IndicatorCache
                 }
             }
 
-            var liveEma = s.EmaBase.Clone();
-            s.EmaLast = liveEma.Update(candles[^1].Close);
+            s.EmaLast = s.EmaBase.ComputeLive(candles[^1].Close);
             return s.EmaLast;
         }
     }
@@ -338,9 +329,7 @@ internal sealed class IndicatorCache
                 }
             }
 
-            var liveAdx = s.AdxBase.Clone();
-            liveAdx.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
-            return (liveAdx.LastAdx, liveAdx.LastPdi, liveAdx.LastMdi);
+            return s.AdxBase.ComputeLive(candles[^1].High, candles[^1].Low, candles[^1].Close);
         }
     }
 
@@ -377,9 +366,7 @@ internal sealed class IndicatorCache
                 }
             }
 
-            var liveAtr = s.AtrBase.Clone();
-            liveAtr.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
-            return liveAtr.LastAtr;
+            return s.AtrBase.ComputeLive(candles[^1].High, candles[^1].Low, candles[^1].Close);
         }
     }
 
@@ -426,14 +413,10 @@ internal sealed class IndicatorCache
         ReadOnlySpan<MiniAppController.OhlcCandle> candles, int period = 14)
     {
         if (candles.Length <= period) return 0.0;
-        // Feed all but the last candle into a fresh stateful ATR
         var atr = new StatefulAtr(period);
-        for (int i = 0; i < candles.Length - 1; i++)
+        for (int i = 0; i < candles.Length; i++)
             atr.Update(candles[i].High, candles[i].Low, candles[i].Close);
-        // Apply the live (potentially unclosed) candle in a throw-away clone
-        var live = atr.Clone();
-        live.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
-        return live.LastAtr;
+        return atr.LastAtr;
     }
 
     public static (double adx, double pdi, double mdi) ComputeAdxRaw(
@@ -441,11 +424,9 @@ internal sealed class IndicatorCache
     {
         if (candles.Length <= period) return (20.0, 0.0, 0.0);
         var adx = new StatefulTrueAdx(period);
-        for (int i = 0; i < candles.Length - 1; i++)
+        for (int i = 0; i < candles.Length; i++)
             adx.Update(candles[i].High, candles[i].Low, candles[i].Close);
-        var live = adx.Clone();
-        live.Update(candles[^1].High, candles[^1].Low, candles[^1].Close);
-        return (live.LastAdx, live.LastPdi, live.LastMdi);
+        return (adx.LastAdx, adx.LastPdi, adx.LastMdi);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

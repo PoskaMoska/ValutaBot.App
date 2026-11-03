@@ -48,6 +48,18 @@ namespace ValutaBot.MiniApp
 
         private record struct TickEvent(string Asset, string Interval, double Price, DateTime OpenTime);
 
+        private sealed class CandleBatchAggregate
+        {
+            public required string Asset { get; init; }
+            public required string Interval { get; init; }
+            public required DateTime OpenTime { get; init; }
+            public double Open { get; set; }
+            public double High { get; set; }
+            public double Low { get; set; }
+            public double Close { get; set; }
+            public int Volume { get; set; }
+        }
+
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s5  = new(StringComparer.OrdinalIgnoreCase);
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s10 = new(StringComparer.OrdinalIgnoreCase);
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s15 = new(StringComparer.OrdinalIgnoreCase);
@@ -224,10 +236,9 @@ namespace ValutaBot.MiniApp
         {
             try
             {
-                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
-                await conn.OpenAsync();
+                await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync();
                 
-                var records = (await Dapper.SqlMapper.QueryAsync(conn, @"
+                var records = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(@"
                     WITH ranked AS (
                         SELECT asset, interval, open_time, open_price, high_price, low_price, close_price, volume,
                                ROW_NUMBER() OVER (PARTITION BY asset, interval ORDER BY open_time DESC) as rn
@@ -237,8 +248,7 @@ namespace ValutaBot.MiniApp
                     SELECT asset, interval, open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume""
                     FROM ranked
                     WHERE rn <= 250
-                    ORDER BY asset, interval, open_time ASC;
-                ")).ToList();
+                    ORDER BY asset, interval, open_time ASC;", commandTimeout: 10))).ToList();
 
                 int loaded = 0;
                 foreach (var g in records.GroupBy(r => $"{r.asset}:{r.interval}"))
@@ -373,42 +383,45 @@ namespace ValutaBot.MiniApp
 
                 await using var tx = await conn.BeginTransactionAsync(ct);
                 
-                // D1-1 FIX: Materialise each group into a List before First/Last.
-                // Channel.CreateBounded with DropOldest evicts the oldest entries when full,
-                // but the items already consumed into 'buffer' retain their insertion (FIFO) order.
-                // Since Channel is SingleReader, buffer preserves the order ticks arrived from WS.
-                // Calling g.ToList() locks in that FIFO order so First()=oldest=Open, Last()=newest=Close.
-                // Гарантируем строгий порядок взятия строковых блокировок для исключения взаимных блокировок (Deadlocks)
-                var grouped = buffer
-                    .GroupBy(t => new { t.Asset, t.Interval, t.OpenTime })
-                    .OrderBy(g => g.Key.Asset)
-                    .ThenBy(g => g.Key.Interval)
-                    .ThenBy(g => g.Key.OpenTime)
-                    .Select(g =>
+                // Single-pass O(N) aggregation: eliminates nested LINQ GroupBy/OrderBy/ToList allocations
+                // and guarantees correct Open (chronologically first tick) and Close (chronologically last tick).
+                var map = new Dictionary<(string Asset, string Interval, DateTime OpenTime), CandleBatchAggregate>();
+                foreach (var tick in buffer)
+                {
+                    var key = (tick.Asset, tick.Interval, tick.OpenTime);
+                    if (!map.TryGetValue(key, out var agg))
                     {
-                        var ordered = g.ToList(); // FIFO insertion order = chronological
-                        return new {
-                            Asset    = g.Key.Asset,
-                            Interval = g.Key.Interval,
-                            OpenTime = g.Key.OpenTime.ToString("o"),
-                            Open     = ordered.First().Price,  // chronologically first tick
-                            High     = ordered.Max(t => t.Price),
-                            Low      = ordered.Min(t => t.Price),
-                            Close    = ordered.Last().Price,   // chronologically last tick
-                            Volume   = ordered.Count
+                        agg = new CandleBatchAggregate
+                        {
+                            Asset = tick.Asset,
+                            Interval = tick.Interval,
+                            OpenTime = tick.OpenTime,
+                            Open = tick.Price,
+                            High = tick.Price,
+                            Low = tick.Price,
+                            Close = tick.Price,
+                            Volume = 1
                         };
-                    }).ToList();
+                        map[key] = agg;
+                    }
+                    else
+                    {
+                        if (tick.Price > agg.High) agg.High = tick.Price;
+                        if (tick.Price < agg.Low) agg.Low = tick.Price;
+                        agg.Close = tick.Price;
+                        agg.Volume++;
+                    }
+                }
 
-                // D1-3 FIX: commandTimeout=8s prevents the consumer loop from blocking
-                // for Npgsql's default 30s ConnectTimeout when PostgreSQL is flapping.
-                // With 8s cap: retry cycle is 8s + 0.5s delay = ~8.5s max blocked per attempt.
-                // Command timeout handled by batch
-                // const int DbCommandTimeoutSecs = 8;
-
-                // High-load optimization: execute the entire grouped batch in one command instead of N sequential proxy roundtrips
+                // Гарантируем строгий детерминированный порядок строк для исключения взаимных блокировок (Deadlocks)
+                var grouped = map.Values
+                    .OrderBy(g => g.Asset, StringComparer.Ordinal)
+                    .ThenBy(g => g.Interval, StringComparer.Ordinal)
+                    .ThenBy(g => g.OpenTime)
+                    .ToList();
 
                 // Pipeline all grouped records in a single network round-trip via NpgsqlBatch
-                await using var batch = new NpgsqlBatch(conn, tx);
+                await using var batch = new NpgsqlBatch(conn, tx) { Timeout = 8 };
                 const string batchSql = @"
                     INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -422,7 +435,7 @@ namespace ValutaBot.MiniApp
                     var batchCmd = new NpgsqlBatchCommand(batchSql);
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Asset });
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Interval });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.OpenTime });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.OpenTime.ToString("o") });
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Open });
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.High });
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Low });
@@ -599,16 +612,15 @@ namespace ValutaBot.MiniApp
                     return closedCandles;
                 }
 
-                using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
-                await conn.OpenAsync();
+                await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync();
                 
-                var records = (await Dapper.SqlMapper.QueryAsync(conn, @"
+                var records = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(@"
                     SELECT open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume""
                     FROM subminute_candles
                     WHERE asset = @Asset AND interval = @Interval
                     ORDER BY open_time DESC
                     LIMIT @Limit;
-                ", new { Asset = cleanAsset, Interval = dbInterval, Limit = limit })).ToList();
+                ", new { Asset = cleanAsset, Interval = dbInterval, Limit = limit }, commandTimeout: 8))).ToList();
 
                 ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch
                 {
@@ -818,10 +830,7 @@ namespace ValutaBot.MiniApp
             {
                 if (acc.OpenTime != default && openTime < acc.OpenTime)
                 {
-                    if ((acc.OpenTime - openTime) > TimeSpan.FromMinutes(5))
-                        acc.Reset(openTime); // DST/timezone jump backwards >5m: reset accumulator
-                    else
-                        return; // late tick: never rewind the live candle
+                    return; // late or out-of-order tick: never rewind the live candle accumulator
                 }
                 if (acc.OpenTime != openTime && acc.OpenTime != default)
                 {

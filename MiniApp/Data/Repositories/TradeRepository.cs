@@ -271,7 +271,7 @@ SELECT
 
     COUNT(id) FILTER (WHERE dt >= NOW() - INTERVAL '48 hours' AND ml_dir = win_dir AND ta_dir != win_dir AND ta_dir != 'NEUTRAL' AND ml_dir != 'NEUTRAL') as MlSavedTrades
 
-FROM outcome_data;");
+FROM outcome_data;", commandTimeout: 10);
                     return dto;
                 });
             }
@@ -295,7 +295,7 @@ FROM outcome_data;");
                          smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, ta_telemetry, ml_telemetry, smc_telemetry)
                         VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
                                 @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
-                        ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; }), transaction: tx);
+                        ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; }), transaction: tx, commandTimeout: 10);
                 });
             }
             catch (Exception ex)
@@ -445,7 +445,7 @@ FROM outcome_data;");
                         outcome.TaTelemetry,
                         outcome.MlTelemetry,
                         outcome.SmcTelemetry
-                    }, transaction: tx);
+                    }, transaction: tx, commandTimeout: 10);
                 });
             }
             catch (Exception ex)
@@ -483,7 +483,7 @@ FROM outcome_data;");
                           {eraFilter}
                         ORDER BY verified_at DESC
                         LIMIT @limit
-                    ", new { limit });
+                    ", new { limit }, commandTimeout: 8);
 
                     return rows.Select(r => new TradeOutcomeRecord
                     {
@@ -565,7 +565,7 @@ FROM outcome_data;");
                         record.TaTelemetry,
                         record.MlTelemetry,
                         record.SmcTelemetry
-                    });
+                    }, commandTimeout: 8);
                 });
             }
             catch (Exception ex)
@@ -619,7 +619,7 @@ FROM outcome_data;");
                               p.price_position_pct as ""PricePositionPct"", p.bb_squeeze as ""BbSqueeze"",
                               p.ta_telemetry::text as ""TaTelemetry"", p.ml_telemetry::text as ""MlTelemetry"", 
                               p.smc_telemetry::text as ""SmcTelemetry"";", 
-                    new { UpToIso = upToIso, Limit = limit, ExcludedArray = excludedArray });
+                    new { UpToIso = upToIso, Limit = limit, ExcludedArray = excludedArray }, commandTimeout: 8);
 
             return rows.Select(r => new SignalTracker.PredictionRecord
             {
@@ -675,7 +675,7 @@ FROM outcome_data;");
             {
                 await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
-                    await conn.ExecuteAsync("UPDATE pending_trades SET claimed_at = NULL WHERE id = @id;", new { id });
+                    await conn.ExecuteAsync("UPDATE pending_trades SET claimed_at = NULL WHERE id = @id;", new { id }, commandTimeout: 8);
                 });
             }
             catch (Exception ex)
@@ -691,7 +691,7 @@ FROM outcome_data;");
             {
                 await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
-                    int resetCount = await conn.ExecuteAsync("UPDATE pending_trades SET claimed_at = NULL WHERE claimed_at IS NOT NULL;");
+                    int resetCount = await conn.ExecuteAsync("UPDATE pending_trades SET claimed_at = NULL WHERE claimed_at IS NOT NULL;", commandTimeout: 8);
                     if (resetCount > 0)
                     {
                         BotLogger.Info($"[TradeRepository] Reset {resetCount} orphaned claimed_at locks on startup.");
@@ -711,7 +711,7 @@ FROM outcome_data;");
             {
                 await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
-                    await conn.ExecuteAsync("DELETE FROM pending_trades WHERE id = @id", new { id });
+                    await conn.ExecuteAsync("DELETE FROM pending_trades WHERE id = @id", new { id }, commandTimeout: 8);
                 });
             }
             catch (Exception ex)
@@ -731,13 +731,13 @@ FROM outcome_data;");
                         ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     int pending = (int)(await conn.ExecuteScalarAsync<long?>(
-                        "SELECT COUNT(*) FROM pending_trades WHERE direction IN ('BUY', 'PUT')") ?? 0L);
+                        "SELECT COUNT(*) FROM pending_trades WHERE direction IN ('BUY', 'PUT')", commandTimeout: 8) ?? 0L);
                     var res = await conn.QueryFirstOrDefaultAsync($@"
                         SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
                         FROM trade_outcomes
                         WHERE direction IN ('BUY', 'PUT')
                           AND was_win IS NOT NULL
-                          {eraFilter}");
+                          {eraFilter}", commandTimeout: 8);
                     
                     int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
                     int correct = res != null ? Convert.ToInt32(res.Correct) : 0;
@@ -763,7 +763,7 @@ FROM outcome_data;");
                         : "";
                     int pending = (int)(await conn.ExecuteScalarAsync<long?>(
                         "SELECT COUNT(*) FROM pending_trades WHERE asset = @asset AND timeframe = @timeframe AND direction IN ('BUY', 'PUT')",
-                        new { asset, timeframe }) ?? 0L);
+                        new { asset, timeframe }, commandTimeout: 8) ?? 0L);
                     var res = await conn.QueryFirstOrDefaultAsync($@"
                         SELECT COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
                         FROM trade_outcomes
@@ -771,7 +771,7 @@ FROM outcome_data;");
                           AND direction IN ('BUY', 'PUT')
                           AND was_win IS NOT NULL
                           {eraFilter}",
-                        new { asset, timeframe });
+                        new { asset, timeframe }, commandTimeout: 8);
                     
                     int verified = res != null ? Convert.ToInt32(res.Verified) : 0;
                     int correct = res != null ? Convert.ToInt32(res.Correct) : 0;
@@ -797,7 +797,7 @@ FROM outcome_data;");
                         : "";
                     
                     var pendingRows = await conn.QueryAsync(
-                        "SELECT asset, timeframe, COUNT(*) as Pending FROM pending_trades WHERE direction IN ('BUY', 'PUT') GROUP BY asset, timeframe");
+                        "SELECT asset, timeframe, COUNT(*) as Pending FROM pending_trades WHERE direction IN ('BUY', 'PUT') GROUP BY asset, timeframe", commandTimeout: 8);
                     
                     var rows = await conn.QueryAsync($@"
                         SELECT asset, timeframe, COUNT(*) as Verified, COALESCE(SUM(CASE WHEN was_win THEN 1 ELSE 0 END), 0) as Correct
@@ -805,7 +805,7 @@ FROM outcome_data;");
                         WHERE direction IN ('BUY', 'PUT')
                           AND was_win IS NOT NULL
                           {eraFilter}
-                        GROUP BY asset, timeframe");
+                        GROUP BY asset, timeframe", commandTimeout: 8);
                     
                     var result = new List<(string, string, int, int, int)>();
                     foreach (var r in rows)
@@ -854,7 +854,7 @@ FROM outcome_data;");
                           {sinceFilter}
                         ORDER BY verified_at DESC 
                         LIMIT @Limit
-                    ", new { Limit = limit, SinceUtc = sinceUtc });
+                    ", new { Limit = limit, SinceUtc = sinceUtc }, commandTimeout: 8);
                     return rows.ToList();
                 });
             }
@@ -887,7 +887,7 @@ FROM outcome_data;");
                           {sinceFilter}
                         ORDER BY verified_at DESC 
                         LIMIT @Limit
-                    ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtc = sinceUtc });
+                    ", new { Asset = asset, Timeframe = timeframe, Limit = limit, SinceUtc = sinceUtc }, commandTimeout: 8);
                     return rows.ToList();
                 });
             }
@@ -913,9 +913,9 @@ FROM outcome_data;");
                     if (ValutaBot.MiniApp.PriceFeed.UsePocketOption)
                     {
                         return await conn.ExecuteScalarAsync<int>(
-                            $"SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '{PoEraCutoff}'::timestamptz AND direction IN ('BUY', 'PUT');");
+                            $"SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '{PoEraCutoff}'::timestamptz AND direction IN ('BUY', 'PUT');", commandTimeout: 8);
                     }
-                    return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes WHERE direction IN ('BUY', 'PUT');");
+                    return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes WHERE direction IN ('BUY', 'PUT');", commandTimeout: 8);
                 });
             }
             catch (Exception ex)

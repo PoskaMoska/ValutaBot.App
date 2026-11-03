@@ -34,7 +34,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             
             return await DbConnectionFactory.WithRetryAsync(async conn =>
                 await conn.ExecuteScalarAsync<bool>(
-                    "SELECT EXISTS(SELECT 1 FROM allowed_users WHERE chat_id = @chatId)", new { chatId }));
+                    "SELECT EXISTS(SELECT 1 FROM allowed_users WHERE chat_id = @chatId)", new { chatId }, commandTimeout: 8));
         }
 
         public static async Task<bool> IsAdminAsync(long chatId)
@@ -42,7 +42,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (SuperAdmins.Contains(chatId)) return true;
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return false;
             return await DbConnectionFactory.WithRetryAsync(async conn =>
-                await conn.ExecuteScalarAsync<bool>("SELECT EXISTS(SELECT 1 FROM admins WHERE chat_id = @chatId)", new { chatId }));
+                await conn.ExecuteScalarAsync<bool>("SELECT EXISTS(SELECT 1 FROM admins WHERE chat_id = @chatId)", new { chatId }, commandTimeout: 8));
         }
 
         public static async Task<List<long>> GetAdminChatIdsAsync()
@@ -50,7 +50,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return new List<long>();
             return await DbConnectionFactory.WithRetryAsync(async conn =>
             {
-                var result = await conn.QueryAsync<long>("SELECT chat_id FROM admins");
+                var result = await conn.QueryAsync<long>("SELECT chat_id FROM admins", commandTimeout: 8);
                 return result.ToList();
             });
         }
@@ -59,21 +59,21 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
             return await DbConnectionFactory.WithRetryAsync(async conn =>
-                (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM all_users"));
+                (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM all_users", commandTimeout: 8));
         }
 
         public static async Task<int> GetAllowedUsersCountAsync()
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return 0;
             return await DbConnectionFactory.WithRetryAsync(async conn =>
-                (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM allowed_users"));
+                (int)await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM allowed_users", commandTimeout: 8));
         }
 
         public static async Task AddAllowedUserAsync(long chatId)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             await DbConnectionFactory.WithRetryAsync(async conn =>
-                await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") }));
+                await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") }, commandTimeout: 8));
         }
 
         public static async Task AddAdminAsync(long chatId)
@@ -81,8 +81,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             await DbConnectionFactory.WithRetryAsync(async conn =>
             {
-                await conn.ExecuteAsync("INSERT INTO admins (chat_id) VALUES (@chatId) ON CONFLICT (chat_id) DO NOTHING", new { chatId });
-                await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") });
+                await conn.ExecuteAsync("INSERT INTO admins (chat_id) VALUES (@chatId) ON CONFLICT (chat_id) DO NOTHING", new { chatId }, commandTimeout: 8);
+                await conn.ExecuteAsync("INSERT INTO allowed_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") }, commandTimeout: 8);
             });
         }
 
@@ -91,7 +91,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (SuperAdmins.Contains(chatId)) return; // Prevent removal of SuperAdmins
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             await DbConnectionFactory.WithRetryAsync(async conn =>
-                await conn.ExecuteAsync("DELETE FROM admins WHERE chat_id = @chatId", new { chatId }));
+                await conn.ExecuteAsync("DELETE FROM admins WHERE chat_id = @chatId", new { chatId }, commandTimeout: 8));
         }
 
         public static async Task RemoveAllowedUserAsync(long chatId)
@@ -99,14 +99,14 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (SuperAdmins.Contains(chatId)) return; // Prevent removal of SuperAdmins
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             await DbConnectionFactory.WithRetryAsync(async conn =>
-                await conn.ExecuteAsync("DELETE FROM allowed_users WHERE chat_id = @chatId", new { chatId }));
+                await conn.ExecuteAsync("DELETE FROM allowed_users WHERE chat_id = @chatId", new { chatId }, commandTimeout: 8));
         }
 
         public static async Task AddAllUserAsync(long chatId)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
             await DbConnectionFactory.WithRetryAsync(async conn =>
-                await conn.ExecuteAsync("INSERT INTO all_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") }));
+                await conn.ExecuteAsync("INSERT INTO all_users (chat_id, created_at) VALUES (@chatId, @now) ON CONFLICT (chat_id) DO NOTHING", new { chatId, now = DateTime.UtcNow.ToString("o") }, commandTimeout: 8));
         }
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, (UserSettings settings, DateTime cachedAt)> _settingsCache = new();
@@ -124,14 +124,14 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 await using var conn = await DbConnectionFactory.OpenConnectionAsync();
                 var settings = await conn.QueryFirstOrDefaultAsync<UserSettings>(
                     "SELECT enable_ml as EnableMl, enable_smc as EnableSmc, enable_of as EnableOf FROM user_settings WHERE chat_id = @chatId", 
-                    new { chatId });
+                    new { chatId }, commandTimeout: 8);
                 
                 if (settings == null)
                 {
                     settings = new UserSettings();
                     await conn.ExecuteAsync(
                         "INSERT INTO user_settings (chat_id, enable_ml, enable_smc, enable_of) VALUES (@chatId, @EnableMl, @EnableSmc, @EnableOf) ON CONFLICT (chat_id) DO NOTHING",
-                        new { chatId, settings.EnableMl, settings.EnableSmc, settings.EnableOf });
+                        new { chatId, settings.EnableMl, settings.EnableSmc, settings.EnableOf }, commandTimeout: 8);
                 }
                 _settingsCache[chatId] = (settings, DateTime.UtcNow);
                 return settings;
@@ -163,7 +163,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             await using var conn = await DbConnectionFactory.OpenConnectionAsync();
             await conn.ExecuteAsync(
                 $"UPDATE user_settings SET {column} = NOT COALESCE({column}, true) WHERE chat_id = @chatId", 
-                new { chatId });
+                new { chatId }, commandTimeout: 8);
                 
             _settingsCache.TryRemove(chatId, out _);
         }

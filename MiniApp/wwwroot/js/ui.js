@@ -404,6 +404,7 @@ let cachedCanvasW = 0;
 let cachedCanvasH = 0;
 let cachedFloorGrad = null;
 let resizeRafId = null;
+let lastChartFrameTime = 0;
 
 export function updateCanvasDimensions() {
     const canvas = document.getElementById('aiChartCanvas');
@@ -411,20 +412,23 @@ export function updateCanvasDimensions() {
     const rect = canvas.parentElement.getBoundingClientRect();
     // Поддержка 3x дисплеев (iPhone Retina / Samsung Ultra) с ограничением до 3
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    cachedCanvasW = rect.width;
-    cachedCanvasH = rect.height;
+    const displayW = Math.round(rect.width);
+    const displayH = Math.round(rect.height);
+    cachedCanvasW = displayW;
+    cachedCanvasH = displayH;
     cachedFloorGrad = null;
-    if (cachedCanvasW > 0 && cachedCanvasH > 0) {
-        const targetW = Math.round(cachedCanvasW * dpr);
-        const targetH = Math.round(cachedCanvasH * dpr);
+    if (displayW > 0 && displayH > 0) {
+        const targetW = Math.round(displayW * dpr);
+        const targetH = Math.round(displayH * dpr);
         if (canvas.width !== targetW || canvas.height !== targetH) {
             canvas.width = targetW;
             canvas.height = targetH;
         }
+        canvas.style.width = `${displayW}px`;
+        canvas.style.height = `${displayH}px`;
         const ctx = canvas.getContext('2d');
         if (ctx) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            // cachedFloorGrad создается динамически в renderAiChartLoop внутри ctx.scale(dpr, dpr)
         }
     }
 }
@@ -442,9 +446,8 @@ export function showAiChart(asset, tf) {
         
         aiChartData = [];
         updateCanvasDimensions();
-        if (!aiChartAnimationId) {
-            renderAiChartLoop();
-        }
+        // Рендерим статический начальный кадр без холостого запуска rAF
+        renderAiChartStatic();
     }
 }
 
@@ -466,6 +469,15 @@ export function updateAiChartData(ohlcArray) {
             close: cl
         };
     }).filter(Boolean).slice(-30);
+
+    // Запускаем цикл анимации только при наличии реальных свечных данных
+    if (aiChartData.length > 0 && !aiChartAnimationId) {
+        const container = document.getElementById('aiChartContainer');
+        if (container && container.classList.contains('active')) {
+            lastChartFrameTime = 0;
+            renderAiChartLoop();
+        }
+    }
 }
 
 export function hideAiChart() {
@@ -482,6 +494,7 @@ export function hideAiChart() {
         resizeRafId = null;
     }
     cachedFloorGrad = null;
+    lastChartFrameTime = 0;
     const canvas = document.getElementById('aiChartCanvas');
     if (canvas) {
         const ctx = canvas.getContext('2d');
@@ -504,7 +517,12 @@ function _onChartVisibilityChange() {
     } else {
         if (!aiChartAnimationId && c && c.classList.contains('active')) {
             updateCanvasDimensions();
-            renderAiChartLoop();
+            if (aiChartData.length > 0) {
+                lastChartFrameTime = 0;
+                renderAiChartLoop();
+            } else {
+                renderAiChartStatic();
+            }
         }
     }
 }
@@ -518,7 +536,36 @@ if (typeof document !== 'undefined') {
     }
 }
 
-function renderAiChartLoop() {
+function renderAiChartStatic() {
+    const canvas = document.getElementById('aiChartCanvas');
+    if (!canvas) return;
+    if (cachedCanvasW === 0 || cachedCanvasH === 0) {
+        updateCanvasDimensions();
+        if (cachedCanvasW === 0 || cachedCanvasH === 0) return;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    const w = cachedCanvasW;
+    const h = cachedCanvasH;
+    ctx.fillStyle = '#0b0d1f';
+    ctx.fillRect(0, 0, w, h);
+    if (!cachedFloorGrad && h > 0) {
+        cachedFloorGrad = ctx.createLinearGradient(0, h * 0.6, 0, h);
+        cachedFloorGrad.addColorStop(0, 'rgba(184, 41, 255, 0)');
+        cachedFloorGrad.addColorStop(1, 'rgba(184, 41, 255, 0.15)');
+    }
+    if (cachedFloorGrad) {
+        ctx.fillStyle = cachedFloorGrad;
+        ctx.fillRect(0, h * 0.6, w, h * 0.4);
+    }
+    ctx.restore();
+}
+
+function renderAiChartLoop(timestamp = 0) {
     if (document.hidden) {
         aiChartAnimationId = null;
         return;
@@ -540,10 +587,26 @@ function renderAiChartLoop() {
             return;
         }
     }
+
+    // Stop animation loop if no candle data available (saves battery)
+    if (aiChartData.length === 0) {
+        renderAiChartStatic();
+        aiChartAnimationId = null;
+        return;
+    }
+
+    // ProMotion 120Hz frame throttle: cap at ~60 FPS (min 16ms between frames)
+    if (timestamp && lastChartFrameTime && (timestamp - lastChartFrameTime < 16)) {
+        aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
+        return;
+    }
+    const deltaMs = lastChartFrameTime ? (timestamp - lastChartFrameTime) : 16.6;
+    lastChartFrameTime = timestamp || performance.now();
+
     const ctx = canvas.getContext('2d');
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     
-    // Полный аппаратный сброс буфера кадра для предотвращения остаточных артефактов
+    // Hardware frame buffer reset
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
     ctx.save();
@@ -565,108 +628,97 @@ function renderAiChartLoop() {
         ctx.fillRect(0, h * 0.6, w, h * 0.4);
     }
     
-    aiChartPhase += 0.018;
+    // Delta-time normalized phase advancement (constant sway speed on 60Hz/120Hz)
+    const dt = Math.min(deltaMs / 1000, 0.1);
+    aiChartPhase += dt * 1.08;
     
-    if (aiChartData.length > 0) {
-        const paddingY = Math.floor(h * 0.25);
-        const paddingX = 15;
-        const count = aiChartData.length;
-        const spacing = (w - paddingX * 2) / count;
-        
-        let candleWidth = Math.max(3, Math.floor(spacing * 0.5));
-        if (candleWidth % 2 === 0) candleWidth += 1;
-        
-        let minP = Infinity, maxP = -Infinity;
-        for (let i = 0; i < count; i++) {
-            const c = aiChartData[i];
-            const low = Number.isFinite(c.low) ? c.low : Number(c.low ?? c.Low ?? c.l);
-            const high = Number.isFinite(c.high) ? c.high : Number(c.high ?? c.High ?? c.h);
-            const open = Number.isFinite(c.open) ? c.open : Number(c.open ?? c.Open ?? c.o);
-            const close = Number.isFinite(c.close) ? c.close : Number(c.close ?? c.Close ?? c.c);
-            const trueLow = Math.min(low, open, close);
-            const trueHigh = Math.max(high, open, close);
-            if (Number.isFinite(trueLow) && trueLow < minP) minP = trueLow;
-            if (Number.isFinite(trueHigh) && trueHigh > maxP) maxP = trueHigh;
-        }
-        if (!Number.isFinite(minP) || !Number.isFinite(maxP) || maxP <= minP) {
-            minP = Number.isFinite(minP) && minP !== Infinity ? minP : 1.0;
-            maxP = minP + 0.0001;
-        }
-        const range = maxP - minP || 0.0001;
-        const scaleY = (h - paddingY * 2) / range;
-        
-        // Батчинг отрисовки свечей (сокращение draw calls с 60+ до 4 для стабильных 60 FPS на 3x Retina)
-        const bullWicks = [];
-        const bullBodies = [];
-        const bearWicks = [];
-        const bearBodies = [];
-
-        for (let i = 0; i < count; i++) {
-            const c = aiChartData[i];
-            const open = Number(c.open ?? c.Open ?? c.o);
-            const close = Number(c.close ?? c.Close ?? c.c);
-            const high = Number(c.high ?? c.High ?? c.h);
-            const low = Number(c.low ?? c.Low ?? c.l);
-            if (!Number.isFinite(open) || !Number.isFinite(close) || !Number.isFinite(high) || !Number.isFinite(low)) continue;
-            const isBull = close >= open;
-            const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
-            
-            const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
-            const x = Math.floor(cx - candleWidth / 2);
-            
-            const yHigh = paddingY + (maxP - high) * scaleY + swayY;
-            const yLow  = paddingY + (maxP - low)  * scaleY + swayY;
-            const yTop  = paddingY + (maxP - Math.max(open, close)) * scaleY + swayY;
-            let bodyH = Math.abs(close - open) * scaleY;
-            if (bodyH < 2) bodyH = 2;
-            
-            if (isBull) {
-                bullWicks.push({ cx, y1: Math.floor(yHigh) + 0.5, y2: Math.floor(yLow) + 0.5 });
-                bullBodies.push({ x: Math.floor(x), y: Math.floor(yTop), w: candleWidth, h: Math.ceil(bodyH) });
-            } else {
-                bearWicks.push({ cx, y1: Math.floor(yHigh) + 0.5, y2: Math.floor(yLow) + 0.5 });
-                bearBodies.push({ x: Math.floor(x), y: Math.floor(yTop), w: candleWidth, h: Math.ceil(bodyH) });
-            }
-        }
-
-        // Отрисовка бычьих свечей (#00b3ff) единым батчем
-        if (bullWicks.length > 0) {
-            ctx.strokeStyle = '#00b3ff';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            for (let i = 0; i < bullWicks.length; i++) {
-                const w = bullWicks[i];
-                ctx.moveTo(w.cx, w.y1);
-                ctx.lineTo(w.cx, w.y2);
-            }
-            ctx.stroke();
-
-            ctx.fillStyle = '#00b3ff';
-            for (let i = 0; i < bullBodies.length; i++) {
-                const b = bullBodies[i];
-                ctx.fillRect(b.x, b.y, b.w, b.h);
-            }
-        }
-
-        // Отрисовка медвежьих свечей (#9b5de5) единым батчем
-        if (bearWicks.length > 0) {
-            ctx.strokeStyle = '#9b5de5';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            for (let i = 0; i < bearWicks.length; i++) {
-                const w = bearWicks[i];
-                ctx.moveTo(w.cx, w.y1);
-                ctx.lineTo(w.cx, w.y2);
-            }
-            ctx.stroke();
-
-            ctx.fillStyle = '#9b5de5';
-            for (let i = 0; i < bearBodies.length; i++) {
-                const b = bearBodies[i];
-                ctx.fillRect(b.x, b.y, b.w, b.h);
-            }
-        }
+    const paddingY = Math.floor(h * 0.25);
+    const paddingX = 15;
+    const count = aiChartData.length;
+    const spacing = (w - paddingX * 2) / count;
+    
+    let candleWidth = Math.max(3, Math.floor(spacing * 0.5));
+    if (candleWidth % 2 === 0) candleWidth += 1;
+    
+    let minP = Infinity, maxP = -Infinity;
+    for (let i = 0; i < count; i++) {
+        const c = aiChartData[i];
+        const low = Number.isFinite(c.low) ? c.low : Number(c.low ?? c.Low ?? c.l);
+        const high = Number.isFinite(c.high) ? c.high : Number(c.high ?? c.High ?? c.h);
+        const open = Number.isFinite(c.open) ? c.open : Number(c.open ?? c.Open ?? c.o);
+        const close = Number.isFinite(c.close) ? c.close : Number(c.close ?? c.Close ?? c.c);
+        const trueLow = Math.min(low, open, close);
+        const trueHigh = Math.max(high, open, close);
+        if (Number.isFinite(trueLow) && trueLow < minP) minP = trueLow;
+        if (Number.isFinite(trueHigh) && trueHigh > maxP) maxP = trueHigh;
     }
+    if (!Number.isFinite(minP) || !Number.isFinite(maxP) || maxP <= minP) {
+        minP = Number.isFinite(minP) && minP !== Infinity ? minP : 1.0;
+        maxP = minP + 0.0001;
+    }
+    const range = maxP - minP || 0.0001;
+    const scaleY = (h - paddingY * 2) / range;
+    
+    // Zero-allocation batch rendering: avoid creating arrays & objects per frame
+    // Pass 1: Bullish (#00b3ff) wicks
+    ctx.strokeStyle = '#00b3ff';
+    ctx.fillStyle = '#00b3ff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) {
+        const c = aiChartData[i];
+        if (c.close < c.open) continue;
+        const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
+        const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
+        const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
+        const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
+        ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
+        ctx.lineTo(cx, Math.floor(yLow) + 0.5);
+    }
+    ctx.stroke();
+
+    // Bullish bodies
+    for (let i = 0; i < count; i++) {
+        const c = aiChartData[i];
+        if (c.close < c.open) continue;
+        const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
+        const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
+        const x = Math.floor(cx - candleWidth / 2);
+        const yTop = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
+        let bodyH = Math.abs(c.close - c.open) * scaleY;
+        if (bodyH < 2) bodyH = 2;
+        ctx.fillRect(x, Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+    }
+
+    // Pass 2: Bearish (#9b5de5) wicks
+    ctx.strokeStyle = '#9b5de5';
+    ctx.fillStyle = '#9b5de5';
+    ctx.beginPath();
+    for (let i = 0; i < count; i++) {
+        const c = aiChartData[i];
+        if (c.close >= c.open) continue;
+        const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
+        const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
+        const yHigh = paddingY + (maxP - c.high) * scaleY + swayY;
+        const yLow  = paddingY + (maxP - c.low)  * scaleY + swayY;
+        ctx.moveTo(cx, Math.floor(yHigh) + 0.5);
+        ctx.lineTo(cx, Math.floor(yLow) + 0.5);
+    }
+    ctx.stroke();
+
+    // Bearish bodies
+    for (let i = 0; i < count; i++) {
+        const c = aiChartData[i];
+        if (c.close >= c.open) continue;
+        const swayY = Math.sin(aiChartPhase * 1.5 + i * 0.6) * 0.3;
+        const cx = Math.floor(paddingX + i * spacing + spacing / 2) + 0.5;
+        const x = Math.floor(cx - candleWidth / 2);
+        const yTop = paddingY + (maxP - Math.max(c.open, c.close)) * scaleY + swayY;
+        let bodyH = Math.abs(c.close - c.open) * scaleY;
+        if (bodyH < 2) bodyH = 2;
+        ctx.fillRect(x, Math.floor(yTop), candleWidth, Math.ceil(bodyH));
+    }
+
     ctx.restore();
     aiChartAnimationId = requestAnimationFrame(renderAiChartLoop);
 }
@@ -675,16 +727,30 @@ function renderAiChartLoop() {
 // Обработка ориентации и визуального вьюпорта
 if (typeof window !== 'undefined') {
     const onWindowOrViewportResize = () => {
-        if (!aiChartAnimationId || resizeRafId) return;
+        if (resizeRafId) return;
         resizeRafId = requestAnimationFrame(() => {
             resizeRafId = null;
-            if (aiChartAnimationId) updateCanvasDimensions();
+            updateCanvasDimensions();
+            const container = document.getElementById('aiChartContainer');
+            if (container && container.classList.contains('active')) {
+                if (aiChartData.length > 0) {
+                    if (!aiChartAnimationId) renderAiChartLoop();
+                } else {
+                    renderAiChartStatic();
+                }
+            }
         });
     };
     window.addEventListener('resize', onWindowOrViewportResize, { passive: true });
     window.addEventListener('orientationchange', onWindowOrViewportResize, { passive: true });
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', onWindowOrViewportResize, { passive: true });
+    }
+    if (window.matchMedia) {
+        const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+        if (mq && typeof mq.addEventListener === 'function') {
+            mq.addEventListener('change', onWindowOrViewportResize);
+        }
     }
 }
 

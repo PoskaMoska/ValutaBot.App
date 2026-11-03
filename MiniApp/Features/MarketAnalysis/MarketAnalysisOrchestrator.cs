@@ -770,91 +770,6 @@ public class MarketAnalysisOrchestrator(
         var dbSw = Stopwatch.StartNew();
         int targetHorizon = cm.Timeout.TimeoutCandles;
 
-        var sourceDirections = new Dictionary<string, string>
-        {
-            ["TechAnalysis"] = DirectionExtensions.FromScore(cm.Consensus.TaScore).ToSignal(),
-            ["SMC"]          = DirectionExtensions.FromScore(cm.Consensus.SmcScore).ToSignal(),
-            ["NeuralBrain"]  = ml.Direction,
-            ["LIGHTGBM"]     = ml.Direction,
-        };
-
-        var sanitizedSmc = new {
-            sensors.SmcResult.HasLiquiditySweep, sensors.SmcResult.SweepDirection,
-            sensors.SmcResult.HasFvg, sensors.SmcResult.FvgType,
-            FvgTop = S(sensors.SmcResult.FvgTop), FvgBottom = S(sensors.SmcResult.FvgBottom), FvgGapSize = S(sensors.SmcResult.FvgGapSize),
-            sensors.SmcResult.HasOrderBlock, sensors.SmcResult.OrderBlockType,
-            OrderBlockLevel = S(sensors.SmcResult.OrderBlockLevel), sensors.SmcResult.IsUnmitigatedOb,
-            sensors.SmcResult.HasBos, sensors.SmcResult.BosDirection
-        };
-        var sanitizedTa = sensors.TaDetail with {
-            Score = S(sensors.TaDetail.Score), Confidence = S(sensors.TaDetail.Confidence), RsiVal = S(sensors.TaDetail.RsiVal, 50.0),
-            HmaVal = S(sensors.TaDetail.HmaVal), VolStrengthVal = S(sensors.TaDetail.VolStrengthVal), AtrVal = S(sensors.TaDetail.AtrVal),
-            HmaSlope = S(sensors.TaDetail.HmaSlope), MicroVel = S(sensors.TaDetail.MicroVel), VolRatio = S(sensors.TaDetail.VolRatio),
-            VelContrib = S(sensors.TaDetail.VelContrib), HmaContrib = S(sensors.TaDetail.HmaContrib), RsiContrib = S(sensors.TaDetail.RsiContrib),
-            ConnorsContrib = S(sensors.TaDetail.ConnorsContrib), VolStrengthContrib = S(sensors.TaDetail.VolStrengthContrib)
-        };
-
-        var candlesPayload = new object[prep.ClosedCandles.Length];
-        for (int i = 0; i < prep.ClosedCandles.Length; i++)
-        {
-            var c = prep.ClosedCandles[i];
-            candlesPayload[i] = new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) };
-        }
-        var mtfCandlesPayload = new object[prep.ClosedHigherCandles.Length];
-        for (int i = 0; i < prep.ClosedHigherCandles.Length; i++)
-        {
-            var c = prep.ClosedHigherCandles[i];
-            mtfCandlesPayload[i] = new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) };
-        }
-
-        var mlFeatures = new {
-            Candles = candlesPayload,
-            MtfCandles = mtfCandlesPayload,
-            Smc = sanitizedSmc,
-            Ta = sanitizedTa,
-            MacroContext = new {
-                MinutesToNews = sensors.MinutesToNews ?? -1,
-                MarketRegime = cm.EffectiveMarketRegime,
-                VelocityRegime = sensors.State.VelocityRegime ?? "UNKNOWN",
-                Atr = S(sensors.MainAtr),
-                Adx = S(sensors.MainAdx, 20.0),
-                Rsi = S(sensors.TaDetail.RsiVal, 50.0),
-                PriceEntropy = S(sensors.PriceEntropy),
-                TrendMaturity = S(sensors.TrendMaturity),
-                PricePositionPct = S(sensors.PricePositionPct, 0.5),
-                BbSqueeze = sensors.BbSqueeze,
-                HourUtc = DateTime.UtcNow.Hour,
-                DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
-                Session = TradeOutcomeTracker.ComputeSession(DateTime.UtcNow),
-                DayRangePositionPct = S(sensors.DayAnchors.DayRangePositionPct, 0.5),
-                DistToDayHighBps = S(sensors.DayAnchors.DistToDayHighBps),
-                DistToDayLowBps = S(sensors.DayAnchors.DistToDayLowBps),
-                AsianHigh = S(sensors.DayAnchors.AsianHigh),
-                AsianLow = S(sensors.DayAnchors.AsianLow),
-                DistToAsianHighBps = S(sensors.DayAnchors.DistToAsianHighBps),
-                DistToAsianLowBps = S(sensors.DayAnchors.DistToAsianLowBps),
-                DxyMomentum1mBps = S(sensors.DxyMetrics.DxyMomentum1mBps),
-                DxyMomentum5mBps = S(sensors.DxyMetrics.DxyMomentum5mBps),
-                BasketSyncScore = S(sensors.DxyMetrics.BasketSyncScore),
-                SpreadBps = S(sensors.LiveSpreadBps),
-                TickCountLastCandle = prep.ClosedCandles.Length > 0 ? S(prep.ClosedCandles[^1].Volume) : 0
-            },
-            NeuralBrain = new {
-                Prob = S(cm.Consensus.MlProb, 0.5),
-                Score = S(cm.Consensus.MlScoreRaw),
-                FinalProb = cm.Consensus.Probability
-            }
-        };
-        string featuresJson = System.Text.Json.JsonSerializer.Serialize(mlFeatures, _jsonOptions);
-
-        var shadowMlFeatures = new {
-            Smc = sanitizedSmc,
-            Ta = sanitizedTa,
-            MacroContext = mlFeatures.MacroContext,
-            NeuralBrain = mlFeatures.NeuralBrain
-        };
-        string shadowFeaturesJson = System.Text.Json.JsonSerializer.Serialize(shadowMlFeatures, _jsonOptions);
-
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool isSubminute = prep.TfLower.StartsWith("s");
         bool isDirectional = cm.Consensus.FinalDirection is "BUY" or "PUT";
@@ -907,6 +822,104 @@ public class MarketAnalysisOrchestrator(
         bool allowShadowRecord = isDirectional
             && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
+
+        Dictionary<string, string> GetSourceDirections() => new()
+        {
+            ["TechAnalysis"] = DirectionExtensions.FromScore(cm.Consensus.TaScore).ToSignal(),
+            ["SMC"]          = DirectionExtensions.FromScore(cm.Consensus.SmcScore).ToSignal(),
+            ["NeuralBrain"]  = ml.Direction,
+            ["LIGHTGBM"]     = ml.Direction,
+        };
+
+        object GetSanitizedSmc() => new {
+            sensors.SmcResult.HasLiquiditySweep, sensors.SmcResult.SweepDirection,
+            sensors.SmcResult.HasFvg, sensors.SmcResult.FvgType,
+            FvgTop = S(sensors.SmcResult.FvgTop), FvgBottom = S(sensors.SmcResult.FvgBottom), FvgGapSize = S(sensors.SmcResult.FvgGapSize),
+            sensors.SmcResult.HasOrderBlock, sensors.SmcResult.OrderBlockType,
+            OrderBlockLevel = S(sensors.SmcResult.OrderBlockLevel), sensors.SmcResult.IsUnmitigatedOb,
+            sensors.SmcResult.HasBos, sensors.SmcResult.BosDirection
+        };
+
+        TaScoringDetail GetSanitizedTa() => sensors.TaDetail with {
+            Score = S(sensors.TaDetail.Score), Confidence = S(sensors.TaDetail.Confidence), RsiVal = S(sensors.TaDetail.RsiVal, 50.0),
+            HmaVal = S(sensors.TaDetail.HmaVal), VolStrengthVal = S(sensors.TaDetail.VolStrengthVal), AtrVal = S(sensors.TaDetail.AtrVal),
+            HmaSlope = S(sensors.TaDetail.HmaSlope), MicroVel = S(sensors.TaDetail.MicroVel), VolRatio = S(sensors.TaDetail.VolRatio),
+            VelContrib = S(sensors.TaDetail.VelContrib), HmaContrib = S(sensors.TaDetail.HmaContrib), RsiContrib = S(sensors.TaDetail.RsiContrib),
+            ConnorsContrib = S(sensors.TaDetail.ConnorsContrib), VolStrengthContrib = S(sensors.TaDetail.VolStrengthContrib)
+        };
+
+        object GetMacroContext() => new {
+            MinutesToNews = sensors.MinutesToNews ?? -1,
+            MarketRegime = cm.EffectiveMarketRegime,
+            VelocityRegime = sensors.State.VelocityRegime ?? "UNKNOWN",
+            Atr = S(sensors.MainAtr),
+            Adx = S(sensors.MainAdx, 20.0),
+            Rsi = S(sensors.TaDetail.RsiVal, 50.0),
+            PriceEntropy = S(sensors.PriceEntropy),
+            TrendMaturity = S(sensors.TrendMaturity),
+            PricePositionPct = S(sensors.PricePositionPct, 0.5),
+            BbSqueeze = sensors.BbSqueeze,
+            HourUtc = DateTime.UtcNow.Hour,
+            DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
+            Session = TradeOutcomeTracker.ComputeSession(DateTime.UtcNow),
+            DayRangePositionPct = S(sensors.DayAnchors.DayRangePositionPct, 0.5),
+            DistToDayHighBps = S(sensors.DayAnchors.DistToDayHighBps),
+            DistToDayLowBps = S(sensors.DayAnchors.DistToDayLowBps),
+            AsianHigh = S(sensors.DayAnchors.AsianHigh),
+            AsianLow = S(sensors.DayAnchors.AsianLow),
+            DistToAsianHighBps = S(sensors.DayAnchors.DistToAsianHighBps),
+            DistToAsianLowBps = S(sensors.DayAnchors.DistToAsianLowBps),
+            DxyMomentum1mBps = S(sensors.DxyMetrics.DxyMomentum1mBps),
+            DxyMomentum5mBps = S(sensors.DxyMetrics.DxyMomentum5mBps),
+            BasketSyncScore = S(sensors.DxyMetrics.BasketSyncScore),
+            SpreadBps = S(sensors.LiveSpreadBps),
+            TickCountLastCandle = prep.ClosedCandles is { Length: > 0 } ? S(prep.ClosedCandles[^1].Volume) : 0
+        };
+
+        object GetNeuralBrainPayload() => new {
+            Prob = S(cm.Consensus.MlProb, 0.5),
+            Score = S(cm.Consensus.MlScoreRaw),
+            FinalProb = cm.Consensus.Probability
+        };
+
+        string BuildFeaturesJson()
+        {
+            int closedCount = prep.ClosedCandles?.Length ?? 0;
+            var candlesPayload = new object[closedCount];
+            for (int i = 0; i < closedCount; i++)
+            {
+                var c = prep.ClosedCandles![i];
+                candlesPayload[i] = new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) };
+            }
+            int mtfClosedCount = prep.ClosedHigherCandles?.Length ?? 0;
+            var mtfCandlesPayload = new object[mtfClosedCount];
+            for (int i = 0; i < mtfClosedCount; i++)
+            {
+                var c = prep.ClosedHigherCandles![i];
+                mtfCandlesPayload[i] = new { c.Timestamp, Open = S(c.Open), High = S(c.High), Low = S(c.Low), Close = S(c.Close), Volume = S(c.Volume) };
+            }
+
+            var mlFeatures = new {
+                Candles = candlesPayload,
+                MtfCandles = mtfCandlesPayload,
+                Smc = GetSanitizedSmc(),
+                Ta = GetSanitizedTa(),
+                MacroContext = GetMacroContext(),
+                NeuralBrain = GetNeuralBrainPayload()
+            };
+            return System.Text.Json.JsonSerializer.Serialize(mlFeatures, _jsonOptions);
+        }
+
+        string BuildShadowFeaturesJson()
+        {
+            var shadowMlFeatures = new {
+                Smc = GetSanitizedSmc(),
+                Ta = GetSanitizedTa(),
+                MacroContext = GetMacroContext(),
+                NeuralBrain = GetNeuralBrainPayload()
+            };
+            return System.Text.Json.JsonSerializer.Serialize(shadowMlFeatures, _jsonOptions);
+        }
 
         double currentLivePrice = prep.CurrentLivePrice;
 
@@ -990,6 +1003,8 @@ public class MarketAnalysisOrchestrator(
                 if (canExecuteReal)
                 {
                     _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
+                    var sourceDirections = GetSourceDirections();
+                    string featuresJson = BuildFeaturesJson();
                     _ = Task.Run(async () =>
                     {
                         try
@@ -1029,6 +1044,8 @@ public class MarketAnalysisOrchestrator(
             if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.TryGetLivePrice(prep.CleanAsset, out double freshShadowPrice) && freshShadowPrice > 0)
                 currentLivePrice = freshShadowPrice;
             
+            var sourceDirections = GetSourceDirections();
+            string shadowFeaturesJson = BuildShadowFeaturesJson();
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
                 sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", 1.0, "NEUTRAL",
                 cm.EffectiveMarketRegime,
@@ -1057,6 +1074,8 @@ public class MarketAnalysisOrchestrator(
             if (isPeriodicSampleDue)
             {
                 _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
+                var sourceDirections = GetSourceDirections();
+                string shadowFeaturesJson = BuildShadowFeaturesJson();
                 _ = SignalTracker.RecordPredictionAsync("HOLD", prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
                     "NONE", false, false, 1.0, "NEUTRAL", cm.EffectiveMarketRegime, sensors.State.VelocityRegime ?? "UNKNOWN", sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal, false, sensors.MinutesToNews ?? -1, "", "", 0.0, sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
                 traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения ({cm.Consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");

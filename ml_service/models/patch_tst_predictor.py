@@ -494,6 +494,13 @@ class PatchTSTPredictor:
             tf_sec = TF_SECONDS.get(str(interval).lower(), 5)
             mtf_tf_sec = 60 if tf_sec < 60 else 300
 
+            # Time-Series Inversion Guard applied upfront to guarantee identical order in candles & macro extraction
+            if len(candles) >= 2:
+                t_first = _extract_candle_ts(candles[0])
+                t_last = _extract_candle_ts(candles[-1])
+                if t_first is not None and t_last is not None and t_first > t_last:
+                    candles = list(reversed(candles))
+
             # Use channel count from checkpoint (4, 5, or 8)
             x_micro_np = normalize_candles_live(candles, seq_len=self._seq_len, n_channels=self._candle_features, tf_sec=tf_sec)
             x_macro_np = build_macro_vector_live(symbol, interval, candles, macro_context, smc_context, n_features=getattr(self, "_macro_features", 31))
@@ -513,7 +520,12 @@ class PatchTSTPredictor:
                     # SequenceBrain expects (x_candles, x_macro)
                     logits, _ = self.model(x_micro_t, x_macro_t)
 
-                # Temperature scaling
+                # Compute unscaled logit margin for Temperature-Invariant Flat Guard
+                raw_logits = logits[0].cpu().numpy()
+                hold_margin = float(raw_logits[0] - max(raw_logits[1], raw_logits[2]))
+                dir_margin = float(abs(raw_logits[1] - raw_logits[2]))
+
+                # Temperature scaling on probabilities
                 temp = self._temperature
                 scaled_logits = logits / temp
                 probs = F.softmax(scaled_logits, dim=-1)[0].cpu().numpy()
@@ -522,9 +534,11 @@ class PatchTSTPredictor:
             p_buy = float(probs[1])
             p_put = float(probs[2])
 
-            # Full-Recall Flat Guard: если класс HOLD доминирует или превышает порог безубыточности
-            # на Pocket Option (флэт гарантирует убыток из-за спреда):
-            if p_hold >= max(p_buy, p_put) or p_hold >= 0.45 or abs(p_buy - p_put) < 0.02:
+            # Temperature-Invariant Full-Recall Flat Guard:
+            # 1. hold_margin >= -0.15 protects against Temperature Scaling pushing p_hold below 0.45 in chop
+            # 2. dir_margin < 0.05 enforces meaningful separation between BUY and PUT logits
+            # 3. p_hold >= max(p_buy, p_put) preserves strict argmax HOLD
+            if p_hold >= max(p_buy, p_put) or hold_margin >= -0.15 or dir_margin < 0.05:
                 direction = "HOLD"
                 calibrated_prob = 0.50
                 raw_prob = 0.50
@@ -540,21 +554,26 @@ class PatchTSTPredictor:
                     direction = "PUT"
                     raw_dir_prob = p_put_cond
 
-                # Плавный штраф за остаточный риск флэта
+                # Platt-Scaled Empirical Calibration on Logit Margin:
+                # Calibrates raw directional margin into empirical win rate P(Win|Trade)
+                # Clamps to break-even threshold (54.05% on 85% payout; 55% hurdle for positive EV)
+                empirical_edge = 1.0 / (1.0 + math.exp(-0.85 * dir_margin))
                 chop_penalty = max(0.20, 1.0 - p_hold * 0.85)
-                calibrated_prob = 0.50 + (raw_dir_prob - 0.50) * chop_penalty
+                calibrated_prob = 0.50 + (empirical_edge - 0.50) * chop_penalty
 
                 # S5 Micro-Regime Dampener:
-                # 5-second breakout spikes on Pocket Option OTC have strong negative autocorrelation (immediate mean-reversion).
-                # Dampen confidence into [50% - 59%] so s5 does not claim false certainty on pure high-frequency tick noise,
-                # while allowing genuine high-conviction momentum trades (>=58%) to execute.
                 if str(interval).lower() == "s5":
                     calibrated_prob = min(0.59, 0.50 + (calibrated_prob - 0.50) * 0.85)
 
-                # Safety floor at 50% (never below chance), ceiling at 92%
-                calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
-                # Signed P(BUY) in [0, 1] (>0.5 for BUY, <0.5 for PUT) so C# mlScore = (rawProb - 0.5)*2 has the right sign
-                raw_prob = round(float(p_buy_cond), 4)
+                # Negative EV Guard: If calibrated probability is below 54.5%, mathematical expectation on Pocket Option
+                # is strictly negative -> suppress to HOLD to preserve capital!
+                if calibrated_prob < 0.545:
+                    direction = "HOLD"
+                    calibrated_prob = 0.50
+                    raw_prob = 0.50
+                else:
+                    calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
+                    raw_prob = round(float(p_buy_cond), 4)
 
             arch_tag = self._arch_tag
             log.info(

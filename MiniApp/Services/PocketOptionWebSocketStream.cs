@@ -202,12 +202,12 @@ public static class PocketOptionWebSocketStream
     /// </summary>
     private static void CancelConnection()
     {
-        // Atomically extract and nullify to prevent race or re-cancelling disposed CTS
-        var cts = Interlocked.Exchange(ref _connectionCts, null);
+        var ws = _webSocket;
+        try { ws?.Abort(); } catch { }
+        var cts = Volatile.Read(ref _connectionCts);
         if (cts != null)
         {
             try { cts.Cancel(); } catch (ObjectDisposedException) { } catch (AggregateException) { }
-            try { cts.Dispose(); } catch { }
         }
     }
 
@@ -577,6 +577,7 @@ public static class PocketOptionWebSocketStream
                 await Task.Delay(1000, token);
                 var ws = _webSocket;
                 if (ws == null || ws.State != WebSocketState.Open) continue;
+                if (Status != "ONLINE") continue;
 
                 double frameIdleSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(Volatile.Read(ref _lastMessageSw)).TotalSeconds;
                 double tickIdleSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(Volatile.Read(ref _lastTickSw)).TotalSeconds;
@@ -636,7 +637,7 @@ public static class PocketOptionWebSocketStream
                 }
 
                 bool wasConnected = false;
-                var connCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                using var connCts = CancellationTokenSource.CreateLinkedTokenSource(token);
                 Interlocked.Exchange(ref _connectionCts, connCts);
 
                 var ws = new ClientWebSocket();
@@ -647,21 +648,30 @@ public static class PocketOptionWebSocketStream
 
                 try
                 {
+                    using var handshakeCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    using var linkedHandshakeCts = CancellationTokenSource.CreateLinkedTokenSource(connCts.Token, handshakeCts.Token);
+                    var handshakeToken = linkedHandshakeCts.Token;
+
                     BotLogger.Info($"[PO WS] Connecting to {tradingUrl}...");
-                    await ws.ConnectAsync(new Uri(tradingUrl), connCts.Token);
+                    await ws.ConnectAsync(new Uri(tradingUrl), handshakeToken);
+
+                    long swConnected = System.Diagnostics.Stopwatch.GetTimestamp();
+                    Volatile.Write(ref _lastMessageSw, swConnected);
+                    Volatile.Write(ref _lastTickSw, swConnected);
+                    Volatile.Write(ref _lastPsSw, swConnected);
 
                     // Step 1: Wait for server handshake packet: '0{"sid":...}'
-                    var (handshake, _) = await ReceiveFrameAsync(ws, connCts.Token);
+                    var (handshake, _) = await ReceiveFrameAsync(ws, handshakeToken);
                     if (handshake == null || !handshake.StartsWith("0"))
                     {
                         throw new InvalidOperationException($"Invalid server handshake: {handshake}");
                     }
 
                     // Step 2: Send Socket.IO connect packet: '40'
-                    await SendTextAsync(ws, "40", connCts.Token);
+                    await SendTextAsync(ws, "40", handshakeToken);
 
                     // Step 3: Wait for server connect ACK: '40{"sid":...}'
-                    var (ack, _) = await ReceiveFrameAsync(ws, connCts.Token);
+                    var (ack, _) = await ReceiveFrameAsync(ws, handshakeToken);
                     if (ack == null || !ack.StartsWith("40"))
                     {
                         throw new InvalidOperationException($"Invalid connect ACK: {ack}");
@@ -669,21 +679,24 @@ public static class PocketOptionWebSocketStream
 
                     // Step 4: Send auth packet: 42["auth", <payload>]
                     string authPacket = "42[\"auth\"," + authPayloadJson + "]";
-                    await SendTextAsync(ws, authPacket, connCts.Token);
+                    await SendTextAsync(ws, authPacket, handshakeToken);
                     BotLogger.Info("[PO WS] Authentication frame sent. Awaiting subscription confirmation...");
 
                     wasConnected = true;
                     SetStatus("ONLINE");
-                    long swConnected = System.Diagnostics.Stopwatch.GetTimestamp();
-                    Volatile.Write(ref _lastMessageSw, swConnected);
-                    Volatile.Write(ref _lastTickSw, swConnected);
-                    Volatile.Write(ref _lastPsSw, swConnected);
+                    Volatile.Write(ref _lastMessageSw, System.Diagnostics.Stopwatch.GetTimestamp());
+                    Volatile.Write(ref _lastTickSw, System.Diagnostics.Stopwatch.GetTimestamp());
+                    Volatile.Write(ref _lastPsSw, System.Diagnostics.Stopwatch.GetTimestamp());
 
                     await ReceiveLoopAsync(ws, connCts.Token);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
                     break;
+                }
+                catch (OperationCanceledException) when (connCts.IsCancellationRequested)
+                {
+                    SetStatus("RECONNECTING");
                 }
                 catch (Exception ex)
                 {
@@ -693,11 +706,7 @@ public static class PocketOptionWebSocketStream
                 }
                 finally
                 {
-                    var activeCts = Interlocked.Exchange(ref _connectionCts, null);
-                    if (activeCts != null)
-                    {
-                        try { activeCts.Dispose(); } catch { }
-                    }
+                    Interlocked.CompareExchange(ref _connectionCts, null, connCts);
                     try { ws.Dispose(); } catch { }
                     if (ReferenceEquals(_webSocket, ws))
                     {
@@ -854,101 +863,112 @@ public static class PocketOptionWebSocketStream
             try { frameTimeoutCts.Cancel(); } catch { }
         });
 
-        while (ws.State == WebSocketState.Open && !connectionToken.IsCancellationRequested)
+        try
         {
-            frameTimeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
-
-            var (text, binary) = await ReceiveFrameAsync(ws, frameTimeoutCts.Token);
-            if (!frameTimeoutCts.TryReset())
+            while (ws.State == WebSocketState.Open && !connectionToken.IsCancellationRequested)
             {
-                break;
-            }
+                frameTimeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
 
-            if (text == null && binary == null)
-            {
-                BotLogger.Warn("[PO WS] Stream closed by server.");
-                break;
-            }
-
-            Volatile.Write(ref _lastMessageSw, System.Diagnostics.Stopwatch.GetTimestamp());
-
-            // 1. Binary attachment payload (follows a 451- packet)
-            if (binary != null)
-            {
-                if (pendingEvent == "updateStream")
+                var (text, binary) = await ReceiveFrameAsync(ws, frameTimeoutCts.Token);
+                if (!frameTimeoutCts.TryReset())
                 {
-                    ParseUpdateStreamUtf8(binary);
+                    break;
                 }
-                else if (pendingEvent == "updateHistoryNewFast")
-                {
-                    string json = Encoding.UTF8.GetString(binary);
-                    ParseHistoryJson(json);
-                }
-                else if (pendingEvent == "successauth" && !subscribed)
-                {
-                    subscribed = true;
-                    _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
-                }
-                pendingEvent = null;
-                continue;
-            }
 
-            // 2. Socket.IO ping/pong heartbeat & 41 namespace disconnect (Auth Rejected)
-            if (text == "2")
-            {
-                await SendTextAsync(ws, "3", connectionToken);
-                continue;
-            }
-            if (text == "3") continue;
-            if (text == "41")
-            {
-                if (!subscribed)
+                if (text == null && binary == null)
                 {
-                    await HandleAuthRejectedAsync(connectionToken);
+                    BotLogger.Warn("[PO WS] Stream closed by server.");
+                    break;
                 }
-                break;
-            }
 
-            // 3. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
-            if (text != null && text.StartsWith("451-"))
-            {
-                try
+                Volatile.Write(ref _lastMessageSw, System.Diagnostics.Stopwatch.GetTimestamp());
+
+                // 1. Binary attachment payload (follows a 451- packet)
+                if (binary != null)
                 {
-                    using var doc = JsonDocument.Parse(text.Substring(4));
-                    if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+                    if (pendingEvent == "updateStream")
                     {
-                        pendingEvent = doc.RootElement[0].GetString();
+                        ParseUpdateStreamUtf8(binary);
                     }
-                }
-                catch { pendingEvent = null; }
-                continue;
-            }
-
-            // 4. Regular JSON event: 42["<event>", ...]
-            if (text != null && text.StartsWith("42"))
-            {
-                if (!subscribed && text.Contains("successauth"))
-                {
-                    subscribed = true;
-                    _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
-                }
-
-                try
-                {
-                    using var doc = JsonDocument.Parse(text.Substring(2));
-                    if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 1)
+                    else if (pendingEvent == "updateHistoryNewFast")
                     {
-                        string ev = doc.RootElement[0].GetString() ?? "";
-                        if (ev == "updateStream")
+                        string json = Encoding.UTF8.GetString(binary);
+                        ParseHistoryJson(json);
+                    }
+                    else if (pendingEvent == "successauth" && !subscribed)
+                    {
+                        subscribed = true;
+                        _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
+                    }
+                    pendingEvent = null;
+                    continue;
+                }
+
+                // 2. Socket.IO ping/pong heartbeat & 41 namespace disconnect (Auth Rejected)
+                if (text == "2")
+                {
+                    await SendTextAsync(ws, "3", connectionToken);
+                    continue;
+                }
+                if (text == "3") continue;
+                if (text == "41")
+                {
+                    if (!subscribed)
+                    {
+                        await HandleAuthRejectedAsync(connectionToken);
+                    }
+                    break;
+                }
+
+                // 3. Binary placeholder header: e.g. 451-["updateStream",{"_placeholder":true,"num":0}]
+                if (text != null && text.StartsWith("451-"))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(text.Substring(4));
+                        if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
                         {
-                            var dataElem = doc.RootElement[1];
-                            string dataRaw = dataElem.ValueKind == JsonValueKind.String ? dataElem.GetString()! : dataElem.GetRawText();
-                            ParseUpdateStreamJson(dataRaw);
+                            pendingEvent = doc.RootElement[0].GetString();
                         }
                     }
+                    catch { pendingEvent = null; }
+                    continue;
                 }
-                catch { }
+
+                // 4. Regular JSON event: 42["<event>", ...]
+                if (text != null && text.StartsWith("42"))
+                {
+                    if (!subscribed && text.Contains("successauth"))
+                    {
+                        subscribed = true;
+                        _ = SubscribeAllAssetsSafeAsync(ws, connectionToken);
+                    }
+
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(text.Substring(2));
+                        if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 1)
+                        {
+                            string ev = doc.RootElement[0].GetString() ?? "";
+                            if (ev == "updateStream")
+                            {
+                                var dataElem = doc.RootElement[1];
+                                string dataRaw = dataElem.ValueKind == JsonValueKind.String ? dataElem.GetString()! : dataElem.GetRawText();
+                                ParseUpdateStreamJson(dataRaw);
+                            }
+                        }
+                    }
+                    catch { }
+                }
             }
+        }
+        catch (OperationCanceledException) when (connectionToken.IsCancellationRequested)
+        {
+            // Expected on stream reconnect or graceful stop
+        }
+        catch (OperationCanceledException) when (frameTimeoutCts.IsCancellationRequested)
+        {
+            BotLogger.Warn("[PO WS] Receive frame timed out (30s). Closing stream to reconnect...");
         }
     }
 
@@ -1042,8 +1062,7 @@ public static class PocketOptionWebSocketStream
                 string asset = aProp.GetString() ?? "";
                 if (hProp.ValueKind == JsonValueKind.Array)
                 {
-                    int count = 0;
-                    int fedCount = 0;
+                    var points = new List<(double srvTs, double price)>();
                     foreach (var pt in hProp.EnumerateArray())
                     {
                         if (pt.ValueKind == JsonValueKind.Array && pt.GetArrayLength() >= 2)
@@ -1052,14 +1071,25 @@ public static class PocketOptionWebSocketStream
                                 (pt[0].ValueKind == JsonValueKind.String && double.TryParse(pt[0].GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedTs) ? parsedTs : 0);
                             double price = pt[1].ValueKind == JsonValueKind.Number ? pt[1].GetDouble() :
                                 (pt[1].ValueKind == JsonValueKind.String && double.TryParse(pt[1].GetString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double parsedPrice) ? parsedPrice : 0);
-                            if (HandleTick(asset, srvTs, price, isBackfill: true))
+                            if (srvTs > 0 && price > 0)
                             {
-                                fedCount++;
+                                points.Add((srvTs, price));
                             }
-                            count++;
                         }
                     }
-                    BotLogger.Info($"[PO WS] History for {asset}: {count} ticks ({fedCount} new ticks fed to candles).");
+
+                    // Strict ascending chronological sorting to prevent watermark dropping when broker returns history in reverse order
+                    points.Sort((a, b) => a.srvTs.CompareTo(b.srvTs));
+
+                    int fedCount = 0;
+                    foreach (var (srvTs, price) in points)
+                    {
+                        if (HandleTick(asset, srvTs, price, isBackfill: true))
+                        {
+                            fedCount++;
+                        }
+                    }
+                    BotLogger.Info($"[PO WS] History for {asset}: {points.Count} ticks ({fedCount} new ticks fed to candles).");
                 }
             }
         }

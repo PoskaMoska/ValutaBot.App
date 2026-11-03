@@ -385,8 +385,11 @@ public class DataRetentionService : BackgroundService
                     autovacuum_vacuum_cost_delay = 2
                 );
                 ALTER TABLE pending_trades SET (
-                    autovacuum_vacuum_scale_factor = 0.01,
-                    autovacuum_vacuum_cost_limit = 1000
+                    fillfactor = 70,
+                    autovacuum_vacuum_threshold = 20,
+                    autovacuum_vacuum_scale_factor = 0.05,
+                    autovacuum_vacuum_cost_limit = 500,
+                    autovacuum_vacuum_cost_delay = 2
                 );
             ", commandTimeout: 30);
             BotLogger.Info("[SmartStorageGovernor] Applied table-level autovacuum and HOT tuning (fillfactor=80, scale_factor=0.02).");

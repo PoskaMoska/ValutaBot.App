@@ -26,6 +26,7 @@
             height: 100%;
             overscroll-behavior: contain;
             overscroll-behavior-y: contain;
+            touch-action: manipulation;
         }
         body {
             background: #03010c;
@@ -44,8 +45,13 @@
             overflow-x: hidden;
             overscroll-behavior: contain;
             overscroll-behavior-y: contain;
+            touch-action: manipulation;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
+        }
+
+        button, .btn-analyze, .dropdown-trigger, .tf-btn, .asset-item, .copilot-action-btn, .res-card {
+            touch-action: manipulation;
         }
 
         /* в”Ђв”Ђв”Ђ Animated Premium Mesh Background в”Ђв”Ђв”Ђ */
@@ -1276,7 +1282,7 @@
     display: block;
     /* Отключает перехват жестов и предотвращает лаги скролла */
     pointer-events: none;
-    touch-action: none;
+    touch-action: pan-y;
 }
 
 /* ─── AI Copilot Tactical Card ─── */

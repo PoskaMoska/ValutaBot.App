@@ -838,6 +838,7 @@ export async function executeAnalysis() {
         cleanupUi();
         if (e.name === 'AbortError' && !timedOut) return; // Graceful exit on intentional abort
         if (e.name === 'AbortError' && timedOut) {
+            showNetworkBanner('Таймаут соединения. Нажмите для повтора');
             renderError('Превышен лимит времени ответа сервера (14с)', 'Сервер не успел рассчитать консенсус за отведенное время (14с). Проверьте интернет-соединение или повторите попытку.');
             return;
         }
@@ -846,6 +847,7 @@ export async function executeAnalysis() {
         let errorMsg;
         if (e instanceof TypeError && (e.message.includes('fetch') || e.message.includes('NetworkError') || e.message.includes('Failed to fetch'))) {
             errorMsg = 'Сетевая ошибка: проверьте интернет-соединение или доступ к серверу';
+            showNetworkBanner('Нет интернет-соединения. Нажмите для повтора');
         } else if (isAuthError) {
             errorMsg = 'Сессия устарела или доступ не авторизован. Перезапустите бота командой /start в Telegram.';
         } else {

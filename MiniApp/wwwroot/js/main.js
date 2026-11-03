@@ -34,8 +34,23 @@ if (tg) {
         // Синхронизация системного бара и оверскролла Telegram с темой терминала
         const syncTgTheme = () => {
             try {
-                if (typeof tg.setHeaderColor === 'function') tg.setHeaderColor('#03010c');
-                if (typeof tg.setBackgroundColor === 'function') tg.setBackgroundColor('#03010c');
+                const themeColor = '#03010c';
+                if (typeof tg.setHeaderColor === 'function') tg.setHeaderColor(themeColor);
+                if (typeof tg.setBackgroundColor === 'function') tg.setBackgroundColor(themeColor);
+
+                let metaTheme = document.querySelector('meta[name="theme-color"]');
+                if (!metaTheme) {
+                    metaTheme = document.createElement('meta');
+                    metaTheme.setAttribute('name', 'theme-color');
+                    document.head.appendChild(metaTheme);
+                }
+                metaTheme.setAttribute('content', themeColor);
+
+                const scheme = (tg && tg.colorScheme) ? tg.colorScheme : 'dark';
+                document.documentElement.setAttribute('data-color-scheme', scheme);
+                if (typeof updateCanvasDimensions === 'function') {
+                    updateCanvasDimensions();
+                }
             } catch (e) {}
         };
         syncTgTheme();

@@ -21,10 +21,19 @@ public class PendingTradeVerificationService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
         
         // Сброс зависших блокировок после холодного перезапуска контейнера
-        await TradeRepository.ResetAllOrphanedClaimsAsync();
+        try
+        {
+            await TradeRepository.ResetAllOrphanedClaimsAsync();
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PendingVerifier] Initial claim reset warning: {ex.Message}");
+        }
+
         BotLogger.Info("[PendingVerifier] Started. Sweeping pending trades every 5s for strict grid verification.");
         try
         {
@@ -89,8 +98,13 @@ public class PendingTradeVerificationService : BackgroundService
 
             tasks.Add(Task.Run(async () =>
             {
-                await _verificationSemaphore.WaitAsync(ct).ConfigureAwait(false);
-                try { await VerifyTradeAsync(record, ct); }
+                bool acquired = false;
+                try
+                {
+                    await _verificationSemaphore.WaitAsync(ct).ConfigureAwait(false);
+                    acquired = true;
+                    await VerifyTradeAsync(record, ct);
+                }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
@@ -100,12 +114,21 @@ public class PendingTradeVerificationService : BackgroundService
                     BotLogger.Warn($"[PendingVerifier] Failed to verify {record.Id}: {ex.Message}");
                     await TradeRepository.ReleasePendingTradeClaimAsync(record.Id);
                 }
-                finally { _verificationSemaphore.Release(); }
-            }, ct));
+                finally
+                {
+                    if (acquired)
+                    {
+                        _verificationSemaphore.Release();
+                    }
+                }
+            }, CancellationToken.None));
         }
         
-        try { await Task.WhenAll(tasks); }
-        catch (OperationCanceledException) { }
+        try
+        {
+            await Task.WhenAll(tasks.Select(t => t.ContinueWith(_ => Task.CompletedTask)));
+        }
+        catch { }
     }
 
     private static async Task VerifyTradeAsync(SignalTracker.PredictionRecord record, CancellationToken ct = default)
@@ -169,30 +192,7 @@ public class PendingTradeVerificationService : BackgroundService
                 MinIso = minIsoPrimary,
                 MaxIso = maxIsoPrimary,
                 TargetGrid = targetGrid
-            }, cancellationToken: ct));
-
-            // Fast-path In-Memory fallback: if DB writer is buffering ticks (micro-batching lag 250-400ms),
-            // inspect the real-time in-memory ring buffer in RealtimeTickCollector directly.
-            if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
-            {
-                try
-                {
-                    var recentCandles = await RealtimeTickCollector.GetRecentCandles(cleanAsset, verifyInterval, 10);
-                    if (recentCandles != null && recentCandles.Length > 0)
-                    {
-                        var match = recentCandles.FirstOrDefault(c =>
-                            Math.Abs((c.Timestamp.AddSeconds(5) - targetGrid).TotalSeconds) <= 2.5);
-                        if (match != null && match.Close > 1e-8 && !double.IsNaN(match.Close) && !double.IsInfinity(match.Close))
-                        {
-                            exitPrice = match.Close;
-                        }
-                    }
-                }
-                catch (Exception exCollector)
-                {
-                    BotLogger.Warn($"[PendingVerifier] In-memory RealtimeTickCollector lookup error: {exCollector.Message}");
-                }
-            }
+            }, cancellationToken: ct, commandTimeout: 8));
 
             // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] via Index Seek on UNIQUE(asset, interval, open_time)
             if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))
@@ -211,7 +211,7 @@ public class PendingTradeVerificationService : BackgroundService
                         Interval = verifyInterval, 
                         CreatedIso = createdBucket.ToString("yyyy-MM-ddTHH:mm:ss"), 
                         TargetIso = targetGrid.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ") 
-                    }, cancellationToken: ct));
+                    }, cancellationToken: ct, commandTimeout: 8));
 
                     double exitVal = exitPrice.Value;
                     double excMax = exc.max_high.HasValue && !double.IsNaN(exc.max_high.Value) && !double.IsInfinity(exc.max_high.Value) 
@@ -245,6 +245,30 @@ public class PendingTradeVerificationService : BackgroundService
         {
             dbFailed = true;
             BotLogger.Warn($"[PendingVerifier] DB fetch failed: {ex.Message}");
+        }
+
+        // Fast-path In-Memory fallback: if DB writer is buffering ticks (micro-batching lag 250-400ms),
+        // OR if DB fetch failed/timed out, inspect the real-time in-memory ring buffer directly.
+        if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))
+        {
+            try
+            {
+                var recentCandles = await RealtimeTickCollector.GetRecentCandles(cleanAsset, verifyInterval, 10);
+                if (recentCandles != null && recentCandles.Length > 0)
+                {
+                    var match = recentCandles.FirstOrDefault(c =>
+                        Math.Abs((c.Timestamp.AddSeconds(5) - targetGrid).TotalSeconds) <= 2.5);
+                    if (match != null && match.Close > 1e-8 && !double.IsNaN(match.Close) && !double.IsInfinity(match.Close))
+                    {
+                        exitPrice = match.Close;
+                        dbFailed = false; // Successfully resolved via fast-path ring buffer!
+                    }
+                }
+            }
+            catch (Exception exCollector)
+            {
+                BotLogger.Warn($"[PendingVerifier] In-memory RealtimeTickCollector lookup error: {exCollector.Message}");
+            }
         }
 
         if (!exitPrice.HasValue || exitPrice.Value <= 1e-8 || double.IsNaN(exitPrice.Value) || double.IsInfinity(exitPrice.Value))

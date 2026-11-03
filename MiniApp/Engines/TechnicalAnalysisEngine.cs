@@ -445,7 +445,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
 
         if (longVol < 1e-5) return 1.0;
         double ratio = shortVol / longVol;
-        return double.IsFinite(ratio) ? ratio : 1.0;
+        return double.IsFinite(ratio) ? Math.Clamp(ratio, 0.0, 10.0) : 1.0;
     }
 
     private static double StandardDeviationScalar(ReadOnlySpan<double> values)

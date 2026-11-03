@@ -68,8 +68,9 @@ public partial class TelegramBotService
             string? token = TelegramNotifier.GetToken();
             if (!string.IsNullOrEmpty(token))
             {
+                string safePocketId = System.Net.WebUtility.HtmlEncode(reg.PocketId ?? "");
                 string trialWelcomeText = 
-                    $"🎉 <b>Добро пожаловать!</b> Вам открыт полный доступ к боту на 3 дня (ID: <code>{reg.PocketId}</code>).\n\n" +
+                    $"🎉 <b>Добро пожаловать!</b> Вам открыт полный доступ к боту на 3 дня (ID: <code>{safePocketId}</code>).\n\n" +
                     "Рекомендуем протестировать первые сигналы на демо-счёте брокера, чтобы освоиться с таймфреймами и стратегией Smart Money. Удачных сделок!";
 
                 await SendMessage(token, reg.ChatId, trialWelcomeText);

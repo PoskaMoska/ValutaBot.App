@@ -98,6 +98,21 @@ def _safe_float(val, default=0.0):
         return default
 
 
+def _extract_candle_ts(c):
+    """Safely extracts epoch timestamp in seconds from any candle representation."""
+    if not isinstance(c, dict):
+        return None
+    ts_raw = c.get("openTime") or c.get("timestamp") or c.get("Timestamp") or c.get("time") or c.get("OpenTime")
+    if isinstance(ts_raw, (int, float)) and ts_raw > 0:
+        return float(ts_raw) / 1000.0 if float(ts_raw) > 1e11 else float(ts_raw)
+    elif isinstance(ts_raw, str) and len(ts_raw) >= 19:
+        try:
+            return datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+    return None
+
+
 def normalize_candles(candles_list, seq_len=160, channels=8, tf_sec=5):
     """
     Normalizes a sequence of OHLCV candles into a stationary [seq_len, channels] array.
@@ -115,6 +130,13 @@ def normalize_candles(candles_list, seq_len=160, channels=8, tf_sec=5):
     arr = np.zeros((seq_len, channels), dtype=np.float32)
     if not candles_list:
         return arr
+
+    # Time-Series Inversion Guard: auto-detect and reverse descending sequences (Train-Serve Parity)
+    if len(candles_list) >= 2:
+        t_first = _extract_candle_ts(candles_list[0])
+        t_last = _extract_candle_ts(candles_list[-1])
+        if t_first is not None and t_last is not None and t_first > t_last:
+            candles_list = list(reversed(candles_list))
 
     tail = candles_list[-seq_len:] if len(candles_list) >= seq_len else candles_list
     offset = seq_len - len(tail)

@@ -16,7 +16,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             // FSM Memory Safety: Атомарно забираем состояние на входе, исключая утечки даже при сбросе прав админа
             bool claimed = TelegramBotService.UserStates.TryRemove(chatId, out var state) && state == TelegramBotService.UserState.AwaitingAddAdminId;
             if (!claimed || !isAdmin) return;
-            if (long.TryParse(cleanText.Trim(), out long targetChatId))
+            if (long.TryParse(cleanText.Trim(), out long targetChatId) && targetChatId > 0)
             {
                 await UserRepository.AddAdminAsync(targetChatId);
                 await UserRepository.AddAllowedUserAsync(targetChatId);
