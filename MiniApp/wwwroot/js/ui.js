@@ -1,4 +1,4 @@
-import { lastPriceVal } from './state.js?v=20261029_audit_v6';
+import { lastPriceVal } from './state.js?v=20261103_audit_v7';
 
 export function hapticImpact(style = 'medium') {
     try {
