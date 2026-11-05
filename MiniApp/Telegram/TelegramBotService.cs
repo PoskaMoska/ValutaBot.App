@@ -331,7 +331,7 @@ public partial class TelegramBotService : BackgroundService
         try
         {
             long initialOffset = await LoadPersistedOffsetAsync(stoppingToken);
-            await PollUpdatesLoopAsync(token, initialOffset, stoppingToken);
+            await PollUpdatesLoopAsync(token, initialOffset, leaderLock, stoppingToken);
         }
         finally
         {
@@ -340,7 +340,7 @@ public partial class TelegramBotService : BackgroundService
         }
     }
 
-    private async Task PollUpdatesLoopAsync(string token, long initialOffset, CancellationToken stoppingToken)
+    private async Task PollUpdatesLoopAsync(string token, long initialOffset, ValutaBot.MiniApp.Services.PostgresDistributedLock leaderLock, CancellationToken stoppingToken)
     {
         long offset = initialOffset;
         var inFlightHandlers = new ConcurrentDictionary<Task, byte>();
@@ -350,6 +350,16 @@ public partial class TelegramBotService : BackgroundService
         {
             try
             {
+                if (!leaderLock.IsHeld)
+                {
+                    _isLeader = false;
+                    BotLogger.Warn("[TG Bot] Advisory lock lost due to network partition/disconnect. Relinquishing leader role...");
+                    await leaderLock.WaitAcquireAsync(TimeSpan.FromSeconds(2), stoppingToken);
+                    if (stoppingToken.IsCancellationRequested) break;
+                    _isLeader = true;
+                    BotLogger.Info("[TG Bot] Advisory lock re-acquired. Resuming polling as active leader.");
+                }
+
                 // Periodic TTL eviction across per-chat rate limits and orphaned user states
                 if (DateTime.UtcNow - lastPruneTime > TimeSpan.FromMinutes(2))
                 {

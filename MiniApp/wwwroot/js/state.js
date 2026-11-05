@@ -70,6 +70,7 @@ export function getAuthHeader() {
 export let isNetworkOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
 export function setNetworkOnlineState(isOnline) {
     isNetworkOnline = Boolean(isOnline);
+    if (typeof window !== 'undefined') window.isNetworkOnline = isNetworkOnline;
 }
 
 // Active Asset & Timeframe selection

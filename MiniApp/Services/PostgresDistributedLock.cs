@@ -20,7 +20,7 @@ public sealed class PostgresDistributedLock : IAsyncDisposable
     private NpgsqlConnection? _connection;
     private bool _isHeld;
 
-    public bool IsHeld => _isHeld;
+    public bool IsHeld => _isHeld && (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString()) || (_connection != null && _connection.State == System.Data.ConnectionState.Open));
     public string LockName => _lockName;
 
     public PostgresDistributedLock(string lockName)
@@ -107,14 +107,14 @@ public sealed class PostgresDistributedLock : IAsyncDisposable
     /// </summary>
     public async Task ReleaseAsync()
     {
-        if (!_isHeld) return;
+        bool wasHeld = _isHeld;
         _isHeld = false;
 
         if (_connection != null)
         {
             try
             {
-                if (_connection.State == System.Data.ConnectionState.Open)
+                if (wasHeld && _connection.State == System.Data.ConnectionState.Open)
                 {
                     await using var cmd = new NpgsqlCommand("SELECT pg_advisory_unlock(@key);", _connection);
                     cmd.Parameters.AddWithValue("key", _lockKey);

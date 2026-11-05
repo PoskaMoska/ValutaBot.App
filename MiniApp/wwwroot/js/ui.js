@@ -620,6 +620,13 @@ function _onChartVisibilityChange() {
 
 if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', _onChartVisibilityChange);
+    document.addEventListener('resume', _onChartVisibilityChange);
+    document.addEventListener('freeze', () => {
+        if (aiChartAnimationId) {
+            cancelAnimationFrame(aiChartAnimationId);
+            aiChartAnimationId = null;
+        }
+    });
     if (typeof window !== 'undefined') {
         window.addEventListener('pageshow', (e) => {
             if (e.persisted) _onChartVisibilityChange();

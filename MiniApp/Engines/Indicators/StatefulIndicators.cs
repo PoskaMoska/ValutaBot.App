@@ -521,6 +521,7 @@ public sealed class StatefulTrueAdx
         else
         {
             _adx = (_adx * (_period - 1) + dx) / _period;
+            if (_adx < 1e-10) _adx = 0;
         }
 
         // FIX C-04: previously LastAdx was assigned AFTER _count++.
@@ -572,6 +573,7 @@ public sealed class StatefulTrueAdx
             : 100.0 * Math.Abs(lastPdi - lastMdi) / (lastPdi + lastMdi);
 
         double adx = (_adx * (_period - 1) + dx) / _period;
+        if (adx < 1e-10) adx = 0;
         return (adx, lastPdi, lastMdi);
     }
 

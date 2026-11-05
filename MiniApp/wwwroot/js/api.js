@@ -11,7 +11,9 @@ import {
     priceSocket, 
     setPriceSocket, 
     triggerCopilotAction,
-    setCircuitBreakerState
+    setCircuitBreakerState,
+    isNetworkOnline,
+    setNetworkOnlineState
 } from './state.js?v=20261103_audit_v7';
 
 function resolveAuthData() {
@@ -27,6 +29,24 @@ function resolveAuthData() {
         if (typeof getCustomInitData === 'function') return getCustomInitData();
     } catch (e) {}
     return '';
+}
+
+function checkNetworkOnline() {
+    try {
+        if (typeof isNetworkOnline !== 'undefined') return Boolean(isNetworkOnline);
+    } catch (_) {}
+    try {
+        if (typeof window !== 'undefined' && typeof window.isNetworkOnline !== 'undefined') return Boolean(window.isNetworkOnline);
+    } catch (_) {}
+    if (typeof navigator !== 'undefined') return Boolean(navigator.onLine);
+    return true;
+}
+
+function updateNetworkOnline(val) {
+    try {
+        if (typeof setNetworkOnlineState === 'function') setNetworkOnlineState(val);
+    } catch (_) {}
+    if (typeof window !== 'undefined') window.isNetworkOnline = Boolean(val);
 }
 
 function getSafeLocationUrl() {
@@ -311,7 +331,7 @@ export function closePriceWebSocket() {
 }
 
 export async function syncTime() {
-    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    if (!checkNetworkOnline()) return;
     let best = null;
     for (let i = 0; i < 3; i++) {
         const controller = new AbortController();
@@ -324,6 +344,8 @@ export async function syncTime() {
                 signal: controller.signal
             });
             if (r.ok) {
+                updateNetworkOnline(true);
+                hideNetworkBanner();
                 const d = await r.json();
                 const rtt = performance.now() - p0;
                 const srv = num(d && d.t);
@@ -346,7 +368,7 @@ export async function executeAnalysis() {
     const btn = document.getElementById('btnGet');
     if (isAnalyzingInProgress || (btn && btn.disabled)) return;
 
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    if (!checkNetworkOnline()) {
         showNetworkBanner('Нет интернет-соединения');
         renderError('⚠️ Ошибка соединения', 'Отсутствует подключение к интернету. Проверьте 4G/Wi-Fi и повторите попытку.');
         return;
@@ -867,8 +889,17 @@ export async function executeAnalysis() {
         }
 
         const isAuthError = Boolean(e && e.message && (e.message.includes('HTTP 401') || e.message.includes('HTTP_401') || e.message.includes('auth_date') || e.message.includes('authorization') || e.message.includes('Access Denied')));
+        const isNetworkErr = (!checkNetworkOnline()) || 
+            (e instanceof TypeError && (
+                e.message.includes('fetch') || 
+                e.message.includes('NetworkError') || 
+                e.message.includes('Failed to fetch') || 
+                e.message.includes('Load failed') ||
+                e.message.includes('Network request failed')
+            ));
         let errorMsg;
-        if (e instanceof TypeError && (e.message.includes('fetch') || e.message.includes('NetworkError') || e.message.includes('Failed to fetch'))) {
+        if (isNetworkErr) {
+            updateNetworkOnline(false);
             errorMsg = 'Сетевая ошибка: проверьте интернет-соединение или доступ к серверу';
             showNetworkBanner('Нет интернет-соединения. Нажмите для повтора');
             hapticNotification('error');

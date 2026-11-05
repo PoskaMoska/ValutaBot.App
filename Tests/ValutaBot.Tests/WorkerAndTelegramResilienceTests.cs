@@ -80,5 +80,17 @@ namespace ValutaBot.Tests
             string body = await response.Content.ReadAsStringAsync();
             Assert.Contains("retry limit exceeded", body);
         }
+
+        [Fact]
+        public async Task PostgresDistributedLock_InOfflineMode_AcquiresAndReleasesGracefully()
+        {
+            await using var distLock = new PostgresDistributedLock("test_lock_offline");
+            bool acquired = await distLock.TryAcquireAsync();
+            Assert.True(acquired);
+            Assert.True(distLock.IsHeld);
+
+            await distLock.ReleaseAsync();
+            Assert.False(distLock.IsHeld);
+        }
     }
 }

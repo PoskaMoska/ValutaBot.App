@@ -817,24 +817,23 @@ public static class PocketOptionWebSocketStream
 
     private static async Task<ReceivedFrame> ReceiveFrameAsync(ClientWebSocket ws, CancellationToken token)
     {
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(32768);
+        byte[] currentBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(32768);
         try
         {
-            var firstResult = await ws.ReceiveAsync(new ArraySegment<byte>(rented), token).ConfigureAwait(false);
+            var firstResult = await ws.ReceiveAsync(new ArraySegment<byte>(currentBuffer), token).ConfigureAwait(false);
             if (firstResult.MessageType == WebSocketMessageType.Close)
             {
-                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+                System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
                 return ReceivedFrame.Empty;
             }
 
             if (firstResult.EndOfMessage)
             {
-                return new ReceivedFrame(firstResult.MessageType, rented.AsMemory(0, firstResult.Count), rented);
+                return new ReceivedFrame(firstResult.MessageType, currentBuffer.AsMemory(0, firstResult.Count), currentBuffer);
             }
 
             const int maxFrameBytes = 4 * 1024 * 1024; // 4 MB safety limit
             int totalBytes = firstResult.Count;
-            byte[] currentBuffer = rented;
 
             WebSocketReceiveResult nextResult;
             do
@@ -871,7 +870,7 @@ public static class PocketOptionWebSocketStream
         }
         catch
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
             throw;
         }
     }

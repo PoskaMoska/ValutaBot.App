@@ -546,6 +546,17 @@ if (typeof document !== 'undefined') {
         cancelAnalysis();
         closePriceWebSocket();
         cancelCopilotTimer();
+        if (countdownTimerId) {
+            clearTimeout(countdownTimerId);
+            countdownTimerId = null;
+        }
+    });
+    document.addEventListener('resume', () => {
+        syncViewport();
+        if (typeof updateCanvasDimensions === 'function') updateCanvasDimensions();
+        updateCountdown();
+        if (!countdownTimerId) tickCountdown();
+        if (typeof navigator === 'undefined' || navigator.onLine) resumeLive();
     });
 }
 if (navigator.connection && typeof navigator.connection.addEventListener === 'function') {
