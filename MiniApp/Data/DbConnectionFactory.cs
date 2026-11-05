@@ -181,6 +181,9 @@ namespace ValutaBot.App.MiniApp.Data
         private static bool IsRetryableSql(Exception ex) =>
             ex is PostgresException { SqlState: "40001" or "40P01" or "55P03" };
 
+        public static bool IsReadOnlyOrDiskFull(Exception ex) =>
+            ex is PostgresException { SqlState: "25006" or "53100" };
+
         private static long _lastPoolClearTicks = 0;
         private static void MaybeEvictDeadPool(Exception ex, NpgsqlConnection? conn)
         {

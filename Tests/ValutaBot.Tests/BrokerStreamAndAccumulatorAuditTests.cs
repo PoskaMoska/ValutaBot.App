@@ -186,5 +186,74 @@ namespace ValutaBot.Tests
             Assert.Same(baseAsset, baseAsset2);
             Assert.Same(candleKey, candleKey2);
         }
+
+        [Fact]
+        public async Task TryGetLivePrice_UnderConcurrentBursts_ExcludesTornReads()
+        {
+            // Reset state
+            PocketOptionWebSocketStream.ResetClockAndWatermarksOnDstShift();
+
+            string asset = "EURUSD_otc";
+            double srvNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + PocketOptionWebSocketStream.ServerTimeOffsetSec;
+
+            // Seed initial tick
+            PocketOptionWebSocketStream.HandleTick(asset, srvNow, 1.0800);
+
+            bool running = true;
+            int tornReadsCount = 0;
+            int successfulReads = 0;
+
+            // Thread 1: Writer simulating high-frequency websocket ticks
+            var writer = Task.Run(() =>
+            {
+                double p = 1.0800;
+                while (Volatile.Read(ref running))
+                {
+                    p += 0.0001;
+                    double ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + PocketOptionWebSocketStream.ServerTimeOffsetSec;
+                    PocketOptionWebSocketStream.HandleTick(asset, ts, p);
+                    Thread.SpinWait(10);
+                }
+            });
+
+            // Thread 2: Concurrent Lock-Free readers
+            var reader = Task.Run(() =>
+            {
+                for (int i = 0; i < 5000; i++)
+                {
+                    if (PocketOptionWebSocketStream.TryGetLivePrice("EURUSD", out double price, maxAgeSeconds: 5.0))
+                    {
+                        if (price < 1.07 || price > 2.0 || double.IsNaN(price))
+                        {
+                            Interlocked.Increment(ref tornReadsCount);
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref successfulReads);
+                        }
+                    }
+                }
+            });
+
+            await reader;
+            Volatile.Write(ref running, false);
+            await writer;
+
+            Assert.Equal(0, tornReadsCount);
+            Assert.True(successfulReads > 0, "Expected successful lock-free reads from Seqlock.");
+        }
+
+        [Fact]
+        public void MacroContextEngine_UpdatePrice_NormalizesTickerWithCachedBaseAsset()
+        {
+            var now = DateTime.UtcNow;
+            // Ingest ticks using different OTC variations
+            ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice("EURUSD_otc", 1.0850, now);
+            ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice("EUR/USD OTC", 1.0855, now.AddSeconds(1));
+            ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice("EURUSD", 1.0860, now.AddSeconds(2));
+
+            var metrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
+            Assert.NotNull(metrics);
+        }
     }
 }

@@ -68,6 +68,7 @@ public static class PocketOptionWebSocketStream
 
     private static readonly ConcurrentDictionary<string, string> _canonicalAssetCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, (string BaseAsset, string CandleKey)> _assetKeysCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, Prometheus.Counter.Child> _metricCountersCache = new(StringComparer.OrdinalIgnoreCase);
 
     public static (string BaseAsset, string CandleKey) GetAssetKeys(string asset)
     {
@@ -81,22 +82,22 @@ public static class PocketOptionWebSocketStream
 
     public static string ResolveCanonicalAsset(ReadOnlySpan<byte> span)
     {
-        if (span.SequenceEqual("EURUSD_otc"u8)) return "EURUSD_otc";
-        if (span.SequenceEqual("GBPUSD_otc"u8)) return "GBPUSD_otc";
-        if (span.SequenceEqual("USDJPY_otc"u8)) return "USDJPY_otc";
-        if (span.SequenceEqual("AUDUSD_otc"u8)) return "AUDUSD_otc";
-        if (span.SequenceEqual("USDCAD_otc"u8)) return "USDCAD_otc";
-        if (span.SequenceEqual("USDCHF_otc"u8)) return "USDCHF_otc";
+        if (span.SequenceEqual("EURUSD_otc"u8) || span.SequenceEqual("EURUSD"u8)) return "EURUSD_otc";
+        if (span.SequenceEqual("GBPUSD_otc"u8) || span.SequenceEqual("GBPUSD"u8)) return "GBPUSD_otc";
+        if (span.SequenceEqual("USDJPY_otc"u8) || span.SequenceEqual("USDJPY"u8)) return "USDJPY_otc";
+        if (span.SequenceEqual("AUDUSD_otc"u8) || span.SequenceEqual("AUDUSD"u8)) return "AUDUSD_otc";
+        if (span.SequenceEqual("USDCAD_otc"u8) || span.SequenceEqual("USDCAD"u8)) return "USDCAD_otc";
+        if (span.SequenceEqual("USDCHF_otc"u8) || span.SequenceEqual("USDCHF"u8)) return "USDCHF_otc";
 
         string assetStr = Encoding.UTF8.GetString(span);
         return _canonicalAssetCache.GetOrAdd(assetStr, assetStr);
     }
 
-    private readonly struct ReceivedFrame : IDisposable
+    private struct ReceivedFrame : IDisposable
     {
         public readonly WebSocketMessageType MessageType;
         public readonly ReadOnlyMemory<byte> Memory;
-        private readonly byte[]? _rented;
+        private byte[]? _rented;
 
         public ReceivedFrame(WebSocketMessageType messageType, ReadOnlyMemory<byte> memory, byte[]? rented)
         {
@@ -112,9 +113,10 @@ public static class PocketOptionWebSocketStream
 
         public void Dispose()
         {
-            if (_rented != null)
+            var r = Interlocked.Exchange(ref _rented, null);
+            if (r != null)
             {
-                System.Buffers.ArrayPool<byte>.Shared.Return(_rented);
+                System.Buffers.ArrayPool<byte>.Shared.Return(r);
             }
         }
     }
@@ -136,8 +138,74 @@ public static class PocketOptionWebSocketStream
         return (payload, TryDemoTradingUrl);
     }
 
-    // Live price store: last tick per symbol (Price, BrokerUtcTicks, LocalSwTimestamp)
-    private static readonly ConcurrentDictionary<string, (double Price, long BrokerUtcTicks, long LocalSwTimestamp)> _livePrices = new(StringComparer.OrdinalIgnoreCase);
+    // Live price store: Lock-Free Seqlock slots per symbol eliminating torn reads of multi-word structs
+    private sealed class LivePriceSlot
+    {
+        private long _version;
+        public double Price;
+        public long BrokerUtcTicks;
+        public long LocalSwTimestamp;
+
+        public void Update(double price, long brokerUtcTicks, long localSw)
+        {
+            if (brokerUtcTicks < Volatile.Read(ref BrokerUtcTicks))
+                return; // Prevent out-of-order broker tick overwrite
+
+            long v = Volatile.Read(ref _version);
+            Volatile.Write(ref _version, v + 1); // Odd: write in progress
+            Interlocked.MemoryBarrier();
+            Price = price;
+            BrokerUtcTicks = brokerUtcTicks;
+            LocalSwTimestamp = localSw;
+            Interlocked.MemoryBarrier();
+            Volatile.Write(ref _version, v + 2); // Even: write completed
+        }
+
+        public bool TryRead(out double price, out long brokerUtcTicks, out long localSw)
+        {
+            for (int retry = 0; retry < 5; retry++)
+            {
+                long v1 = Volatile.Read(ref _version);
+                if ((v1 & 1) != 0)
+                {
+                    Thread.SpinWait(1);
+                    continue;
+                }
+                Interlocked.MemoryBarrier();
+                double p = Price;
+                long b = BrokerUtcTicks;
+                long l = LocalSwTimestamp;
+                Interlocked.MemoryBarrier();
+                long v2 = Volatile.Read(ref _version);
+                if (v1 == v2 && (v2 & 1) == 0)
+                {
+                    price = p;
+                    brokerUtcTicks = b;
+                    localSw = l;
+                    return true;
+                }
+                Thread.SpinWait(1);
+            }
+            price = 0;
+            brokerUtcTicks = 0;
+            localSw = 0;
+            return false;
+        }
+
+        public void Reset()
+        {
+            long v = Volatile.Read(ref _version);
+            Volatile.Write(ref _version, v + 1);
+            Interlocked.MemoryBarrier();
+            Price = 0;
+            BrokerUtcTicks = 0;
+            LocalSwTimestamp = 0;
+            Interlocked.MemoryBarrier();
+            Volatile.Write(ref _version, v + 2);
+        }
+    }
+
+    private static readonly ConcurrentDictionary<string, LivePriceSlot> _livePrices = new(StringComparer.OrdinalIgnoreCase);
 
     // Monotonic tick arrival per symbol for Dead Man's Switch detection
     private static readonly ConcurrentDictionary<string, long> _lastTickTicksBySymbol = new(StringComparer.OrdinalIgnoreCase);
@@ -341,13 +409,15 @@ public static class PocketOptionWebSocketStream
     public static bool TryGetLivePrice(string symbol, out double price, double maxAgeSeconds = 2.0)
     {
         if (_clockAnchor != null &&
-            _livePrices.TryGetValue(AssetSanitizer.Sanitize(symbol), out var entry) && entry.Price > 0)
+            _livePrices.TryGetValue(PriceFeed.BaseAsset(symbol), out var slot) &&
+            slot.TryRead(out double tickPrice, out long brokerUtcTicks, out long localSw) &&
+            tickPrice > 0)
         {
-            double arrivalAge = System.Diagnostics.Stopwatch.GetElapsedTime(entry.LocalSwTimestamp).TotalSeconds;
-            double brokerAge = (GetBrokerTimeUtc().Ticks - entry.BrokerUtcTicks) / (double)TimeSpan.TicksPerSecond;
+            double arrivalAge = System.Diagnostics.Stopwatch.GetElapsedTime(localSw).TotalSeconds;
+            double brokerAge = (GetBrokerTimeUtc().Ticks - brokerUtcTicks) / (double)TimeSpan.TicksPerSecond;
             if (arrivalAge <= maxAgeSeconds && brokerAge <= maxAgeSeconds && brokerAge >= -AnchorToleranceSec)
             {
-                price = entry.Price;
+                price = tickPrice;
                 return true;
             }
         }
@@ -817,19 +887,21 @@ public static class PocketOptionWebSocketStream
 
     private static async Task<ReceivedFrame> ReceiveFrameAsync(ClientWebSocket ws, CancellationToken token)
     {
-        byte[] currentBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(32768);
+        byte[]? currentBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(32768);
+        bool ownershipTransferred = false;
         try
         {
             var firstResult = await ws.ReceiveAsync(new ArraySegment<byte>(currentBuffer), token).ConfigureAwait(false);
             if (firstResult.MessageType == WebSocketMessageType.Close)
             {
-                System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
                 return ReceivedFrame.Empty;
             }
 
             if (firstResult.EndOfMessage)
             {
-                return new ReceivedFrame(firstResult.MessageType, currentBuffer.AsMemory(0, firstResult.Count), currentBuffer);
+                var frame = new ReceivedFrame(firstResult.MessageType, currentBuffer.AsMemory(0, firstResult.Count), currentBuffer);
+                ownershipTransferred = true;
+                return frame;
             }
 
             const int maxFrameBytes = 4 * 1024 * 1024; // 4 MB safety limit
@@ -844,7 +916,6 @@ public static class PocketOptionWebSocketStream
                     if (newCap > maxFrameBytes)
                     {
                         BotLogger.Error("[PO WS] Frame exceeded 4MB limit, aborting frame receive.");
-                        System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
                         return ReceivedFrame.Empty;
                     }
                     byte[] newBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(newCap);
@@ -859,19 +930,22 @@ public static class PocketOptionWebSocketStream
 
                 if (nextResult.MessageType == WebSocketMessageType.Close)
                 {
-                    System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
                     return ReceivedFrame.Empty;
                 }
 
                 totalBytes += nextResult.Count;
             } while (!nextResult.EndOfMessage);
 
-            return new ReceivedFrame(nextResult.MessageType, currentBuffer.AsMemory(0, totalBytes), currentBuffer);
+            var multiFrame = new ReceivedFrame(nextResult.MessageType, currentBuffer.AsMemory(0, totalBytes), currentBuffer);
+            ownershipTransferred = true;
+            return multiFrame;
         }
-        catch
+        finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
-            throw;
+            if (!ownershipTransferred && currentBuffer != null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(currentBuffer);
+            }
         }
     }
 
@@ -1398,21 +1472,20 @@ public static class PocketOptionWebSocketStream
         }
     }
 
-    private static bool HandleTick(string asset, double srvTs, double price, bool isBackfill = false)
+    internal static bool HandleTick(string asset, double srvTs, double price, bool isBackfill = false)
     {
-        // Data Integrity Guard: reject poisoned broker ticks (NaN, Infinity, non-positive price, or out-of-range epoch timestamp)
-        if (double.IsNaN(price) || double.IsInfinity(price) || price <= 0 ||
-            double.IsNaN(srvTs) || double.IsInfinity(srvTs) || srvTs <= 0 || srvTs > 3_000_000_000)
+        long nowUtcTicks = DateTime.UtcNow.Ticks;
+        // Data Integrity Guard: reject poisoned broker ticks (NaN, Infinity, non-positive or excessive price, or out-of-range epoch timestamp)
+        if (double.IsNaN(srvTs) || double.IsInfinity(srvTs) || srvTs <= 0 || srvTs > 3_000_000_000)
         {
             return false;
         }
 
-        int epoch = Volatile.Read(ref _clockEpoch);
         double utcSec = srvTs - ServerTimeOffsetSec;
         long tickTimeUtc = DateTimeOffset.FromUnixTimeMilliseconds((long)(utcSec * 1000)).UtcTicks;
 
         // D4 upper bound: record skew before rejecting future-poisoned timestamps (>10 minutes ahead of host UTC) so DST shifts are still detected
-        if (tickTimeUtc - DateTime.UtcNow.Ticks > FutureTickGuardTicks)
+        if (tickTimeUtc - nowUtcTicks > FutureTickGuardTicks)
         {
             if (!isBackfill)
             {
@@ -1423,6 +1496,13 @@ public static class PocketOptionWebSocketStream
             }
             return false;
         }
+
+        if (!PriceFeed.IsValidTick(price, tickTimeUtc, nowUtcTicks, isBackfill))
+        {
+            return false;
+        }
+
+        int epoch = Volatile.Read(ref _clockEpoch);
 
         long swNow = System.Diagnostics.Stopwatch.GetTimestamp();
         var (baseAsset, candleKey) = GetAssetKeys(asset);
@@ -1452,18 +1532,15 @@ public static class PocketOptionWebSocketStream
             {
                 return false;
             }
-            // D5 fix: store broker tick timestamp and prevent out-of-order overwrite
-            _livePrices.AddOrUpdate(
-                baseAsset,
-                static (_, arg) => (arg.price, arg.tickTimeUtc, arg.swNow),
-                static (_, old, arg) => arg.tickTimeUtc >= old.BrokerUtcTicks ? (arg.price, arg.tickTimeUtc, arg.swNow) : old,
-                (price, tickTimeUtc, swNow));
+            // D5 fix: store broker tick timestamp and prevent out-of-order overwrite via Lock-Free Seqlock
+            var priceSlot = _livePrices.GetOrAdd(baseAsset, static _ => new LivePriceSlot());
+            priceSlot.Update(price, tickTimeUtc, swNow);
             _lastTickTicksBySymbol[baseAsset] = swNow;
 
             Volatile.Write(ref _lastMessageSw, swNow);
             Volatile.Write(ref _lastTickSw, swNow);
             ValutaBot.MiniApp.Services.ClockSkewMonitor.Record(tickTimeUtc);
-            ValutaMetrics.WebSocketTicksTotal.WithLabels(candleKey).Inc();
+            _metricCountersCache.GetOrAdd(candleKey, static k => ValutaMetrics.WebSocketTicksTotal.WithLabels(k)).Inc();
 
             ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.UpdatePrice(
                 baseAsset, price, new DateTime(tickTimeUtc, DateTimeKind.Utc));

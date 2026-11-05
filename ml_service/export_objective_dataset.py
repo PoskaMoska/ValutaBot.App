@@ -89,14 +89,14 @@ def normalize_candle_window(df_window: pd.DataFrame) -> np.ndarray:
 
     ref_price = close[-1] if close[-1] > 0 else 1.0
 
-    # 1. Normalized Close relative to last close (per-mille / 10 bps units)
-    norm_close = (close - ref_price) / ref_price * 1000.0
-    # 2. Spread / High-Low range
-    norm_spread = (high - low) / ref_price * 1000.0
-    # 3. Upper wick
-    upper_wick = (high - np.maximum(open_, close)) / ref_price * 1000.0
-    # 4. Lower wick
-    lower_wick = (np.minimum(open_, close) - low) / ref_price * 1000.0
+    # 1. Normalized Close relative to last close (per-mille / 10 bps units) [-50.0, 50.0]
+    norm_close = np.clip((close - ref_price) / ref_price * 1000.0, -50.0, 50.0)
+    # 2. Spread / High-Low range [0.0, 50.0]
+    norm_spread = np.clip((high - low) / ref_price * 1000.0, 0.0, 50.0)
+    # 3. Upper wick [0.0, 50.0]
+    upper_wick = np.clip((high - np.maximum(open_, close)) / ref_price * 1000.0, 0.0, 50.0)
+    # 4. Lower wick [0.0, 50.0]
+    lower_wick = np.clip((np.minimum(open_, close) - low) / ref_price * 1000.0, 0.0, 50.0)
     # 5. Normalized Volume clamped to [0, 10] exactly as in C# BuildOnnxTensors
     mean_vol = np.mean(vol) + 1e-4
     norm_vol = np.clip(vol / mean_vol, 0.0, 10.0)
@@ -120,9 +120,13 @@ def compute_bridge_vector(m1_win: pd.DataFrame, s5_win: pd.DataFrame) -> np.ndar
     m1_tr = np.maximum(m1_win['high_price'].values - m1_win['low_price'].values, 1e-7).mean()
     atr_ratio = float(np.clip(s5_tr / (m1_tr + 1e-7), 0.01, 20.0))
 
-    # 3. Micro Z-Score
+    # 3. Micro Z-Score with Huber MAD standard deviation matching C# BuildOnnxTensors
     s5_closes = s5_win['close_price'].values.astype(np.float64)
-    s5_std = np.std(s5_closes) + 1e-7
+    micro_mean = np.mean(s5_closes)
+    abs_dev = np.abs(s5_closes - micro_mean)
+    max_dev = max(4.0 * np.mean(abs_dev), 1e-5)
+    clipped_dev = np.clip(s5_closes - micro_mean, -max_dev, max_dev)
+    s5_std = np.sqrt(np.mean(clipped_dev ** 2)) + 1e-7
     s5_ema = pd.Series(s5_closes).ewm(span=7).mean().iloc[-1]
     z_score = float(np.clip((cur_p - s5_ema) / s5_std, -5.0, 5.0))
 

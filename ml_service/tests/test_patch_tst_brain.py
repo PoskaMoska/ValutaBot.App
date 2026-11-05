@@ -384,3 +384,43 @@ def test_10_online_drift_detector(predictor, api_client):
     diag = resp.json()
     assert "mean_entropy" in diag
     assert "drift_detected" in diag
+
+
+# -----------------------------------------------------------------------------
+# 11. Online Concept Drift Hysteresis Test (No Flapping)
+# -----------------------------------------------------------------------------
+def test_11_drift_detector_hysteresis_no_flapping():
+    from models.patch_tst_predictor import OnlineDriftDetector
+
+    detector = OnlineDriftDetector(
+        window_size=20,
+        entropy_noise_threshold=0.92,
+        entropy_clear_noise=0.88
+    )
+
+    # 1. Trigger drift with high-entropy noise
+    for _ in range(15):
+        detector.record_prediction((0.334, 0.333, 0.333), "HOLD", payout=0.85)
+
+    status = detector.get_status()
+    assert status["drift_detected"] is True
+    assert status["drift_type"] == "OTC_VOLATILITY_NOISE_COLLAPSE"
+
+    # 2. Add directional samples that move mean_entropy to ~0.895 (in deadband [0.88, 0.92])
+    # Without hysteresis this would flap; with Schmitt trigger hysteresis it must stay latched!
+    for _ in range(5):
+        detector.record_prediction((0.10, 0.80, 0.10), "BUY", payout=0.85)
+
+    status_deadband = detector.get_status()
+    assert 0.88 <= status_deadband["mean_entropy"] < 0.92
+    assert status_deadband["drift_detected"] is True, "Must not flap in deadband!"
+    assert status_deadband["drift_type"] == "OTC_VOLATILITY_NOISE_COLLAPSE"
+
+    # 3. Add directional impulse samples to bring mean_entropy <= 0.88 -> clear drift
+    for _ in range(15):
+        detector.record_prediction((0.10, 0.85, 0.05), "BUY", payout=0.85)
+
+    status_cleared = detector.get_status()
+    assert status_cleared["mean_entropy"] <= 0.88
+    assert status_cleared["drift_detected"] is False
+    assert status_cleared["drift_type"] == "NONE"

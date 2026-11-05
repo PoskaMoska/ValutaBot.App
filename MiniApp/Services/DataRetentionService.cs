@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using ValutaBot.App.MiniApp.Data;
+using ValutaBot.App.MiniApp.Data.Repositories;
 using ValutaBot.Core;
 
 namespace ValutaBot.MiniApp.Services;
@@ -267,7 +268,10 @@ public class DataRetentionService : BackgroundService
                 {
                     if (!await SafeVacuumFullAsync(conn, tbl))
                     {
-                        await conn.ExecuteAsync($"VACUUM (ANALYZE) {tbl};", commandTimeout: 120);
+                        if (AllowedAnalyzeTables.Contains(tbl))
+                        {
+                            await conn.ExecuteAsync($"VACUUM (ANALYZE) \"{tbl}\";", commandTimeout: 120);
+                        }
                     }
                 }
             }
@@ -288,6 +292,23 @@ public class DataRetentionService : BackgroundService
         _latestTelemetry = telemetry;
 
         BotLogger.Info($"[SmartStorageGovernor] Maintenance complete. Zone: {telemetry.ActiveZone}. Cleaned: {subPoDeleted} PO candles, {shadowDeleted} chop, {chopStrided} strided, {jsonCompacted} compacted, {pendingDeleted} pending. New DB Size: {telemetry.DatabaseSizeMb:F1} MB.");
+
+        // Drain any emergency buffered trade outcomes once storage headroom has been restored
+        if (TradeRepository.EmergencyOutcomesBufferCount > 0)
+        {
+            try
+            {
+                int drained = await TradeRepository.DrainEmergencyOutcomesAsync();
+                if (drained > 0)
+                {
+                    BotLogger.Info($"[SmartStorageGovernor] Drained {drained} emergency trade outcomes after storage maintenance.");
+                }
+            }
+            catch (Exception exDrain)
+            {
+                BotLogger.Warn($"[SmartStorageGovernor] Post-maintenance emergency outcomes drain notice: {exDrain.Message}");
+            }
+        }
 
         return telemetry;
     }
@@ -448,12 +469,25 @@ public class DataRetentionService : BackgroundService
         );
     }
 
+    private static readonly HashSet<string> AllowedVacuumFullTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "trade_outcomes"
+    };
+
+    private static readonly HashSet<string> AllowedAnalyzeTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "trade_outcomes",
+        "subminute_candles",
+        "pending_trades",
+        "historical_candles"
+    };
+
     private static async Task<bool> SafeVacuumFullAsync(System.Data.Common.DbConnection conn, string table)
     {
-        // High-frequency ingest tables must NEVER undergo VACUUM FULL: AccessExclusiveLock blocks NpgsqlBatch inserts and drops ticks!
-        if (table is "subminute_candles" or "pending_trades")
+        // Enforce strict positive whitelist: only explicitly designated low-frequency tables may undergo VACUUM FULL
+        if (!AllowedVacuumFullTables.Contains(table))
         {
-            BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} rejected: AccessExclusiveLock would block streaming live tick ingestion. Running non-blocking VACUUM (ANALYZE) instead.");
+            BotLogger.Warn($"[SmartStorageGovernor] VACUUM FULL {table} rejected: table is not in strict whitelist (streaming ingest tables require non-blocking VACUUM ANALYZE).");
             return false;
         }
 
@@ -494,7 +528,7 @@ public class DataRetentionService : BackgroundService
             // Protective sub-second lock timeout: abort immediately if active queries would cause lock queuing
             await conn.ExecuteAsync("SET lock_timeout = '1s';");
             await conn.ExecuteAsync("SET statement_timeout = '120s';");
-            await conn.ExecuteAsync($"VACUUM FULL {table};", commandTimeout: 150);
+            await conn.ExecuteAsync($"VACUUM FULL \"{table}\";", commandTimeout: 150);
             BotLogger.Info($"[SmartStorageGovernor] VACUUM FULL {table} succeeded.");
             return true;
         }

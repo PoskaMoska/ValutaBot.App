@@ -99,8 +99,8 @@ public static class AuthService
                 {
                     var authTime = DateTimeOffset.FromUnixTimeSeconds(authDateEpoch).UtcDateTime;
                     var now = DateTime.UtcNow;
-                    // Verify TTL and clock-skew tolerance (5 min future, 24h past)
-                    if (authTime > now.AddMinutes(5) || (now - authTime).TotalHours > 24)
+                    // Verify TTL and clock-skew tolerance (60s future, 24h past)
+                    if (authTime > now.AddSeconds(60) || (now - authTime).TotalHours > 24)
                     {
                         return (false, 0, "Custom authorization token expired or invalid timestamp");
                     }

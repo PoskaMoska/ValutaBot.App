@@ -33,6 +33,72 @@ public static partial class MiniAppController
         return CryptographicOperations.FixedTimeEquals(provHash, expHash);
     }
 
+    public static bool IsPrivateOrLoopback(System.Net.IPAddress? ip)
+    {
+        if (ip == null) return true;
+        if (System.Net.IPAddress.IsLoopback(ip)) return true;
+        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+        if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            byte[] b = ip.GetAddressBytes();
+            if (b[0] == 10) return true; // 10.0.0.0/8
+            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true; // 172.16.0.0/12
+            if (b[0] == 192 && b[1] == 168) return true; // 192.168.0.0/16
+            if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return true; // 100.64.0.0/10 CGNAT (Railway/K8s)
+            if (b[0] == 169 && b[1] == 254) return true; // 169.254.0.0/16 Link-local
+        }
+        else if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            if (ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal) return true;
+            byte[] b = ip.GetAddressBytes();
+            if ((b[0] & 0xFE) == 0xFC) return true; // Unique local fc00::/7
+        }
+        return false;
+    }
+
+    public static System.Net.IPAddress? ResolveClientIp(HttpContext context)
+    {
+        var remoteIp = context.Connection.RemoteIpAddress;
+        if (remoteIp != null && !IsPrivateOrLoopback(remoteIp))
+        {
+            return remoteIp;
+        }
+
+        // 1. Cloudflare prioritized (cannot be spoofed from client)
+        string cfIp = context.Request.Headers["CF-Connecting-IP"].FirstOrDefault() ?? "";
+        if (!string.IsNullOrEmpty(cfIp) && System.Net.IPAddress.TryParse(cfIp.Trim(), out var parsedCf))
+        {
+            return parsedCf;
+        }
+
+        // 2. X-Real-IP
+        string realIp = context.Request.Headers["X-Real-IP"].FirstOrDefault() ?? "";
+        if (!string.IsNullOrEmpty(realIp) && System.Net.IPAddress.TryParse(realIp.Trim(), out var parsedReal))
+        {
+            return parsedReal;
+        }
+
+        // 3. X-Forwarded-For: parse right-to-left to find first non-private client IP
+        string rawForwarded = context.Request.Headers["X-Forwarded-For"].FirstOrDefault() ?? "";
+        if (!string.IsNullOrWhiteSpace(rawForwarded))
+        {
+            var hops = rawForwarded.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            for (int i = hops.Length - 1; i >= 0; i--)
+            {
+                if (System.Net.IPAddress.TryParse(hops[i], out var parsedHop) && !IsPrivateOrLoopback(parsedHop))
+                {
+                    return parsedHop;
+                }
+            }
+            if (hops.Length > 0 && System.Net.IPAddress.TryParse(hops[0], out var firstHop))
+            {
+                return firstHop;
+            }
+        }
+
+        return remoteIp;
+    }
+
     private static bool IsTransientSentryException(Exception? ex)
     {
         if (ex == null) return false;
@@ -252,16 +318,7 @@ public static partial class MiniAppController
 
             options.AddPolicy("Global", context =>
             {
-                System.Net.IPAddress? clientIp = context.Connection.RemoteIpAddress;
-                if (clientIp == null || System.Net.IPAddress.IsLoopback(clientIp))
-                {
-                    string rawHeader = context.Request.Headers["X-Forwarded-For"].FirstOrDefault() ?? "";
-                    string firstHop = rawHeader.Split(',')[0].Trim();
-                    if (System.Net.IPAddress.TryParse(firstHop, out var parsedForwarded))
-                    {
-                        clientIp = parsedForwarded;
-                    }
-                }
+                System.Net.IPAddress? clientIp = ResolveClientIp(context);
                 string partitionKey;
                 if (clientIp == null)
                 {
@@ -323,19 +380,20 @@ public static partial class MiniAppController
         ValutaBot.MiniApp.TradeOutcomeTracker.AutoCalib = app.Services.GetRequiredService<ValutaBot.MiniApp.IAutoCalibrationEngine>();
 
         LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
-        app.UseStaticFiles();
-        app.UseCors("AllowMiniApp");
-        
-        // SECURITY: Global HTTP Security Headers (prevent MIME-sniffing, XSS, etc.)
+        // SECURITY: Global HTTP Security Headers (prevent MIME-sniffing, XSS, Clickjacking, etc.)
+        // Registered BEFORE UseStaticFiles to ensure static files (index.html, JS, CSS) receive security headers
         app.Use(async (context, next) =>
         {
             context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
             context.Response.Headers.Append("X-XSS-Protection", "1; mode=block");
             context.Response.Headers.Append("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-            // Allow framing only from Telegram (to allow WebApp to work inside Telegram UI)
-            context.Response.Headers.Append("Content-Security-Policy", "frame-ancestors 'self' https://web.telegram.org tg://*");
+            // Allow framing only from official Telegram Web clients (prevent Clickjacking)
+            context.Response.Headers.Append("Content-Security-Policy", "frame-ancestors 'self' https://web.telegram.org https://*.web.telegram.org https://telegram.org https://*.telegram.org tg://*;");
             await next();
         });
+
+        app.UseStaticFiles();
+        app.UseCors("AllowMiniApp");
 
         // SECURITY: Metrics endpoint authentication with constant-time token verification for Prometheus / Grafana Cloud
         app.Use(async (context, next) =>

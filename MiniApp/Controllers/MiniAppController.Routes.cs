@@ -70,7 +70,7 @@ public static partial class MiniAppController
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
             return Results.Ok(new { t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
-        });
+        }).RequireRateLimiting("Global");
 
         // Sentry verification test endpoint (protected against unauthorized quota exhaustion)
         app.MapGet("/api/sentry-test", async (HttpContext context) =>
@@ -169,7 +169,7 @@ public static partial class MiniAppController
 
             var fng = await GetFearGreedIndex();
             return Results.Json(fng);
-        });
+        }).RequireRateLimiting("Global");
 
         /* Postback Endpoint */
         app.MapGet("/api/postback", async Task<IResult> (HttpContext context) =>
@@ -228,7 +228,7 @@ public static partial class MiniAppController
 
     private static void RegisterAnalysisRoutes(WebApplication app)
     {
-        app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe) =>
+        app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe, double? payout) =>
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
             var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
@@ -263,11 +263,18 @@ public static partial class MiniAppController
                     && !string.Equals(result.direction, result.lgbmDirection, StringComparison.OrdinalIgnoreCase);
 
                 // BO Kelly Criterion
-                double payout = 0.82;
+                double effectivePayout = 0.82;
+                if (payout.HasValue && double.IsFinite(payout.Value) && payout.Value > 0.0)
+                {
+                    double pVal = payout.Value;
+                    effectivePayout = pVal > 1.0 ? pVal / 100.0 : pVal;
+                    effectivePayout = Math.Clamp(effectivePayout, 0.50, 0.98);
+                }
+                double breakEvenProb = 1.0 / (1.0 + effectivePayout);
                 double q = 1.0 - confidence;
-                double kellyPct = isNeutralSignal ? 0.0 : confidence - (q / payout);
+                double kellyPct = (isNeutralSignal || confidence <= breakEvenProb || effectivePayout <= 0.0) ? 0.0 : confidence - (q / effectivePayout);
                 double fractionalKelly = kellyPct > 0 ? kellyPct * 0.5 : 0.0;
-                double adjustedKelly = Math.Max(0, fractionalKelly * (1.0 - Math.Min(variance, 1.0)));
+                double adjustedKelly = Math.Min(0.25, Math.Max(0, fractionalKelly * (1.0 - Math.Min(variance, 1.0))));
 
                 double minVolThreshold = 0.0001;
                 bool volFilterPassed = volatility >= minVolThreshold;
@@ -284,6 +291,8 @@ public static partial class MiniAppController
                     },
                     risk_management = new
                     {
+                        payout_rate            = Math.Round(effectivePayout * 100.0, 1),
+                        break_even_winrate     = Math.Round(breakEvenProb * 100.0, 2),
                         kelly_percentage       = Math.Round(adjustedKelly * 100.0, 2),
                         volatility_filter_passed = volFilterPassed,
                         variance_penalty       = variance,
@@ -381,16 +390,7 @@ public static partial class MiniAppController
             }
 
             // 2. Per-IP and Global WebSocket Connection Limiting (DoS protection)
-            System.Net.IPAddress? clientRemoteIp = context.Connection.RemoteIpAddress;
-            if (clientRemoteIp == null || System.Net.IPAddress.IsLoopback(clientRemoteIp))
-            {
-                string rawForwarded = context.Request.Headers["X-Forwarded-For"].FirstOrDefault() ?? "";
-                string firstHop = rawForwarded.Split(',')[0].Trim();
-                if (System.Net.IPAddress.TryParse(firstHop, out var parsedForwarded))
-                {
-                    clientRemoteIp = parsedForwarded;
-                }
-            }
+            System.Net.IPAddress? clientRemoteIp = ResolveClientIp(context);
             string clientIp = clientRemoteIp?.ToString() ?? "unknown";
             if (context.Items.TryGetValue("userId", out var uidObj) && uidObj is long uid && uid > 0)
             {

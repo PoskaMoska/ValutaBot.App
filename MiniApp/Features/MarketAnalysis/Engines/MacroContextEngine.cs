@@ -128,7 +128,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
         public static void UpdatePrice(string asset, double price, DateTime timeUtc)
         {
             if (price <= 0) return;
-            string clean = asset.ToUpper().Replace("/", "").Replace("-", "").Replace(" OTC", "").Replace("_OTC", "");
+            string clean = ValutaBot.MiniApp.PriceFeed.BaseAsset(asset);
             
             var queue = _priceHistory.GetOrAdd(clean, _ => new Queue<(DateTime, double)>());
             lock (_basketLock)

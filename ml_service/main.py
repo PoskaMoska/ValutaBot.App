@@ -28,7 +28,7 @@ _API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
 START_TIME = time.time()
 
 # Dedicated worker pool for CPU-bound PyTorch inference tasks (prevents event loop starvation under burst load)
-inference_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="patch_tst_worker")
+inference_executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, os.cpu_count() or 2)), thread_name_prefix="patch_tst_worker")
 
 logging.basicConfig(
     level=logging.INFO,

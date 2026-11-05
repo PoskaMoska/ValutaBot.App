@@ -185,8 +185,12 @@ class DualStreamPatchBrain(nn.Module):
             rng = hi - lo
 
         # Window ATR in bps (trailing 20 bars, clamped >= 0.35 bps)
+        # Robust Winsorizing against OTC adversarial needle spikes: cap single-bar outliers to 4x median range
         tail_len = min(20, seq_len)
-        atr = rng[:, -tail_len:].mean(dim=1, keepdim=True) + 0.35  # [B, 1]
+        rng_tail = rng[:, -tail_len:]
+        med_rng = torch.median(rng_tail, dim=1, keepdim=True).values
+        rng_robust = torch.clamp(rng_tail, max=torch.clamp(med_rng * 4.0, min=1.5))
+        atr = rng_robust.mean(dim=1, keepdim=True) + 0.35  # [B, 1]
         atr_3d = atr.unsqueeze(-1)  # [B, 1, 1]
 
         x_norm = x.clone()

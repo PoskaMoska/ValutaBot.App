@@ -60,6 +60,11 @@ class DualStreamMTFBrain(nn.Module):
         )
 
     def forward(self, macro, micro, bridge):
+        # macro: [B, 30, 5], micro: [B, 30, 5], bridge: [B, 4]
+        macro = torch.nan_to_num(macro, nan=0.0, posinf=50.0, neginf=-50.0)
+        micro = torch.nan_to_num(micro, nan=0.0, posinf=50.0, neginf=-50.0)
+        bridge = torch.nan_to_num(bridge, nan=0.0, posinf=50.0, neginf=-50.0)
+        
         # macro: [B, 30, 5] -> permute to [B, 5, 30] for Conv1d
         m_in = macro.permute(0, 2, 1)
         m_feat = F.gelu(self.macro_conv1(m_in))
@@ -243,15 +248,15 @@ def train_dual_stream(data_path="ml_service/data/dataset_v5_dual_stream.npz", ep
         model,
         (dummy_macro, dummy_micro, dummy_bridge),
         save_onnx,
-        input_names=["macro", "micro", "bridge"],
-        output_names=["win_logit"],
+        input_names=["macro_x", "micro_x", "bridge_x"],
+        output_names=["logit"],
         dynamic_axes={
-            "macro": {0: "batch_size"},
-            "micro": {0: "batch_size"},
-            "bridge": {0: "batch_size"},
-            "win_logit": {0: "batch_size"}
+            "macro_x": {0: "batch_size"},
+            "micro_x": {0: "batch_size"},
+            "bridge_x": {0: "batch_size"},
+            "logit": {0: "batch_size"}
         },
-        opset_version=14
+        opset_version=17
     )
     onnx_size_kb = os.path.getsize(save_onnx) / 1024
     print(f"[+] Successfully exported in-process ONNX model: {save_onnx} ({onnx_size_kb:.1f} KB)")

@@ -59,6 +59,9 @@ class DualStreamMTFBrain(nn.Module):
 
     def forward(self, macro_x, micro_x, bridge_x):
         # macro_x: (B, 30, 5), micro_x: (B, 30, 5), bridge_x: (B, 4)
+        macro_x = torch.nan_to_num(macro_x, nan=0.0, posinf=50.0, neginf=-50.0)
+        micro_x = torch.nan_to_num(micro_x, nan=0.0, posinf=50.0, neginf=-50.0)
+        bridge_x = torch.nan_to_num(bridge_x, nan=0.0, posinf=50.0, neginf=-50.0)
         
         # Conv1d expects (B, Channels, Length)
         m_in = macro_x.transpose(1, 2)
@@ -254,7 +257,7 @@ def train_model():
         (dummy_macro, dummy_micro, dummy_bridge),
         onnx_path,
         export_params=True,
-        opset_version=14,
+        opset_version=17,
         do_constant_folding=True,
         input_names=["macro_x", "micro_x", "bridge_x"],
         output_names=["logit"],

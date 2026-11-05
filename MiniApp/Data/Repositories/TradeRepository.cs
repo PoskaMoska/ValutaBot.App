@@ -89,6 +89,11 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
     public static class TradeRepository
     {
         private const string PoEraCutoff = "2026-10-15 21:55:00+00";
+        private static readonly System.Collections.Concurrent.ConcurrentQueue<TradeOutcomeRecord> _emergencyOutcomesQueue = new();
+        private const int MaxEmergencyOutcomesCapacity = 10_000;
+        private static int _isDrainingOutcomes = 0;
+
+        public static int EmergencyOutcomesBufferCount => _emergencyOutcomesQueue.Count;
 
         public static string NormalizeDirection(string? dir)
         {
@@ -292,15 +297,30 @@ FROM outcome_data;", commandTimeout: 10);
                     await conn.ExecuteAsync(@"
                         INSERT INTO trade_outcomes 
                         (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
-                         smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, ta_telemetry, ml_telemetry, smc_telemetry)
+                         smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon,
+                         market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news,
+                         session, day_of_week, hour_utc,
+                         ta_direction, ml_direction, smc_direction, of_direction, conflict_count,
+                         confidence_bucket, was_close_call, consecutive_losses_before, seconds_since_last_trade,
+                         reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps,
+                         price_entropy, trend_maturity, price_position_pct, bb_squeeze,
+                         ta_telemetry, ml_telemetry, smc_telemetry)
                         VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
-                                @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
+                                @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
+                                @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
+                                @Session, @DayOfWeek, @HourUtc,
+                                @TaDirection, @MlDirection, @SmcDirection, @OfDirection, @ConflictCount,
+                                @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
+                                @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
+                                @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze,
+                                NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
                         ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; }), transaction: tx, commandTimeout: 10);
                 });
             }
             catch (Exception ex)
             {
                 BotLogger.Error($"[PostgreSQL DB] Failed to save batch trade outcome records | Details: {ex.Message}");
+                throw;
             }
         }
 
@@ -403,13 +423,71 @@ FROM outcome_data;", commandTimeout: 10);
                         outcome.MlTelemetry,
                         outcome.SmcTelemetry
                     }, transaction: tx, commandTimeout: 10);
-                    return !string.IsNullOrEmpty(insertedId);
+                    bool success = !string.IsNullOrEmpty(insertedId);
+                    if (success && !_emergencyOutcomesQueue.IsEmpty)
+                    {
+                        _ = Task.Run(DrainEmergencyOutcomesAsync);
+                    }
+                    return success;
                 });
             }
             catch (Exception ex)
             {
-                BotLogger.Error("[PostgreSQL DB] Failed to save trade outcome record", ex);
+                BotLogger.Error($"[PostgreSQL DB] Failed to save trade outcome record {outcome.Id} ({ex.Message}). Buffering in emergency in-memory queue.", ex);
+                if (_emergencyOutcomesQueue.Count < MaxEmergencyOutcomesCapacity)
+                {
+                    _emergencyOutcomesQueue.Enqueue(outcome);
+                }
                 return false;
+            }
+        }
+
+        public static async Task<int> DrainEmergencyOutcomesAsync()
+        {
+            if (_emergencyOutcomesQueue.IsEmpty || string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString()))
+                return 0;
+
+            if (Interlocked.CompareExchange(ref _isDrainingOutcomes, 1, 0) != 0)
+                return 0; // Concurrent drain already in progress
+
+            int totalDrained = 0;
+            try
+            {
+                while (!_emergencyOutcomesQueue.IsEmpty)
+                {
+                    var batch = new List<TradeOutcomeRecord>();
+                    while (_emergencyOutcomesQueue.TryDequeue(out var item) && batch.Count < 200)
+                    {
+                        batch.Add(item);
+                    }
+
+                    if (batch.Count == 0) break;
+
+                    try
+                    {
+                        await SaveTradeOutcomesBatchAsync(batch);
+                        totalDrained += batch.Count;
+                        BotLogger.Info($"[TradeRepository] Drained and saved {batch.Count} emergency buffered trade outcomes (total: {totalDrained}, remaining: {_emergencyOutcomesQueue.Count}).");
+                    }
+                    catch (Exception ex)
+                    {
+                        // Restore batch back into emergency queue so data is NOT lost
+                        foreach (var item in batch)
+                        {
+                            if (_emergencyOutcomesQueue.Count < MaxEmergencyOutcomesCapacity)
+                            {
+                                _emergencyOutcomesQueue.Enqueue(item);
+                            }
+                        }
+                        BotLogger.Warn($"[TradeRepository] Drain emergency outcomes postponed: {ex.Message}");
+                        break;
+                    }
+                }
+                return totalDrained;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isDrainingOutcomes, 0);
             }
         }
 

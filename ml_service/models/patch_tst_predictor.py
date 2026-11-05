@@ -325,13 +325,28 @@ class OnlineDriftDetector:
        where model cannot discern directional edges (e.g., OTC weekend noise collapse).
     2. Mode Collapse / Saturation: Rolling normalized Shannon entropy H_bar <= 0.25 or single-direction frequency >= 0.85.
     """
-    def __init__(self, window_size: int = 100, entropy_noise_threshold: float = 0.92, entropy_sat_threshold: float = 0.25):
+    def __init__(
+        self,
+        window_size: int = 100,
+        entropy_noise_threshold: float = 0.92,
+        entropy_sat_threshold: float = 0.25,
+        entropy_clear_noise: float = 0.88,
+        entropy_clear_sat: float = 0.30,
+        freq_sat_threshold: float = 0.85,
+        freq_clear_threshold: float = 0.78,
+    ):
         self.window_size = window_size
         self.entropy_noise_threshold = entropy_noise_threshold
         self.entropy_sat_threshold = entropy_sat_threshold
+        self.entropy_clear_noise = entropy_clear_noise
+        self.entropy_clear_sat = entropy_clear_sat
+        self.freq_sat_threshold = freq_sat_threshold
+        self.freq_clear_threshold = freq_clear_threshold
         self._lock = threading.Lock()
         self._history = collections.deque(maxlen=window_size)
         self._ln3 = math.log(3.0)
+        self._drift_active = False
+        self._drift_type = "NONE"
 
     def record_prediction(self, probs: Tuple[float, float, float], direction: str, payout: float = 0.85):
         p0, p1, p2 = probs
@@ -351,6 +366,8 @@ class OnlineDriftDetector:
         with self._lock:
             n = len(self._history)
             if n < 10:
+                self._drift_active = False
+                self._drift_type = "NONE"
                 return {
                     "sample_count": n,
                     "window_size": self.window_size,
@@ -368,23 +385,32 @@ class OnlineDriftDetector:
             f_hold = hold_count / n
             f_buy = buy_count / n
             f_put = put_count / n
+            max_dir_freq = max(f_buy, f_put)
 
-            drift_detected = False
-            drift_type = "NONE"
-
-            if mean_entropy >= self.entropy_noise_threshold:
-                drift_detected = True
-                drift_type = "OTC_VOLATILITY_NOISE_COLLAPSE"
-            elif mean_entropy <= self.entropy_sat_threshold or max(f_buy, f_put) >= 0.85:
-                drift_detected = True
-                drift_type = "DIRECTIONAL_MODE_COLLAPSE"
+            # Schmitt Trigger Hysteresis to eliminate flapping on regime boundaries
+            if not self._drift_active:
+                if mean_entropy >= self.entropy_noise_threshold:
+                    self._drift_active = True
+                    self._drift_type = "OTC_VOLATILITY_NOISE_COLLAPSE"
+                elif mean_entropy <= self.entropy_sat_threshold or max_dir_freq >= self.freq_sat_threshold:
+                    self._drift_active = True
+                    self._drift_type = "DIRECTIONAL_MODE_COLLAPSE"
+            else:
+                if self._drift_type == "OTC_VOLATILITY_NOISE_COLLAPSE":
+                    if mean_entropy <= self.entropy_clear_noise:
+                        self._drift_active = False
+                        self._drift_type = "NONE"
+                elif self._drift_type == "DIRECTIONAL_MODE_COLLAPSE":
+                    if mean_entropy >= self.entropy_clear_sat and max_dir_freq <= self.freq_clear_threshold:
+                        self._drift_active = False
+                        self._drift_type = "NONE"
 
             return {
                 "sample_count": n,
                 "window_size": self.window_size,
                 "mean_entropy": round(mean_entropy, 4),
-                "drift_detected": drift_detected,
-                "drift_type": drift_type,
+                "drift_detected": self._drift_active,
+                "drift_type": self._drift_type,
                 "class_frequencies": {
                     "HOLD": round(f_hold, 4),
                     "BUY": round(f_buy, 4),

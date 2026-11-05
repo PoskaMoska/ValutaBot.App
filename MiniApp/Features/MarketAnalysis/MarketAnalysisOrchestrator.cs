@@ -474,7 +474,24 @@ public class MarketAnalysisOrchestrator(
             return null;
         }
 
-        ReadOnlySpan<MiniAppController.OhlcCandle> macroSlice = macroCandles.AsSpan(macroCandles.Length - 30, 30);
+        int macroEndIdx = macroCandles.Length;
+        if (macroCandles.Length > 30)
+        {
+            DateTime microClose = microCandles[^1].Timestamp.AddSeconds(5);
+            // Point-in-Time dual-stream synchronization: M1 open time must be <= microClose - 60s (entry_epoch - 55s)
+            for (int i = macroCandles.Length - 1; i >= 29; i--)
+            {
+                if (macroCandles[i].Timestamp <= microClose.AddSeconds(-60))
+                {
+                    macroEndIdx = i + 1;
+                    break;
+                }
+            }
+        }
+        if (macroEndIdx < 30)
+            return null;
+
+        ReadOnlySpan<MiniAppController.OhlcCandle> macroSlice = macroCandles.AsSpan(macroEndIdx - 30, 30);
         ReadOnlySpan<MiniAppController.OhlcCandle> microSlice = microCandles.AsSpan(microCandles.Length - 30, 30);
 
         static bool HasInvalidCandle(ReadOnlySpan<MiniAppController.OhlcCandle> slice)
@@ -505,10 +522,11 @@ public class MarketAnalysisOrchestrator(
             {
                 var c = slice[i];
                 int offset = i * 5;
-                result[offset + 0] = (float)((c.Close - refP) / refP * 1000.0);
-                result[offset + 1] = (float)((c.High - c.Low) / refP * 1000.0);
-                result[offset + 2] = (float)((c.High - Math.Max(c.Open, c.Close)) / refP * 1000.0);
-                result[offset + 3] = (float)((Math.Min(c.Open, c.Close) - c.Low) / refP * 1000.0);
+                // Adversarial needle spike protection (Winsorized to institutional bounds)
+                result[offset + 0] = Math.Clamp((float)((c.Close - refP) / refP * 1000.0), -50.0f, 50.0f);
+                result[offset + 1] = Math.Clamp((float)((c.High - c.Low) / refP * 1000.0), 0.0f, 50.0f);
+                result[offset + 2] = Math.Clamp((float)((c.High - Math.Max(c.Open, c.Close)) / refP * 1000.0), 0.0f, 50.0f);
+                result[offset + 3] = Math.Clamp((float)((Math.Min(c.Open, c.Close) - c.Low) / refP * 1000.0), 0.0f, 50.0f);
                 result[offset + 4] = Math.Clamp((float)(c.Volume / meanVol), 0.0f, 10.0f);
             }
             return result;
@@ -545,10 +563,13 @@ public class MarketAnalysisOrchestrator(
         float atrRatio = (float)(s5Tr / (m1Tr + 1e-7));
 
         double microMean = sumMicroCloses / 30.0;
+        double sumAbsDev = 0.0;
+        for (int i = 0; i < 30; i++) sumAbsDev += Math.Abs(microCloses[i] - microMean);
+        double maxDev = Math.Max(4.0 * (sumAbsDev / 30.0), 1e-5);
         double sumSq = 0.0;
         for (int i = 0; i < 30; i++)
         {
-            double d = microCloses[i] - microMean;
+            double d = Math.Clamp(microCloses[i] - microMean, -maxDev, maxDev);
             sumSq += d * d;
         }
         double microStd = Math.Sqrt(sumSq / 30.0) + 1e-7;

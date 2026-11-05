@@ -454,8 +454,9 @@ namespace ValutaBot.MiniApp
             }
             catch (Exception ex)
             {
-                bool isTransient = DbConnectionFactory.IsNetworkTransient(ex);
-                BotLogger.Warn($"[TickSync] Failed to batch save ticks (isTransient={isTransient}): {ex.Message}. Retrying...");
+                bool isReadOnlyOrDiskFull = DbConnectionFactory.IsReadOnlyOrDiskFull(ex);
+                bool isTransient = DbConnectionFactory.IsNetworkTransient(ex) || isReadOnlyOrDiskFull;
+                BotLogger.Warn($"[TickSync] Failed to batch save ticks (isTransient={isTransient}, isDiskFull={isReadOnlyOrDiskFull}): {ex.Message}. Retrying...");
                 return (false, isTransient);
             }
         }
@@ -494,7 +495,7 @@ namespace ValutaBot.MiniApp
                             else if (isTransient)
                             {
                                 // Cluster restart or temporary network blink: do NOT count towards poisoned threshold!
-                                BotLogger.Warn($"[TickCollector] Transient DB disconnect during batch write. Preserving {buffer.Count} ticks in buffer for cluster recovery.");
+                                BotLogger.Warn($"[TickCollector] Transient DB disconnect / disk read-only during batch write. Preserving {buffer.Count} ticks in buffer for cluster recovery.");
                                 try { await Task.Delay(500, token); } catch (OperationCanceledException) { }
                             }
                             else
@@ -788,7 +789,8 @@ namespace ValutaBot.MiniApp
         public static Task OnPriceUpdateAsync(string asset, double price, long tickTimeUtc, bool isBackfill = false)
         {
             // Data Integrity Guard: reject poisoned ticks (NaN, Infinity, non-positive price or invalid time)
-            if (double.IsNaN(price) || double.IsInfinity(price) || price <= 0 || tickTimeUtc <= 0)
+            long nowUtcTicks = DateTime.UtcNow.Ticks;
+            if (!PriceFeed.IsValidTick(price, tickTimeUtc, nowUtcTicks, isBackfill))
             {
                 return Task.CompletedTask;
             }

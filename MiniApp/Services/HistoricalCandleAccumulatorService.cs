@@ -107,10 +107,16 @@ public class HistoricalCandleAccumulatorService : BackgroundService
 
                 foreach (var r in s5Rows)
                 {
-                    if ((double)r.high_price > high) high = (double)r.high_price;
-                    if ((double)r.low_price  < low)  low  = (double)r.low_price;
-                    volume += (double)r.volume;
+                    double h = (double)r.high_price;
+                    double l = (double)r.low_price;
+                    double v = (double)r.volume;
+                    if (h > high && h <= PriceFeed.MaxAllowedPrice) high = h;
+                    if (l < low && l > 0) low = l;
+                    if (v > 0 && !double.IsNaN(v) && !double.IsInfinity(v)) volume += v;
                 }
+
+                if (open <= 0 || open > PriceFeed.MaxAllowedPrice || close <= 0 || close > PriceFeed.MaxAllowedPrice || high < low)
+                    continue;
 
                 // ON CONFLICT DO NOTHING — safe to re-run without duplicating
                 int affected = await conn.ExecuteAsync(@"

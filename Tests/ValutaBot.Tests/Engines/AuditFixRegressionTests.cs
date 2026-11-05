@@ -256,6 +256,19 @@ namespace ValutaBot.Tests.Engines
         // ═══════════════════════════════════════════════════════════
 
         [Fact]
+        public void Audit3_PostgresReadOnlyAndDiskFull_RecognizedCorrectly()
+        {
+            var ex25006 = new Npgsql.PostgresException("read only transaction", "FATAL", "FATAL", "25006");
+            var ex53100 = new Npgsql.PostgresException("disk full", "FATAL", "FATAL", "53100");
+            var exRandom = new Npgsql.PostgresException("other", "ERROR", "ERROR", "42P01");
+
+            Assert.True(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsReadOnlyOrDiskFull(ex25006));
+            Assert.True(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsReadOnlyOrDiskFull(ex53100));
+            Assert.False(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsReadOnlyOrDiskFull(exRandom));
+            Assert.False(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsReadOnlyOrDiskFull(new InvalidOperationException()));
+        }
+
+        [Fact]
         public void Stress_OrderFlow_ConcurrentUpdates_NoException()
         {
             var of      = new StatefulOrderFlow();

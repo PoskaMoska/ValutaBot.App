@@ -331,4 +331,35 @@ public class AnalyzeEndpointTests : IClassFixture<ValutaBotTestFactory>
         _output.WriteLine($"expiryCandles: {candles}");
         Assert.True(candles > 0, $"expiryCandles={candles}: фронтенд ожидает > 0 для отображения таймера");
     }
+
+    // ── 12. Dynamic Payout & Break-even Kelly EV Guard ──────────────────────
+    [Fact]
+    public async Task Analyze_DynamicPayout_CalculatesExpectedValueAndGuardsBreakEven()
+    {
+        // 1. High broker payout (92%)
+        var respHigh = await _client.GetAsync("/api/analyze?asset=EUR/USD&timeframe=m1&payout=0.92");
+        Assert.Equal(HttpStatusCode.OK, respHigh.StatusCode);
+        var jsonHigh = await respHigh.Content.ReadAsStringAsync();
+        using var docHigh = JsonDocument.Parse(jsonHigh);
+        var rmHigh = docHigh.RootElement.GetProperty("risk_management");
+        Assert.Equal(92.0, rmHigh.GetProperty("payout_rate").GetDouble());
+        Assert.Equal(52.08, rmHigh.GetProperty("break_even_winrate").GetDouble());
+        Assert.True(rmHigh.GetProperty("kelly_percentage").GetDouble() >= 0);
+
+        // 2. Low broker payout (60%) -> break-even win rate is 62.5%
+        var respLow = await _client.GetAsync("/api/analyze?asset=EUR/USD&timeframe=m1&payout=60");
+        Assert.Equal(HttpStatusCode.OK, respLow.StatusCode);
+        var jsonLow = await respLow.Content.ReadAsStringAsync();
+        using var docLow = JsonDocument.Parse(jsonLow);
+        var rmLow = docLow.RootElement.GetProperty("risk_management");
+        Assert.Equal(60.0, rmLow.GetProperty("payout_rate").GetDouble());
+        Assert.Equal(62.5, rmLow.GetProperty("break_even_winrate").GetDouble());
+
+        // 3. Negative / Division-by-Zero Protection
+        var respZero = await _client.GetAsync("/api/analyze?asset=EUR/USD&timeframe=m1&payout=0");
+        Assert.Equal(HttpStatusCode.OK, respZero.StatusCode);
+        var jsonZero = await respZero.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("NaN", jsonZero, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Infinity", jsonZero, StringComparison.OrdinalIgnoreCase);
+    }
 }

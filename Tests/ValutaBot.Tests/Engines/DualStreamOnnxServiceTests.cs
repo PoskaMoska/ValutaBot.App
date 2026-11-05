@@ -111,4 +111,43 @@ public class DualStreamOnnxServiceTests
         // zScore was previously hardcoded to 0f, verify it is now actively computed
         Assert.NotEqual(0f, tuple.bridge[2]);
     }
+
+    [Fact]
+    public void BuildOnnxTensors_WithAdversarialNeedleSpike_ClampsFeaturesAndPreservesZScore()
+    {
+        var buildMethod = typeof(ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator).GetMethod(
+            "BuildOnnxTensors",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(buildMethod);
+
+        var microCandles = new MiniAppController.OhlcCandle[30];
+        var macroCandles = new MiniAppController.OhlcCandle[30];
+        var now = DateTime.UtcNow;
+
+        for (int i = 0; i < 30; i++)
+        {
+            double baseP = 1.1000 + i * 0.0001;
+            microCandles[i] = new MiniAppController.OhlcCandle(baseP, baseP + 0.0002, baseP - 0.0001, baseP + 0.0001, 10.0, now.AddSeconds(i * 5));
+            macroCandles[i] = new MiniAppController.OhlcCandle(baseP, baseP + 0.0005, baseP - 0.0003, baseP + 0.0002, 50.0, now.AddSeconds(i * 60));
+        }
+
+        // Inject adversarial needle spike in 1 micro candle (500 pips spike)
+        microCandles[15] = new MiniAppController.OhlcCandle(1.1015, 1.1515, 1.1010, 1.1016, 100.0, now.AddSeconds(15 * 5));
+
+        var result = buildMethod!.Invoke(null, new object[] { microCandles, macroCandles, 1.1030 });
+        Assert.NotNull(result);
+
+        var tuple = ((float[] macro, float[] micro, float[] bridge))result!;
+        
+        // Ensure all micro and macro features are bounded in [-50, 50]
+        foreach (var v in tuple.micro)
+        {
+            Assert.True(float.IsFinite(v));
+            Assert.InRange(v, -50.0f, 50.0f);
+        }
+
+        // Verify zScore is still finite and non-zero despite the needle spike
+        Assert.True(float.IsFinite(tuple.bridge[2]));
+        Assert.NotEqual(0f, tuple.bridge[2]);
+    }
 }
