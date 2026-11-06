@@ -52,7 +52,18 @@ public class DataRetentionService : BackgroundService
 
         // Startup probe: if already in Red/Emergency zone, run critical cleanup immediately before first sleep
         await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken); // Allow DB connections to stabilize
-        await ExecuteSmartGovernorCycleAsync(stoppingToken);
+        try
+        {
+            await ExecuteSmartGovernorCycleAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exStartup)
+        {
+            BotLogger.Warn($"[SmartStorageGovernor] Startup storage probe warning (continuing to periodic cycle): {exStartup.Message}");
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -248,7 +259,7 @@ public class DataRetentionService : BackgroundService
                       SELECT ctid FROM trade_outcomes
                       WHERE features_json IS NOT NULL
                         AND octet_length(features_json) > 2500
-                        AND (created_at < @cutoff::timestamptz OR created_at < @cutoffLegacy::timestamptz)
+                        AND (created_at::timestamptz < @cutoff::timestamptz OR created_at::timestamptz < @cutoffLegacy::timestamptz)
                         AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
                       LIMIT 3000
                       FOR UPDATE SKIP LOCKED

@@ -370,7 +370,7 @@ public class SelfDiagnosticService : BackgroundService
             {
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 var poV3Count = await Dapper.SqlMapper.QueryFirstOrDefaultAsync<int>(conn,
-                    "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL AND created_at >= '2026-10-15 21:55:00+00'::timestamptz");
+                    "SELECT COUNT(*) FROM trade_outcomes WHERE features_json IS NOT NULL AND created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz");
                 BotLogger.Info($"[Diagnostics] V3 PO-Era Dataset Progress: {poV3Count} clean Pocket Option OTC records accumulated with 160-candle sequences & macro context.");
             }
             catch (Exception exV3)

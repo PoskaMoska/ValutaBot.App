@@ -76,7 +76,7 @@ def load_candles_for_asset(asset: str, interval: str) -> pd.DataFrame:
         df[col] = df[col].astype(float)
     df['open_time'] = pd.to_datetime(df['open_time'], utc=True)
     df = df.sort_values('open_time').reset_index(drop=True)
-    df['epoch_sec'] = (df['open_time'].astype('int64') // 10**9).values
+    df['epoch_sec'] = df['open_time'].astype('datetime64[s, UTC]').astype('int64').values
     return df
 
 def normalize_candle_window(df_window: pd.DataFrame) -> np.ndarray:

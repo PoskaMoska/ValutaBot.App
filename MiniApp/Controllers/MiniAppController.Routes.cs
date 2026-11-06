@@ -549,10 +549,10 @@ public static partial class MiniAppController
                 using var conn = ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnection();
                 await conn.OpenAsync();
                 
-                var total = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '2026-10-15 21:55:00+00'::timestamptz;");
-                var lastNight = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;");
-                var wins = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND direction IN ('BUY', 'PUT') AND was_win = true;");
-                var datasetSamples12h = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= (NOW() - INTERVAL '12 hours') AND features_json IS NOT NULL;");
+                var total = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz;");
+                var lastNight = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at::timestamptz >= (NOW() - INTERVAL '12 hours') AND direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;");
+                var wins = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at::timestamptz >= (NOW() - INTERVAL '12 hours') AND direction IN ('BUY', 'PUT') AND was_win = true;");
+                var datasetSamples12h = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM trade_outcomes WHERE created_at::timestamptz >= (NOW() - INTERVAL '12 hours') AND features_json IS NOT NULL;");
                 var losses = lastNight - wins;
                 
                 var candles = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn, "SELECT COUNT(*) FROM subminute_candles WHERE asset LIKE '%_PO';");

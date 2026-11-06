@@ -226,7 +226,7 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
                 return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
                     string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     var dto = await conn.QueryFirstOrDefaultAsync<EvolutionDumpDto>($@"
 WITH outcome_data AS (
@@ -513,7 +513,7 @@ FROM outcome_data;", commandTimeout: 10);
                 return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
                     string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     var rows = await conn.QueryAsync($@"
                         SELECT id as ""Id"", asset as ""Asset"", timeframe as ""Timeframe"", direction as ""Direction"",
@@ -794,7 +794,7 @@ FROM outcome_data;", commandTimeout: 10);
                 return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
                     string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     int pending = (int)(await conn.ExecuteScalarAsync<long?>(
                         "SELECT COUNT(*) FROM pending_trades WHERE direction IN ('BUY', 'PUT')", commandTimeout: 8) ?? 0L);
@@ -825,7 +825,7 @@ FROM outcome_data;", commandTimeout: 10);
                 return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
                     string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     int pending = (int)(await conn.ExecuteScalarAsync<long?>(
                         "SELECT COUNT(*) FROM pending_trades WHERE asset = @asset AND timeframe = @timeframe AND direction IN ('BUY', 'PUT')",
@@ -859,7 +859,7 @@ FROM outcome_data;", commandTimeout: 10);
                 return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
                     string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     
                     var pendingRows = await conn.QueryAsync(
@@ -906,7 +906,7 @@ FROM outcome_data;", commandTimeout: 10);
                 return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
                     string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     string sinceFilter = sinceUtc.HasValue
                         ? "AND verified_at > @SinceUtcStr"
@@ -940,7 +940,7 @@ FROM outcome_data;", commandTimeout: 10);
                 return await DbConnectionFactory.WithRetryAsync(async conn =>
                 {
                     string eraFilter = ValutaBot.MiniApp.PriceFeed.UsePocketOption
-                        ? $"AND created_at >= '{PoEraCutoff}'::timestamptz"
+                        ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     string sinceFilter = sinceUtc.HasValue
                         ? "AND verified_at > @SinceUtcStr"
@@ -981,7 +981,7 @@ FROM outcome_data;", commandTimeout: 10);
                     if (ValutaBot.MiniApp.PriceFeed.UsePocketOption)
                     {
                         return await conn.ExecuteScalarAsync<int>(
-                            $"SELECT COUNT(*) FROM trade_outcomes WHERE created_at >= '{PoEraCutoff}'::timestamptz AND direction IN ('BUY', 'PUT');", commandTimeout: 8);
+                            $"SELECT COUNT(*) FROM trade_outcomes WHERE created_at::timestamptz >= '{PoEraCutoff}'::timestamptz AND direction IN ('BUY', 'PUT');", commandTimeout: 8);
                     }
                     return await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM trade_outcomes WHERE direction IN ('BUY', 'PUT');", commandTimeout: 8);
                 });
