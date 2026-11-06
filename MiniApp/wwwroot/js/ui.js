@@ -115,7 +115,7 @@ export function switchResultTab(tabName) {
 }
 
 export function clearResults() {
-    const safeSetText = (id, txt) => { const el = document.getElementById(id); if (el) el.innerText = txt; };
+    const safeSetText = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
     const safeSetHtml = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
     const safeSetStyle = (id, prop, val) => { const el = document.getElementById(id); if (el) el.style[prop] = val; };
 
@@ -870,6 +870,9 @@ if (typeof window !== 'undefined') {
     };
     window.addEventListener('resize', onWindowOrViewportResize, { passive: true });
     window.addEventListener('orientationchange', onWindowOrViewportResize, { passive: true });
+    if (typeof screen !== 'undefined' && screen.orientation && typeof screen.orientation.addEventListener === 'function') {
+        screen.orientation.addEventListener('change', onWindowOrViewportResize);
+    }
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', onWindowOrViewportResize, { passive: true });
     }

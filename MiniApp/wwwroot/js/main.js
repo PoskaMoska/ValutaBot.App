@@ -577,7 +577,7 @@ window.addEventListener('offline', () => {
     renderError('⚠️ Ошибка соединения', 'Соединение с интернетом потеряно. Проверьте подключение (4G/Wi-Fi).');
     const valEl = document.getElementById('livePriceValue');
     if (valEl) {
-        valEl.innerText = 'ОФФЛАЙН';
+        valEl.textContent = 'ОФФЛАЙН';
         valEl.className = 'live-price-value';
     }
 });

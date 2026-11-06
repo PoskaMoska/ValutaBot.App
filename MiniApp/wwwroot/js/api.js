@@ -170,7 +170,7 @@ function scheduleWsReconnect(valEl, isPolling = false) {
     
     // SRE-FIX: Prevent infinite reconnect loops & battery drain
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        if (valEl) valEl.innerText = 'ОФФЛАЙН';
+        if (valEl) valEl.textContent = 'ОФФЛАЙН';
         showNetworkBanner('Поток цен недоступен. Нажмите на пару для повтора.');
         return;
     }
@@ -181,7 +181,7 @@ function scheduleWsReconnect(valEl, isPolling = false) {
     const jitter = Math.floor(Math.random() * 500);
     const finalDelay = isPolling ? 2000 : (baseDelay + jitter);
     
-    if (valEl) valEl.innerText = 'ПЕРЕПОДКЛЮЧЕНИЕ...';
+    if (valEl) valEl.textContent = 'ПЕРЕПОДКЛЮЧЕНИЕ...';
     if (reconnectAttempts >= 2 && !isPolling) {
         showNetworkBanner(`Переподключение к потоку цен (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
     }
@@ -216,12 +216,12 @@ export function initPriceWebSocket() {
     if (livePriceContainer) livePriceContainer.style.display = 'flex';
     const valEl = document.getElementById('livePriceValue');
     if (valEl) {
-        valEl.innerText = '--';
+        valEl.textContent = '--';
         valEl.className = 'live-price-value';
     }
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        if (valEl) valEl.innerText = 'ОФФЛАЙН';
+        if (valEl) valEl.textContent = 'ОФФЛАЙН';
         showNetworkBanner('Нет интернет-соединения');
         return;
     }
@@ -312,7 +312,7 @@ export function closePriceWebSocket() {
     // Мгновенный сброс отображения старой цены при смене валютной пары
     const valEl = document.getElementById('livePriceValue');
     if (valEl) {
-        valEl.innerText = '--';
+        valEl.textContent = '--';
         valEl.className = 'live-price-value';
     }
     if (priceSocket) {
@@ -576,18 +576,15 @@ export async function executeAnalysis() {
         if (resDir) {
             if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
             if (normDir === 'BUY') {
-                resDir.innerHTML = 'ВВЕРХ';
-                resDir.innerText = 'ВВЕРХ';
+                resDir.textContent = 'ВВЕРХ';
                 resDir.style.color = '#00e676';
                 if (sphere) sphere.classList.add('buy-signal');
             } else if (normDir === 'PUT') {
-                resDir.innerHTML = 'ВНИЗ';
-                resDir.innerText = 'ВНИЗ';
+                resDir.textContent = 'ВНИЗ';
                 resDir.style.color = '#ff1744';
                 if (sphere) sphere.classList.add('put-signal');
             } else {
-                resDir.innerHTML = 'НЕЙТРАЛЬНО';
-                resDir.innerText = 'НЕЙТРАЛЬНО';
+                resDir.textContent = 'НЕЙТРАЛЬНО';
                 resDir.style.color = 'var(--dim)';
                 if (sphere) sphere.classList.add('neutral-signal');
             }
