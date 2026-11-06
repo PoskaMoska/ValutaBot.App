@@ -75,8 +75,8 @@ public class SelfDiagnosticService : BackgroundService
             }
 
             // Responsive scan: every 1 minute normally, or every 15 seconds if recovering from an incident
-            var scanInterval = (!_mlWasHealthy || !_dbWasHealthy)
-                ? TimeSpan.FromSeconds(15)
+            var scanInterval = (!_mlWasHealthy || !_dbWasHealthy || !_memWasHealthy)
+                ? TimeSpan.FromSeconds(10)
                 : TimeSpan.FromMinutes(1);
             await Task.Delay(scanInterval, stoppingToken);
         }
@@ -225,10 +225,16 @@ public class SelfDiagnosticService : BackgroundService
             if (containerLimitMb <= 0 || containerLimitMb > 4096)
                 containerLimitMb = 1024;
 
-            long tier1ThresholdMb = Math.Min(700, (long)(containerLimitMb * 0.68));
-            long tier2ThresholdMb = Math.Min(850, (long)(containerLimitMb * 0.82));
-            long tier3ThresholdMb = Math.Min(950, (long)(containerLimitMb * 0.92));
-            long tierHealthyLowMb = Math.Min(500, (long)(containerLimitMb * 0.50));
+            // In dual-process containers (Kestrel .NET + child Python ML worker), Python consumes ~100-120MB.
+            // .NET threshold budget must deduct the child process headroom so that total container memory never breaches cgroups.
+            long netProcessBudgetMb = containerLimitMb <= 512
+                ? Math.Max(260, containerLimitMb - 110)
+                : (long)(containerLimitMb * 0.90);
+
+            long tier1ThresholdMb = Math.Min(700, (long)(netProcessBudgetMb * 0.68));
+            long tier2ThresholdMb = Math.Min(850, (long)(netProcessBudgetMb * 0.82));
+            long tier3ThresholdMb = Math.Min(950, (long)(netProcessBudgetMb * 0.92));
+            long tierHealthyLowMb = Math.Min(500, (long)(netProcessBudgetMb * 0.50));
 
             if (memoryUsedMb >= tier1ThresholdMb && memoryUsedMb < tier2ThresholdMb)
             {
@@ -264,7 +270,7 @@ public class SelfDiagnosticService : BackgroundService
                 {
                     _memWasHealthy = false;
                     await TelegramBotService.SendMessageToAdmins(
-                        $"⚠️ <b>[RAM Guard] Высокое потребление памяти</b>\nПроцесс потребляет {memAfter} МБ (было {memoryUsedMb} МБ). Сборщик мусора освободил {freedMb} МБ. При приближении к 950 МБ будет выполнен мягкий автоперезапуск во избежание OOMKilled.");
+                        $"⚠️ <b>[RAM Guard] Высокое потребление памяти</b>\nПроцесс потребляет {memAfter} МБ (было {memoryUsedMb} МБ). Сборщик мусора освободил {freedMb} МБ. При приближении к {tier3ThresholdMb} МБ будет выполнен мягкий автоперезапуск во избежание OOMKilled.");
                 }
                 else if (memAfter < tier1ThresholdMb && !_memWasHealthy)
                 {
@@ -278,7 +284,7 @@ public class SelfDiagnosticService : BackgroundService
                 // ── Tier 3: Emergency Self-Recycle Safeguard (>= 950 MB) ──
                 // Railway container limit is typically 1024 MB. At >=950 MB, Linux OOMKilled (SIGKILL 137) is imminent.
                 // Prevent brutal SIGKILL and container freeze by performing an orderly in-process soft restart!
-                BotLogger.Error($"[RAM Guard Tier 3] Critical memory ceiling exceeded ({memoryUsedMb} MB / 1024 MB). Initiating emergency graceful self-recycle...");
+                BotLogger.Error($"[RAM Guard Tier 3] Critical memory ceiling exceeded ({memoryUsedMb} MB / {containerLimitMb} MB). Initiating emergency graceful self-recycle...");
 
                 // 1. Flush tick buffers to prevent any tick data loss
                 await RealtimeTickCollector.FlushAsync(stoppingToken);
@@ -287,7 +293,7 @@ public class SelfDiagnosticService : BackgroundService
                 try
                 {
                     await TelegramBotService.SendMessageToAdmins(
-                        $"🚨 <b>[RAM Guard Tier 3 Emergency]</b> Предотвращение OOMKilled: Потребление RAM достигло {memoryUsedMb} МБ / 1024 МБ. Выполнен экстренный сброс тиков в базу данных и запущен мягкий перезапуск приложения.");
+                        $"🚨 <b>[RAM Guard Tier 3 Emergency]</b> Предотвращение OOMKilled: Потребление RAM достигло {memoryUsedMb} МБ / {containerLimitMb} МБ. Выполнен экстренный сброс тиков в базу данных и запущен мягкий перезапуск приложения.");
                 }
                 catch { }
 

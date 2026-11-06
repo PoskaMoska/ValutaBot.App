@@ -16,6 +16,9 @@
     <RetainVMGarbageCollection>false</RetainVMGarbageCollection>
   </PropertyGroup>
   <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimitPercent" Value="55" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="ValutaBot.Tests" />
   </ItemGroup>
   <ItemGroup>
