@@ -320,7 +320,7 @@ public static partial class MiniAppController
                 Console.WriteLine($"[API ERR] /api/analyze failed: {ex}");
                 return Results.Json(new { error = "Внутренняя ошибка сервера при анализе данных" }, statusCode: StatusCodes.Status500InternalServerError);
             }
-        }).RequireRateLimiting("Global");
+        }).RequireRateLimiting("Analyze");
 
         app.MapGet("/api/chart-ohlc", async Task<IResult> (HttpContext context, string? asset, string? timeframe, ValutaBot.MiniApp.MarketDataFetcher fetcher) =>
         {

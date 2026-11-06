@@ -72,8 +72,7 @@ public class HistoricalCandleAccumulatorService : BackgroundService
 
     private static async Task FlushAndSaveAsync(DateTime closedMinute)
     {
-        using var conn = DbConnectionFactory.GetConnection();
-        await conn.OpenAsync();
+        await using var conn = await DbConnectionFactory.OpenConnectionAsync();
 
         int totalSaved = 0;
 

@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 import psycopg2
 
-DB_URL = os.environ["DATABASE_URL"]
+DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("DB_URL", "postgresql://valutabot:password@localhost:5432/valutabot")
 
 def get_connection():
     conn = psycopg2.connect(
@@ -183,6 +183,12 @@ def main():
             if entry_close <= 0:
                 continue
 
+            # Strict temporal continuity: reject samples crossing data gaps / broker disconnections
+            if int(s5_epochs[i + h]) - entry_epoch != h * 5:
+                continue
+            if entry_epoch - int(s5_epochs[i - 29]) != 29 * 5:
+                continue
+
             future_close = s5_closes[i + h]
             delta_bps = (future_close - entry_close) / entry_close * 10000.0
 
@@ -200,6 +206,10 @@ def main():
             s5_close_epoch = entry_epoch + 5
             m1_avail_count = np.searchsorted(m1_epochs, s5_close_epoch - 60, side='right')
             if m1_avail_count < 30:
+                continue
+
+            # Macro window continuity: 30 closed M1 bars must not cross gaps (> 31 minutes)
+            if int(m1_epochs[m1_avail_count - 1]) - int(m1_epochs[m1_avail_count - 30]) > 29 * 60 + 120:
                 continue
 
             micro_win = s5_df.iloc[i - 29 : i + 1]

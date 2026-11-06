@@ -10,6 +10,10 @@
     <!-- CA1303/CA1304/CA1305/CA1310: Строковая локализация — не нужна для торгового бота -->
     <!-- CA1034: Вложенные типы — намеренный паттерн архитектуры -->
     <NoWarn>$(NoWarn);CA2007;CA1062;CA1031;CA1303;CA1304;CA1305;CA1310;CA1034</NoWarn>
+    <!-- SRE / Cloud Resilience: Workstation GC to prevent OOMKilled in memory-constrained containers (512MB RAM) -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <RetainVMGarbageCollection>false</RetainVMGarbageCollection>
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="ValutaBot.Tests" />

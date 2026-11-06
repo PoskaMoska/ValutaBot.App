@@ -15,6 +15,7 @@ namespace ValutaBot.MiniApp;
 public static class BotLogger
 {
     private static readonly string LogFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "valuta_bot.log");
+    private const long MaxLogFileSizeBytes = 10 * 1024 * 1024; // 10 MB per log segment (20 MB total with .old)
     
     // Unbounded channel for high-performance non-blocking fire-and-forget logging
     private static readonly Channel<string> _logChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(10000)
@@ -78,6 +79,13 @@ public static class BotLogger
 
                 try
                 {
+                    // SRE-FIX: Automatic file rotation to prevent container disk exhaustion (max 10MB + .old)
+                    var fi = new FileInfo(LogFilePath);
+                    if (fi.Exists && fi.Length > MaxLogFileSizeBytes)
+                    {
+                        string oldLogPath = LogFilePath + ".old";
+                        File.Move(LogFilePath, oldLogPath, overwrite: true);
+                    }
                     File.AppendAllText(LogFilePath, buffer.ToString(), Encoding.UTF8);
                 }
                 catch { /* Ignore I/O errors so we don't crash the background loop */ }

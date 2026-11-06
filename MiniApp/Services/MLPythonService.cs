@@ -81,6 +81,19 @@ public static class MLPythonService
     private static Process? _mlProcess; // Track to prevent zombie leaks
     private static int _exitHookRegistered = 0;
 
+    public static void StopProcess()
+    {
+        try
+        {
+            if (_mlProcess != null && !_mlProcess.HasExited)
+            {
+                BotLogger.Info($"[MLPython] Gracefully terminating Python service tree (PID: {_mlProcess.Id})...");
+                _mlProcess.Kill(entireProcessTree: true);
+            }
+        }
+        catch { /* Ignore kill errors during shutdown */ }
+    }
+
 
     private static readonly JsonSerializerOptions _jsonOptions = new() { 
         PropertyNameCaseInsensitive = true,
@@ -131,11 +144,8 @@ public static class MLPythonService
         // On Railway (and any container orchestrator) the watchdog must NOT run:
         // the orchestrator already handles process restarts via health checks.
         // A competing C# watchdog would cause kill/restart races and prevent recovery.
-        if (IsRunningOnRailway())
-        {
-            BotLogger.Info("[MLPython] Running on Railway — skipping local process watchdog (container orchestrator handles restarts).");
-            return;
-        }
+        // SRE-FIX: On Railway, do not skip process launch if Python is on localhost.
+        // Only skip the background health watchdog loop to avoid restart wars.
 
         if (Interlocked.CompareExchange(ref _isLaunching, 1, 0) != 0)
             return;
@@ -165,7 +175,10 @@ public static class MLPythonService
                 }
 
                 LaunchPythonProcess();
-                StartPythonWatchdog();
+                if (!IsRunningOnRailway())
+                {
+                    StartPythonWatchdog();
+                }
             }
             finally
             {

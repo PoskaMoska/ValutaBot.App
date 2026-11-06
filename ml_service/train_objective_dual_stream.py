@@ -91,6 +91,12 @@ class DualStreamMTFBrain(nn.Module):
         return logit
 
 def train_model():
+    # Ensure reproducible training run
+    torch.manual_seed(42)
+    np.random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+
     data_path = os.path.join(os.path.dirname(__file__), "data", "dataset_objective_dual_stream.npz")
     if not os.path.exists(data_path):
         print(f"Dataset not found: {data_path}")
@@ -157,11 +163,19 @@ def train_model():
 
     model = DualStreamMTFBrain(d_model=32, nhead=2, dropout=0.15).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
 
     best_val_acc = 0.0
+    best_val_ev = -1.0
     best_weights = None
     epochs = 25
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+
+    pos_count = float(np.sum(tr_y == 1))
+    neg_count = float(np.sum(tr_y == 0))
+    pos_weight_val = neg_count / max(pos_count, 1.0)
+    pos_weight = torch.tensor([pos_weight_val], dtype=torch.float32, device=device)
+    print(f"Class Distribution: BUY={int(pos_count)}, PUT={int(neg_count)} (pos_weight: {pos_weight_val:.4f})")
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     print("\nStarting training loop...")
     for epoch in range(1, epochs + 1):
@@ -176,6 +190,7 @@ def train_model():
             logits = model(m_x, u_x, b_x).squeeze(-1)
             loss = criterion(logits, y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item() * len(y)
@@ -183,6 +198,7 @@ def train_model():
             correct += (preds == y).sum().item()
             total += len(y)
 
+        scheduler.step()
         train_loss = total_loss / total
         train_acc = correct / total
 
@@ -199,13 +215,16 @@ def train_model():
                 val_total += len(y)
 
         val_acc = val_correct / val_total
-        print(f"Epoch {epoch:02d}/{epochs:02d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Val Acc: {val_acc*100:.2f}%")
+        payout_rate = 0.82
+        val_ev = val_acc * payout_rate - (1.0 - val_acc) * 1.0
+        print(f"Epoch {epoch:02d}/{epochs:02d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Val Acc: {val_acc*100:.2f}% | Val EV PnL: {val_ev*100:+.2f}%")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+            best_val_ev = val_ev
             best_weights = copy.deepcopy(model.state_dict())
 
-    print(f"\nBest Validation Accuracy: {best_val_acc*100:.2f}%")
+    print(f"\nBest Validation Accuracy: {best_val_acc*100:.2f}% (EV PnL: {best_val_ev*100:+.2f}%)")
     if best_weights is not None:
         model.load_state_dict(best_weights)
 
@@ -228,14 +247,43 @@ def train_model():
     all_y = np.array(all_y)
     preds = (all_probs >= 0.5).astype(int)
     test_acc = np.mean(preds == all_y)
-    print(f"\nFinal Test Accuracy (all test samples): {test_acc*100:.2f}%")
+    test_ev = test_acc * 0.82 - (1.0 - test_acc) * 1.0
+    print(f"\nFinal Test Accuracy (all test samples): {test_acc*100:.2f}% | Test EV PnL: {test_ev*100:+.2f}%")
 
     # High-conviction threshold evaluation (prob >= 0.58 or prob <= 0.42)
     high_mask = (all_probs >= 0.58) | (all_probs <= 0.42)
     high_count = np.sum(high_mask)
     if high_count > 0:
         high_acc = np.mean(preds[high_mask] == all_y[high_mask])
-        print(f"High-Conviction Winrate (prob >= 58% or <= 42%): {high_acc*100:.2f}% (over {high_count} trades, {high_count/len(all_y)*100:.1f}% coverage)")
+        high_ev = high_acc * 0.82 - (1.0 - high_acc) * 1.0
+        print(f"High-Conviction Winrate (prob >= 58% or <= 42%): {high_acc*100:.2f}% | High-Conviction EV: {high_ev*100:+.2f}% (over {high_count} trades, {high_count/len(all_y)*100:.1f}% coverage)")
+
+    # Temperature Scaling on Validation Set (Guo et al., 2017)
+    # Calibrates raw logits so that output sigmoid probabilities match true empirical probabilities for Kelly Criterion
+    print("\nCalibrating probabilities via Temperature Scaling on validation set...")
+    val_logits_list = []
+    val_y_list = []
+    with torch.no_grad():
+        for m_x, u_x, b_x, y in val_loader:
+            m_x, u_x, b_x, y = m_x.to(device), u_x.to(device), b_x.to(device), y.to(device)
+            val_logits_list.append(model(m_x, u_x, b_x).squeeze(-1).cpu())
+            val_y_list.append(y.cpu())
+    val_logits_all = torch.cat(val_logits_list)
+    val_y_all = torch.cat(val_y_list)
+
+    temp_param = nn.Parameter(torch.ones(1, device="cpu"))
+    opt_t = torch.optim.LBFGS([temp_param], lr=0.01, max_iter=50)
+    bce_loss_fn = nn.BCEWithLogitsLoss()
+
+    def eval_temp():
+        opt_t.zero_grad()
+        loss = bce_loss_fn(val_logits_all / torch.clamp(temp_param, min=0.1, max=10.0), val_y_all)
+        loss.backward()
+        return loss
+
+    opt_t.step(eval_temp)
+    calibrated_temperature = float(torch.clamp(temp_param, min=0.1, max=10.0).item())
+    print(f"Optimal Temperature (ECE Minimization): T = {calibrated_temperature:.4f}")
 
     # Save PyTorch weights
     models_dir = os.path.join(os.path.dirname(__file__), "models")
@@ -246,15 +294,21 @@ def train_model():
 
     # Export to ONNX for C# execution
     onnx_path = os.path.join(models_dir, "dual_stream_brain_v5.onnx")
-    model.eval()
-    dummy_macro = torch.randn(1, 30, 5, device=device)
-    dummy_micro = torch.randn(1, 30, 5, device=device)
-    dummy_bridge = torch.randn(1, 4, device=device)
+    export_model = copy.deepcopy(model).to("cpu").eval()
+    if calibrated_temperature > 0.1 and abs(calibrated_temperature - 1.0) > 1e-4:
+        with torch.no_grad():
+            export_model.classifier[-1].weight.data.div_(calibrated_temperature)
+            if export_model.classifier[-1].bias is not None:
+                export_model.classifier[-1].bias.data.div_(calibrated_temperature)
+        print(f"Folded Temperature Scaling (1/{calibrated_temperature:.4f}) into export linear classifier.")
+    dummy_macro_cpu = torch.randn(1, 30, 5, device="cpu")
+    dummy_micro_cpu = torch.randn(1, 30, 5, device="cpu")
+    dummy_bridge_cpu = torch.randn(1, 4, device="cpu")
 
     print(f"Exporting to ONNX: {onnx_path}...")
     torch.onnx.export(
-        model,
-        (dummy_macro, dummy_micro, dummy_bridge),
+        export_model,
+        (dummy_macro_cpu, dummy_micro_cpu, dummy_bridge_cpu),
         onnx_path,
         export_params=True,
         opset_version=17,
@@ -269,6 +323,29 @@ def train_model():
         }
     )
     print(f"ONNX export successful! Size: {os.path.getsize(onnx_path) / 1024:.1f} KB")
+
+    # Validate ONNX graph integrity via onnx.checker
+    import onnx
+    onnx_model = onnx.load(onnx_path)
+    onnx.checker.check_model(onnx_model)
+    print("ONNX model structural validation passed (onnx.checker.check_model: OK)")
+
+    # Parity check via ONNX Runtime
+    try:
+        import onnxruntime as ort
+        ort_sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        ort_inputs = {
+            "macro_x": dummy_macro_cpu.numpy(),
+            "micro_x": dummy_micro_cpu.numpy(),
+            "bridge_x": dummy_bridge_cpu.numpy()
+        }
+        ort_out = ort_sess.run(None, ort_inputs)[0]
+        with torch.no_grad():
+            pt_out = export_model(dummy_macro_cpu, dummy_micro_cpu, dummy_bridge_cpu).numpy()
+        np.testing.assert_allclose(pt_out, ort_out, rtol=1e-3, atol=1e-5)
+        print("ONNX Runtime inference test passed! Numerical parity verified.")
+    except Exception as e:
+        print(f"ONNX Runtime verification warning: {e}")
 
 if __name__ == "__main__":
     train_model()

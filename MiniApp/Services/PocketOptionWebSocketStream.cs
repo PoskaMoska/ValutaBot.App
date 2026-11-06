@@ -163,12 +163,13 @@ public static class PocketOptionWebSocketStream
 
         public bool TryRead(out double price, out long brokerUtcTicks, out long localSw)
         {
-            for (int retry = 0; retry < 5; retry++)
+            var spin = new SpinWait();
+            for (int retry = 0; retry < 10; retry++)
             {
                 long v1 = Volatile.Read(ref _version);
                 if ((v1 & 1) != 0)
                 {
-                    Thread.SpinWait(1);
+                    spin.SpinOnce();
                     continue;
                 }
                 Interlocked.MemoryBarrier();
@@ -184,7 +185,7 @@ public static class PocketOptionWebSocketStream
                     localSw = l;
                     return true;
                 }
-                Thread.SpinWait(1);
+                spin.SpinOnce();
             }
             price = 0;
             brokerUtcTicks = 0;

@@ -16,10 +16,13 @@ const dom = new JSDOM(`<!DOCTYPE html><html><body>
 <div id="trafficLight"></div>
 <div id="assetGrid"></div>
 <input type="text" id="assetSearchInput" />
+<div id="livePriceValue" class="live-price-value">--</div>
 </body></html>`, { runScripts: "dangerously", url: "https://valutabot.app/?custom_user_id=123&custom_user_sign=abc&auth_date=1000000000" });
 
 const { window } = dom;
 const hapticCalls = [];
+let rafCalls = 0;
+let lastRafCb = null;
 
 window.Telegram = {
     WebApp: {
@@ -32,8 +35,14 @@ window.Telegram = {
     }
 };
 
-window.requestAnimationFrame = (cb) => setTimeout(cb, 16);
-window.cancelAnimationFrame = (id) => clearTimeout(id);
+window.requestAnimationFrame = (cb) => {
+    rafCalls++;
+    lastRafCb = cb;
+    return 100;
+};
+window.cancelAnimationFrame = (id) => {
+    lastRafCb = null;
+};
 
 let transformedState = stateJs
     .replace(/export\s+(async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(/g, 'window.$2 = $1function(')
@@ -112,6 +121,41 @@ assert(errBox.innerHTML.includes('Сессия авторизации устар
 // 6. Dynamic Auth Header reflects active Telegram WebApp
 const authHdr = window.getAuthHeader();
 assert(authHdr === "fresh_mock_init_data", "getAuthHeader reads dynamic Telegram WebApp initData without stale closure");
+
+// 7. Tick Storm Throttling & rAF Coalescing
+rafCalls = 0;
+lastRafCb = null;
+const priceEl = window.document.getElementById('livePriceValue');
+
+// Simulate burst of 5 rapid ticks from WebSocket
+window.updateLivePriceUI(1.08500);
+window.updateLivePriceUI(1.08510);
+window.updateLivePriceUI(1.08520);
+window.updateLivePriceUI(1.08505);
+window.updateLivePriceUI(1.08550);
+
+assert(rafCalls === 1, "updateLivePriceUI coalesces rapid tick burst into exactly 1 rAF schedule");
+
+// Execute the scheduled rAF
+if (typeof lastRafCb === 'function') lastRafCb();
+assert(priceEl.textContent === '1.08550', "updateLivePriceUI renders the latest coalesced tick in textContent");
+
+// Verify next tick compares against last rendered price
+rafCalls = 0;
+window.updateLivePriceUI(1.08540); // price down
+if (typeof lastRafCb === 'function') lastRafCb();
+assert(priceEl.textContent === '1.08540' && priceEl.className.includes('down'), "updateLivePriceUI marks downwards tick direction");
+
+rafCalls = 0;
+window.updateLivePriceUI(1.08560); // price up
+if (typeof lastRafCb === 'function') lastRafCb();
+assert(priceEl.textContent === '1.08560' && priceEl.className.includes('up'), "updateLivePriceUI marks upwards tick direction");
+
+// Verify resetLivePriceFlash cancels pending rAF
+rafCalls = 0;
+window.updateLivePriceUI(1.08600);
+window.resetLivePriceFlash();
+assert(lastRafCb === null && priceEl.className === 'live-price-value', "resetLivePriceFlash cancels pending rAF and restores clean class");
 
 console.log("=======================================================");
 console.log(`AUDIT 7 TESTS: ${total} | PASSED: ${passed} | FAILED: ${total - passed}`);

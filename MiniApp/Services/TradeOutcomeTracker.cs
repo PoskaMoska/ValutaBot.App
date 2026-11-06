@@ -219,6 +219,14 @@ public static class TradeOutcomeTracker
                         string json = System.Text.Json.JsonSerializer.Serialize(outcomeRecord, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
                         await System.IO.File.WriteAllTextAsync(dumpFile, json);
                         BotLogger.Warn($"[PostMortem] Snapshot saved for loss on {record.Asset} at {dumpFile}");
+
+                        // SRE-FIX: Prune older loss dumps to prevent container disk / inode exhaustion (keep 50 newest)
+                        var dirInfo = new System.IO.DirectoryInfo(dumpDir);
+                        var oldFiles = System.Linq.Enumerable.Skip(System.Linq.Enumerable.OrderByDescending(dirInfo.GetFiles("loss_*.json"), f => f.CreationTimeUtc), 50);
+                        foreach (var f in oldFiles)
+                        {
+                            try { f.Delete(); } catch { }
+                        }
                     }
                     catch (Exception ex)
                     {

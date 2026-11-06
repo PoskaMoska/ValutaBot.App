@@ -290,10 +290,17 @@ FROM outcome_data;", commandTimeout: 10);
         public static async Task SaveTradeOutcomesBatchAsync(IEnumerable<TradeOutcomeRecord> outcomes)
         {
             if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
+            var list = outcomes.Select(o => { SanitizeOutcome(o); return o; }).ToList();
+            if (list.Count == 0) return;
+            var ids = list.Select(o => o.Id).ToArray();
             try
             {
                 await DbConnectionFactory.WithRetryAsync(async (conn, tx) =>
                 {
+                    await conn.ExecuteAsync(@"
+                        DELETE FROM pending_trades WHERE id = ANY(@ids);",
+                        new { ids }, transaction: tx, commandTimeout: 10);
+
                     await conn.ExecuteAsync(@"
                         INSERT INTO trade_outcomes 
                         (id, asset, timeframe, direction, probability, entry_price, exit_price, pnl_bps, was_win, ta_score, of_score, smc_score, ml_prob, ml_score, features_json, created_at, verified_at,
@@ -314,7 +321,7 @@ FROM outcome_data;", commandTimeout: 10);
                                 @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
                                 @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze,
                                 NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
-                        ON CONFLICT (id) DO NOTHING", outcomes.Select(o => { SanitizeOutcome(o); return o; }), transaction: tx, commandTimeout: 10);
+                        ON CONFLICT (id) DO NOTHING", list, transaction: tx, commandTimeout: 10);
                 });
             }
             catch (Exception ex)
@@ -415,10 +422,10 @@ FROM outcome_data;", commandTimeout: 10);
                         outcome.MlModelAccuracy,
                         outcome.MaxFavorableBps,
                         outcome.MaxAdverseBps,
-                        price_entropy = outcome.PriceEntropy,
-                        trend_maturity = outcome.TrendMaturity,
-                        price_position_pct = outcome.PricePositionPct,
-                        bb_squeeze = outcome.BbSqueeze,
+                        outcome.PriceEntropy,
+                        outcome.TrendMaturity,
+                        outcome.PricePositionPct,
+                        outcome.BbSqueeze,
                         outcome.TaTelemetry,
                         outcome.MlTelemetry,
                         outcome.SmcTelemetry
@@ -434,10 +441,11 @@ FROM outcome_data;", commandTimeout: 10);
             catch (Exception ex)
             {
                 BotLogger.Error($"[PostgreSQL DB] Failed to save trade outcome record {outcome.Id} ({ex.Message}). Buffering in emergency in-memory queue.", ex);
-                if (_emergencyOutcomesQueue.Count < MaxEmergencyOutcomesCapacity)
+                while (_emergencyOutcomesQueue.Count >= MaxEmergencyOutcomesCapacity && _emergencyOutcomesQueue.TryDequeue(out var evicted))
                 {
-                    _emergencyOutcomesQueue.Enqueue(outcome);
+                    BotLogger.Warn($"[TradeRepository] Emergency buffer capacity reached ({MaxEmergencyOutcomesCapacity}). Evicting oldest outcome {evicted.Id} to prioritize recent trade {outcome.Id}.");
                 }
+                _emergencyOutcomesQueue.Enqueue(outcome);
                 return false;
             }
         }
@@ -474,10 +482,8 @@ FROM outcome_data;", commandTimeout: 10);
                         // Restore batch back into emergency queue so data is NOT lost
                         foreach (var item in batch)
                         {
-                            if (_emergencyOutcomesQueue.Count < MaxEmergencyOutcomesCapacity)
-                            {
-                                _emergencyOutcomesQueue.Enqueue(item);
-                            }
+                            while (_emergencyOutcomesQueue.Count >= MaxEmergencyOutcomesCapacity && _emergencyOutcomesQueue.TryDequeue(out _)) { }
+                            _emergencyOutcomesQueue.Enqueue(item);
                         }
                         BotLogger.Warn($"[TradeRepository] Drain emergency outcomes postponed: {ex.Message}");
                         break;

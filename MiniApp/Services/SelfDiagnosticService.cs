@@ -210,14 +210,34 @@ public class SelfDiagnosticService : BackgroundService
             using var process = Process.GetCurrentProcess();
             long memoryUsedMb = process.PrivateMemorySize64 / (1024 * 1024);
 
-            if (memoryUsedMb >= 700 && memoryUsedMb < 850)
+            // SRE / Cloud Resilience: Dynamic threshold adaptation for memory-constrained containers (e.g. 512MB on Railway)
+            long containerLimitMb = 1024;
+            try
+            {
+                var gcInfo = GC.GetGCMemoryInfo();
+                if (gcInfo.TotalAvailableMemoryBytes > 0)
+                {
+                    containerLimitMb = gcInfo.TotalAvailableMemoryBytes / (1024 * 1024);
+                }
+            }
+            catch { }
+
+            if (containerLimitMb <= 0 || containerLimitMb > 4096)
+                containerLimitMb = 1024;
+
+            long tier1ThresholdMb = Math.Min(700, (long)(containerLimitMb * 0.68));
+            long tier2ThresholdMb = Math.Min(850, (long)(containerLimitMb * 0.82));
+            long tier3ThresholdMb = Math.Min(950, (long)(containerLimitMb * 0.92));
+            long tierHealthyLowMb = Math.Min(500, (long)(containerLimitMb * 0.50));
+
+            if (memoryUsedMb >= tier1ThresholdMb && memoryUsedMb < tier2ThresholdMb)
             {
                 // ── Tier 1: Soft Purge (700 - 850 MB) ──
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                 GC.Collect(2, GCCollectionMode.Forced, blocking: false);
                 BotLogger.Info($"[RAM Guard Tier 1] Soft GC compaction triggered at {memoryUsedMb} MB.");
             }
-            else if (memoryUsedMb >= 850 && memoryUsedMb < 950)
+            else if (memoryUsedMb >= tier2ThresholdMb && memoryUsedMb < tier3ThresholdMb)
             {
                 // ── Tier 2: Aggressive Purge & Cache Trimming (850 - 950 MB) ──
                 BotLogger.Warn($"[RAM Guard Tier 2] High RAM detected ({memoryUsedMb} MB). Executing aggressive memory compaction...");
@@ -240,20 +260,20 @@ public class SelfDiagnosticService : BackgroundService
                     BotLogger.Info($"[RAM Guard Tier 2] Aggressive GC reclaimed {freedMb} MB (was: {memoryUsedMb} MB, now: {memAfter} MB).");
                 }
 
-                if (memAfter >= 850 && _memWasHealthy)
+                if (memAfter >= tier2ThresholdMb && _memWasHealthy)
                 {
                     _memWasHealthy = false;
                     await TelegramBotService.SendMessageToAdmins(
                         $"⚠️ <b>[RAM Guard] Высокое потребление памяти</b>\nПроцесс потребляет {memAfter} МБ (было {memoryUsedMb} МБ). Сборщик мусора освободил {freedMb} МБ. При приближении к 950 МБ будет выполнен мягкий автоперезапуск во избежание OOMKilled.");
                 }
-                else if (memAfter < 700 && !_memWasHealthy)
+                else if (memAfter < tier1ThresholdMb && !_memWasHealthy)
                 {
                     _memWasHealthy = true;
                     await TelegramBotService.SendMessageToAdmins(
                         $"✅ <b>[RAM Guard] Память стабилизирована</b>\nПотребление снижено до {memAfter} МБ. Нормальный режим восстановлен.");
                 }
             }
-            else if (memoryUsedMb >= 950)
+            else if (memoryUsedMb >= tier3ThresholdMb)
             {
                 // ── Tier 3: Emergency Self-Recycle Safeguard (>= 950 MB) ──
                 // Railway container limit is typically 1024 MB. At >=950 MB, Linux OOMKilled (SIGKILL 137) is imminent.
@@ -285,7 +305,7 @@ public class SelfDiagnosticService : BackgroundService
             }
             else
             {
-                if (!_memWasHealthy && memoryUsedMb < 500)
+                if (!_memWasHealthy && memoryUsedMb < tierHealthyLowMb)
                 {
                     _memWasHealthy = true;
                 }

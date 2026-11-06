@@ -536,6 +536,16 @@ namespace ValutaBot.App.MiniApp.Data
                         );
                     EXCEPTION WHEN others THEN END;
                     BEGIN
+                        ALTER TABLE historical_candles SET (
+                            fillfactor = 90,
+                            autovacuum_vacuum_threshold = 100,
+                            autovacuum_vacuum_scale_factor = 0.05,
+                            autovacuum_analyze_scale_factor = 0.02,
+                            autovacuum_vacuum_cost_limit = 1000,
+                            autovacuum_vacuum_cost_delay = 2
+                        );
+                    EXCEPTION WHEN others THEN END;
+                    BEGIN
                         UPDATE trade_outcomes SET created_at = replace(created_at, ' ', 'T') WHERE created_at LIKE '% %';
                         UPDATE trade_outcomes SET verified_at = replace(verified_at, ' ', 'T') WHERE verified_at LIKE '% %';
                         UPDATE pending_trades SET created_at = replace(created_at, ' ', 'T') WHERE created_at LIKE '% %';

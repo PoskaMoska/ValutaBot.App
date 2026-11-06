@@ -42,5 +42,10 @@ RUN pip3 install --no-cache-dir pytest httpx python-multipart && cd ml_service &
 # Open the port
 EXPOSE 5000 8765
 
+# SRE / Cloud Resilience: Workstation GC & heap limits for 512MB RAM containers on Railway
+ENV DOTNET_gcServer=0 \
+    DOTNET_gcConcurrent=1 \
+    DOTNET_GCHeapHardLimitPercent=55
+
 # Start the bot (the .NET app will automatically launch Python via Process.Start)
 ENTRYPOINT ["dotnet", "ValutaBot.App.dll"]

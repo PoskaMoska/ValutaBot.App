@@ -248,7 +248,7 @@ public class DataRetentionService : BackgroundService
                       SELECT ctid FROM trade_outcomes
                       WHERE features_json IS NOT NULL
                         AND octet_length(features_json) > 2500
-                        AND (created_at < @cutoff OR created_at < @cutoffLegacy)
+                        AND (created_at < @cutoff::timestamptz OR created_at < @cutoffLegacy::timestamptz)
                         AND (features_json LIKE '%""Candles""%' OR features_json LIKE '%""candles""%')
                       LIMIT 3000
                       FOR UPDATE SKIP LOCKED
@@ -280,6 +280,7 @@ public class DataRetentionService : BackgroundService
                 await conn.ExecuteAsync("VACUUM (ANALYZE) trade_outcomes;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) subminute_candles;", commandTimeout: 120);
                 await conn.ExecuteAsync("VACUUM (ANALYZE) pending_trades;", commandTimeout: 60);
+                await conn.ExecuteAsync("VACUUM (ANALYZE) historical_candles;", commandTimeout: 120);
             }
         }
         catch (Exception exVac)
@@ -410,6 +411,14 @@ public class DataRetentionService : BackgroundService
                     autovacuum_vacuum_threshold = 20,
                     autovacuum_vacuum_scale_factor = 0.05,
                     autovacuum_vacuum_cost_limit = 500,
+                    autovacuum_vacuum_cost_delay = 2
+                );
+                ALTER TABLE historical_candles SET (
+                    fillfactor = 90,
+                    autovacuum_vacuum_threshold = 100,
+                    autovacuum_vacuum_scale_factor = 0.05,
+                    autovacuum_analyze_scale_factor = 0.02,
+                    autovacuum_vacuum_cost_limit = 1000,
                     autovacuum_vacuum_cost_delay = 2
                 );
             ", commandTimeout: 30);

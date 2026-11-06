@@ -38,8 +38,17 @@ export function normalizeDirection(dir) {
 let priceFlashTimeout = null;
 let cachedLivePriceEl = null;
 let cachedTrafficLightEl = null;
+let pendingTickPrice = null;
+let tickRafId = null;
+let lastRenderedPrice = 0;
 
 export function resetLivePriceFlash() {
+    if (tickRafId) {
+        cancelAnimationFrame(tickRafId);
+        tickRafId = null;
+    }
+    pendingTickPrice = null;
+    lastRenderedPrice = 0;
     if (priceFlashTimeout) {
         clearTimeout(priceFlashTimeout);
         priceFlashTimeout = null;
@@ -53,32 +62,48 @@ export function updateLivePriceUI(price) {
     const numPrice = Number(price);
     if (!Number.isFinite(numPrice) || numPrice <= 0) return;
 
-    if (!cachedLivePriceEl || !cachedLivePriceEl.isConnected) {
-        cachedLivePriceEl = document.getElementById('livePriceValue');
-        if (!cachedLivePriceEl) return;
-    }
+    pendingTickPrice = numPrice;
+    if (tickRafId) return;
 
-    const isHighVal = numPrice > 100;
-    const formatted = numPrice.toFixed(isHighVal ? 2 : 5);
+    tickRafId = requestAnimationFrame(() => {
+        tickRafId = null;
+        if (pendingTickPrice === null) return;
+        const currentPrice = pendingTickPrice;
+        pendingTickPrice = null;
 
-    cachedLivePriceEl.innerText = formatted;
-
-    if (lastPriceVal > 0) {
-        if (numPrice > lastPriceVal) {
-            cachedLivePriceEl.className = 'live-price-value up';
-        } else if (numPrice < lastPriceVal) {
-            cachedLivePriceEl.className = 'live-price-value down';
+        if (!cachedLivePriceEl || !cachedLivePriceEl.isConnected) {
+            cachedLivePriceEl = document.getElementById('livePriceValue');
+            if (!cachedLivePriceEl) return;
         }
-        
-        if (priceFlashTimeout) clearTimeout(priceFlashTimeout);
-        priceFlashTimeout = setTimeout(() => {
-            if (cachedLivePriceEl && cachedLivePriceEl.innerText === formatted) {
-                cachedLivePriceEl.className = 'live-price-value';
+
+        const isHighVal = currentPrice > 100;
+        const formatted = currentPrice.toFixed(isHighVal ? 2 : 5);
+
+        // textContent avoids Layout Thrashing / Reflow on high-frequency quote updates
+        if (cachedLivePriceEl.textContent !== formatted) {
+            cachedLivePriceEl.textContent = formatted;
+        }
+
+        const prevPrice = lastRenderedPrice > 0 ? lastRenderedPrice : lastPriceVal;
+        if (prevPrice > 0) {
+            if (currentPrice > prevPrice) {
+                cachedLivePriceEl.className = 'live-price-value up';
+            } else if (currentPrice < prevPrice) {
+                cachedLivePriceEl.className = 'live-price-value down';
             }
-        }, 400);
-    } else {
-        cachedLivePriceEl.className = 'live-price-value';
-    }
+            
+            if (priceFlashTimeout) clearTimeout(priceFlashTimeout);
+            priceFlashTimeout = setTimeout(() => {
+                if (cachedLivePriceEl && cachedLivePriceEl.textContent === formatted) {
+                    cachedLivePriceEl.className = 'live-price-value';
+                }
+            }, 400);
+        } else {
+            cachedLivePriceEl.className = 'live-price-value';
+        }
+
+        lastRenderedPrice = currentPrice;
+    });
 }
 
 export function switchResultTab(tabName) {

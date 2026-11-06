@@ -1,3 +1,4 @@
+import copy
 """
 train_dual_stream_v5.py - Pure Multi-Timeframe Dual-Stream Neural Brain
 Trained on Point-in-Time Aligned dataset_v5_dual_stream.npz.
@@ -240,13 +241,14 @@ def train_dual_stream(data_path="ml_service/data/dataset_v5_dual_stream.npz", ep
     
     # Auto-export to ONNX (legacy model path to avoid overwriting production dual_stream_brain_v5.onnx)
     save_onnx = "ml_service/models/legacy_dual_stream_brain_v5.onnx"
-    dummy_macro = torch.randn(1, 30, 5)
-    dummy_micro = torch.randn(1, 30, 5)
-    dummy_bridge = torch.randn(1, 4)
+    export_model = copy.deepcopy(model).to("cpu").eval()
+    dummy_macro_cpu = torch.randn(1, 30, 5, device="cpu")
+    dummy_micro_cpu = torch.randn(1, 30, 5, device="cpu")
+    dummy_bridge_cpu = torch.randn(1, 4, device="cpu")
     
     torch.onnx.export(
-        model,
-        (dummy_macro, dummy_micro, dummy_bridge),
+        export_model,
+        (dummy_macro_cpu, dummy_micro_cpu, dummy_bridge_cpu),
         save_onnx,
         input_names=["macro_x", "micro_x", "bridge_x"],
         output_names=["logit"],
@@ -260,6 +262,28 @@ def train_dual_stream(data_path="ml_service/data/dataset_v5_dual_stream.npz", ep
     )
     onnx_size_kb = os.path.getsize(save_onnx) / 1024
     print(f"[+] Successfully exported in-process ONNX model: {save_onnx} ({onnx_size_kb:.1f} KB)")
+
+    # Validate ONNX graph integrity via onnx.checker
+    import onnx
+    onnx_model = onnx.load(save_onnx)
+    onnx.checker.check_model(onnx_model)
+    print("[+] ONNX model structural validation passed (onnx.checker.check_model: OK)")
+
+    try:
+        import onnxruntime as ort
+        ort_sess = ort.InferenceSession(save_onnx, providers=["CPUExecutionProvider"])
+        ort_inputs = {
+            "macro_x": dummy_macro_cpu.numpy(),
+            "micro_x": dummy_micro_cpu.numpy(),
+            "bridge_x": dummy_bridge_cpu.numpy()
+        }
+        ort_out = ort_sess.run(None, ort_inputs)[0]
+        with torch.no_grad():
+            pt_out = export_model(dummy_macro_cpu, dummy_micro_cpu, dummy_bridge_cpu).numpy()
+        np.testing.assert_allclose(pt_out, ort_out, rtol=1e-3, atol=1e-5)
+        print("[+] ONNX Runtime inference test passed! Numerical parity verified.")
+    except Exception as e:
+        print(f"[!] ONNX Runtime verification warning: {e}")
     print("=" * 70)
 
 

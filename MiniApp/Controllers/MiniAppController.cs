@@ -346,6 +346,76 @@ public static partial class MiniAppController
                         AutoReplenishment = true
                     });
             });
+
+            // SRE-FIX: Dedicated strict rate limiting for /api/analyze to prevent CPU/ML inference DoS
+            // Partitions primarily by Telegram userId, falling back to IP (prevents proxy evasion and CGNAT collision)
+            options.AddPolicy("Analyze", context =>
+            {
+                string partitionKey = "unknown";
+
+                if (context.Items.TryGetValue("userId", out object? uidObj) && uidObj is long uid && uid > 0)
+                {
+                    partitionKey = $"user_{uid}";
+                }
+                else
+                {
+                    string initHeader = context.Request.Headers["X-Telegram-Init-Data"].ToString();
+                    if (!string.IsNullOrEmpty(initHeader))
+                    {
+                        if (initHeader.Contains("custom_user_id="))
+                        {
+                            var parsed = System.Web.HttpUtility.ParseQueryString(initHeader);
+                            if (long.TryParse(parsed["custom_user_id"], out long cUid) && cUid > 0)
+                                partitionKey = $"user_{cUid}";
+                        }
+                        else if (initHeader.Contains("user="))
+                        {
+                            var parsed = System.Web.HttpUtility.ParseQueryString(initHeader);
+                            string userJson = parsed["user"] ?? "";
+                            if (!string.IsNullOrEmpty(userJson))
+                            {
+                                try
+                                {
+                                    using var doc = JsonDocument.Parse(userJson);
+                                    if (doc.RootElement.TryGetProperty("id", out var idProp))
+                                        partitionKey = $"user_{idProp.GetInt64()}";
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+
+                    if (partitionKey == "unknown")
+                    {
+                        System.Net.IPAddress? clientIp = ResolveClientIp(context);
+                        if (clientIp == null)
+                        {
+                            partitionKey = "unknown";
+                        }
+                        else if (clientIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && !clientIp.IsIPv4MappedToIPv6)
+                        {
+                            byte[] bytes = clientIp.GetAddressBytes();
+                            Array.Clear(bytes, 8, 8); // /64 subnet mask
+                            partitionKey = new System.Net.IPAddress(bytes).ToString();
+                        }
+                        else
+                        {
+                            partitionKey = clientIp.ToString();
+                        }
+                    }
+                }
+
+                return RateLimitPartition.GetTokenBucketLimiter(partitionKey, _ =>
+                    new TokenBucketRateLimiterOptions
+                    {
+                        TokenLimit = 20,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                        QueueLimit = 0,
+                        ReplenishmentPeriod = TimeSpan.FromSeconds(10),
+                        TokensPerPeriod = 5,
+                        AutoReplenishment = true
+                    });
+            });
         });
 
 
@@ -425,7 +495,7 @@ public static partial class MiniAppController
 
         RegisterRoutes(app);
 
-        // SRE-FIX: Gracefully close broker WebSocket and flush in-memory ticks before Kestrel stops
+        // SRE-FIX: Gracefully close broker WebSocket, flush in-memory ticks and emergency trade outcomes before Kestrel stops
         app.Lifetime.ApplicationStopping.Register(() =>
         {
             try
@@ -441,12 +511,32 @@ public static partial class MiniAppController
             try
             {
                 Console.WriteLine("[TickCollector] Application stopping: performing final tick flush to DB...");
-                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
                 RealtimeTickCollector.StopAsync(shutdownCts.Token).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[TickCollector] Application stopping flush error: {ex.Message}");
+            }
+
+            try
+            {
+                Console.WriteLine("[TradeRepository] Application stopping: draining emergency trade outcomes to DB...");
+                ValutaBot.App.MiniApp.Data.Repositories.TradeRepository.DrainEmergencyOutcomesAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TradeRepository] Application stopping drain error: {ex.Message}");
+            }
+
+            try
+            {
+                Console.WriteLine("[MLPython] Application stopping: terminating Python child process...");
+                MLPythonService.StopProcess();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[MLPython] Application stopping error: {ex.Message}");
             }
         });
 

@@ -609,8 +609,11 @@ class PatchTSTPredictor:
             hurdle_p = break_even_p + 0.0045
 
             drift_status = self.drift_detector.get_status()
-            if drift_status.get("drift_detected") and drift_status.get("drift_type") == "OTC_VOLATILITY_NOISE_COLLAPSE":
-                hurdle_p += 0.015
+            if drift_status.get("drift_detected"):
+                if drift_status.get("drift_type") == "OTC_VOLATILITY_NOISE_COLLAPSE":
+                    hurdle_p += 0.015
+                elif drift_status.get("drift_type") == "DIRECTIONAL_MODE_COLLAPSE":
+                    hurdle_p += 0.020
 
             tf_sec = TF_SECONDS.get(str(interval).lower(), 5)
             mtf_tf_sec = 60 if tf_sec < 60 else 300

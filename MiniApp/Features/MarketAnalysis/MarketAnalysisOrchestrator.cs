@@ -741,21 +741,31 @@ public class MarketAnalysisOrchestrator(
                  CombinedReasoningText = consensus.CombinedReasoningText + $"\n⚠️ Предупреждение риск-контроля: {sensors.Gatekeeper.Reason}" 
              };
         }
-        else if (consensus.FinalDirection == "NEUTRAL")
+        else if (consensus.FinalDirection == "NEUTRAL" || string.IsNullOrEmpty(consensus.FinalDirection))
         {
-            bool isExplicitHoldSignal = ml.Direction is "HOLD" or "NEUTRAL"
-                || (consensus.CombinedReasoningText != null && consensus.CombinedReasoningText.Contains("HOLD (flat market, entry blocked)"));
-
-            if (!isExplicitHoldSignal)
+            // БИЗНЕС-ИНВАРИАНТ: Бот ВСЕГДА даёт торговый сигнал (BUY или PUT).
+            // В условиях низкой волатильности / нейтрального ML консенсус приводится к направлению микро-дрейфа.
+            string fallbackDir = "BUY";
+            if (prep.ClosedCandles.Length > 0)
             {
-                string fallbackDir = prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT";
-                consensus = consensus with {
-                    FinalDirection = fallbackDir,
-                    CandidateDirection = fallbackDir,
-                    Probability = 51,
-                    CombinedReasoningText = consensus.CombinedReasoningText + $"\n🧭 Базовый дрейф: нейтральный консенсус приведен к {fallbackDir} (51%) по направлению закрытия последней свечи."
-                };
+                fallbackDir = prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT";
             }
+            else if (prep.ClosedPrices.Length >= 2)
+            {
+                fallbackDir = prep.ClosedPrices[^1] >= prep.ClosedPrices[^2] ? "BUY" : "PUT";
+            }
+            else if (prep.MainPrices.Length >= 2)
+            {
+                fallbackDir = prep.MainPrices[^1] >= prep.MainPrices[^2] ? "BUY" : "PUT";
+            }
+
+            int fallbackProb = consensus.Probability >= 50 ? consensus.Probability : 51;
+            consensus = consensus with {
+                FinalDirection = fallbackDir,
+                CandidateDirection = fallbackDir,
+                Probability = fallbackProb,
+                CombinedReasoningText = consensus.CombinedReasoningText + $"\n🧭 Определение импульса: консенсус приведен к сигналу {fallbackDir} ({fallbackProb}%) по ценовому микро-дрейфу."
+            };
         }
 
         string effectiveMarketRegime = !string.IsNullOrEmpty(sensors.TaDetail.Regime) && sensors.TaDetail.Regime != "UNKNOWN"
@@ -1344,8 +1354,8 @@ public class MarketAnalysisOrchestrator(
             uiMarketSession = uiMarketSession,
             uiMarketPhase = uiMarketPhase,
             uiMarketEntropy = uiMarketEntropy,
-            direction = sensors.IsRiskBlocked ? "NEUTRAL" : (cm.Consensus.FinalDirection is "BUY" or "PUT" ? cm.Consensus.FinalDirection : "NEUTRAL"),
-            probability = sensors.IsRiskBlocked ? 0 : (cm.Consensus.FinalDirection == "NEUTRAL" ? Math.Clamp(cm.Consensus.Probability, 0, 100) : Math.Clamp(cm.Consensus.Probability, 50, 92)),
+            direction = sensors.IsRiskBlocked ? "NEUTRAL" : (cm.Consensus.FinalDirection is "BUY" or "PUT" ? cm.Consensus.FinalDirection : (prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT")),
+            probability = sensors.IsRiskBlocked ? 0 : Math.Clamp(cm.Consensus.Probability >= 50 ? cm.Consensus.Probability : 51, 50, 92),
             duration = cm.Timeout.TimeoutText,
             expiryCandles = cm.Timeout.TimeoutCandles,
             adaptiveReasoning = cm.Consensus.CombinedReasoningText ?? string.Empty,
