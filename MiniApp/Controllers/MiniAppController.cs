@@ -120,7 +120,7 @@ public static partial class MiniAppController
     public static string? LastExceptionMessage { get; set; }
     private static readonly string _internalApiSecretFallback = Guid.NewGuid().ToString();
 
-    public record OhlcCandle(double Open, double High, double Low, double Close, double Volume, DateTime Timestamp = default)
+    public record OhlcCandle(double Open, double High, double Low, double Close, double Volume, DateTime Timestamp = default, double CrowdSentiment = 50.0)
     {
         public bool IsValid => double.IsFinite(Open) && double.IsFinite(High) && double.IsFinite(Low) &&
                                double.IsFinite(Close) && double.IsFinite(Volume) &&

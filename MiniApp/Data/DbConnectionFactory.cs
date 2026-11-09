@@ -435,6 +435,10 @@ namespace ValutaBot.App.MiniApp.Data
                     ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ta_telemetry JSONB NULL;
                     ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS ml_telemetry JSONB NULL;
                     ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS smc_telemetry JSONB NULL;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS crowd_sentiment DOUBLE PRECISION NOT NULL DEFAULT 50.0;
+                    ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS payout DOUBLE PRECISION NOT NULL DEFAULT 82.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS crowd_sentiment DOUBLE PRECISION NOT NULL DEFAULT 50.0;
+                    ALTER TABLE pending_trades ADD COLUMN IF NOT EXISTS payout DOUBLE PRECISION NOT NULL DEFAULT 82.0;
                 END $$;
 
                 CREATE TABLE IF NOT EXISTS subminute_candles (
@@ -447,6 +451,7 @@ namespace ValutaBot.App.MiniApp.Data
                     low_price DOUBLE PRECISION NOT NULL,
                     close_price DOUBLE PRECISION NOT NULL,
                     volume DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    crowd_sentiment DOUBLE PRECISION NOT NULL DEFAULT 50.0,
                     UNIQUE(asset, interval, open_time)
                 );
 
@@ -481,6 +486,7 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_ml_export ON trade_outcomes(created_at ASC) WHERE features_json IS NOT NULL AND was_win IS NOT NULL AND entry_price > 0 AND exit_price > 0;
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
+                ALTER TABLE subminute_candles ADD COLUMN IF NOT EXISTS crowd_sentiment DOUBLE PRECISION NOT NULL DEFAULT 50.0;
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_covering ON subminute_candles(asset, interval, open_time DESC) INCLUDE (open_price, high_price, low_price, close_price, volume) WITH (fillfactor = 90);
@@ -550,6 +556,14 @@ namespace ValutaBot.App.MiniApp.Data
                         UPDATE trade_outcomes SET verified_at = replace(verified_at, ' ', 'T') WHERE verified_at LIKE '% %';
                         UPDATE pending_trades SET created_at = replace(created_at, ' ', 'T') WHERE created_at LIKE '% %';
                         UPDATE pending_trades SET verify_at = replace(verify_at, ' ', 'T') WHERE verify_at LIKE '% %';
+                    EXCEPTION WHEN others THEN END;
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_cast
+                            WHERE castsource = 'text'::regtype AND casttarget = 'timestamptz'::regtype
+                        ) THEN
+                            CREATE CAST (text AS timestamptz) WITH INOUT AS ASSIGNMENT;
+                        END IF;
                     EXCEPTION WHEN others THEN END;
                     BEGIN
                         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_trade_outcomes_direction') THEN

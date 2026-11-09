@@ -337,7 +337,9 @@ public class PendingTradeVerificationService : BackgroundService
                     OfState = record.OfState,
                     TaTelemetry = record.TaTelemetry,
                     MlTelemetry = record.MlTelemetry,
-                    SmcTelemetry = record.SmcTelemetry
+                    SmcTelemetry = record.SmcTelemetry,
+                    CrowdSentiment = record.CrowdSentiment,
+                    Payout = record.Payout
                 };
 
                 await TradeRepository.SaveTradeOutcomeAsync(staleOutcome, record.Id);

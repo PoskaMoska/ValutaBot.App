@@ -40,7 +40,8 @@ public static class SignalTracker
         double atrAtSignal = 0.0, double adxAtSignal = 0.0, double rsiAtSignal = 50.0,
         bool higherTfAligned = false, int minutesToNews = -1,
         string reasoningText = "", string mlModelVersion = "", double mlModelAccuracy = 0.0,
-        double priceEntropy = 0.0, int trendMaturity = 0, double pricePositionPct = 0.5, bool bbSqueeze = false, string? taTelemetry = null, string? mlTelemetry = null, string? smcTelemetry = null)
+        double priceEntropy = 0.0, int trendMaturity = 0, double pricePositionPct = 0.5, bool bbSqueeze = false, string? taTelemetry = null, string? mlTelemetry = null, string? smcTelemetry = null,
+        double? crowdSentiment = null, double? payout = null)
     {
 
         // Hard Circuit Breaker Guard: Never record a live order when Circuit Breaker is active!
@@ -135,7 +136,9 @@ public static class SignalTracker
             BbSqueeze = bbSqueeze,
             TaTelemetry = taTelemetry,
             MlTelemetry = mlTelemetry,
-            SmcTelemetry = smcTelemetry
+            SmcTelemetry = smcTelemetry,
+            CrowdSentiment = crowdSentiment ?? PocketOptionWebSocketStream.GetCrowdSentiment(asset),
+            Payout = payout ?? PocketOptionWebSocketStream.GetAssetPayout(asset)
         };
 
         try
@@ -286,6 +289,8 @@ public static class SignalTracker
         public string? TaTelemetry { get; set; }
         public string? MlTelemetry { get; set; }
         public string? SmcTelemetry { get; set; }
+        public double CrowdSentiment { get; set; } = 50.0;
+        public double Payout { get; set; } = 82.0;
     }
 
     public class AccuracyStats

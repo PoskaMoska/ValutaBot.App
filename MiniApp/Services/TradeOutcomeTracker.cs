@@ -141,6 +141,8 @@ public static class TradeOutcomeTracker
                 TaTelemetry = record.TaTelemetry,
                 MlTelemetry = record.MlTelemetry,
                 SmcTelemetry = record.SmcTelemetry,
+                CrowdSentiment = record.CrowdSentiment,
+                Payout = record.Payout,
                 CreatedAt = record.CreatedAt.ToString("o"),
                 VerifiedAt = DateTime.UtcNow.ToString("o")
             };

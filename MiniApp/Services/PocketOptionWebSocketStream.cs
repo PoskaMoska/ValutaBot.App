@@ -34,11 +34,21 @@ public static class PocketOptionWebSocketStream
     private static bool _isDeferredStartPending = false;
     private static long _totalTicksIngested = 0;
 
+    private static readonly string[] BaseTrackedPairs = {
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"
+    };
+
     private static readonly string[] DefaultAssets = {
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
         "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "AUDUSD_otc", "USDCAD_otc", "USDCHF_otc"
     };
 
     private static string[] _subscribedAssets = DefaultAssets;
+
+    public sealed record PoAssetMeta(string RawSymbol, int Payout, bool IsOpen, bool IsOtc);
+    private static readonly ConcurrentDictionary<string, PoAssetMeta> _assetMeta = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, double> _crowdSentimentByRawSymbol = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, string> _activeRawSymbolByBase = new(StringComparer.OrdinalIgnoreCase);
 
     private const int ReconnectAfterConnectedMs = 1_000;
     private const int MinBackoffMs = 5_000;
@@ -82,15 +92,139 @@ public static class PocketOptionWebSocketStream
 
     public static string ResolveCanonicalAsset(ReadOnlySpan<byte> span)
     {
-        if (span.SequenceEqual("EURUSD_otc"u8) || span.SequenceEqual("EURUSD"u8)) return "EURUSD_otc";
-        if (span.SequenceEqual("GBPUSD_otc"u8) || span.SequenceEqual("GBPUSD"u8)) return "GBPUSD_otc";
-        if (span.SequenceEqual("USDJPY_otc"u8) || span.SequenceEqual("USDJPY"u8)) return "USDJPY_otc";
-        if (span.SequenceEqual("AUDUSD_otc"u8) || span.SequenceEqual("AUDUSD"u8)) return "AUDUSD_otc";
-        if (span.SequenceEqual("USDCAD_otc"u8) || span.SequenceEqual("USDCAD"u8)) return "USDCAD_otc";
-        if (span.SequenceEqual("USDCHF_otc"u8) || span.SequenceEqual("USDCHF"u8)) return "USDCHF_otc";
+        if (span.SequenceEqual("EURUSD"u8)) return "EURUSD";
+        if (span.SequenceEqual("GBPUSD"u8)) return "GBPUSD";
+        if (span.SequenceEqual("USDJPY"u8)) return "USDJPY";
+        if (span.SequenceEqual("AUDUSD"u8)) return "AUDUSD";
+        if (span.SequenceEqual("USDCAD"u8)) return "USDCAD";
+        if (span.SequenceEqual("USDCHF"u8)) return "USDCHF";
+        if (span.SequenceEqual("EURUSD_otc"u8)) return "EURUSD_otc";
+        if (span.SequenceEqual("GBPUSD_otc"u8)) return "GBPUSD_otc";
+        if (span.SequenceEqual("USDJPY_otc"u8)) return "USDJPY_otc";
+        if (span.SequenceEqual("AUDUSD_otc"u8)) return "AUDUSD_otc";
+        if (span.SequenceEqual("USDCAD_otc"u8)) return "USDCAD_otc";
+        if (span.SequenceEqual("USDCHF_otc"u8)) return "USDCHF_otc";
 
         string assetStr = Encoding.UTF8.GetString(span);
         return _canonicalAssetCache.GetOrAdd(assetStr, assetStr);
+    }
+
+    public static string GetActiveRawSymbol(string symbol)
+    {
+        string baseAsset = PriceFeed.BaseAsset(symbol);
+        string otcSymbol = baseAsset + "_otc";
+
+        if (_assetMeta.TryGetValue(baseAsset, out var realMeta))
+        {
+            if (realMeta.IsOpen)
+            {
+                return baseAsset;
+            }
+            if (_assetMeta.TryGetValue(otcSymbol, out var otcMeta) && otcMeta.IsOpen)
+            {
+                return otcSymbol;
+            }
+            return baseAsset;
+        }
+
+        if (_assetMeta.TryGetValue(otcSymbol, out var onlyOtcMeta) && !onlyOtcMeta.IsOpen)
+        {
+            return baseAsset;
+        }
+
+        var dow = DateTime.UtcNow.DayOfWeek;
+        bool isWeekend = dow == DayOfWeek.Saturday || dow == DayOfWeek.Sunday;
+        return isWeekend ? otcSymbol : baseAsset;
+    }
+
+    public static bool IsActiveSymbolForBase(string baseAsset, string rawAsset)
+    {
+        string activeRaw = GetActiveRawSymbol(baseAsset);
+        if (_activeRawSymbolByBase.TryGetValue(baseAsset, out var prevRaw) &&
+            !string.Equals(prevRaw, activeRaw, StringComparison.OrdinalIgnoreCase))
+        {
+            if (_activeRawSymbolByBase.TryUpdate(baseAsset, activeRaw, prevRaw))
+            {
+                string candleKey = baseAsset + PriceFeed.PoSuffix;
+                _lastCandleSrvTs.TryRemove(candleKey, out _);
+                _lastBackfillSrvTs.TryRemove(candleKey, out _);
+                if (_livePrices.TryGetValue(baseAsset, out var slot))
+                {
+                    slot.Reset();
+                }
+                RealtimeTickCollector.ResetAssetAccumulator(candleKey);
+                BotLogger.Info($"[PO WS] Active feed for {baseAsset} switched: {prevRaw} -> {activeRaw}");
+            }
+        }
+        else
+        {
+            _activeRawSymbolByBase.TryAdd(baseAsset, activeRaw);
+        }
+
+        return string.Equals(rawAsset, activeRaw, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static double GetCrowdSentiment(string symbol)
+    {
+        string baseAsset = PriceFeed.BaseAsset(symbol);
+        string activeRaw = GetActiveRawSymbol(baseAsset);
+        if (_crowdSentimentByRawSymbol.TryGetValue(activeRaw, out double val) && double.IsFinite(val))
+        {
+            return val;
+        }
+        if (_crowdSentimentByRawSymbol.TryGetValue(baseAsset, out double baseVal) && double.IsFinite(baseVal))
+        {
+            return baseVal;
+        }
+        if (_crowdSentimentByRawSymbol.TryGetValue(baseAsset + "_otc", out double otcVal) && double.IsFinite(otcVal))
+        {
+            return otcVal;
+        }
+        if (_livePrices.TryGetValue(baseAsset, out var slot) && slot.TryRead(out _, out _, out _, out double slotSentiment, out _))
+        {
+            return slotSentiment;
+        }
+        return 50.0;
+    }
+
+    public static int GetAssetPayout(string symbol)
+    {
+        string baseAsset = PriceFeed.BaseAsset(symbol);
+        string activeRaw = GetActiveRawSymbol(baseAsset);
+        if (_assetMeta.TryGetValue(activeRaw, out var meta))
+        {
+            return meta.Payout;
+        }
+        if (_assetMeta.TryGetValue(baseAsset, out var baseMeta))
+        {
+            return baseMeta.Payout;
+        }
+        if (_assetMeta.TryGetValue(baseAsset + "_otc", out var otcMeta))
+        {
+            return otcMeta.Payout;
+        }
+        if (_livePrices.TryGetValue(baseAsset, out var slot) && slot.TryRead(out _, out _, out _, out _, out int slotPayout))
+        {
+            return slotPayout;
+        }
+        return 82;
+    }
+
+    public static bool IsAssetOpen(string symbol)
+    {
+        string baseAsset = PriceFeed.BaseAsset(symbol);
+        string activeRaw = GetActiveRawSymbol(baseAsset);
+        if (_assetMeta.TryGetValue(activeRaw, out var meta))
+        {
+            return meta.IsOpen;
+        }
+        return true;
+    }
+
+    public static bool IsCurrentlyOtc(string symbol)
+    {
+        string activeRaw = GetActiveRawSymbol(symbol);
+        return activeRaw.EndsWith("_otc", StringComparison.OrdinalIgnoreCase);
     }
 
     private struct ReceivedFrame : IDisposable
@@ -145,8 +279,10 @@ public static class PocketOptionWebSocketStream
         public double Price;
         public long BrokerUtcTicks;
         public long LocalSwTimestamp;
+        public double CrowdSentiment = 50.0;
+        public int Payout = 82;
 
-        public void Update(double price, long brokerUtcTicks, long localSw)
+        public void Update(double price, long brokerUtcTicks, long localSw, double crowdSentiment = 50.0, int payout = 82)
         {
             if (brokerUtcTicks < Volatile.Read(ref BrokerUtcTicks))
                 return; // Prevent out-of-order broker tick overwrite
@@ -157,11 +293,31 @@ public static class PocketOptionWebSocketStream
             Price = price;
             BrokerUtcTicks = brokerUtcTicks;
             LocalSwTimestamp = localSw;
+            if (double.IsFinite(crowdSentiment) && crowdSentiment >= 0.0 && crowdSentiment <= 100.0)
+                CrowdSentiment = crowdSentiment;
+            if (payout > 0 && payout <= 100)
+                Payout = payout;
             Interlocked.MemoryBarrier();
             Volatile.Write(ref _version, v + 2); // Even: write completed
         }
 
+        public void UpdateSentimentAndPayout(double crowdSentiment, int payout)
+        {
+            long v = Volatile.Read(ref _version);
+            Volatile.Write(ref _version, v + 1);
+            Interlocked.MemoryBarrier();
+            if (double.IsFinite(crowdSentiment) && crowdSentiment >= 0.0 && crowdSentiment <= 100.0)
+                CrowdSentiment = crowdSentiment;
+            if (payout > 0 && payout <= 100)
+                Payout = payout;
+            Interlocked.MemoryBarrier();
+            Volatile.Write(ref _version, v + 2);
+        }
+
         public bool TryRead(out double price, out long brokerUtcTicks, out long localSw)
+            => TryRead(out price, out brokerUtcTicks, out localSw, out _, out _);
+
+        public bool TryRead(out double price, out long brokerUtcTicks, out long localSw, out double crowdSentiment, out int payout)
         {
             var spin = new SpinWait();
             for (int retry = 0; retry < 10; retry++)
@@ -176,6 +332,8 @@ public static class PocketOptionWebSocketStream
                 double p = Price;
                 long b = BrokerUtcTicks;
                 long l = LocalSwTimestamp;
+                double cs = CrowdSentiment;
+                int pay = Payout;
                 Interlocked.MemoryBarrier();
                 long v2 = Volatile.Read(ref _version);
                 if (v1 == v2 && (v2 & 1) == 0)
@@ -183,6 +341,8 @@ public static class PocketOptionWebSocketStream
                     price = p;
                     brokerUtcTicks = b;
                     localSw = l;
+                    crowdSentiment = cs;
+                    payout = pay;
                     return true;
                 }
                 spin.SpinOnce();
@@ -190,6 +350,8 @@ public static class PocketOptionWebSocketStream
             price = 0;
             brokerUtcTicks = 0;
             localSw = 0;
+            crowdSentiment = 50.0;
+            payout = 82;
             return false;
         }
 
@@ -201,6 +363,8 @@ public static class PocketOptionWebSocketStream
             Price = 0;
             BrokerUtcTicks = 0;
             LocalSwTimestamp = 0;
+            CrowdSentiment = 50.0;
+            Payout = 82;
             Interlocked.MemoryBarrier();
             Volatile.Write(ref _version, v + 2);
         }
@@ -432,7 +596,14 @@ public static class PocketOptionWebSocketStream
         {
             if (assets != null && assets.Length > 0)
             {
-                _subscribedAssets = assets;
+                var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var a in assets)
+                {
+                    string baseSym = PriceFeed.BaseAsset(a);
+                    expanded.Add(baseSym);
+                    expanded.Add(baseSym + "_otc");
+                }
+                _subscribedAssets = expanded.ToArray();
             }
 
             if (Interlocked.CompareExchange(ref _loopRunning, 1, 0) != 0)
@@ -1059,6 +1230,14 @@ public static class PocketOptionWebSocketStream
                     {
                         ParseHistoryUtf8(frame.Memory);
                     }
+                    else if (pendingEvent == "chafor")
+                    {
+                        ParseChaforUtf8(span);
+                    }
+                    else if (pendingEvent == "updateAssets")
+                    {
+                        ParseUpdateAssetsUtf8(span);
+                    }
                     else if (pendingEvent == "successauth" && !subscribed)
                     {
                         subscribed = true;
@@ -1122,6 +1301,8 @@ public static class PocketOptionWebSocketStream
             {
                 if (reader.ValueTextEquals("updateStream"u8)) return "updateStream";
                 if (reader.ValueTextEquals("updateHistoryNewFast"u8)) return "updateHistoryNewFast";
+                if (reader.ValueTextEquals("chafor"u8)) return "chafor";
+                if (reader.ValueTextEquals("updateAssets"u8)) return "updateAssets";
                 if (reader.ValueTextEquals("successauth"u8)) return "successauth";
                 return reader.GetString();
             }
@@ -1161,10 +1342,164 @@ public static class PocketOptionWebSocketStream
             {
                 ParseHistoryUtf8(memory);
             }
+            else if (reader.ValueTextEquals("chafor"u8))
+            {
+                if (reader.Read() && reader.TokenType == JsonTokenType.StartArray)
+                {
+                    ParseChaforArray(ref reader);
+                }
+            }
+            else if (reader.ValueTextEquals("updateAssets"u8))
+            {
+                if (reader.Read() && reader.TokenType == JsonTokenType.StartArray)
+                {
+                    ParseUpdateAssetsArray(ref reader);
+                }
+            }
         }
         catch (Exception ex)
         {
             BotLogger.Warn($"[PO WS] Error parsing 42 frame: {ex.Message}");
+        }
+    }
+
+    private static void ParseChaforUtf8(ReadOnlySpan<byte> utf8Json)
+    {
+        try
+        {
+            var reader = new Utf8JsonReader(utf8Json);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray) return;
+            ParseChaforArray(ref reader);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PO WS] Error parsing chafor UTF8 frame: {ex.Message}");
+        }
+    }
+
+    private static void ParseChaforArray(ref Utf8JsonReader reader)
+    {
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (reader.TokenType == JsonTokenType.StartArray)
+            {
+                if (!reader.Read()) break;
+                string rawSymbol = reader.TokenType == JsonTokenType.String ? ResolveCanonicalAsset(reader.ValueSpan) : "";
+
+                if (!reader.Read()) break;
+                double pct = 50.0;
+                if (reader.TokenType == JsonTokenType.Number)
+                {
+                    pct = reader.GetDouble();
+                }
+                else if (reader.TokenType == JsonTokenType.String)
+                {
+                    if (!System.Buffers.Text.Utf8Parser.TryParse(reader.ValueSpan, out pct, out _))
+                    {
+                        double.TryParse(Encoding.UTF8.GetString(reader.ValueSpan), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out pct);
+                    }
+                }
+
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    if (reader.TokenType == JsonTokenType.StartArray || reader.TokenType == JsonTokenType.StartObject)
+                        reader.Skip();
+                }
+
+                if (!string.IsNullOrEmpty(rawSymbol) && double.IsFinite(pct))
+                {
+                    double clamped = Math.Clamp(pct, 0.0, 100.0);
+                    _crowdSentimentByRawSymbol[rawSymbol] = clamped;
+                    string baseAsset = PriceFeed.BaseAsset(rawSymbol);
+                    if (IsActiveSymbolForBase(baseAsset, rawSymbol) && _livePrices.TryGetValue(baseAsset, out var slot))
+                    {
+                        int payout = GetAssetPayout(baseAsset);
+                        slot.UpdateSentimentAndPayout(clamped, payout);
+                    }
+                }
+            }
+            else if (reader.TokenType == JsonTokenType.StartObject)
+            {
+                reader.Skip();
+            }
+        }
+    }
+
+    private static void ParseUpdateAssetsUtf8(ReadOnlySpan<byte> utf8Json)
+    {
+        try
+        {
+            var reader = new Utf8JsonReader(utf8Json);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray) return;
+            ParseUpdateAssetsArray(ref reader);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[PO WS] Error parsing updateAssets UTF8 frame: {ex.Message}");
+        }
+    }
+
+    private static void ParseUpdateAssetsArray(ref Utf8JsonReader reader)
+    {
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (reader.TokenType == JsonTokenType.StartArray)
+            {
+                string rawSymbol = "";
+                int payout = 82;
+                bool isOtc = false;
+                bool isOpen = true;
+                int idx = 0;
+
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    if (reader.TokenType == JsonTokenType.StartArray || reader.TokenType == JsonTokenType.StartObject)
+                    {
+                        reader.Skip();
+                        idx++;
+                        continue;
+                    }
+
+                    if (idx == 1 && reader.TokenType == JsonTokenType.String)
+                    {
+                        rawSymbol = ResolveCanonicalAsset(reader.ValueSpan);
+                    }
+                    else if (idx == 5 && reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int p))
+                    {
+                        payout = p;
+                    }
+                    else if (idx == 9)
+                    {
+                        isOtc = reader.TokenType == JsonTokenType.True ||
+                                (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int otcInt) && otcInt != 0);
+                    }
+                    else if (idx == 14)
+                    {
+                        isOpen = reader.TokenType == JsonTokenType.True ||
+                                 (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int openInt) && openInt != 0);
+                    }
+                    idx++;
+                }
+
+                if (!string.IsNullOrEmpty(rawSymbol))
+                {
+                    _assetMeta[rawSymbol] = new PoAssetMeta(rawSymbol, payout, isOpen, isOtc);
+                }
+            }
+            else if (reader.TokenType == JsonTokenType.StartObject)
+            {
+                reader.Skip();
+            }
+        }
+
+        foreach (var basePair in BaseTrackedPairs)
+        {
+            string activeRaw = GetActiveRawSymbol(basePair);
+            IsActiveSymbolForBase(basePair, activeRaw);
+            if (_livePrices.TryGetValue(basePair, out var slot))
+            {
+                slot.UpdateSentimentAndPayout(GetCrowdSentiment(basePair), GetAssetPayout(basePair));
+            }
         }
     }
 
@@ -1508,6 +1843,15 @@ public static class PocketOptionWebSocketStream
         long swNow = System.Diagnostics.Stopwatch.GetTimestamp();
         var (baseAsset, candleKey) = GetAssetKeys(asset);
 
+        if (!IsActiveSymbolForBase(baseAsset, asset))
+        {
+            if (!isBackfill)
+            {
+                Volatile.Write(ref _lastMessageSw, swNow);
+            }
+            return false;
+        }
+
         if (!isBackfill)
         {
             if (!TryUpdateAnchor(baseAsset, tickTimeUtc, swNow, out bool rebasedBackward))
@@ -1527,6 +1871,9 @@ public static class PocketOptionWebSocketStream
         bool fedToCandles = TryAdvanceCandleWatermark(candleKey, srvTs, isBackfill);
         if (epoch != Volatile.Read(ref _clockEpoch)) return false;
 
+        double crowdSentiment = GetCrowdSentiment(baseAsset);
+        int payout = GetAssetPayout(baseAsset);
+
         if (!isBackfill && fedToCandles)
         {
             if (epoch != Volatile.Read(ref _clockEpoch))
@@ -1535,7 +1882,7 @@ public static class PocketOptionWebSocketStream
             }
             // D5 fix: store broker tick timestamp and prevent out-of-order overwrite via Lock-Free Seqlock
             var priceSlot = _livePrices.GetOrAdd(baseAsset, static _ => new LivePriceSlot());
-            priceSlot.Update(price, tickTimeUtc, swNow);
+            priceSlot.Update(price, tickTimeUtc, swNow, crowdSentiment, payout);
             _lastTickTicksBySymbol[baseAsset] = swNow;
 
             Volatile.Write(ref _lastMessageSw, swNow);
@@ -1550,7 +1897,7 @@ public static class PocketOptionWebSocketStream
 
         if (fedToCandles)
         {
-            _ = RealtimeTickCollector.OnPriceUpdateAsync(candleKey, price, tickTimeUtc, isBackfill);
+            _ = RealtimeTickCollector.OnPriceUpdateAsync(candleKey, price, tickTimeUtc, isBackfill, crowdSentiment);
         }
 
         // Raw ticks are aggregated directly in-memory into subminute_candles (RealtimeTickCollector).

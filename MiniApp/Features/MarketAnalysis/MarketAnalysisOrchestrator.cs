@@ -413,6 +413,8 @@ public class MarketAnalysisOrchestrator(
             HourUtc = DateTime.UtcNow.Hour,
             DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
             TickCountLastCandle = prep.ClosedCandles.Length > 0 ? S(prep.ClosedCandles[^1].Volume) : 0,
+            CrowdSentiment = S(PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset), 50.0),
+            Payout = S(PocketOptionWebSocketStream.GetAssetPayout(prep.CleanAsset), 82.0),
             Ta = new {
                 Score = S(taDetail.Score),
                 MicroVel = S(taDetail.MicroVel),
@@ -466,7 +468,8 @@ public class MarketAnalysisOrchestrator(
     private static (float[] macro, float[] micro, float[] bridge)? BuildOnnxTensors(
         MiniAppController.OhlcCandle[] microCandles,
         MiniAppController.OhlcCandle[] macroCandles,
-        double currentPrice)
+        double currentPrice,
+        double? liveCrowdSentiment = null)
     {
         if (microCandles == null || microCandles.Length < 30 ||
             macroCandles == null || macroCandles.Length < 30 || currentPrice <= 0)
@@ -594,7 +597,11 @@ public class MarketAnalysisOrchestrator(
         zScore = Math.Clamp(zScore, -5.0f, 5.0f);
         wickBal = Math.Clamp(wickBal, -1.0f, 1.0f);
 
-        float[] bridgeData = new[] { distM1, atrRatio, zScore, wickBal };
+        double rawCrowd = liveCrowdSentiment ?? (double.IsFinite(last.CrowdSentiment) ? last.CrowdSentiment : 50.0);
+        float normCrowd = Math.Clamp((float)((rawCrowd - 50.0) / 50.0), -1.0f, 1.0f);
+        if (!float.IsFinite(normCrowd)) normCrowd = 0.0f;
+
+        float[] bridgeData = new[] { distM1, atrRatio, zScore, wickBal, normCrowd };
 
         return (macroData, microData, bridgeData);
     }
@@ -613,20 +620,23 @@ public class MarketAnalysisOrchestrator(
             // Fast Path: In-process ONNX Runtime (strictly s5 + m1 as trained in dual_stream_brain_v5.onnx)
             if (DualStreamOnnxService.Instance.IsModelLoaded && prep.TfLower.Equals("s5", StringComparison.OrdinalIgnoreCase))
             {
-                var tensors = BuildOnnxTensors(prep.ClosedCandles, prep.ClosedHigherCandles, prep.CurrentLivePrice);
+                double liveCrowd = PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset);
+                var tensors = BuildOnnxTensors(prep.ClosedCandles, prep.ClosedHigherCandles, prep.CurrentLivePrice, liveCrowd);
                 if (tensors.HasValue)
                 {
                     var onnxPred = DualStreamOnnxService.Instance.Predict(tensors.Value.macro, tensors.Value.micro, tensors.Value.bridge);
                     if (onnxPred.Direction is "BUY" or "PUT")
                     {
+                        // Real metadata from the training sidecar; never fabricate accuracy/AUC/NTrain.
+                        var onnxMeta = DualStreamOnnxService.Instance.Metadata;
                         mlPrediction = new MLPythonService.MLPythonPrediction(
                             Direction: onnxPred.Direction,
                             Confidence: onnxPred.Probability,
                             ModelVersion: "dual_stream_onnx_v5",
-                            Accuracy: 0.62,
-                            Auc: 0.65,
-                            NTrain: 52768,
-                            VarianceEstimate: 0.05,
+                            Accuracy: onnxMeta?.Accuracy,
+                            Auc: null,
+                            NTrain: onnxMeta?.NTrain,
+                            VarianceEstimate: null,
                             RawConfidence: onnxPred.RawProbability,
                             HorizonCandles: 1
                         );
@@ -841,15 +851,21 @@ public class MarketAnalysisOrchestrator(
         }
 
         bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (ml.Prediction != null && ml.Direction is "BUY" or "PUT");
+        double liveCrowdSentiment = PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset);
+        int currentPayout = PriceFeed.UsePocketOption ? PocketOptionWebSocketStream.GetAssetPayout(prep.CleanAsset) : 82;
+        bool isAssetOpen = !PriceFeed.UsePocketOption || PocketOptionWebSocketStream.IsAssetOpen(prep.CleanAsset);
+        bool isPayoutAcceptable = currentPayout >= 70 && isAssetOpen;
+
         bool canExecuteReal = isDirectional 
             && hasLiveNeuralSignal
+            && isPayoutAcceptable
             && cm.Consensus.Probability >= requiredProb 
             && !isCbHalted
             && !isCooldownActive
             && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse)
             && (!isS5 || (htfAligned && !isExhaustedOnS5));
 
-        bool isS5Guarded = isS5 && (isExhaustedOnS5 || !htfAligned || isCooldownActive || cm.Consensus.Probability < requiredProb);
+        bool isS5Guarded = isS5 && (isExhaustedOnS5 || !htfAligned || isCooldownActive || cm.Consensus.Probability < requiredProb || !isPayoutAcceptable);
         bool allowShadowRecord = isDirectional
             && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
@@ -904,7 +920,9 @@ public class MarketAnalysisOrchestrator(
             DxyMomentum5mBps = S(sensors.DxyMetrics.DxyMomentum5mBps),
             BasketSyncScore = S(sensors.DxyMetrics.BasketSyncScore),
             SpreadBps = S(sensors.LiveSpreadBps),
-            TickCountLastCandle = prep.ClosedCandles is { Length: > 0 } ? S(prep.ClosedCandles[^1].Volume) : 0
+            TickCountLastCandle = prep.ClosedCandles is { Length: > 0 } ? S(prep.ClosedCandles[^1].Volume) : 0,
+            CrowdSentiment = S(liveCrowdSentiment, 50.0),
+            Payout = S(currentPayout, 82.0)
         };
 
         object GetNeuralBrainPayload() => new {
@@ -1050,7 +1068,7 @@ public class MarketAnalysisOrchestrator(
                                 cm.Consensus.CombinedReasoningText ?? "",
                                 ml.Prediction?.ModelVersion ?? "",
                                 ml.Prediction?.Accuracy ?? 0.0,
-                                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
+                                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null, liveCrowdSentiment, currentPayout);
                         }
                         catch (Exception ex)
                         {
@@ -1087,13 +1105,14 @@ public class MarketAnalysisOrchestrator(
                 cm.Consensus.CombinedReasoningText ?? "",
                 ml.Prediction?.ModelVersion ?? "",
                 ml.Prediction?.Accuracy ?? 0.0,
-                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
+                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null, liveCrowdSentiment, currentPayout);
             dbSw.Stop();
             string shadowReason = isGlobalCbHalted ? ", Global CB halt guard" : (isSymbolQuarantined ? ", Per-symbol quarantine guard" 
+                : (!isPayoutAcceptable ? $", Payout/Closed guard ({currentPayout}%)"
                 : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard" 
                 : (isS5 && !htfAligned ? ", S5 HTF divergence guard" 
                 : (isS5 && isCooldownActive ? ", S5 cooldown guard" 
-                : (isS5 && cm.Consensus.Probability < 58 ? ", S5 prob threshold guard" : "")))));
+                : (isS5 && cm.Consensus.Probability < 58 ? ", S5 prob threshold guard" : ""))))));
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {cm.Consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else
@@ -1108,7 +1127,7 @@ public class MarketAnalysisOrchestrator(
                 var sourceDirections = GetSourceDirections();
                 string shadowFeaturesJson = BuildShadowFeaturesJson();
                 _ = SignalTracker.RecordPredictionAsync("HOLD", prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
-                    "NONE", false, false, 1.0, "NEUTRAL", cm.EffectiveMarketRegime, sensors.State.VelocityRegime ?? "UNKNOWN", sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal, false, sensors.MinutesToNews ?? -1, "", "", 0.0, sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null);
+                    "NONE", false, false, 1.0, "NEUTRAL", cm.EffectiveMarketRegime, sensors.State.VelocityRegime ?? "UNKNOWN", sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal, false, sensors.MinutesToNews ?? -1, "", "", 0.0, sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null, liveCrowdSentiment, currentPayout);
                 traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения ({cm.Consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");
             }
             else

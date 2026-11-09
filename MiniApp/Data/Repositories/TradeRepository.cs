@@ -75,6 +75,10 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
         public string? TaTelemetry  { get; set; }
         public string? MlTelemetry  { get; set; }
         public string? SmcTelemetry { get; set; }
+
+        // === Pocket Option Crowd Sentiment (chafor) & Broker Payout ===
+        public double CrowdSentiment { get; set; } = 50.0;
+        public double Payout         { get; set; } = 82.0;
     }
 
     public class EvolutionDumpDto
@@ -181,6 +185,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             o.TaTelemetry = SanitizeTelemetry(o.TaTelemetry);
             o.MlTelemetry = SanitizeTelemetry(o.MlTelemetry);
             o.SmcTelemetry = SanitizeTelemetry(o.SmcTelemetry);
+            o.CrowdSentiment = Sanitize(o.CrowdSentiment, 50.0);
+            o.Payout = Sanitize(o.Payout, 82.0);
         }
 
         private static SignalTracker.PredictionRecord SanitizePrediction(SignalTracker.PredictionRecord r)
@@ -202,6 +208,8 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             r.TaTelemetry = SanitizeTelemetry(r.TaTelemetry);
             r.MlTelemetry = SanitizeTelemetry(r.MlTelemetry);
             r.SmcTelemetry = SanitizeTelemetry(r.SmcTelemetry);
+            r.CrowdSentiment = Sanitize(r.CrowdSentiment, 50.0);
+            r.Payout = Sanitize(r.Payout, 82.0);
             return r;
         }
 
@@ -311,8 +319,8 @@ FROM outcome_data;", commandTimeout: 10);
                          confidence_bucket, was_close_call, consecutive_losses_before, seconds_since_last_trade,
                          reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps,
                          price_entropy, trend_maturity, price_position_pct, bb_squeeze,
-                         ta_telemetry, ml_telemetry, smc_telemetry)
-                        VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
+                         ta_telemetry, ml_telemetry, smc_telemetry, crowd_sentiment, payout)
+                        VALUES (@Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                                 @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
                                 @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
                                 @Session, @DayOfWeek, @HourUtc,
@@ -320,7 +328,8 @@ FROM outcome_data;", commandTimeout: 10);
                                 @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
                                 @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
                                 @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze,
-                                NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
+                                NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb,
+                                @CrowdSentiment, @Payout)
                         ON CONFLICT (id) DO NOTHING", list, transaction: tx, commandTimeout: 10);
                 });
             }
@@ -357,8 +366,8 @@ FROM outcome_data;", commandTimeout: 10);
                      ta_direction, ml_direction, smc_direction, of_direction, conflict_count,
                      confidence_bucket, was_close_call, consecutive_losses_before, seconds_since_last_trade,
                      reasoning_text, ml_model_version, ml_model_accuracy, max_favorable_bps, max_adverse_bps,
-                     price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
-                    SELECT @Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt, @VerifiedAt,
+                     price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry, crowd_sentiment, payout)
+                    SELECT @Id, @Asset, @Timeframe, @Direction, @Probability, @EntryPrice, @ExitPrice, @PnlBps, @WasWin, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @FeaturesJson, @CreatedAt::timestamptz, @VerifiedAt::timestamptz,
                            @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon,
                            @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews,
                            @Session, @DayOfWeek, @HourUtc,
@@ -366,7 +375,8 @@ FROM outcome_data;", commandTimeout: 10);
                            @ConfidenceBucket, @WasCloseCall, @ConsecutiveLossesBefore, @SecondsSinceLastTrade,
                            @ReasoningText, @MlModelVersion, @MlModelAccuracy, @MaxFavorableBps, @MaxAdverseBps,
                            @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze,
-                           NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb
+                           NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb,
+                           @CrowdSentiment, @Payout
                     WHERE (@PendingTradeId IS NOT NULL AND @PendingTradeId != '' AND EXISTS (SELECT 1 FROM del))
                        OR (@PendingTradeId IS NULL OR @PendingTradeId = '')
                     ON CONFLICT (id) DO NOTHING
@@ -428,7 +438,9 @@ FROM outcome_data;", commandTimeout: 10);
                         outcome.BbSqueeze,
                         outcome.TaTelemetry,
                         outcome.MlTelemetry,
-                        outcome.SmcTelemetry
+                        outcome.SmcTelemetry,
+                        outcome.CrowdSentiment,
+                        outcome.Payout
                     }, transaction: tx, commandTimeout: 10);
                     bool success = !string.IsNullOrEmpty(insertedId);
                     if (success && !_emergencyOutcomesQueue.IsEmpty)
@@ -564,8 +576,8 @@ FROM outcome_data;", commandTimeout: 10);
                 {
                     SanitizePrediction(record);
                     await conn.ExecuteAsync(@"
-                    INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry)
-                    VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb)
+                    INSERT INTO pending_trades (id, direction, asset, timeframe, binance_symbol, entry_price, created_at, verify_at, is_forex, source_directions, probability, ta_score, of_score, smc_score, ml_prob, ml_score, smc_bos_dir, smc_has_ob, smc_has_fvg, of_delta_ratio, of_state, dynamic_horizon, market_regime, velocity_regime, atr_at_signal, adx_at_signal, rsi_at_signal, higher_tf_aligned, minutes_to_news, reasoning_text, ml_model_version, ml_model_accuracy, features_json, price_entropy, trend_maturity, price_position_pct, bb_squeeze, ta_telemetry, ml_telemetry, smc_telemetry, crowd_sentiment, payout)
+                    VALUES (@Id, @Direction, @Asset, @Timeframe, @BrokerSymbol, @EntryPrice, @CreatedAtStr, @VerifyAtStr, @IsForex, @SourceDirectionsStr, @Probability, @TaScore, @OfScore, @SmcScore, @MlProb, @MlScore, @SmcBosDir, @SmcHasOb, @SmcHasFvg, @OfDeltaRatio, @OfState, @DynamicHorizon, @MarketRegime, @VelocityRegime, @AtrAtSignal, @AdxAtSignal, @RsiAtSignal, @HigherTfAligned, @MinutesToNews, @ReasoningText, @MlModelVersion, @MlModelAccuracy, @FeaturesJson, @PriceEntropy, @TrendMaturity, @PricePositionPct, @BbSqueeze, NULLIF(BTRIM(@TaTelemetry), '')::jsonb, NULLIF(BTRIM(@MlTelemetry), '')::jsonb, NULLIF(BTRIM(@SmcTelemetry), '')::jsonb, @CrowdSentiment, @Payout)
                     ON CONFLICT (id) DO NOTHING", 
                     new {
                         record.Id,
@@ -607,7 +619,9 @@ FROM outcome_data;", commandTimeout: 10);
                         record.BbSqueeze,
                         record.TaTelemetry,
                         record.MlTelemetry,
-                        record.SmcTelemetry
+                        record.SmcTelemetry,
+                        record.CrowdSentiment,
+                        record.Payout
                     }, commandTimeout: 8);
                 });
             }
@@ -661,7 +675,9 @@ FROM outcome_data;", commandTimeout: 10);
                               p.price_entropy as ""PriceEntropy"", p.trend_maturity as ""TrendMaturity"", 
                               p.price_position_pct as ""PricePositionPct"", p.bb_squeeze as ""BbSqueeze"",
                               p.ta_telemetry::text as ""TaTelemetry"", p.ml_telemetry::text as ""MlTelemetry"", 
-                              p.smc_telemetry::text as ""SmcTelemetry"";", 
+                              p.smc_telemetry::text as ""SmcTelemetry"",
+                              COALESCE(p.crowd_sentiment, 50.0) as ""CrowdSentiment"",
+                              COALESCE(p.payout, 82.0) as ""Payout"";", 
                     new { UpToIso = upToIso, Limit = limit, ExcludedArray = excludedArray }, commandTimeout: 8);
 
             return rows.Select(r => new SignalTracker.PredictionRecord
@@ -706,7 +722,9 @@ FROM outcome_data;", commandTimeout: 10);
                 BbSqueeze = r.BbSqueeze != null ? Convert.ToBoolean(r.BbSqueeze) : false,
                 TaTelemetry = (string?)r.TaTelemetry,
                 MlTelemetry = (string?)r.MlTelemetry,
-                SmcTelemetry = (string?)r.SmcTelemetry
+                SmcTelemetry = (string?)r.SmcTelemetry,
+                CrowdSentiment = r.CrowdSentiment != null ? Convert.ToDouble(r.CrowdSentiment) : 50.0,
+                Payout = r.Payout != null ? Convert.ToDouble(r.Payout) : 82.0
             }).Where(r => r.CreatedAt != DateTime.MinValue).ToList();
             });
         }
@@ -909,7 +927,7 @@ FROM outcome_data;", commandTimeout: 10);
                         ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     string sinceFilter = sinceUtc.HasValue
-                        ? "AND verified_at > @SinceUtcStr"
+                        ? "AND verified_at::timestamptz > @SinceUtcStr::timestamptz"
                         : "";
                     string sinceUtcStr = sinceUtc?.ToUniversalTime().ToString("o") ?? "";
                     var rows = await conn.QueryAsync<bool?>($@"
@@ -943,7 +961,7 @@ FROM outcome_data;", commandTimeout: 10);
                         ? $"AND created_at::timestamptz >= '{PoEraCutoff}'::timestamptz"
                         : "";
                     string sinceFilter = sinceUtc.HasValue
-                        ? "AND verified_at > @SinceUtcStr"
+                        ? "AND verified_at::timestamptz > @SinceUtcStr::timestamptz"
                         : "";
                     string sinceUtcStr = sinceUtc?.ToUniversalTime().ToString("o") ?? "";
                     var rows = await conn.QueryAsync<bool>($@"

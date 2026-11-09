@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -20,7 +20,8 @@ public sealed class DualStreamOnnxService : IDisposable
 
     private static readonly int[] MacroDims = [1, 30, 5];
     private static readonly int[] MicroDims = [1, 30, 5];
-    private static readonly int[] BridgeDims = [1, 4];
+    private readonly int _bridgeDim = 5;
+    private readonly int[] _bridgeDims = [1, 5];
 
     private readonly ReaderWriterLockSlim _sessionLock = new(LockRecursionPolicy.NoRecursion);
     private readonly InferenceSession? _session;
@@ -29,6 +30,35 @@ public sealed class DualStreamOnnxService : IDisposable
 
     public bool IsModelLoaded => _isLoaded && !_disposed;
     public string ModelPath { get; } = string.Empty;
+
+    /// <summary>
+    /// Sidecar metadata written by train_objective_dual_stream.py (dual_stream_brain_v5.json next to the .onnx).
+    /// Null for legacy models shipped without it - callers must then NOT invent accuracy numbers.
+    /// </summary>
+    public sealed record ModelMetadata(double? Accuracy, int? NTrain, int? HorizonSec, double? Temperature, string? TrainedAtUtc);
+    public ModelMetadata? Metadata { get; private set; }
+
+    private static ModelMetadata? TryLoadMetadata(string onnxPath)
+    {
+        try
+        {
+            string jsonPath = Path.ChangeExtension(onnxPath, ".json");
+            if (!File.Exists(jsonPath)) return null;
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(jsonPath));
+            var root = doc.RootElement;
+            static double? D(System.Text.Json.JsonElement r, string n) =>
+                r.TryGetProperty(n, out var e) && e.ValueKind == System.Text.Json.JsonValueKind.Number && e.TryGetDouble(out var v) && double.IsFinite(v) ? v : null;
+            static int? I(System.Text.Json.JsonElement r, string n) =>
+                r.TryGetProperty(n, out var e) && e.ValueKind == System.Text.Json.JsonValueKind.Number && e.TryGetInt32(out var v) ? v : null;
+            string? trainedAt = root.TryGetProperty("trained_at_utc", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.String ? t.GetString() : null;
+            return new ModelMetadata(D(root, "accuracy"), I(root, "n_train"), I(root, "horizon_sec"), D(root, "temperature"), trainedAt);
+        }
+        catch (Exception ex)
+        {
+            BotLogger.Warn($"[DualStreamOnnx] Could not read model metadata sidecar: {ex.Message}");
+            return null;
+        }
+    }
 
     public readonly record struct OnnxPrediction(
         string Direction,        // "BUY" | "PUT" | "NEUTRAL"
@@ -69,6 +99,13 @@ public sealed class DualStreamOnnxService : IDisposable
                 };
 
                 _session = new InferenceSession(ModelPath, sessionOptions);
+                if (_session.InputMetadata.TryGetValue("bridge_x", out var bridgeMeta) &&
+                    bridgeMeta.Dimensions.Length >= 2 &&
+                    bridgeMeta.Dimensions[1] > 0)
+                {
+                    _bridgeDim = bridgeMeta.Dimensions[1];
+                    _bridgeDims = [1, _bridgeDim];
+                }
                 _isLoaded = true;
 
                 // Pre-warm ONNX session execution provider and memory buffers so first live inference is ~1ms
@@ -76,7 +113,7 @@ public sealed class DualStreamOnnxService : IDisposable
                 {
                     var dummyMacro = new DenseTensor<float>(new float[150], MacroDims);
                     var dummyMicro = new DenseTensor<float>(new float[150], MicroDims);
-                    var dummyBridge = new DenseTensor<float>(new float[4], BridgeDims);
+                    var dummyBridge = new DenseTensor<float>(new float[_bridgeDim], _bridgeDims);
                     using var warmup = _session.Run(new[]
                     {
                         NamedOnnxValue.CreateFromTensor("macro_x", dummyMacro),
@@ -87,6 +124,19 @@ public sealed class DualStreamOnnxService : IDisposable
                 catch { }
 
                 BotLogger.Info($"[DualStreamOnnx] Successfully loaded and pre-warmed in-process ONNX model from: {ModelPath}");
+                Metadata = TryLoadMetadata(ModelPath);
+                if (Metadata == null)
+                {
+                    BotLogger.Warn("[DualStreamOnnx] No metadata sidecar (dual_stream_brain_v5.json): legacy model, accuracy/horizon unknown.");
+                }
+                else
+                {
+                    BotLogger.Info($"[DualStreamOnnx] Metadata: horizon={Metadata.HorizonSec?.ToString() ?? "?"}s, live-like winrate@gate={Metadata.Accuracy?.ToString("P1") ?? "n/a"}, T={Metadata.Temperature?.ToString("F3") ?? "n/a"}, trained={Metadata.TrainedAtUtc ?? "?"}");
+                    if (Metadata.HorizonSec.HasValue && Metadata.HorizonSec.Value != 5)
+                    {
+                        BotLogger.Warn($"[DualStreamOnnx] Model label horizon is {Metadata.HorizonSec}s but s5 trades expire after 5s: train/serve horizon mismatch.");
+                    }
+                }
             }
             else
             {
@@ -114,12 +164,12 @@ public sealed class DualStreamOnnxService : IDisposable
     /// Evaluates in-process inference for the DualStream model:
     /// macro: (1, 30, 5) float tensor
     /// micro: (1, 30, 5) float tensor
-    /// bridge: (1, 4) float tensor
+    /// bridge: (1, 5) or (1, 4) float tensor ([dist_m1_ema, atr_ratio, z_score, wick_bal, norm_crowd_sentiment])
     /// </summary>
     public OnnxPrediction Predict(float[] macroData, float[] microData, float[] bridgeData)
     {
         if (_disposed || !_isLoaded || _session == null || macroData == null || microData == null || bridgeData == null ||
-            macroData.Length != 150 || microData.Length != 150 || bridgeData.Length != 4 ||
+            macroData.Length != 150 || microData.Length != 150 || (bridgeData.Length != 4 && bridgeData.Length != 5 && bridgeData.Length != _bridgeDim) ||
             HasNonFinite(macroData) || HasNonFinite(microData) || HasNonFinite(bridgeData))
         {
             return new OnnxPrediction("NEUTRAL", 0.50, 0.50, 0);
@@ -135,9 +185,16 @@ public sealed class DualStreamOnnxService : IDisposable
 
             long startSw = Stopwatch.GetTimestamp();
 
+            float[] effectiveBridge = bridgeData;
+            if (bridgeData.Length != _bridgeDim)
+            {
+                effectiveBridge = new float[_bridgeDim];
+                Array.Copy(bridgeData, effectiveBridge, Math.Min(bridgeData.Length, _bridgeDim));
+            }
+
             var macroTensor = new DenseTensor<float>(macroData, MacroDims);
             var microTensor = new DenseTensor<float>(microData, MicroDims);
-            var bridgeTensor = new DenseTensor<float>(bridgeData, BridgeDims);
+            var bridgeTensor = new DenseTensor<float>(effectiveBridge, _bridgeDims);
 
             var inputs = new NamedOnnxValue[]
             {

@@ -22,21 +22,26 @@ namespace ValutaBot.MiniApp
             public double Low { get; set; } = double.MaxValue;
             public double Close { get; set; }
             public int TickCount { get; set; }
+            public double CrowdSentiment { get; set; } = 50.0;
             public DateTime OpenTime { get; set; }
             public MiniAppController.OhlcCandle? LastClosed { get; set; }
             
-            public void AddTick(double price)
+            public void AddTick(double price, double crowdSentiment = 50.0)
             {
                 if (!Open.HasValue) Open = price;
                 if (price > High) High = price;
                 if (price < Low) Low = price;
                 Close = price;
                 TickCount++;
+                if (double.IsFinite(crowdSentiment) && crowdSentiment >= 0.0 && crowdSentiment <= 100.0)
+                {
+                    CrowdSentiment = crowdSentiment;
+                }
             }
             
             public void Reset(DateTime openTime)
             {
-                if (Open.HasValue) LastClosed = new MiniAppController.OhlcCandle(Open.Value, High, Low, Close, TickCount, OpenTime);
+                if (Open.HasValue) LastClosed = new MiniAppController.OhlcCandle(Open.Value, High, Low, Close, TickCount, OpenTime, CrowdSentiment);
                 Open = null;
                 High = double.MinValue;
                 Low = double.MaxValue;
@@ -46,7 +51,7 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        private record struct TickEvent(string Asset, string Interval, double Price, DateTime OpenTime);
+        private record struct TickEvent(string Asset, string Interval, double Price, DateTime OpenTime, double CrowdSentiment = 50.0);
 
         private sealed class CandleBatchAggregate
         {
@@ -58,6 +63,7 @@ namespace ValutaBot.MiniApp
             public double Low { get; set; }
             public double Close { get; set; }
             public int Volume { get; set; }
+            public double CrowdSentiment { get; set; } = 50.0;
         }
 
         private static readonly ConcurrentDictionary<string, CandleAccumulator> _s5  = new(StringComparer.OrdinalIgnoreCase);
@@ -227,6 +233,21 @@ namespace ValutaBot.MiniApp
             ValutaBot.MiniApp.Services.AutoTradingScannerService.ResetLastScannedTimes();
         }
 
+        public static void ResetAssetAccumulator(string asset)
+        {
+            string cleanAsset = PriceFeed.CandleKey(asset);
+            _s5.TryRemove(cleanAsset, out _);
+            _s10.TryRemove(cleanAsset, out _);
+            _s15.TryRemove(cleanAsset, out _);
+            _s30.TryRemove(cleanAsset, out _);
+            _m1.TryRemove(cleanAsset, out _);
+            foreach (var tf in new[] { "s5", "s10", "s15", "s30", "1min", "m1" })
+            {
+                _ringBuffers.TryRemove($"{cleanAsset}:{tf}", out _);
+                _recentCandlesCache.TryRemove($"{cleanAsset}:{tf}", out _);
+            }
+        }
+
         public static void Initialize()
         {
             InitializeAsync().GetAwaiter().GetResult();
@@ -239,14 +260,14 @@ namespace ValutaBot.MiniApp
                 await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync();
                 
                 var records = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(@"
-                    SELECT c.asset, c.interval, c.open_time as ""OpenTime"", c.open_price as ""Open"", c.high_price as ""High"", c.low_price as ""Low"", c.close_price as ""Close"", c.volume as ""Volume""
+                    SELECT c.asset, c.interval, c.open_time as ""OpenTime"", c.open_price as ""Open"", c.high_price as ""High"", c.low_price as ""Low"", c.close_price as ""Close"", c.volume as ""Volume"", COALESCE(c.crowd_sentiment, 50.0) as ""CrowdSentiment""
                     FROM (
                         SELECT DISTINCT asset, interval 
                         FROM subminute_candles 
                         WHERE interval IN ('s5', 's10', 's15', 's30', '1min')
                     ) pairs
                     CROSS JOIN LATERAL (
-                        SELECT open_time, open_price, high_price, low_price, close_price, volume
+                        SELECT open_time, open_price, high_price, low_price, close_price, volume, crowd_sentiment
                         FROM subminute_candles s
                         WHERE s.asset = pairs.asset AND s.interval = pairs.interval
                         ORDER BY open_time DESC
@@ -273,6 +294,7 @@ namespace ValutaBot.MiniApp
                             ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
                             : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
                         DateTime alignedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
+                        double crowd = r.CrowdSentiment != null ? Convert.ToDouble(r.CrowdSentiment, System.Globalization.CultureInfo.InvariantCulture) : 50.0;
 
                         return new MiniAppController.OhlcCandle(
                             Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture),
@@ -280,7 +302,8 @@ namespace ValutaBot.MiniApp
                             Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture),
                             Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture),
                             Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
-                            alignedTime
+                            alignedTime,
+                            crowd
                         );
                     }).ToList();
                     
@@ -404,7 +427,8 @@ namespace ValutaBot.MiniApp
                             High = tick.Price,
                             Low = tick.Price,
                             Close = tick.Price,
-                            Volume = 1
+                            Volume = 1,
+                            CrowdSentiment = tick.CrowdSentiment
                         };
                         map[key] = agg;
                     }
@@ -414,6 +438,7 @@ namespace ValutaBot.MiniApp
                         if (tick.Price < agg.Low) agg.Low = tick.Price;
                         agg.Close = tick.Price;
                         agg.Volume++;
+                        agg.CrowdSentiment = tick.CrowdSentiment;
                     }
                 }
 
@@ -427,13 +452,14 @@ namespace ValutaBot.MiniApp
                 // Pipeline all grouped records in a single network round-trip via NpgsqlBatch
                 await using var batch = new NpgsqlBatch(conn, tx) { Timeout = 8 };
                 const string batchSql = @"
-                    INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    INSERT INTO subminute_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume, crowd_sentiment)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (asset, interval, open_time) DO UPDATE SET
-                        high_price  = GREATEST(subminute_candles.high_price,  EXCLUDED.high_price),
-                        low_price   = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
-                        close_price = EXCLUDED.close_price,
-                        volume      = subminute_candles.volume + EXCLUDED.volume;";
+                        high_price      = GREATEST(subminute_candles.high_price,  EXCLUDED.high_price),
+                        low_price       = LEAST(subminute_candles.low_price,      EXCLUDED.low_price),
+                        close_price     = EXCLUDED.close_price,
+                        volume          = subminute_candles.volume + EXCLUDED.volume,
+                        crowd_sentiment = EXCLUDED.crowd_sentiment;";
                 foreach (var item in grouped)
                 {
                     var batchCmd = new NpgsqlBatchCommand(batchSql);
@@ -445,6 +471,7 @@ namespace ValutaBot.MiniApp
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Low });
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Close });
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = (double)item.Volume });
+                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.CrowdSentiment });
                     batch.BatchCommands.Add(batchCmd);
                 }
                 await batch.ExecuteNonQueryAsync(ct);
@@ -595,7 +622,7 @@ namespace ValutaBot.MiniApp
                         if (live.Open.HasValue)
                         {
                             liveCandle = new MiniAppController.OhlcCandle(
-                                live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
+                                live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime, live.CrowdSentiment);
                         }
                     }
                 }
@@ -630,7 +657,7 @@ namespace ValutaBot.MiniApp
                 await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync();
                 
                 var records = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(@"
-                    SELECT open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume""
+                    SELECT open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume"", COALESCE(crowd_sentiment, 50.0) as ""CrowdSentiment""
                     FROM subminute_candles
                     WHERE asset = @Asset AND interval = @Interval
                     ORDER BY open_time DESC
@@ -647,13 +674,15 @@ namespace ValutaBot.MiniApp
                             ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
                             : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
                         DateTime alignedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
+                        double crowd = r.CrowdSentiment != null ? Convert.ToDouble(r.CrowdSentiment, System.Globalization.CultureInfo.InvariantCulture) : 50.0;
                         return new MiniAppController.OhlcCandle(
                             Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture),
                             Convert.ToDouble(r.High, System.Globalization.CultureInfo.InvariantCulture),
                             Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture),
                             Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture),
                             Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
-                            alignedTime);
+                            alignedTime,
+                            crowd);
                     }).OrderBy(c => c.Timestamp).ToList();
                     ringToWarm.AddRange(parsedList);
                 }
@@ -676,7 +705,7 @@ namespace ValutaBot.MiniApp
                             liveOpenTime = acc.OpenTime.ToUniversalTime();
                             liveLastClosed = acc.LastClosed;
                             currentLiveCandle = new MiniAppController.OhlcCandle(
-                                acc.Open.Value, acc.High, acc.Low, acc.Close, acc.TickCount, acc.OpenTime);
+                                acc.Open.Value, acc.High, acc.Low, acc.Close, acc.TickCount, acc.OpenTime, acc.CrowdSentiment);
                         }
                     }
                 }
@@ -724,6 +753,7 @@ namespace ValutaBot.MiniApp
                         ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
                         : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
                     DateTime parsedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
+                    double crowd = r.CrowdSentiment != null ? Convert.ToDouble(r.CrowdSentiment, System.Globalization.CultureInfo.InvariantCulture) : 50.0;
 
                     result[resultIdx++] = new MiniAppController.OhlcCandle(
                         Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture), 
@@ -731,7 +761,8 @@ namespace ValutaBot.MiniApp
                         Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture), 
                         Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture), 
                         Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
-                        parsedTime);
+                        parsedTime,
+                        crowd);
                 }
 
                 if (missedClosed != null && resultIdx < resultSize)
@@ -768,7 +799,7 @@ namespace ValutaBot.MiniApp
                             if (live.Open.HasValue)
                             {
                                 liveCandle = new MiniAppController.OhlcCandle(
-                                    live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime);
+                                    live.Open.Value, live.High, live.Low, live.Close, live.TickCount, live.OpenTime, live.CrowdSentiment);
                             }
                         }
                     }
@@ -786,7 +817,7 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        public static Task OnPriceUpdateAsync(string asset, double price, long tickTimeUtc, bool isBackfill = false)
+        public static Task OnPriceUpdateAsync(string asset, double price, long tickTimeUtc, bool isBackfill = false, double crowdSentiment = 50.0)
         {
             // Data Integrity Guard: reject poisoned ticks (NaN, Infinity, non-positive price or invalid time)
             long nowUtcTicks = DateTime.UtcNow.Ticks;
@@ -798,17 +829,17 @@ namespace ValutaBot.MiniApp
             string cleanAsset = PriceFeed.CandleKey(asset);
             long nowTicks = tickTimeUtc;
 
-            QueueTick(cleanAsset, "s5", price, nowTicks, TimeSpan.FromSeconds(5).Ticks);
-            QueueTick(cleanAsset, "s10", price, nowTicks, TimeSpan.FromSeconds(10).Ticks);
-            QueueTick(cleanAsset, "s15", price, nowTicks, TimeSpan.FromSeconds(15).Ticks);
-            QueueTick(cleanAsset, "s30", price, nowTicks, TimeSpan.FromSeconds(30).Ticks);
-            QueueTick(cleanAsset, "1min", price, nowTicks, TimeSpan.FromSeconds(60).Ticks);
+            QueueTick(cleanAsset, "s5", price, nowTicks, TimeSpan.FromSeconds(5).Ticks, crowdSentiment);
+            QueueTick(cleanAsset, "s10", price, nowTicks, TimeSpan.FromSeconds(10).Ticks, crowdSentiment);
+            QueueTick(cleanAsset, "s15", price, nowTicks, TimeSpan.FromSeconds(15).Ticks, crowdSentiment);
+            QueueTick(cleanAsset, "s30", price, nowTicks, TimeSpan.FromSeconds(30).Ticks, crowdSentiment);
+            QueueTick(cleanAsset, "1min", price, nowTicks, TimeSpan.FromSeconds(60).Ticks, crowdSentiment);
 
-            UpdateAccumulator(_s5,  cleanAsset, price, nowTicks, TimeSpan.FromSeconds(5).Ticks, isBackfill);
-            UpdateAccumulator(_s10, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(10).Ticks, isBackfill);
-            UpdateAccumulator(_s15, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(15).Ticks, isBackfill);
-            UpdateAccumulator(_s30, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(30).Ticks, isBackfill);
-            UpdateAccumulator(_m1, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(60).Ticks, isBackfill);
+            UpdateAccumulator(_s5,  cleanAsset, price, nowTicks, TimeSpan.FromSeconds(5).Ticks, isBackfill, crowdSentiment);
+            UpdateAccumulator(_s10, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(10).Ticks, isBackfill, crowdSentiment);
+            UpdateAccumulator(_s15, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(15).Ticks, isBackfill, crowdSentiment);
+            UpdateAccumulator(_s30, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(30).Ticks, isBackfill, crowdSentiment);
+            UpdateAccumulator(_m1, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(60).Ticks, isBackfill, crowdSentiment);
             
             return Task.CompletedTask;
         }
@@ -832,7 +863,7 @@ namespace ValutaBot.MiniApp
             return false;
         }
 
-        private static void QueueTick(string asset, string interval, double price, long nowTicks, long intervalTicks)
+        private static void QueueTick(string asset, string interval, double price, long nowTicks, long intervalTicks, double crowdSentiment = 50.0)
         {
             var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
             if (_tickChannel.Reader.Count >= ChannelCapacity)
@@ -846,7 +877,7 @@ namespace ValutaBot.MiniApp
                 }
             }
 
-            if (!_tickChannel.Writer.TryWrite(new TickEvent(asset, interval, price, openTime)))
+            if (!_tickChannel.Writer.TryWrite(new TickEvent(asset, interval, price, openTime, crowdSentiment)))
             {
                 Interlocked.Increment(ref _droppedTickCount);
             }
@@ -854,7 +885,7 @@ namespace ValutaBot.MiniApp
 
         private static void UpdateAccumulator(
             ConcurrentDictionary<string, CandleAccumulator> dict,
-            string asset, double price, long nowTicks, long intervalTicks, bool isBackfill = false)
+            string asset, double price, long nowTicks, long intervalTicks, bool isBackfill = false, double crowdSentiment = 50.0)
         {
             var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
             var acc = dict.GetOrAdd(asset, _ => new CandleAccumulator());
@@ -881,7 +912,7 @@ namespace ValutaBot.MiniApp
                 else if (acc.OpenTime == default)
                     acc.OpenTime = openTime;
 
-                acc.AddTick(price);
+                acc.AddTick(price, crowdSentiment);
             }
 
             // D1 FIX: Update ring buffer and invalidate cache outside lock(acc) (<10ns under lock)

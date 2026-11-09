@@ -2,11 +2,12 @@
 export_objective_dataset.py - Fast Vectorized Objective Ground-Truth Dataset Exporter
 Builds training samples directly from closed candles in subminute_candles (PostgreSQL).
 
-Label is derived from objective forward price change:
+Label is derived from objective forward price change over H s5-bars (default H=1 -> 5s expiry,
+matching the live TradeTimeoutEngine which always expires after exactly 1 candle of the signal timeframe):
   delta_bps = (Close(T + H) - Close(T)) / Close(T) * 10,000
-  If delta_bps >= +0.6 bps -> Label 1 (BUY)
-  If delta_bps <= -0.6 bps -> Label 0 (PUT)
-  If |delta_bps| < 0.6 bps -> Discarded as untradeable noise (Two-Stage Hurdle)
+  delta_bps > 0 -> Label 1 (BUY wins), delta_bps <= 0 -> Label 0 (PUT wins; an exact tie is a loss for both).
+  |delta_bps| < noise_bps (default 0.6) -> flagged trainable=False (excluded from fitting, but KEPT in the
+  file so evaluation can be done on the FULL live-like stream where such trades are still placed).
 
 Inputs:
   - macro_x: (N, 30, 5) - 30 closed M1 bars prior to T
@@ -14,9 +15,15 @@ Inputs:
   - bridge_x: (N, 4) - [dist_to_m1_ema, atr_ratio, micro_zscore, wick_balance]
   - labels: (N,) - 1 for BUY, 0 for PUT
   - epochs: (N,) - entry epoch seconds (globally sorted ascending)
+  - delta_bps: (N,) - signed forward move in bps (0.0 == exact tie)
+  - trainable: (N,) - bool, False for |delta_bps| < noise_bps (noise zone)
+  - asset_ids: (N,) - index into ASSETS (for per-pair evaluation)
+  - meta: JSON string with horizon / step / noise threshold used
 """
 
+import argparse
 import contextlib
+import json
 import os
 import sys
 import numpy as np
@@ -50,7 +57,8 @@ ASSETS = [
 
 def load_candles_for_asset(asset: str, interval: str) -> pd.DataFrame:
     query = """
-        SELECT open_time, open_price, high_price, low_price, close_price, volume
+        SELECT open_time, open_price, high_price, low_price, close_price, volume,
+               COALESCE(crowd_sentiment, 50.0) AS crowd_sentiment
         FROM subminute_candles
         WHERE asset = %s AND interval = %s AND open_time > %s
         ORDER BY open_time ASC
@@ -72,7 +80,7 @@ def load_candles_for_asset(asset: str, interval: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.concat(frames, ignore_index=True)
-    for col in ("open_price", "high_price", "low_price", "close_price", "volume"):
+    for col in ("open_price", "high_price", "low_price", "close_price", "volume", "crowd_sentiment"):
         df[col] = df[col].astype(float)
     df['open_time'] = pd.to_datetime(df['open_time'], utc=True)
     df = df.sort_values('open_time').reset_index(drop=True)
@@ -140,24 +148,45 @@ def compute_bridge_vector(m1_win: pd.DataFrame, s5_win: pd.DataFrame) -> np.ndar
     u_wick = last_h - max(last_o, last_c)
     wick_bal = float(np.clip((l_wick - u_wick) / rng, -1.0, 1.0))
 
-    return np.array([dist_m1_ema, atr_ratio, z_score, wick_bal], dtype=np.float32)
+    # 5. Pocket Option Crowd Sentiment (chafor % BUY, normalized from [0..100] to [-1..1])
+    raw_crowd = float(s5_win['crowd_sentiment'].iloc[-1]) if 'crowd_sentiment' in s5_win.columns else 50.0
+    if not np.isfinite(raw_crowd):
+        raw_crowd = 50.0
+    norm_crowd = float(np.clip((raw_crowd - 50.0) / 50.0, -1.0, 1.0))
+
+    return np.array([dist_m1_ema, atr_ratio, z_score, wick_bal, norm_crowd], dtype=np.float32)
 
 def main():
+    ap = argparse.ArgumentParser(description="Export objective dual-stream dataset")
+    ap.add_argument("--horizon", type=int, default=1,
+                    help="Label horizon in s5 bars (1 = 5s expiry, the live expiry for s5). Default: 1")
+    ap.add_argument("--step", type=int, default=6, help="Stride between samples in s5 bars (default 6 = 30s)")
+    ap.add_argument("--noise-bps", type=float, default=0.6, help="|delta| below this is flagged non-trainable")
+    args = ap.parse_args()
+    if args.horizon < 1 or args.step < 1:
+        raise SystemExit("--horizon and --step must be >= 1")
+
+    if not DB_URL or "@localhost" in DB_URL and not (os.environ.get("DATABASE_URL") or os.environ.get("DB_URL")):
+        raise SystemExit("DATABASE_URL (or DB_URL) is not set. Export it before running the exporter.")
     host_info = DB_URL.split('@')[1] if '@' in DB_URL else "configured DB"
     print(f"Connecting to DB: {host_info}...")
+    print(f"Horizon: {args.horizon} x s5 = {args.horizon * 5}s | step: {args.step} | noise threshold: {args.noise_bps} bps")
 
     all_macro = []
     all_micro = []
     all_bridge = []
     all_labels = []
     all_epochs = []
+    all_delta = []
+    all_trainable = []
+    all_asset_ids = []
 
     noise_filtered_count = 0
     total_checked = 0
 
-    h = 6  # 30-second primary expiry (6 bars of 5s)
+    h = args.horizon  # label horizon in s5 bars (5s per bar)
 
-    for asset in ASSETS:
+    for asset_idx, asset in enumerate(ASSETS):
         print(f"\n--- Loading candles for {asset} ---")
         m1_df = load_candles_for_asset(asset, "1min")
         s5_df = load_candles_for_asset(asset, "s5")
@@ -171,7 +200,7 @@ def main():
         s5_epochs = s5_df['epoch_sec'].values
         s5_closes = s5_df['close_price'].values
 
-        step = 6
+        step = args.step
         min_idx = 30
         max_idx = len(s5_df) - h - 1
 
@@ -192,12 +221,13 @@ def main():
             future_close = s5_closes[i + h]
             delta_bps = (future_close - entry_close) / entry_close * 10000.0
 
-            # Hurdle Gatekeeper: Filter dead flat noise (|delta| < 0.6 bps)
-            if abs(delta_bps) < 0.6:
+            # Noise zone is flagged, not dropped: live trading still takes these trades (ties are losses),
+            # so honest evaluation needs them. Training/validation fit uses trainable == True only.
+            is_trainable = abs(delta_bps) >= args.noise_bps
+            if not is_trainable:
                 noise_filtered_count += 1
-                continue
 
-            label = 1 if delta_bps >= 0.6 else 0
+            label = 1 if delta_bps > 0 else 0
 
             # Точный Point-in-Time расчет закрытия свечи s5:
             # Свеча s5 с open_time = entry_epoch закрывается ровно в entry_epoch + 5 сек.
@@ -227,16 +257,19 @@ def main():
             all_bridge.append(bridge_feats)
             all_labels.append(label)
             all_epochs.append(entry_epoch)
+            all_delta.append(delta_bps)
+            all_trainable.append(is_trainable)
+            all_asset_ids.append(asset_idx)
             asset_samples += 1
 
-        print(f"  Extracted {asset_samples} high-conviction samples for {asset}")
+        print(f"  Extracted {asset_samples} samples for {asset}")
 
     total_valid = len(all_labels)
     print(f"\n==========================================")
     print(f"Extraction Summary:")
     print(f"  Total points evaluated: {total_checked}")
-    print(f"  Noise / Dead flat filtered: {noise_filtered_count} ({noise_filtered_count / (total_checked + 1e-7) * 100:.1f}%)")
-    print(f"  High-conviction samples kept: {total_valid}")
+    print(f"  Noise-zone samples (flagged non-trainable): {noise_filtered_count} ({noise_filtered_count / (max(total_valid, 1)) * 100:.1f}% of kept)")
+    print(f"  Total samples saved: {total_valid}")
 
     if total_valid < 100:
         print("ERROR: Not enough samples extracted.")
@@ -247,6 +280,9 @@ def main():
     bridge_arr = np.array(all_bridge, dtype=np.float32)
     labels_arr = np.array(all_labels, dtype=np.int64)
     epochs_arr = np.array(all_epochs, dtype=np.int64)
+    delta_arr = np.array(all_delta, dtype=np.float32)
+    trainable_arr = np.array(all_trainable, dtype=bool)
+    asset_arr = np.array(all_asset_ids, dtype=np.int16)
 
     # Sort globally by timestamp so chronological train/val/test split never leaks or biases by asset order
     order = np.argsort(epochs_arr, kind="stable")
@@ -255,9 +291,14 @@ def main():
     bridge_arr = bridge_arr[order]
     labels_arr = labels_arr[order]
     epochs_arr = epochs_arr[order]
+    delta_arr = delta_arr[order]
+    trainable_arr = trainable_arr[order]
+    asset_arr = asset_arr[order]
 
-    buy_ratio = np.mean(labels_arr)
-    print(f"  Class balance: BUY={buy_ratio * 100:.2f}%, PUT={(1 - buy_ratio) * 100:.2f}%")
+    buy_ratio = np.mean(labels_arr[trainable_arr]) if trainable_arr.any() else float("nan")
+    print(f"  Class balance (trainable): BUY={buy_ratio * 100:.2f}%, PUT={(1 - buy_ratio) * 100:.2f}%")
+    print(f"  Exact ties (delta == 0): {int(np.sum(delta_arr == 0.0))} ({np.mean(delta_arr == 0.0) * 100:.1f}%)")
+    print(f"  Span: {pd.to_datetime(int(epochs_arr[0]), unit='s', utc=True)} -> {pd.to_datetime(int(epochs_arr[-1]), unit='s', utc=True)}")
 
     out_dir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(out_dir, exist_ok=True)
@@ -269,7 +310,14 @@ def main():
         micro_x=micro_arr,
         bridge_x=bridge_arr,
         labels=labels_arr,
-        epochs=epochs_arr
+        epochs=epochs_arr,
+        delta_bps=delta_arr,
+        trainable=trainable_arr,
+        asset_ids=asset_arr,
+        meta=np.array(json.dumps({
+            "horizon_bars": args.horizon, "horizon_sec": args.horizon * 5, "step": args.step,
+            "noise_bps": args.noise_bps, "assets": ASSETS, "n": int(total_valid),
+        }))
     )
     print(f"Saved dataset to {out_path} ({os.path.getsize(out_path) / 1024 / 1024:.2f} MB)")
 
