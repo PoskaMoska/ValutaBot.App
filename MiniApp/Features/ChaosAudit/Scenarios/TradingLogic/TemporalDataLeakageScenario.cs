@@ -40,11 +40,11 @@ public class TemporalDataLeakageScenario : IChaosScenario
             const string query = @"
                 SELECT id, asset, timeframe, created_at,
                        (features_json::json->'candles'->-1->>'openTime')::bigint as last_candle_sec,
-                       EXTRACT(EPOCH FROM created_at)::bigint as trade_created_sec
+                       EXTRACT(EPOCH FROM created_at::timestamptz)::bigint as trade_created_sec
                 FROM trade_outcomes
-                WHERE created_at >= NOW() - INTERVAL '2 hours'
+                WHERE created_at::timestamptz >= NOW() - INTERVAL '2 hours'
                   AND features_json IS NOT NULL
-                  AND (features_json::json->'candles'->-1->>'openTime')::bigint > EXTRACT(EPOCH FROM created_at)::bigint
+                  AND (features_json::json->'candles'->-1->>'openTime')::bigint > EXTRACT(EPOCH FROM created_at::timestamptz)::bigint
                 LIMIT 5;";
 
             var violations = (await conn.QueryAsync(query)).ToList();

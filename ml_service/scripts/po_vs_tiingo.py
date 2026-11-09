@@ -33,7 +33,7 @@ def load_po(offset):
 
 
 def load_tiingo(assets, t0, t1):
-    db_url = os.environ.get("DATABASE_URL", "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway")
+    db_url = os.environ.get("DATABASE_URL", "")
     conn = psycopg2.connect(db_url)
     out = {}
     for a in assets:

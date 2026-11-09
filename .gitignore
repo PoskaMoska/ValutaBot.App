@@ -57,3 +57,5 @@ ml_service/.env
 # Research data (broker tick logs, Dukascopy cache)
 ml_service/data/po_ticks/
 ml_service/data/dukascopy/
+**/.env
+.env.*

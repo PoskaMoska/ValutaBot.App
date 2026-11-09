@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 import psycopg2
@@ -6,7 +7,7 @@ import pandas as pd
 import numpy as np
 
 async def verify_po_vs_bot():
-    db_url = 'postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway'
+    db_url = os.environ.get("DATABASE_URL", "")
     conn = psycopg2.connect(db_url)
     cur = conn.cursor()
     cur.execute('SELECT state FROM po_collector_state WHERE id = 1;')

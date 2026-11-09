@@ -1,10 +1,11 @@
+import os
 import asyncio
 import json
 import psycopg2
 import websockets
 
 async def test_direct_ws():
-    db_url = 'postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway'
+    db_url = os.environ.get("DATABASE_URL", "")
     conn = psycopg2.connect(db_url)
     cur = conn.cursor()
     cur.execute('SELECT state FROM po_collector_state WHERE id = 1;')

@@ -16,7 +16,7 @@ import psycopg2
 from scipy import signal
 
 DATA = Path(__file__).resolve().parent.parent / "data" / "po_ticks"
-DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway")
+DB_URL = os.environ.get("DATABASE_URL", "")
 
 
 def load_po():

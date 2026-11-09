@@ -17,7 +17,7 @@ from psycopg2.extras import execute_batch
 import websockets
 
 DEFAULT_ASSETS = ["EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "AUDUSD_otc", "USDCAD_otc", "USDCHF_otc"]
-DEFAULT_DB_URL = "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway"
+DEFAULT_DB_URL = os.environ.get("DATABASE_URL", "")
 SRV_OFFSET = float(os.environ.get("SRV_OFFSET", "7200.0"))
 
 def log(msg):

@@ -44,7 +44,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/save_session":
             try:
                 body = json.loads(self.rfile.read(n))
-                db_url = os.environ.get("DATABASE_URL", "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway")
+                db_url = os.environ.get("DATABASE_URL", "")
                 import psycopg2
                 conn = psycopg2.connect(db_url)
                 conn.autocommit = True

@@ -44,7 +44,7 @@ public class DirectionalBiasAnomalyScenario : IChaosScenario
                        SUM(CASE WHEN direction LIKE '%BUY%' THEN 1 ELSE 0 END) as buy_count,
                        SUM(CASE WHEN direction LIKE '%PUT%' THEN 1 ELSE 0 END) as put_count
                 FROM trade_outcomes
-                WHERE created_at >= NOW() - INTERVAL '2 hours'
+                WHERE created_at::timestamptz >= NOW() - INTERVAL '2 hours'
                   AND direction IN ('BUY', 'PUT', 'SHADOW_BUY', 'SHADOW_PUT')
                 GROUP BY asset, timeframe
                 HAVING COUNT(*) >= 30;";

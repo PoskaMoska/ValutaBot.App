@@ -19,7 +19,7 @@ import pandas as pd
 import psycopg2
 
 DATA = Path(__file__).resolve().parent.parent / "data" / "po_ticks"
-DEFAULT_DB_URL = "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway"
+DEFAULT_DB_URL = os.environ.get("DATABASE_URL", "")
 
 
 def pip_size(asset):

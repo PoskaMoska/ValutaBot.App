@@ -19,7 +19,7 @@ from pathlib import Path
 
 DEFAULT_DB_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway"
+    ""
 )
 
 def run_step(cmd_args, desc):

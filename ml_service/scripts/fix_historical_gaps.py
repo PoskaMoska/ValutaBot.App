@@ -30,7 +30,7 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-DEFAULT_CONN = "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway"
+DEFAULT_CONN = os.environ.get("DATABASE_URL", "")
 
 
 def parse_open_time(s: str) -> datetime:

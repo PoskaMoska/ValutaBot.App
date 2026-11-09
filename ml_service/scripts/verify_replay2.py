@@ -5,7 +5,7 @@ import pandas as pd
 import psycopg2
 
 DATA = Path(__file__).resolve().parent.parent / "data" / "po_ticks"
-DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway")
+DB_URL = os.environ.get("DATABASE_URL", "")
 
 def main():
     import glob

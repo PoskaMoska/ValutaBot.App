@@ -117,15 +117,16 @@ public class ExecutionGatewayLowLatencyTests
         Assert.NotNull(handleTickMethod);
 
         double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        string rawSymbol = PocketOptionWebSocketStream.GetActiveRawSymbol("EURUSD");
 
         // 1. Fresh progressive tick at t = now, price = 1.0900
-        handleTickMethod!.Invoke(null, new object[] { "EURUSD_otc", now, 1.0900, false });
+        handleTickMethod!.Invoke(null, new object[] { rawSymbol, now, 1.0900, false });
         bool ok = PocketOptionWebSocketStream.TryGetLivePrice("EURUSD", out double livePrice);
         Assert.True(ok);
         Assert.Equal(1.0900, livePrice);
 
         // 2. Stale out-of-order tick at t = now - 1.0, price = 1.0800 (must be rejected by watermark)
-        handleTickMethod.Invoke(null, new object[] { "EURUSD_otc", now - 1.0, 1.0800, false });
+        handleTickMethod.Invoke(null, new object[] { rawSymbol, now - 1.0, 1.0800, false });
 
         // 3. Live price must NOT be corrupted/overwritten by the stale tick
         PocketOptionWebSocketStream.TryGetLivePrice("EURUSD", out double priceAfterStale);
@@ -142,13 +143,14 @@ public class ExecutionGatewayLowLatencyTests
         Assert.NotNull(handleTickMethod);
 
         double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        string rawGbp = PocketOptionWebSocketStream.GetActiveRawSymbol("GBPUSD");
 
         // 1. Fresh tick at t = now
-        handleTickMethod!.Invoke(null, new object[] { "GBPUSD_otc", now, 1.2500, false });
+        handleTickMethod!.Invoke(null, new object[] { rawGbp, now, 1.2500, false });
         var brokerTime1 = PocketOptionWebSocketStream.GetBrokerTimeUtc();
 
         // 2. Lagged burst tick arriving 1 second later with older timestamp t = now - 0.5
-        handleTickMethod.Invoke(null, new object[] { "GBPUSD_otc", now - 0.5, 1.2505, false });
+        handleTickMethod.Invoke(null, new object[] { rawGbp, now - 0.5, 1.2505, false });
         var brokerTime2 = PocketOptionWebSocketStream.GetBrokerTimeUtc();
 
         // Monotonic invariant: broker clock should never regress backwards

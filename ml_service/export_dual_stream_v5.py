@@ -17,7 +17,7 @@ import numpy as np
 import psycopg2
 from datetime import datetime, timezone, timedelta
 
-DEFAULT_DSN = "postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway"
+DEFAULT_DSN = os.environ.get("DATABASE_URL", "")
 
 def _safe_float(val, default=0.0):
     if val is None:

@@ -193,7 +193,7 @@ namespace ValutaBot.Tests
             // Reset state
             PocketOptionWebSocketStream.ResetClockAndWatermarksOnDstShift();
 
-            string asset = "EURUSD_otc";
+            string asset = PocketOptionWebSocketStream.GetActiveRawSymbol("EURUSD");
             double srvNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + PocketOptionWebSocketStream.ServerTimeOffsetSec;
 
             // Seed initial tick

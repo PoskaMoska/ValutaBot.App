@@ -93,18 +93,18 @@ public class DualStreamOnnxServiceTests
             macroCandles[i] = new MiniAppController.OhlcCandle(baseP, baseP + 0.0005, baseP - 0.0003, baseP + 0.0002, 50.0, now.AddSeconds(i * 60));
         }
 
-        var result = buildMethod!.Invoke(null, new object[] { microCandles, macroCandles, 1.1030 });
+        var result = buildMethod!.Invoke(null, new object?[] { microCandles, macroCandles, 1.1030, null });
         Assert.NotNull(result);
 
         // Extract bridgeData tuple element
         var tuple = ((float[] macro, float[] micro, float[] bridge))result!;
         Assert.Equal(150, tuple.macro.Length);
         Assert.Equal(150, tuple.micro.Length);
-        Assert.Equal(4, tuple.bridge.Length);
+        Assert.Equal(5, tuple.bridge.Length);
 
         // Verify bridge features are calculated and finite:
-        // bridge[0]: distM1, bridge[1]: atrRatio, bridge[2]: zScore, bridge[3]: wickBal
-        for (int i = 0; i < 4; i++)
+        // bridge[0]: distM1, bridge[1]: atrRatio, bridge[2]: zScore, bridge[3]: wickBal, bridge[4]: normCrowd
+        for (int i = 0; i < 5; i++)
         {
             Assert.True(float.IsFinite(tuple.bridge[i]), $"Bridge feature {i} is not finite: {tuple.bridge[i]}");
         }
@@ -134,7 +134,7 @@ public class DualStreamOnnxServiceTests
         // Inject adversarial needle spike in 1 micro candle (500 pips spike)
         microCandles[15] = new MiniAppController.OhlcCandle(1.1015, 1.1515, 1.1010, 1.1016, 100.0, now.AddSeconds(15 * 5));
 
-        var result = buildMethod!.Invoke(null, new object[] { microCandles, macroCandles, 1.1030 });
+        var result = buildMethod!.Invoke(null, new object?[] { microCandles, macroCandles, 1.1030, null });
         Assert.NotNull(result);
 
         var tuple = ((float[] macro, float[] micro, float[] bridge))result!;

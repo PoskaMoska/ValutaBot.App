@@ -605,7 +605,7 @@ public static partial class MiniAppController
                     WHERE features_json IS NOT NULL
                       AND direction IN ('BUY', 'PUT')
                       AND was_win IS NOT NULL
-                      AND created_at >= '2026-10-15 21:55:00+00'::timestamptz
+                      AND created_at::timestamptz >= '2026-10-15 21:55:00+00'::timestamptz
                     GROUP BY asset, timeframe
                     ORDER BY asset, timeframe
                 ");

@@ -24,7 +24,8 @@ from contextlib import asynccontextmanager
 from common import TF_MAP, is_forex_symbol, normalize_interval
 from models.patch_tst_predictor import PatchTSTPredictor
 
-_API_SECRET = os.environ.get("INTERNAL_API_SECRET", "default_secret")
+# No default: without INTERNAL_API_SECRET all protected endpoints are rejected (fail closed).
+_API_SECRET = os.environ.get("INTERNAL_API_SECRET") or None
 START_TIME = time.time()
 
 # Dedicated worker pool for CPU-bound PyTorch inference tasks (prevents event loop starvation under burst load)
@@ -51,7 +52,9 @@ if _sentry_dsn:
         log.warning(f"[Sentry] Initialization error: {_sentry_err}")
 
 def verify_secret(x_internal_secret: str | None = Header(default=None)):
-    if x_internal_secret != _API_SECRET:
+    import hmac
+    if not _API_SECRET or not x_internal_secret or not hmac.compare_digest(
+            x_internal_secret.encode("utf-8"), _API_SECRET.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Forbidden: Invalid Internal Secret")
 
 @asynccontextmanager

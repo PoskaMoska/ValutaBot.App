@@ -1,9 +1,10 @@
+import os
 import psycopg2
 import time
 import datetime
 from collections import defaultdict
 
-DB_URL = 'postgresql://postgres:MaEHyMeUBqdeBJdrTWodZJEKoQcldCEN@centerbeam.proxy.rlwy.net:47825/railway'
+DB_URL = os.environ.get("DATABASE_URL", "")
 
 def run_deep_verification(target_per_tf=50):
     print("=" * 75)
