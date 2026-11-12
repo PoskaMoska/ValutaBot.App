@@ -320,9 +320,10 @@ public class ConfluenceMatrixEngine(
         ConfluenceMatrixResult mtfResult,
         int consecutiveLosses = 0,
         double volRatio = 1.0,
-        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null)
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
+        double crowdSentiment = 50.0)
     {
-        return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, ofSignal);
+        return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, ofSignal, crowdSentiment);
     }
 
     public Task<ConsensusDecision> EvaluateMatrixAsync(
@@ -337,9 +338,10 @@ public class ConfluenceMatrixEngine(
         ConfluenceMatrixResult mtfResult,
         int consecutiveLosses = 0,
         double volRatio = 1.0,
-        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null)
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
+        double crowdSentiment = 50.0)
     {
-        return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, null);
+        return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, null, crowdSentiment);
     }
 
     private Task<ConsensusDecision> EvaluateMatrixInternalAsync(
@@ -355,7 +357,8 @@ public class ConfluenceMatrixEngine(
         int consecutiveLosses = 0,
         double volRatio = 1.0,
         ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
-        OrderflowSignal? ofSignal = null)
+        OrderflowSignal? ofSignal = null,
+        double crowdSentiment = 50.0)
     {
         // Zero-allocation synchronous decision tree
         double taScore = taSignal.Score;
@@ -638,6 +641,53 @@ public class ConfluenceMatrixEngine(
             }
         }
 
+        // ══════════════════════════════════════════════════════════════════════════
+        // STAGE 2.5: SMART ADAPTIVE CROWD FILTER (chafor sentiment confluence)
+        // ══════════════════════════════════════════════════════════════════════════
+        if (finalDir is "BUY" or "PUT" && double.IsFinite(crowdSentiment) && crowdSentiment >= 0.0 && crowdSentiment <= 100.0)
+        {
+            // Case 1: Extreme Overheated FOMO at Tops/Bottoms (Защита от покупки на хаях)
+            // If candidate is BUY and crowd is euphoric (>= 82%) AND price is extended (RSI >= 64 or extreme overbought)
+            if (finalDir == "BUY" && crowdSentiment >= 82.0 && (taSignal.Rsi >= 64.0 || (noiseAudit.HasValue && noiseAudit.Value.IsExtremeOverbought)))
+            {
+                finalProbPct = Math.Min(finalProbPct, 54);
+                probCeiling = Math.Min(probCeiling, 54);
+                safetyNotes.Add($"⚠️ Перегрев толпы (FOMO Top): толпа {crowdSentiment:F0}% в CALL на хаях (RSI {taSignal.Rsi:F0}) — высокий риск отката, вход BUY подавлен");
+            }
+            // Symmetrically: If candidate is PUT and crowd is in panic sell (<= 18%) AND price is depressed (RSI <= 36 or extreme oversold)
+            else if (finalDir == "PUT" && crowdSentiment <= 18.0 && (taSignal.Rsi <= 36.0 || (noiseAudit.HasValue && noiseAudit.Value.IsExtremeOversold)))
+            {
+                finalProbPct = Math.Min(finalProbPct, 54);
+                probCeiling = Math.Min(probCeiling, 54);
+                safetyNotes.Add($"⚠️ Перегрев толпы (FOMO Bottom): толпа {crowdSentiment:F0}% в CALL (>=82% PUT) на дне (RSI {taSignal.Rsi:F0}) — риск отскока вверх, вход PUT подавлен");
+            }
+            // Case 2: Trap Confluence (Fading Extreme Crowd with Technical Confluence - 73.7% Win Rate Setup)
+            // Bot wants PUT (reversal/resistance) while crowd is heavily long (>= 75%)
+            else if (finalDir == "PUT" && crowdSentiment >= 75.0)
+            {
+                int crowdBoost = hasRiskDampener ? 2 : (crowdSentiment >= 85.0 ? 6 : 4);
+                finalProbPct = Math.Clamp(finalProbPct + crowdBoost, 50, 85);
+                safetyNotes.Add($"🎯 Ловушка толпы (Fade Crowd PUT): толпа застряла в CALL ({crowdSentiment:F0}%), вход против толпы (+{crowdBoost}%)");
+            }
+            // Bot wants BUY (reversal/support) while crowd is heavily short (<= 25%)
+            else if (finalDir == "BUY" && crowdSentiment <= 25.0)
+            {
+                int crowdBoost = hasRiskDampener ? 2 : (crowdSentiment <= 15.0 ? 6 : 4);
+                finalProbPct = Math.Clamp(finalProbPct + crowdBoost, 50, 85);
+                safetyNotes.Add($"🎯 Ловушка толпы (Fade Crowd BUY): толпа застряла в PUT (всего {crowdSentiment:F0}% CALL), вход против толпы (+{crowdBoost}%)");
+            }
+            // Case 3: Healthy Trend Following (Moderate crowd alignment 58-75% for BUY, 25-42% for PUT)
+            else if ((finalDir == "BUY" && crowdSentiment >= 58.0 && crowdSentiment <= 75.0 && taSignal.Rsi is >= 45.0 and <= 65.0) ||
+                     (finalDir == "PUT" && crowdSentiment >= 25.0 && crowdSentiment <= 42.0 && taSignal.Rsi is >= 35.0 and <= 55.0))
+            {
+                if (!hasRiskDampener && finalProbPct < 70)
+                {
+                    finalProbPct += 2;
+                    safetyNotes.Add($"🌊 Здоровый импульс по тренду: умеренный сантимент толпы ({crowdSentiment:F0}%) подтверждает тренд (+2%)");
+                }
+            }
+        }
+
         finalProbPct = Math.Min(finalProbPct, probCeiling);
 
         var coPilot = new System.Text.StringBuilder();
@@ -657,6 +707,7 @@ public class ConfluenceMatrixEngine(
         coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
         coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult?.DominantDirection ?? "NEUTRAL"}{(mtfResult?.IsGoldenSetup == true ? " [GOLDEN]" : "")}");
         coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal?.VelocityBpsPerSec ?? 0.0:F2} bps/s");
+        coPilot.AppendLine($" - Датчик толпы (Crowd Sentiment): {crowdSentiment:F0}% {(crowdSentiment >= 50 ? "CALL" : "PUT")}");
         if (safetyNotes.Count > 0)
         {
             coPilot.AppendLine();

@@ -49,7 +49,8 @@ public interface IConfluenceMatrixEngine
         ConfluenceMatrixResult mtfResult,
         int consecutiveLosses = 0,
         double volRatio = 1.0,
-        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null);
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
+        double crowdSentiment = 50.0);
 
     Task<ConsensusDecision> EvaluateMatrixAsync(
         string asset,
@@ -64,7 +65,8 @@ public interface IConfluenceMatrixEngine
         ConfluenceMatrixResult mtfResult,
         int consecutiveLosses = 0,
         double volRatio = 1.0,
-        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null);
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
+        double crowdSentiment = 50.0);
 }
 
 // Replaces ConsensusEngine.DecisionResult

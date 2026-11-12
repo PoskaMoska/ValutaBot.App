@@ -727,7 +727,14 @@ public class MarketAnalysisOrchestrator(
 
         var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(prep.ClosedCandles, timeframe);
         traceLines.Add($"[6.8 Noise Gate]     {noiseAudit.RegimeDescription} (TR: {noiseAudit.LocalAtrBps:F2} bps, Порог: {noiseAudit.NoiseFloorBps:F1} bps, Z: {noiseAudit.ZScore:F2})");
-        var consensus = await _cmEngine.EvaluateMatrixAsync(prep.CleanAsset, timeframe, prep.TfLower.StartsWith("s"), conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, TradeOutcomeTracker.GetConsecutiveLosses(prep.CleanAsset, timeframe), _marketAnalyzer.CalculateVolatilityRatio(prep.MainPrices), noiseAudit);
+        double liveCrowd = PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset);
+        var consensus = await _cmEngine.EvaluateMatrixAsync(
+            prep.CleanAsset, timeframe, prep.TfLower.StartsWith("s"), conflictPenalty, 
+            taSignal, smcSignal, mlSignal, stateSignal, mtfResult, 
+            TradeOutcomeTracker.GetConsecutiveLosses(prep.CleanAsset, timeframe), 
+            _marketAnalyzer.CalculateVolatilityRatio(prep.MainPrices), 
+            noiseAudit,
+            liveCrowd);
         
         matrixSw.Stop();
         traceLines.Add($"[6. Риск-контроль]    Нейросеть и фильтры сведены (Фаза: {sensors.State.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
@@ -820,7 +827,26 @@ public class MarketAnalysisOrchestrator(
         bool isCbHalted = isGlobalCbHalted || isSymbolQuarantined;
         string sampleKey = $"{prep.CleanAsset}_{timeframe}";
 
-        int requiredProb = 58;
+        double liveCrowdSentiment = PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset);
+        int currentPayout = PriceFeed.UsePocketOption ? PocketOptionWebSocketStream.GetAssetPayout(prep.CleanAsset) : 82;
+        bool isAssetOpen = !PriceFeed.UsePocketOption || PocketOptionWebSocketStream.IsAssetOpen(prep.CleanAsset);
+        bool isPayoutAcceptable = currentPayout >= 70 && isAssetOpen;
+
+        // ══════════════════════════════════════════════════════════════════════════
+        // ADAPTIVE PROBABILITY THRESHOLD (Based on Payout & Horizon Risk)
+        // ══════════════════════════════════════════════════════════════════════════
+        // Formula: Break-even win rate = 100 / (100 + payout). Target edge margin = +3.5%
+        // E.g. at 92% -> BE 52.1% (req 58%), at 82% -> BE 54.9% (req 59%), at 70% -> BE 58.8% (req 63%)
+        double breakEvenWinRate = 100.0 / (100.0 + Math.Max(currentPayout, 50));
+        int adaptiveRequiredProb = Math.Max(58, (int)Math.Ceiling((breakEvenWinRate + 0.035) * 100.0));
+        if (isS5)
+        {
+            adaptiveRequiredProb += 2; // Extra hurdle against 5s tick noise and high tie rates
+        }
+        int requiredProb = adaptiveRequiredProb;
+
+        traceLines.Add($"[7.5 Adaptive Guard] Payout: {currentPayout}%, Порог: {requiredProb}% (BE: {breakEvenWinRate * 100:F1}%) | Толпа: {liveCrowdSentiment:F0}%");
+
         bool htfAligned = cm.MtfResult.DominantDirection == cm.Consensus.FinalDirection && isDirectional;
         bool isGoldenSetup = cm.MtfResult.IsGoldenSetup && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse);
 
@@ -851,10 +877,6 @@ public class MarketAnalysisOrchestrator(
         }
 
         bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (ml.Prediction != null && ml.Direction is "BUY" or "PUT");
-        double liveCrowdSentiment = PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset);
-        int currentPayout = PriceFeed.UsePocketOption ? PocketOptionWebSocketStream.GetAssetPayout(prep.CleanAsset) : 82;
-        bool isAssetOpen = !PriceFeed.UsePocketOption || PocketOptionWebSocketStream.IsAssetOpen(prep.CleanAsset);
-        bool isPayoutAcceptable = currentPayout >= 70 && isAssetOpen;
 
         bool canExecuteReal = isDirectional 
             && hasLiveNeuralSignal
