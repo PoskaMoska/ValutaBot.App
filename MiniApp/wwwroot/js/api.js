@@ -12,8 +12,9 @@ import {
     setPriceSocket, 
     setCircuitBreakerState,
     isNetworkOnline,
-    setNetworkOnlineState
-} from './state.js?v=20261113_nocopilot';
+    setNetworkOnlineState,
+    getCandleBoundaryWaitMs
+} from './state.js?v=20261113_timing';
 
 function resolveAuthData() {
     try {
@@ -77,7 +78,7 @@ import {
     hapticImpact,
     hapticNotification,
     hapticSelection
-} from './ui.js?v=20261113_nocopilot';
+} from './ui.js?v=20261113_timing';
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -91,6 +92,15 @@ let runSeq = 0;
 let chartOhlcAbortController = null;
 let analyzeAbortController = null;
 let analyzeTimeoutTimer = null;
+let candleWaitTimer = null;
+let candleWaitResolve = null;
+
+function resolveGreenZoneWaitMs(tf) {
+    if (typeof timeOffset !== 'number' || typeof getCandleBoundaryWaitMs !== 'function') {
+        return 0;
+    }
+    return getCandleBoundaryWaitMs(tf, Date.now() + timeOffset);
+}
 
 // Resilient JSON parser: server may serialize NaN/Infinity tokens (AllowNamedFloatingPointLiterals)
 function safeParseJson(text) {
@@ -104,6 +114,15 @@ const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 
 export function cancelAnalysis() {
     runSeq++;
+    if (candleWaitTimer) {
+        clearTimeout(candleWaitTimer);
+        candleWaitTimer = null;
+    }
+    if (candleWaitResolve) {
+        const resolveWait = candleWaitResolve;
+        candleWaitResolve = null;
+        resolveWait();
+    }
     if (analyzeTimeoutTimer) {
         clearTimeout(analyzeTimeoutTimer);
         analyzeTimeoutTimer = null;
@@ -435,8 +454,28 @@ export async function executeAnalysis() {
 
     const currentRun = myRun;
     const currentController = analyzeAbortController;
-    const startTime = Date.now();
     let timedOut = false;
+
+    const boundaryWaitMs = resolveGreenZoneWaitMs(requestedTf);
+    if (boundaryWaitMs > 0) {
+        await new Promise(resolve => {
+            candleWaitResolve = resolve;
+            candleWaitTimer = setTimeout(() => {
+                candleWaitTimer = null;
+                if (candleWaitResolve === resolve) candleWaitResolve = null;
+                resolve();
+            }, boundaryWaitMs);
+        });
+        if (isStale()) return;
+        if (!checkNetworkOnline()) {
+            cleanupUi();
+            showNetworkBanner('Нет интернет-соединения');
+            renderError('⚠️ Ошибка соединения', 'Отсутствует подключение к интернету. Проверьте 4G/Wi-Fi и повторите попытку.');
+            return;
+        }
+    }
+
+    const startTime = Date.now();
     analyzeTimeoutTimer = setTimeout(() => {
         if (currentRun === runSeq && !currentController.signal.aborted) {
             timedOut = true;

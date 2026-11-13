@@ -1,7 +1,7 @@
-import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261113_nocopilot';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, setNetworkOnlineState, clearExpiredAuthParams } from './state.js?v=20261113_nocopilot';
+import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261113_timing';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, setNetworkOnlineState, clearExpiredAuthParams, getTfSeconds, getTrafficLightThresholds } from './state.js?v=20261113_timing';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261113_nocopilot';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261113_timing';
 
 // 1. Telegram WebApp Lifecycle, Viewport & Theme Synchronization
 const syncViewport = () => {
@@ -341,12 +341,6 @@ initAssetGrid();
     } catch(e) {}
 })();
 
-function getTfSeconds() {
-    const map = { s3:3, s5:5, s10:10, s15:15, s30:30, m1:60, m2:120, m3:180, m5:300, m15:900, m30:1800, h1:3600, h4:14400, d1:86400 };
-    const tfClean = (currentTf || 'm1').toLowerCase();
-    return map[tfClean] || 60;
-}
-
 let cachedCandleTimeEl = null;
 let lastCandleClass = '';
 let lastCandleText = '';
@@ -357,9 +351,9 @@ function updateCountdown() {
         cachedCandleTimeEl = document.getElementById('candleTime');
         if (!cachedCandleTimeEl) return;
     }
-    const tfSec = getTfSeconds();
+    const tfSec = getTfSeconds(currentTf);
     const nowSec = Math.floor((Date.now() + timeOffset) / 1000);
-    const elapsed = nowSec % tfSec;
+    const elapsed = ((nowSec % tfSec) + tfSec) % tfSec;
     const remaining = (tfSec - 1) - elapsed; // Range: [tfSec - 1 ... 0]
     const mins = Math.floor(remaining / 60);
     const secs = remaining % 60;
@@ -369,18 +363,7 @@ function updateCountdown() {
         lastCandleText = nextText;
     }
     
-    let greenThresh = 2;
-    let yellowThresh = 8;
-    
-    if (tfSec <= 5) {
-        greenThresh = 0; yellowThresh = 1;
-    } else if (tfSec <= 10) {
-        greenThresh = 1; yellowThresh = 2;
-    } else if (tfSec <= 15) {
-        greenThresh = 1; yellowThresh = 3;
-    } else if (tfSec <= 30) {
-        greenThresh = 2; yellowThresh = 5;
-    }
+    const { greenThresh, yellowThresh } = getTrafficLightThresholds(tfSec);
     let nextClass = 'time';
     if (remaining <= greenThresh) {
         nextClass = 'time critical';
@@ -427,6 +410,11 @@ if (netAlertEl) {
 
 syncTime().finally(updateCountdown);
 initPriceWebSocket();
+setInterval(() => {
+    if (!document.hidden && navigator.onLine) {
+        syncTime();
+    }
+}, 60000);
 
 function tickCountdown() {
     if (document.hidden) {

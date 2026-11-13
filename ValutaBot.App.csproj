@@ -30,6 +30,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <Content Include="ml_service/models/dual_stream_brain_v5.json" Condition="Exists('ml_service/models/dual_stream_brain_v5.json')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <Content Remove="MiniApp/wwwroot/js/tests/**" />
   </ItemGroup>
   <ItemGroup>

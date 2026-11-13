@@ -475,6 +475,14 @@ public static class PocketOptionWebSocketStream
     }
 
     /// <summary>
+    /// Returns broker-aligned UTC time when the Pocket Option tick stream is active, otherwise DateTime.UtcNow.
+    /// </summary>
+    public static DateTime GetEffectiveUtcNow() =>
+        (PriceFeed.UsePocketOption && LastBrokerTickUtc != DateTime.MinValue)
+            ? GetBrokerTimeUtc()
+            : DateTime.UtcNow;
+
+    /// <summary>
     /// Thread-safe status updater synchronized under _streamLifecycleLock.
     /// Prevents background unwinding tasks from overwriting "STOPPED" with "RECONNECTING" or "ONLINE".
     /// </summary>

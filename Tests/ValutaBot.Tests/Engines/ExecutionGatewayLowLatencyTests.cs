@@ -156,4 +156,50 @@ public class ExecutionGatewayLowLatencyTests
         // Monotonic invariant: broker clock should never regress backwards
         Assert.True(brokerTime2 >= brokerTime1, $"Expected broker time to never regress backwards. {brokerTime2} vs {brokerTime1}");
     }
+
+    [Theory]
+    [InlineData(5, 4, 850, 180.0)]   // 150ms left before 5s close -> wait 150 + 30ms buffer
+    [InlineData(60, 59, 750, 280.0)] // 250ms left before 60s close -> wait 250 + 30ms buffer
+    [InlineData(5, 4, 200, 0.0)]     // 800ms left -> outside 350ms server pre-close window
+    [InlineData(5, 0, 0, 0.0)]       // Exact candle boundary -> no delay
+    [InlineData(5, 0, 500, 0.0)]     // Start of fresh candle -> no delay
+    public void ComputePreCloseBoundaryDelayMs_AlignsOnlyFinalPreCloseWindow(
+        int intervalSecs, int secIntoBar, int msIntoSec, double expectedDelayMs)
+    {
+        var baseUtc = new DateTime(2026, 11, 13, 12, 0, 0, DateTimeKind.Utc);
+        var refUtc = baseUtc.AddSeconds(secIntoBar).AddMilliseconds(msIntoSec);
+
+        double delayMs = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.ComputePreCloseBoundaryDelayMs(refUtc, intervalSecs);
+
+        Assert.Equal(expectedDelayMs, delayMs, precision: 3);
+    }
+
+    [Fact]
+    public void GetEffectiveUtcNow_UsesBrokerClockWhenTickPresent_AndFallsBackAfterReset()
+    {
+        try
+        {
+            PocketOptionWebSocketStream.ResetClockAndWatermarksOnDstShift();
+            DateTime fallbackUtc = PocketOptionWebSocketStream.GetEffectiveUtcNow();
+            Assert.True(Math.Abs((fallbackUtc - DateTime.UtcNow).TotalSeconds) < 1.0);
+
+            var handleTickMethod = typeof(PocketOptionWebSocketStream).GetMethod("HandleTick",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(handleTickMethod);
+
+            double brokerFutureSec = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0
+                + PocketOptionWebSocketStream.ServerTimeOffsetSec
+                + 3.0;
+            string rawEur = PocketOptionWebSocketStream.GetActiveRawSymbol("EURUSD");
+            handleTickMethod!.Invoke(null, new object[] { rawEur, brokerFutureSec, 1.0910, false });
+
+            DateTime effectiveUtc = PocketOptionWebSocketStream.GetEffectiveUtcNow();
+            double deltaSec = (effectiveUtc - DateTime.UtcNow).TotalSeconds;
+            Assert.True(deltaSec > 1.5, $"Expected effective time to follow +3s broker offset, got delta {deltaSec:F2}s");
+        }
+        finally
+        {
+            PocketOptionWebSocketStream.ResetClockAndWatermarksOnDstShift();
+        }
+    }
 }

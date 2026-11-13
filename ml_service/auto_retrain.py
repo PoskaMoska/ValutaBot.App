@@ -11,10 +11,12 @@ Executes the full retraining cycle:
 """
 
 import os
+import shutil
 import sys
 import argparse
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 DEFAULT_DB_URL = os.environ.get(
@@ -40,10 +42,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=20, help="Max training epochs (default: 20)")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size (default: 128)")
     parser.add_argument("--keep-dataset", action="store_true", help="Keep temporary .npz dataset file instead of purging")
+    parser.add_argument("--promote", action="store_true", help="Promote candidate checkpoint even if Quality Gate fails")
     args = parser.parse_args()
 
     ml_dir = Path(__file__).resolve().parent
     temp_dataset = ml_dir / "data" / "dataset_temp.npz"
+    candidate_out = ml_dir / "models" / "patch_tst_brain_v4.candidate.pt"
     checkpoint_out = ml_dir / "models" / "patch_tst_brain_v4.pt"
 
     # Step 1: Export clean dataset from PostgreSQL
@@ -56,7 +60,7 @@ def main():
     ]
     run_step(export_args, "Exporting clean dataset from PostgreSQL (V4 cadence)")
 
-    # Step 2: Train DualStreamPatchBrain
+    # Step 2: Train DualStreamPatchBrain into candidate path (never overwrite prod blindly)
     train_args = [
         str(ml_dir / "train_brain.py"),
         "--data", str(temp_dataset),
@@ -65,7 +69,7 @@ def main():
         "--batch-size", str(args.batch_size),
         "--lr", "1e-3",
         "--val-split", "0.20",
-        "--save", str(checkpoint_out),
+        "--save", str(candidate_out),
         "--patience", "4",
         "--num-threads", "8"
     ]
@@ -79,13 +83,29 @@ def main():
         except Exception as e:
             print(f"[-] Note: could not delete temporary dataset: {e}")
 
-    # Step 4: Verify predictor loads new checkpoint
+    # Step 4: Enforce Quality Gate before promoting candidate -> production checkpoint
     print("\n" + "=" * 70)
-    print("[*] STEP: Verifying loaded model checkpoint")
+    print("[*] STEP: Checking Quality Gate & verifying loaded model checkpoint")
     print("=" * 70)
     if str(ml_dir) not in sys.path:
         sys.path.insert(0, str(ml_dir))
-    from models.patch_tst_predictor import PatchTSTPredictor
+    import torch
+    from models.patch_tst_predictor import PatchTSTPredictor, validate_checkpoint_quality
+
+    ckpt = torch.load(candidate_out, map_location="cpu", weights_only=False)
+    gate_ok, gate_reason = validate_checkpoint_quality(
+        ckpt, min_samples=1000, min_val_acc=50.0, min_test_acc=49.0, max_val_loss=1.00, require_metrics=True
+    )
+    if gate_ok or args.promote:
+        if checkpoint_out.exists():
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            shutil.copy2(checkpoint_out, ml_dir / "models" / f"patch_tst_brain_v4.{stamp}.bak.pt")
+        shutil.copy2(candidate_out, checkpoint_out)
+        print(f"[+] Promoted {candidate_out.name} -> {checkpoint_out.name} ({gate_reason})")
+    else:
+        print(f"[-] QUALITY GATE FAILED ({gate_reason}): kept {candidate_out.name}, production untouched.")
+        sys.exit(1)
+
     pred = PatchTSTPredictor.get_instance()
     pred._load_model()
     if pred.is_available():
@@ -96,7 +116,7 @@ def main():
         print("[-] WARNING: Model loaded but reported unavailable.")
 
     print("\n" + "=" * 70)
-    print(f"[+] Pipeline complete! Checkpoint saved to: {checkpoint_out}")
+    print(f"[+] Pipeline complete! Checkpoint promoted to: {checkpoint_out}")
     print("=" * 70)
 
 if __name__ == "__main__":

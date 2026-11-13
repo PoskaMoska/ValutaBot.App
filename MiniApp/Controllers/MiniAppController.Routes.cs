@@ -65,11 +65,13 @@ public static partial class MiniAppController
             await context.Response.SendFileAsync(System.IO.Path.Combine(app.Environment.WebRootPath, "index.html"));
         });
 
-        // /api/time for clock-drift compensation
+        // /api/time for clock-drift compensation (synchronized with Pocket Option broker clock when active)
         app.MapGet("/api/time", (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            return Results.Ok(new { t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+            DateTime refUtc = PocketOptionWebSocketStream.GetEffectiveUtcNow();
+            long tMs = new DateTimeOffset(DateTime.SpecifyKind(refUtc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
+            return Results.Ok(new { t = tMs });
         }).RequireRateLimiting("Global");
 
         // Sentry verification test endpoint (protected against unauthorized quota exhaustion)
@@ -250,7 +252,7 @@ public static partial class MiniAppController
             try
             {
                 var orchestrator = context.RequestServices.GetRequiredService<ValutaBot.MiniApp.Features.MarketAnalysis.IMarketAnalysisOrchestrator>();
-                var result = await orchestrator.ExecuteAnalysisAsync(assetTrimmed, tf, userSettings);
+                var result = await orchestrator.ExecuteAnalysisAsync(assetTrimmed, tf, userSettings, ct: context.RequestAborted);
                 bool isNeutralSignal = string.IsNullOrEmpty(result.direction)
                     || string.Equals(result.direction, "NEUTRAL", StringComparison.OrdinalIgnoreCase);
                 double effectiveProbPct = result.probability > 0 ? result.probability : result.lgbmConfidence;

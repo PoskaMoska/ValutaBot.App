@@ -150,4 +150,19 @@ public class DualStreamOnnxServiceTests
         Assert.True(float.IsFinite(tuple.bridge[2]));
         Assert.NotEqual(0f, tuple.bridge[2]);
     }
+
+    [Fact]
+    public void CalibratedSidecarMetadata_IsLoaded_WithS5HorizonAndTemperature()
+    {
+        var service = DualStreamOnnxService.Instance;
+        if (!service.IsModelLoaded)
+        {
+            return;
+        }
+
+        Assert.NotNull(service.Metadata);
+        Assert.Equal(5, service.Metadata!.HorizonSec);
+        Assert.True(service.Metadata.Temperature >= 1.0, $"Expected calibrated T >= 1.0, got {service.Metadata.Temperature}");
+        Assert.True(service.Metadata.NTrain > 0);
+    }
 }

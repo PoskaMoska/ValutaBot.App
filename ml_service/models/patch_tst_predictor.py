@@ -29,9 +29,50 @@ _MODEL_PATH = Path(__file__).parent / "patch_tst_brain_v4.pt"
 _FALLBACK_V3_PATH = Path(__file__).parent / "patch_tst_brain_v3.pt"
 _FALLBACK_MODEL_PATH = Path(__file__).parent / "sequence_brain_v3.pt"
 
+CHECKPOINT_MIN_SAMPLES = 1000
+CHECKPOINT_MIN_VAL_ACC = 48.0
+CHECKPOINT_MIN_TEST_ACC = 48.0
+CHECKPOINT_MAX_VAL_LOSS = 1.02
 
-def _resolve_model_path() -> Optional[Path]:
-    candidate_paths = [
+
+def validate_checkpoint_quality(
+    checkpoint: Any,
+    min_samples: int = CHECKPOINT_MIN_SAMPLES,
+    min_val_acc: float = CHECKPOINT_MIN_VAL_ACC,
+    min_test_acc: float = CHECKPOINT_MIN_TEST_ACC,
+    max_val_loss: float = CHECKPOINT_MAX_VAL_LOSS,
+    require_metrics: bool = False,
+) -> Tuple[bool, str]:
+    """Validates stored checkpoint evaluation metrics against a minimum quality gate."""
+    if not isinstance(checkpoint, dict):
+        return False, "checkpoint is not a dictionary"
+
+    vs = checkpoint.get("val_stats") if isinstance(checkpoint.get("val_stats"), dict) else {}
+    n_samples = vs.get("total") or vs.get("n_val")
+    val_acc = checkpoint.get("val_acc") if checkpoint.get("val_acc") is not None else vs.get("acc")
+    test_acc = checkpoint.get("test_acc")
+    val_loss = checkpoint.get("val_loss") if checkpoint.get("val_loss") is not None else vs.get("loss")
+
+    if require_metrics and (n_samples is None or val_acc is None):
+        return False, "missing validation metrics (val_stats.total or val_acc)"
+
+    if n_samples is not None and int(n_samples) < min_samples:
+        return False, f"undersampled validation set: total={n_samples} < {min_samples}"
+
+    if val_acc is not None and float(val_acc) < min_val_acc:
+        return False, f"val_acc={float(val_acc):.2f}% < {min_val_acc:.2f}%"
+
+    if test_acc is not None and float(test_acc) < min_test_acc:
+        return False, f"test_acc={float(test_acc):.2f}% < {min_test_acc:.2f}%"
+
+    if val_loss is not None and float(val_loss) > max_val_loss:
+        return False, f"val_loss={float(val_loss):.4f} > {max_val_loss:.4f}"
+
+    return True, "ok"
+
+
+def _candidate_model_paths() -> List[Path]:
+    return [
         Path("data/models/patch_tst_brain_v4.pt"),
         Path("/app/data/models/patch_tst_brain_v4.pt"),
         _MODEL_PATH,
@@ -48,9 +89,32 @@ def _resolve_model_path() -> Optional[Path]:
         Path("models/sequence_brain_v3.pt"),
         Path("/app/models/sequence_brain_v3.pt"),
     ]
-    for p in candidate_paths:
-        if p.exists() and p.is_file():
-            return p
+
+
+def _resolve_model_path() -> Optional[Path]:
+    seen = set()
+    for p in _candidate_model_paths():
+        if not (p.exists() and p.is_file()):
+            continue
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            import torch
+            ckpt = torch.load(p, map_location="cpu", weights_only=False)
+            ok, reason = validate_checkpoint_quality(ckpt)
+            if not ok:
+                log.warning(f"[PatchTSTPredictor] Skipping {p.name} — failed Quality Gate ({reason}).")
+                continue
+        except Exception as e:
+            log.warning(f"[PatchTSTPredictor] Skipping {p.name} — unreadable checkpoint ({e}).")
+            continue
+        return p
     return None
 
 ASSET_MAP = {

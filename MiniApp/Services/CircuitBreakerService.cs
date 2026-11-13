@@ -167,6 +167,7 @@ namespace ValutaBot.MiniApp.Services
         public bool IsSymbolQuarantined(string asset, string timeframe, out string? reason)
         {
             reason = null;
+            if (!_settings.EnableSymbolQuarantine) return false;
             timeframe = TimeframeNormalizer.Normalize(timeframe);
             string cleanAsset = AssetSanitizer.Sanitize(asset);
 
@@ -207,7 +208,7 @@ namespace ValutaBot.MiniApp.Services
 
         public async Task CheckSymbolStateAsync(string asset, string timeframe, bool? latestWasWin = null, bool isShadow = false, CancellationToken ct = default)
         {
-            if (latestWasWin == null) return;
+            if (!_settings.EnableSymbolQuarantine || latestWasWin == null) return;
             timeframe = TimeframeNormalizer.Normalize(timeframe);
             string key = GetSymbolKey(asset, timeframe);
             string cleanAsset = AssetSanitizer.Sanitize(asset);

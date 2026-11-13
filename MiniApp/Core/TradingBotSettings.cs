@@ -23,6 +23,12 @@ public class TradingBotSettings
     public int DatasetReadinessThreshold { get; set; } = 1_000;            // Minimum outcomes before CB activates
 
     /// <summary>
+    /// Enables 30-minute per-symbol/timeframe quarantines after consecutive losses.
+    /// Disabled by default so continuous factual tracking and user signal flow never silently stall.
+    /// </summary>
+    public bool EnableSymbolQuarantine { get; set; } = false;
+
+    /// <summary>
     /// When true, the AutoTradingScanner completely bypasses the Circuit Breaker
     /// so dataset accumulation never stops due to consecutive losses.
     /// Defaults to false so Circuit Breaker actively protects trading.

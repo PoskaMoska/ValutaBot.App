@@ -157,9 +157,100 @@ window.updateLivePriceUI(1.08600);
 window.resetLivePriceFlash();
 assert(lastRafCb === null && priceEl.className === 'live-price-value', "resetLivePriceFlash cancels pending rAF and restores clean class");
 
-console.log("=======================================================");
-console.log(`AUDIT 7 TESTS: ${total} | PASSED: ${passed} | FAILED: ${total - passed}`);
-console.log("=======================================================\n");
+// 8. Candle timing thresholds & green-zone boundary wait helpers (state.js)
+assert(window.getTfSeconds('S5') === 5 && window.getTfSeconds('M1') === 60, "getTfSeconds parses S5=5 and M1=60");
+const s5Thresh = window.getTrafficLightThresholds(5);
+const m1Thresh = window.getTrafficLightThresholds(60);
+assert(s5Thresh.greenThresh === 0 && s5Thresh.yellowThresh === 1, "S5 traffic light thresholds preserve green=0, yellow=1");
+assert(m1Thresh.greenThresh === 2 && m1Thresh.yellowThresh === 8, "M1 traffic light thresholds preserve green=2, yellow=8");
 
-if (passed !== total) process.exit(1);
-process.exit(0);
+// At 4.200s into S5 candle (remaining=0 -> green zone), should wait 800 + 120 = 920ms until next bar opens
+assert(window.getCandleBoundaryWaitMs('s5', 4200) === 920, "getCandleBoundaryWaitMs('s5', 4200) waits 920ms for next 5s bar");
+// At 3.500s into S5 candle (remaining=1 -> yellow zone), should not delay
+assert(window.getCandleBoundaryWaitMs('s5', 3500) === 0, "getCandleBoundaryWaitMs('s5', 3500) returns 0 outside green zone");
+// At 0.200s into fresh S5 candle (remaining=4 -> red zone), sends immediately for ExpiryGuard
+assert(window.getCandleBoundaryWaitMs('s5', 200) === 0, "getCandleBoundaryWaitMs('s5', 200) returns 0 at start of candle");
+// At 58.000s into M1 candle (remaining=1 -> green zone), waits 2000 + 120 = 2120ms
+assert(window.getCandleBoundaryWaitMs('m1', 58000) === 2120, "getCandleBoundaryWaitMs('m1', 58000) waits 2120ms for M1 close");
+// Mid-candle M1 (30.000s) returns 0
+assert(window.getCandleBoundaryWaitMs('m1', 30000) === 0, "getCandleBoundaryWaitMs('m1', 30000) returns 0 mid-candle");
+
+// 9. Async boundary defer + cancelAnalysis behavior in api.js when triggered in green zone
+(async () => {
+    const apiJsPath = path.resolve(__dirname, '../api.js');
+    let apiJs = fs.readFileSync(apiJsPath, 'utf8')
+        .replace(/import\s+[\s\S]*?from\s+['"][^'"]+['"];?/g, '/* mocked import */')
+        .replace(/export\s+(async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(/g, 'window.$2 = $1function(')
+        .replace(/export\s+const\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =')
+        .replace(/export\s+let\s+([a-zA-Z0-9_]+)\s*=/g, 'window.$1 =');
+
+    window.currentAsset = 'EUR/USD OTC';
+    window.currentTf = 's5';
+    window.tg = window.Telegram.WebApp;
+    window.getCustomInitData = () => '';
+    window.isNetworkOnline = true;
+    window.setNetworkOnlineState = (v) => { window.isNetworkOnline = Boolean(v); };
+    window.setCircuitBreakerState = () => {};
+    window.setPriceSocket = () => {};
+    window.priceSocket = null;
+    window.setLastPriceVal = () => {};
+    window.showAiChart = () => {};
+    window.hideAiChart = () => {};
+    window.updateAiChartData = () => {};
+    window.clearResults = () => {};
+    window.startStatusBar = () => {};
+    window.stopStatusBar = () => {};
+    window.flashResults = () => {};
+    window.renderDirSvg = () => {};
+    window.renderMiniChart = () => {};
+    window.renderSparklinePrediction = () => {};
+    window.renderExpiryCandles = () => {};
+    window.switchResultTab = () => {};
+    window.parseMd = (s) => s;
+    window.pricesToBars = () => [];
+    window.normalizeDirection = (d) => d || 'NEUTRAL';
+
+    const btn = window.document.createElement('button');
+    btn.id = 'btnGet';
+    window.document.body.appendChild(btn);
+
+    window.eval(apiJs);
+
+    let analyzeCalls = 0;
+    window.fetch = async (url) => {
+        if (String(url).includes('/api/analyze')) analyzeCalls++;
+        return {
+            ok: true,
+            headers: { get: () => 'application/json' },
+            text: async () => JSON.stringify({ result: { direction: 'BUY', probability: 62, duration: '5 сек', chartData: [1, 1.01] }, config: {} })
+        };
+    };
+
+    // Shift offset so Date.now() + timeOffset sits 4.65s into a 5s candle (~470ms total wait with +120ms buffer)
+    const nowReal = Date.now();
+    const targetVirtual = Math.floor(nowReal / 5000) * 5000 + 4650;
+    window.setTimeOffset(targetVirtual - nowReal);
+    window.executeAnalysis();
+    await new Promise(r => setTimeout(r, 80));
+    assert(analyzeCalls === 0, "executeAnalysis in S5 green zone waits for candle close before firing /api/analyze");
+    await new Promise(r => setTimeout(r, 520));
+    assert(analyzeCalls === 1, "executeAnalysis fires /api/analyze immediately after candle opens");
+
+    // Verify cancelAnalysis aborts green-zone wait without sending /api/analyze
+    const beforeCancel = analyzeCalls;
+    const nowReal2 = Date.now();
+    const targetVirtual2 = Math.floor(nowReal2 / 5000) * 5000 + 4550;
+    window.setTimeOffset(targetVirtual2 - nowReal2);
+    window.executeAnalysis();
+    await new Promise(r => setTimeout(r, 50));
+    window.cancelAnalysis();
+    await new Promise(r => setTimeout(r, 650));
+    assert(analyzeCalls === beforeCancel, "cancelAnalysis cancels pending green-zone boundary wait cleanly");
+
+    console.log("=======================================================");
+    console.log(`AUDIT 7 TESTS: ${total} | PASSED: ${passed} | FAILED: ${total - passed}`);
+    console.log("=======================================================\n");
+
+    if (passed !== total) process.exit(1);
+    process.exit(0);
+})();

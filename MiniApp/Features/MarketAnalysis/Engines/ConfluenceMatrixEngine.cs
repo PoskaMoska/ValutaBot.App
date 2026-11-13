@@ -422,6 +422,9 @@ public class ConfluenceMatrixEngine(
         int finalProbPct;
 
         const int RequiredProb = 58;
+        // S5 ceiling aligned with orchestrator's s5 adaptive threshold (60-65% across 70-92% payouts)
+        const int S5ProbabilityCeiling = 65;
+        bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
 
         // D-2 fix: проверка отсутствия направленного MTF-консенсуса (пустой словарь/null или все TF == NEUTRAL при отсутствии DominantDirection).
@@ -443,9 +446,9 @@ public class ConfluenceMatrixEngine(
         int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
         int probCeiling = 100; // жёсткий потолок вероятности, применяется после всех стадий
 
-        if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
+        if (isS5)
         {
-            probCeiling = Math.Min(probCeiling, 59);
+            probCeiling = Math.Min(probCeiling, S5ProbabilityCeiling);
         }
 
         int ApplyRiskDampeners(int p, bool emitNotes)
@@ -479,9 +482,9 @@ public class ConfluenceMatrixEngine(
             finalProbPct = (int)Math.Clamp(Math.Round(neuralConf * 100.0), 50, 92);
 
             // S5 Micro-Timeframe Noise Calibration
-            if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
+            if (isS5)
             {
-                finalProbPct = Math.Min(59, finalProbPct);
+                finalProbPct = Math.Min(S5ProbabilityCeiling, finalProbPct);
             }
 
             finalProbPct = ApplyRiskDampeners(finalProbPct, emitNotes: true);
@@ -538,9 +541,9 @@ public class ConfluenceMatrixEngine(
             {
                 finalDir = taScore > 0 ? "BUY" : "PUT";
                 finalProbPct = (int)Math.Clamp(Math.Round((0.50 + Math.Abs(taScore) * 0.25) * 100.0), 50, 92);
-                if (timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase))
+                if (isS5)
                 {
-                    finalProbPct = Math.Min(59, finalProbPct);
+                    finalProbPct = Math.Min(S5ProbabilityCeiling, finalProbPct);
                 }
                 finalProbPct = ApplyRiskDampeners(finalProbPct, emitNotes: true);
                 safetyNotes.Add("ℹ️ Резервный режим: ML сигнал нейтрален или на калибровке (Fallback Engine)");
@@ -661,31 +664,8 @@ public class ConfluenceMatrixEngine(
                 probCeiling = Math.Min(probCeiling, 54);
                 safetyNotes.Add($"⚠️ Перегрев толпы (FOMO Bottom): толпа {crowdSentiment:F0}% в CALL (>=82% PUT) на дне (RSI {taSignal.Rsi:F0}) — риск отскока вверх, вход PUT подавлен");
             }
-            // Case 2: Trap Confluence (Fading Extreme Crowd with Technical Confluence - 73.7% Win Rate Setup)
-            // Bot wants PUT (reversal/resistance) while crowd is heavily long (>= 75%)
-            else if (finalDir == "PUT" && crowdSentiment >= 75.0)
-            {
-                int crowdBoost = hasRiskDampener ? 2 : (crowdSentiment >= 85.0 ? 6 : 4);
-                finalProbPct = Math.Clamp(finalProbPct + crowdBoost, 50, 85);
-                safetyNotes.Add($"🎯 Ловушка толпы (Fade Crowd PUT): толпа застряла в CALL ({crowdSentiment:F0}%), вход против толпы (+{crowdBoost}%)");
-            }
-            // Bot wants BUY (reversal/support) while crowd is heavily short (<= 25%)
-            else if (finalDir == "BUY" && crowdSentiment <= 25.0)
-            {
-                int crowdBoost = hasRiskDampener ? 2 : (crowdSentiment <= 15.0 ? 6 : 4);
-                finalProbPct = Math.Clamp(finalProbPct + crowdBoost, 50, 85);
-                safetyNotes.Add($"🎯 Ловушка толпы (Fade Crowd BUY): толпа застряла в PUT (всего {crowdSentiment:F0}% CALL), вход против толпы (+{crowdBoost}%)");
-            }
-            // Case 3: Healthy Trend Following (Moderate crowd alignment 58-75% for BUY, 25-42% for PUT)
-            else if ((finalDir == "BUY" && crowdSentiment >= 58.0 && crowdSentiment <= 75.0 && taSignal.Rsi is >= 45.0 and <= 65.0) ||
-                     (finalDir == "PUT" && crowdSentiment >= 25.0 && crowdSentiment <= 42.0 && taSignal.Rsi is >= 35.0 and <= 55.0))
-            {
-                if (!hasRiskDampener && finalProbPct < 70)
-                {
-                    finalProbPct += 2;
-                    safetyNotes.Add($"🌊 Здоровый импульс по тренду: умеренный сантимент толпы ({crowdSentiment:F0}%) подтверждает тренд (+2%)");
-                }
-            }
+            // Crowd sentiment probability boosts (+4/+6% fade and +2% trend) are disabled:
+            // empirical trade_outcomes analysis showed sub-breakeven win rates on boosted signals.
         }
 
         finalProbPct = Math.Min(finalProbPct, probCeiling);

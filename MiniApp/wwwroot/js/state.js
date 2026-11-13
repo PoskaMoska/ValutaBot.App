@@ -77,6 +77,44 @@ export function setNetworkOnlineState(isOnline) {
 export let currentAsset = (typeof window !== 'undefined' && window.currentAsset) ? window.currentAsset : 'EUR/USD OTC';
 export let currentTf = (typeof window !== 'undefined' && window.currentTf) ? window.currentTf : 'm1';
 
+export const TF_SECONDS_MAP = {
+    s3: 3, s5: 5, s10: 10, s15: 15, s30: 30,
+    m1: 60, m2: 120, m3: 180, m5: 300, m15: 900, m30: 1800,
+    h1: 3600, h4: 14400, d1: 86400
+};
+
+export function getTfSeconds(tf = currentTf) {
+    const tfClean = String(tf || 'm1').toLowerCase();
+    return TF_SECONDS_MAP[tfClean] || 60;
+}
+
+export function getTrafficLightThresholds(tfSec) {
+    if (tfSec <= 5) return { greenThresh: 0, yellowThresh: 1 };
+    if (tfSec <= 10) return { greenThresh: 1, yellowThresh: 2 };
+    if (tfSec <= 15) return { greenThresh: 1, yellowThresh: 3 };
+    if (tfSec <= 30) return { greenThresh: 2, yellowThresh: 5 };
+    return { greenThresh: 2, yellowThresh: 8 };
+}
+
+/**
+ * When triggered inside the green traffic-light window at the end of an expiring bar,
+ * returns milliseconds to wait until just after the next candle opens (+120ms safety buffer)
+ * so the backend analyzes the newly closed bar and clears ExpiryGuard.
+ */
+export function getCandleBoundaryWaitMs(tf, nowMs) {
+    const tfSec = getTfSeconds(tf);
+    if (!Number.isFinite(nowMs) || tfSec <= 0) return 0;
+    const nowSec = Math.floor(nowMs / 1000);
+    const elapsed = ((nowSec % tfSec) + tfSec) % tfSec;
+    const remaining = (tfSec - 1) - elapsed;
+    const { greenThresh } = getTrafficLightThresholds(tfSec);
+    if (remaining > greenThresh) return 0;
+    const tfMs = tfSec * 1000;
+    const msIntoBar = ((nowMs % tfMs) + tfMs) % tfMs;
+    const msToNextBar = tfMs - msIntoBar;
+    return msToNextBar > 0 ? Math.min(msToNextBar + 120, (greenThresh + 1) * 1000 + 250) : 0;
+}
+
 export function setCurrentAsset(asset) {
     if (!asset) return;
     currentAsset = asset;

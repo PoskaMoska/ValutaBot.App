@@ -145,6 +145,26 @@ public class MarketAnalysisOrchestrator(
         return sumBits.ToString("X8").Substring(0, 8);
     }
 
+    /// <summary>
+    /// Computes a micro-delay (in ms) when an on-demand request arrives within the final
+    /// milliseconds before a candle closes so Stage 1 reads the newly closed bar instead of the previous one.
+    /// </summary>
+    internal static double ComputePreCloseBoundaryDelayMs(
+        DateTime referenceUtc,
+        int intervalSecs,
+        double maxLookaheadMs = 350.0,
+        double bufferMs = 30.0)
+    {
+        if (intervalSecs <= 0) return 0.0;
+        long bucketTicks = TimeSpan.FromSeconds(intervalSecs).Ticks;
+        long ticksIntoBar = referenceUtc.Ticks % bucketTicks;
+        if (ticksIntoBar <= 0) return 0.0;
+        double remainingMs = TimeSpan.FromTicks(bucketTicks - ticksIntoBar).TotalMilliseconds;
+        return (remainingMs > 0.0 && remainingMs <= maxLookaheadMs)
+            ? remainingMs + bufferMs
+            : 0.0;
+    }
+
     #endregion
 
     #region Main Pipeline Entrypoint
@@ -163,6 +183,17 @@ public class MarketAnalysisOrchestrator(
         var traceLines = new List<string>();
 
         _logger.LogInformation("[TRACE {TraceId}] Analysis started for Asset: {Asset}, TF: {Timeframe}", traceId, asset, timeframe);
+
+        if (preloadedCandles == null && PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+        {
+            int intervalSecs = _fetcher.TimeframeSeconds(timeframe);
+            double preCloseDelayMs = ComputePreCloseBoundaryDelayMs(PocketOptionWebSocketStream.GetBrokerTimeUtc(), intervalSecs);
+            if (preCloseDelayMs > 0.0)
+            {
+                _logger.LogInformation("[TRACE {TraceId}] Boundary alignment: waiting {DelayMs:F0}ms for {Asset}/{Timeframe} candle close.", traceId, preCloseDelayMs, asset, timeframe);
+                await Task.Delay(TimeSpan.FromMilliseconds(preCloseDelayMs), ct);
+            }
+        }
 
         // Stage 1: Fetch and Prepare Closed Candle Windows
         var prepared = await FetchAndPrepareCandlesAsync(asset, timeframe, preloadedCandles, traceId, traceLines);

@@ -1,0 +1,88 @@
+{
+  "model_version": "dual_stream_onnx_v5",
+  "calibrated_at_utc": "2026-11-13T22:38:25.685875+00:00",
+  "trained_at_utc": "2026-10-29T23:25:10.487627+00:00",
+  "dataset": "dataset_objective_dual_stream.npz",
+  "dataset_meta": {
+    "horizon_bars": 1,
+    "horizon_sec": 5,
+    "step": 6,
+    "noise_bps": 0.6,
+    "assets": [
+      "EURUSD_PO",
+      "GBPUSD_PO",
+      "USDJPY_PO",
+      "AUDUSD_PO",
+      "USDCAD_PO",
+      "USDCHF_PO"
+    ],
+    "n": 68840
+  },
+  "horizon_sec": 5,
+  "n_train": 68840,
+  "n_cal": 34420,
+  "n_test": 33944,
+  "temperature": 8.9026,
+  "temperature_folded": true,
+  "calibration_applied": true,
+  "payout": 0.82,
+  "break_even_winrate": 0.5494505494505495,
+  "accuracy": null,
+  "accuracy_tradeable_only": 0.5066113559761473,
+  "overall_live_winrate_50": 0.43680768324298846,
+  "test_live_like": [
+    {
+      "tau": 0.5,
+      "n": 33944,
+      "winrate": 0.43680768324298846,
+      "avg_conf": 0.5009684592303548,
+      "ci_lo": 0.4315386022230384,
+      "ci_hi": 0.44209106617979754,
+      "ev": -0.20501001649776102
+    },
+    {
+      "tau": 0.52,
+      "n": 60,
+      "winrate": 0.4,
+      "avg_conf": 0.5372757748957722,
+      "ci_lo": 0.28569303003765506,
+      "ci_hi": 0.5263417560579315,
+      "ev": -0.27199999999999996
+    },
+    {
+      "tau": 0.54,
+      "n": 26,
+      "winrate": 0.46153846153846156,
+      "avg_conf": 0.5496502513175201,
+      "ci_lo": 0.28755582695234905,
+      "ci_hi": 0.6454236379556988,
+      "ev": -0.15999999999999998
+    },
+    {
+      "tau": 0.55,
+      "n": 12,
+      "winrate": 0.3333333333333333,
+      "avg_conf": 0.5557193541666742,
+      "ci_lo": 0.13811783989736134,
+      "ci_hi": 0.609382412602386,
+      "ev": -0.3933333333333334
+    },
+    {
+      "tau": 0.56,
+      "n": 2,
+      "winrate": 0.0,
+      "avg_conf": 0.5673419009556181,
+      "ci_lo": 0.0,
+      "ci_hi": 0.6576280471103807,
+      "ev": -1.0
+    }
+  ],
+  "gate": {
+    "pass": false,
+    "tau": 0.58,
+    "min_trades": 300,
+    "detail": "no trades at confidence >= 0.58"
+  },
+  "onnx_parity_ok": true,
+  "onnx_sha256": "a58e160c5005b704d84815740a0c20962f44a0e5c0d55f933f4b90394c2e11b6"
+}

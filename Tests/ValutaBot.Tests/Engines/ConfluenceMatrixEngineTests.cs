@@ -221,5 +221,60 @@ namespace ValutaBot.Tests.Engines
             Assert.True(decision.Probability <= 60, $"Expected probability <= 60% when circuit breaker is active, got {decision.Probability}");
             Assert.Contains("демпфировано", decision.CombinedReasoningText);
         }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_S5StrongSignal_ClearsExecutionThresholdWithinCeiling()
+        {
+            var taSignal = new TaSignal(1.5, 70.0, 58, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish BOS");
+            var mlSignal = new MlSignal("BUY", 0.64, 0.72, "dual_stream_v5");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.5);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "Normal", "MTF", new Dictionary<string, string>(), "BUY");
+            var noiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: true,
+                ZScore: 1.0,
+                LocalAtrBps: 2.0,
+                NoiseFloorBps: 1.0,
+                RegimeDescription: "Здоровый импульс"
+            );
+
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s5", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: noiseAudit);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.InRange(decision.Probability, 61, 65);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_ExtremeOrModerateCrowd_DoesNotInflateProbability()
+        {
+            var taSignal = new TaSignal(1.0, 70.0, 55.0, 100, 1.0, 5);
+            var smcSignal = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish BOS");
+            var mlSignal = new MlSignal("BUY", 0.56, 0.60, "patch_tst_v3");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.5);
+            var mtfResult = new ConfluenceMatrixResult(0.60, false, 6, "Normal", "MTF", new Dictionary<string, string>(), "BUY");
+
+            var baseline = await _engine.EvaluateMatrixAsync("EURUSD", "m1", false, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, crowdSentiment: 50.0);
+            var extremeFade = await _engine.EvaluateMatrixAsync("EURUSD", "m1", false, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, crowdSentiment: 10.0);
+            var moderateTrend = await _engine.EvaluateMatrixAsync("EURUSD", "m1", false, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, crowdSentiment: 65.0);
+
+            Assert.Equal(baseline.Probability, extremeFade.Probability);
+            Assert.Equal(baseline.Probability, moderateTrend.Probability);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_OverheatedFomoCrowdOnHighRsi_CapsBuyProbability()
+        {
+            var taSignal = new TaSignal(1.2, 70.0, 72.0, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish BOS");
+            var mlSignal = new MlSignal("BUY", 0.62, 0.68, "patch_tst_v3");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.5);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "Normal", "MTF", new Dictionary<string, string>(), "BUY");
+
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "m1", false, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, crowdSentiment: 88.0);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.True(decision.Probability <= 54, $"Expected FOMO crowd cap <= 54%, got {decision.Probability}");
+            Assert.Contains("Перегрев толпы", decision.CombinedReasoningText);
+        }
     }
 }
