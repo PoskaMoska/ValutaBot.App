@@ -1488,7 +1488,7 @@ body.keyboard-visible .asset-menu {
 }
 
 /* ─── Mobile GPU Performance & Layer Isolation ─── */
-.sphere-scene, .magic-ball, .ai-chart-container {
-    transform: translateZ(0);
+/* Note: never apply contain: paint or translateZ(0) to .sphere-scene / .magic-ball — it clips 3D orbits and flattens preserve-3d. */
+.ai-chart-container {
     contain: paint;
 }

@@ -610,32 +610,6 @@ export async function executeAnalysis() {
         const durEl = document.getElementById('resDur');
         if (durEl) durEl.innerText = data.duration || '--';
 
-        // Bind Monte Carlo / Kelly Risk Management Block (#mcCard)
-        const mcCard = document.getElementById('mcCard');
-        if (mcCard && data.risk_management) {
-            const rm = data.risk_management;
-            const mcKelly = document.getElementById('mcKelly');
-            if (mcKelly) {
-                mcKelly.innerText = rm.volatility_filter_passed !== false 
-                    ? `${rm.kelly_percentage}%` 
-                    : '0% (Фильтр)';
-                mcKelly.style.color = rm.volatility_filter_passed !== false && rm.kelly_percentage > 0 ? '#10b981' : '#f59e0b';
-            }
-            const mcEv = document.getElementById('mcEv');
-            if (mcEv) {
-                const prob = Number(data.probability) || 50;
-                const evVal = ((prob / 100 * 0.82) - ((100 - prob) / 100)).toFixed(2);
-                mcEv.innerText = `${evVal > 0 ? '+' : ''}${evVal}`;
-                mcEv.style.color = evVal > 0 ? '#10b981' : '#f59e0b';
-            }
-            const wfStatus = document.getElementById('wfStatus');
-            if (wfStatus) {
-                wfStatus.innerText = rm.volatility_filter_passed !== false ? 'В НОРМЕ' : 'ПАУЗА';
-                wfStatus.style.color = rm.volatility_filter_passed !== false ? '#10b981' : '#ef4444';
-            }
-            mcCard.style.display = 'block';
-        }
-
         if (data.rsi !== undefined) {
             const rsiEl = document.getElementById('resRsi');
             if (rsiEl) {

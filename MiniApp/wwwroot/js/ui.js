@@ -142,7 +142,6 @@ export function clearResults() {
     safeSetStyle('tabContentAI', 'display', 'none');
     safeSetStyle('mlEnsembleCard', 'display', 'none');
     safeSetStyle('confluenceCard', 'display', 'none');
-    safeSetStyle('mcCard', 'display', 'none');
     safeSetStyle('reasoningCard', 'display', 'none');
     safeSetStyle('newsCard', 'display', 'none');
     safeSetStyle('welcomeSec', 'display', 'flex');
