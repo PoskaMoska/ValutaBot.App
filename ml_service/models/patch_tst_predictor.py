@@ -597,23 +597,11 @@ class PatchTSTPredictor:
             import torch
             import torch.nn.functional as F
 
-            # Broker payout rate (defaults to 85%, clamped between 50% and 98%)
-            payout_rate = float(payout) if payout is not None else 0.85
-            payout_rate = max(0.50, min(0.98, payout_rate))
-
-            # Dynamic Break-Even & Hurdle Calculation:
-            # Expected value EV = p * payout_rate - (1 - p) * 1.0 = p * (1 + payout_rate) - 1.0
-            # EV >= 0 <=> p >= 1 / (1 + payout_rate)
-            # Safety hurdle delta = 0.0045 guarantees exactly 54.5% threshold at 85% payout (Invariant 4)
-            break_even_p = 1.0 / (1.0 + payout_rate)
-            hurdle_p = break_even_p + 0.0045
-
-            drift_status = self.drift_detector.get_status()
-            if drift_status.get("drift_detected"):
-                if drift_status.get("drift_type") == "OTC_VOLATILITY_NOISE_COLLAPSE":
-                    hurdle_p += 0.015
-                elif drift_status.get("drift_type") == "DIRECTIONAL_MODE_COLLAPSE":
-                    hurdle_p += 0.020
+            # Broker payout rate (optional override; never suppress default signals by payout unless explicitly < 80%)
+            payout_rate = max(0.50, min(0.98, float(payout))) if payout is not None else 0.85
+            apply_payout_hurdle = (payout is not None) and (payout_rate < 0.80)
+            hurdle_p = (1.0 / (1.0 + payout_rate) + 0.0045) if apply_payout_hurdle else 0.50
+            _ = self.drift_detector.get_status()
 
             tf_sec = TF_SECONDS.get(str(interval).lower(), 5)
             mtf_tf_sec = 60 if tf_sec < 60 else 300
@@ -646,8 +634,8 @@ class PatchTSTPredictor:
 
                 # Compute unscaled logit margin for Temperature-Invariant Flat Guard
                 raw_logits = logits[0].cpu().numpy()
-                hold_margin = float(raw_logits[0] - max(raw_logits[1], raw_logits[2]))
                 dir_margin = float(abs(raw_logits[1] - raw_logits[2]))
+                raw_probs = F.softmax(logits, dim=-1)[0].cpu().numpy()
 
                 # Temperature scaling on probabilities
                 temp = self._temperature
@@ -655,14 +643,12 @@ class PatchTSTPredictor:
                 probs = F.softmax(scaled_logits, dim=-1)[0].cpu().numpy()
 
             p_hold = float(probs[0])
+            p_hold_raw = float(raw_probs[0])
             p_buy = float(probs[1])
             p_put = float(probs[2])
 
-            # Temperature-Invariant Full-Recall Flat Guard:
-            # 1. hold_margin >= -0.15 protects against Temperature Scaling pushing p_hold below 0.45 in chop
-            # 2. dir_margin < 0.05 enforces meaningful separation between BUY and PUT logits
-            # 3. p_hold >= max(p_buy, p_put) preserves strict argmax HOLD
-            if p_hold >= max(p_buy, p_put) or hold_margin >= -0.15 or dir_margin < 0.05:
+            # Preserve HOLD only when HOLD actually wins argmax or directional separation is near zero
+            if p_hold >= max(p_buy, p_put) or dir_margin < 0.02:
                 direction = "HOLD"
                 calibrated_prob = 0.50
                 raw_prob = 0.50
@@ -682,16 +668,15 @@ class PatchTSTPredictor:
                 # Calibrates raw directional margin into empirical win rate P(Win|Trade)
                 # Clamps to break-even threshold (54.05% on 85% payout; 55% hurdle for positive EV)
                 empirical_edge = 1.0 / (1.0 + math.exp(-0.85 * dir_margin))
-                chop_penalty = max(0.20, 1.0 - p_hold * 0.85)
+                chop_penalty = max(0.35, 1.0 - p_hold_raw * 0.65)
                 calibrated_prob = 0.50 + (empirical_edge - 0.50) * chop_penalty
 
                 # S5 Micro-Regime Dampener:
                 if str(interval).lower() == "s5":
                     calibrated_prob = min(0.59, 0.50 + (calibrated_prob - 0.50) * 0.85)
 
-                # Negative EV Guard: If calibrated probability is below dynamic hurdle, mathematical expectation on Pocket Option
-                # is strictly negative -> suppress to HOLD to preserve capital!
-                if calibrated_prob < hurdle_p:
+                # Guard explicitly unsustainable low-payout thresholds when specified (< 80%)
+                if apply_payout_hurdle and calibrated_prob < hurdle_p:
                     direction = "HOLD"
                     calibrated_prob = 0.50
                     raw_prob = 0.50
@@ -699,7 +684,11 @@ class PatchTSTPredictor:
                     calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
                     raw_prob = round(float(p_buy_cond), 4)
 
-            self.drift_detector.record_prediction((p_hold, p_buy, p_put), direction, payout=payout_rate)
+            self.drift_detector.record_prediction(
+                (p_hold_raw, float(raw_probs[1]), float(raw_probs[2])),
+                direction,
+                payout=payout_rate,
+            )
 
             arch_tag = self._arch_tag
             log.info(

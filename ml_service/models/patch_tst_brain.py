@@ -516,15 +516,16 @@ class DualStreamPatchBrain(nn.Module):
         gw_cell = self.cell_gate_weights[aid_idx, tf_idx]  # [B, 25]
         gate_mult = torch.exp(torch.clamp((G_even_n * gw_cell).sum(dim=-1), -1.5, 1.5) * g_scale)
 
-        # Goldilocks sweet spot saturation + Sniper Gate modulation
+        # Monotonic saturation + Sniper Gate modulation (avoids collapsing strong trends toward 0)
         dir_tau_ratio = torch.clamp(dir_s / tau, -8.0, 8.0)
-        sat_s = dir_s / (1.0 + dir_tau_ratio ** 4)
+        sat_denom = torch.sqrt(1.0 + dir_tau_ratio ** 2)
+        sat_s = dir_s / sat_denom
         final_s = sat_s * gate_mult
 
         # Calibrated uniform probability scale across all 30 cells (clamped against cubic explosion)
         s_norm = torch.clamp(final_s / cell_p85, -4.0, 4.0)
         alpha_dir = torch.clamp(0.20 * s_norm + 0.14 * (s_norm ** 3), -3.0, 3.0)
-        sniper_gate = gate_mult / (1.0 + dir_tau_ratio ** 4)
+        sniper_gate = gate_mult / sat_denom
 
         return alpha_dir, sniper_gate
 

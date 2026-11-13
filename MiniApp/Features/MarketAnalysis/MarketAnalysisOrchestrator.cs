@@ -761,9 +761,37 @@ public class MarketAnalysisOrchestrator(
         else if (consensus.FinalDirection == "NEUTRAL" || string.IsNullOrEmpty(consensus.FinalDirection))
         {
             // БИЗНЕС-ИНВАРИАНТ: Бот ВСЕГДА даёт торговый сигнал (BUY или PUT).
-            // В условиях низкой волатильности / нейтрального ML консенсус приводится к направлению микро-дрейфа.
+            // При NEUTRAL / HOLD опираемся на взвешенный консенсус TA + SMC + MTF + импульс серии свечей,
+            // а не на случайный цвет одной последней свечи.
+            double fallbackScore = Math.Clamp(sensors.TaResult.score, -1.0, 1.0) * 0.50;
+
+            string bosDir = (sensors.SmcResult.BosDirection ?? "").ToUpperInvariant();
+            if (sensors.SmcResult.HasBos)
+            {
+                if (bosDir.Contains("BULL") || bosDir == "BUY") fallbackScore += 0.25;
+                else if (bosDir.Contains("BEAR") || bosDir == "PUT") fallbackScore -= 0.25;
+            }
+
+            string mtfDir = (mtfResult.DominantDirection ?? "").ToUpperInvariant();
+            if (mtfDir == "BUY") fallbackScore += 0.15;
+            else if (mtfDir == "PUT") fallbackScore -= 0.15;
+
+            if (prep.ClosedCandles.Length >= 5 && prep.ClosedCandles[^5].Open > 0)
+            {
+                double impulse5Bps = (prep.ClosedCandles[^1].Close - prep.ClosedCandles[^5].Open) / prep.ClosedCandles[^5].Open * 10000.0;
+                fallbackScore += Math.Clamp(impulse5Bps / 15.0, -1.0, 1.0) * 0.15;
+            }
+            else if (Math.Abs(sensors.State.VelocityBpsPerSec) > 1e-6)
+            {
+                fallbackScore += Math.Clamp(sensors.State.VelocityBpsPerSec / 3.0, -1.0, 1.0) * 0.15;
+            }
+
             string fallbackDir = "BUY";
-            if (prep.ClosedCandles.Length > 0)
+            if (Math.Abs(fallbackScore) >= 0.05)
+            {
+                fallbackDir = fallbackScore > 0 ? "BUY" : "PUT";
+            }
+            else if (prep.ClosedCandles.Length > 0)
             {
                 fallbackDir = prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT";
             }
@@ -776,12 +804,21 @@ public class MarketAnalysisOrchestrator(
                 fallbackDir = prep.MainPrices[^1] >= prep.MainPrices[^2] ? "BUY" : "PUT";
             }
 
-            int fallbackProb = consensus.Probability >= 50 ? consensus.Probability : 51;
+            int fallbackProb = consensus.Probability > 50
+                ? consensus.Probability
+                : (Math.Abs(fallbackScore) >= 0.25 && sensors.MainAdx >= 20.0
+                    ? Math.Clamp(50 + (int)Math.Round(Math.Abs(fallbackScore) * 14.0), 52, 62)
+                    : 50);
+
+            string reasonSource = Math.Abs(fallbackScore) >= 0.05
+                ? "по консенсусу TA/SMC/MTF и импульса"
+                : "по ценовому микро-дрейфу";
+
             consensus = consensus with {
                 FinalDirection = fallbackDir,
                 CandidateDirection = fallbackDir,
                 Probability = fallbackProb,
-                CombinedReasoningText = consensus.CombinedReasoningText + $"\n🧭 Определение импульса: консенсус приведен к сигналу {fallbackDir} ({fallbackProb}%) по ценовому микро-дрейфу."
+                CombinedReasoningText = consensus.CombinedReasoningText + $"\n🧭 Определение импульса: консенсус приведен к сигналу {fallbackDir} ({fallbackProb}%) {reasonSource}."
             };
         }
 
@@ -1229,6 +1266,7 @@ public class MarketAnalysisOrchestrator(
         string regime = sensors.State.VelocityRegime ?? "";
         if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс";
         else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс";
+        else if (sensors.MainAdx >= 24.0 && Math.Abs(sensors.TaResult.score) >= 0.40) uiMarketPhase = sensors.TaResult.score > 0 ? "Бычий тренд" : "Медвежий тренд";
         else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Коррекция)";
         else if (sensors.TaResult.rsiVal >= 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Сброс)" : "Бычий тренд (Пологий)";
         else if (sensors.TaResult.rsiVal <= 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Пологий)";
@@ -1240,9 +1278,12 @@ public class MarketAnalysisOrchestrator(
         double vel = Math.Abs(sensors.State.VelocityBpsPerSec);
         double dangerVel = exec.IsSubminute ? 0.3 : 3.0; 
         double deadVel   = exec.IsSubminute ? 0.02 : 0.1;
+        double atrBps = prep.CurrentLivePrice > 0 ? (sensors.MainAtr / prep.CurrentLivePrice) * 10000.0 : cm.NoiseAudit.LocalAtrBps;
+        double effectiveAtrBps = Math.Max(atrBps, cm.NoiseAudit.LocalAtrBps);
+        double deadAtrBps = exec.IsSubminute ? 0.45 : 1.2;
 
         if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
-        else if (vel < deadVel) uiMarketEntropy = "Мертвый рынок";
+        else if (vel < deadVel && effectiveAtrBps < deadAtrBps && sensors.MainAdx < 18.0) uiMarketEntropy = "Мертвый рынок";
 
         string uiSmcDirection = 
             (cm.SmcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
