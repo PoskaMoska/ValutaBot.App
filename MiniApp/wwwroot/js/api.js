@@ -10,11 +10,10 @@ import {
     setLastPriceVal, 
     priceSocket, 
     setPriceSocket, 
-    triggerCopilotAction,
     setCircuitBreakerState,
     isNetworkOnline,
     setNetworkOnlineState
-} from './state.js?v=20261103_audit_v7';
+} from './state.js?v=20261113_nocopilot';
 
 function resolveAuthData() {
     try {
@@ -72,16 +71,13 @@ import {
     showAiChart, 
     hideAiChart, 
     updateAiChartData, 
-    updateAiCopilot,
-    recordAnalysisPsychometrics,
-    getSessionPsychometrics,
     showNetworkBanner,
     hideNetworkBanner,
     normalizeDirection,
     hapticImpact,
     hapticNotification,
     hapticSelection
-} from './ui.js?v=20261103_audit_v7';
+} from './ui.js?v=20261113_nocopilot';
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -523,7 +519,6 @@ export async function executeAnalysis() {
         if (isStale()) return;
 
         cleanupUi();
-        recordAnalysisPsychometrics();
 
         // 1. Explicit Circuit Breaker Check First
         if (data.reason === 'CIRCUIT_BREAKER_ACTIVE' || (data.message && data.message.includes('Circuit Breaker'))) {
@@ -661,13 +656,32 @@ export async function executeAnalysis() {
         if (wSession && data.uiMarketSession) {
             wSession.innerText = data.uiMarketSession;
             let sColor = "#f59e0b";
-            let sessionLow = data.uiMarketSession.toLowerCase();
-            if (sessionLow.includes("европа") || sessionLow.includes("америка") || sessionLow.includes("нью-йорк") || sessionLow.includes("лондон")) {
-                sColor = "#10b981";
-            } else if (sessionLow.includes("otc")) {
+            const sessionLow = data.uiMarketSession.toLowerCase();
+            if (sessionLow.includes("закрыт")) {
+                sColor = "#ef4444";
+            } else if (sessionLow.includes("otc") || sessionLow.includes("внебирж")) {
                 sColor = "#8b5cf6";
-            } else if (sessionLow.includes("мертв") || sessionLow.includes("пил") || sessionLow.includes("ази")) {
+            } else if (sessionLow.includes("крипт")) {
+                sColor = "#06b6d4";
+            } else if (
+                sessionLow.includes("мертв") ||
+                sessionLow.includes("пил") ||
+                sessionLow.includes("ази") ||
+                sessionLow.includes("ноч") ||
+                sessionLow.includes("тих") ||
+                sessionLow.includes("вечер") ||
+                sessionLow.includes("флэт")
+            ) {
                 sColor = "#f59e0b";
+            } else if (
+                sessionLow.includes("европ") ||
+                sessionLow.includes("америк") ||
+                sessionLow.includes("нью-йорк") ||
+                sessionLow.includes("лондон") ||
+                sessionLow.includes("актив") ||
+                sessionLow.includes("объем")
+            ) {
+                sColor = "#10b981";
             }
             wSession.style.color = sColor;
         }
@@ -675,13 +689,28 @@ export async function executeAnalysis() {
         const wPhase = document.getElementById("weatherPhase");
         if (wPhase && data.uiMarketPhase) {
             wPhase.innerText = data.uiMarketPhase;
-            let phaseColor = "#10b981";
-            let phaseLow = data.uiMarketPhase.toLowerCase();
-            if (phaseLow.includes("флэт") || phaseLow.includes("замедление") || phaseLow.includes("консолидация") || phaseLow.includes("боковик")) {
+            let phaseColor = "#94a3b8";
+            const phaseLow = data.uiMarketPhase.toLowerCase();
+            if (
+                phaseLow.includes("флэт") ||
+                phaseLow.includes("замедлен") ||
+                phaseLow.includes("консолидац") ||
+                phaseLow.includes("боковик") ||
+                phaseLow.includes("штиль") ||
+                phaseLow.includes("сжат") ||
+                phaseLow.includes("коррекц") ||
+                phaseLow.includes("отскок") ||
+                phaseLow.includes("откат") ||
+                phaseLow.includes("сброс") ||
+                phaseLow.includes("разворот") ||
+                phaseLow.includes("пила") ||
+                phaseLow.includes("перекуплен") ||
+                phaseLow.includes("перепродан")
+            ) {
                 phaseColor = "#f59e0b";
-            } else if (phaseLow.includes("медвеж") || phaseLow.includes("перепродан") || phaseLow.includes("падени") || phaseLow.includes("сброс")) {
+            } else if (phaseLow.includes("медвеж") || phaseLow.includes("падени")) {
                 phaseColor = "#ef4444";
-            } else if (phaseLow.includes("быч") || phaseLow.includes("перекуплен") || phaseLow.includes("рост")) {
+            } else if (phaseLow.includes("быч") || phaseLow.includes("рост")) {
                 phaseColor = "#10b981";
             }
             wPhase.style.color = phaseColor;
@@ -691,17 +720,33 @@ export async function executeAnalysis() {
         const wTitle = document.getElementById("weatherTitle");
         if (wEntropy && data.uiMarketEntropy) {
             wEntropy.innerText = data.uiMarketEntropy;
-            let entColor = "#10b981";
-            let entLow = data.uiMarketEntropy.toLowerCase();
-            if (entLow.includes("норм") || entLow.includes("безопасн")) {
-                entColor = "#10b981";
-            } else if (entLow.includes("хаос") || entLow.includes("опасн") || entLow.includes("шторм")) {
+            let entColor = "#94a3b8";
+            const entLow = data.uiMarketEntropy.toLowerCase();
+            if (
+                entLow.includes("высок") ||
+                entLow.includes("хаос") ||
+                entLow.includes("небезопасн") ||
+                /(?:^|[^а-яё])опасн/.test(entLow) ||
+                entLow.includes("шторм") ||
+                entLow.includes("спайк")
+            ) {
                 entColor = "#ef4444";
-            } else if (entLow.includes("мертв") || entLow.includes("сонн") || entLow.includes("штиль")) {
+            } else if (
+                entLow.includes("мертв") ||
+                entLow.includes("сонн") ||
+                entLow.includes("штиль") ||
+                entLow.includes("повыш") ||
+                entLow.includes("шум")
+            ) {
                 entColor = "#f59e0b";
+            } else if (entLow.includes("норм") || entLow.includes("безопасн")) {
+                entColor = "#10b981";
             }
             wEntropy.style.color = entColor;
-            if (wTitle) wTitle.style.color = entColor;
+            if (wTitle) {
+                const sessionClosed = wSession && (wSession.style.color === "#ef4444" || wSession.style.color === "rgb(239, 68, 68)");
+                wTitle.style.color = sessionClosed ? "#ef4444" : entColor;
+            }
         }
 
         // ML Ensemble Card
@@ -820,26 +865,18 @@ export async function executeAnalysis() {
 
         renderDirSvg(normDir);
 
-        const durBars = pricesToBars(cleanPrices, 8);
-        if (data.chartOhlc && data.chartOhlc.length) renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles);
-        else if (durBars.length) renderMiniChart('durChart', durBars, '');
-
-        // AI Copilot Tactical Intelligence
-        updateAiCopilot(data, (rec) => {
-            triggerCopilotAction(rec);
-        });
+        renderExpiryCandles('durChart', data.chartOhlc, data.expiryCandles || 1, normDir);
 
         const tabReg = document.getElementById('resultsTabBar');
         if (tabReg) tabReg.style.display = 'flex';
         switchResultTab('chart');
         flashResults();
 
-        // Trader Psychometrics & Haptic Feedback Integration
-        const psycho = (typeof getSessionPsychometrics === 'function') ? getSessionPsychometrics() : { speedPenalty: 0 };
+        // Haptic Feedback Integration
         const probNum = Number(data.probability) || 0;
-        if (data.goldenSetup || (probNum >= 60 && !data.tfConflict && psycho.speedPenalty < 25)) {
+        if (data.goldenSetup || (probNum >= 60 && !data.tfConflict)) {
             hapticNotification('success');
-        } else if (psycho.speedPenalty >= 25 || (data.copilotAdvice && (data.copilotAdvice.status === 'CIRCUIT_BREAKER' || data.copilotAdvice.status === 'NOISE_GUARD'))) {
+        } else if (data.tfConflict) {
             hapticNotification('warning');
         } else {
             if (normDir === 'BUY' || normDir === 'PUT') {

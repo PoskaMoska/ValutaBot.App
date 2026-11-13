@@ -1236,6 +1236,167 @@ public class MarketAnalysisOrchestrator(
 
     #region Pipeline Stage 7: Assemble Response DTO
 
+    private static string ResolveMarketSession(bool isForex, bool isAssetOpen, bool isOtcFeed, DateTime utcNow)
+    {
+        if (!isForex) return "КРИПТО (24/7)";
+        if (!isAssetOpen) return "Рынок закрыт";
+
+        DayOfWeek dow = utcNow.DayOfWeek;
+        int h = utcNow.Hour;
+        bool isWeekendFxClosed = dow == DayOfWeek.Saturday
+            || (dow == DayOfWeek.Sunday && h < 21)
+            || (dow == DayOfWeek.Friday && h >= 22);
+
+        if (isOtcFeed || isWeekendFxClosed) return "Внебиржевая (OTC)";
+
+        if (h >= 21 || h < 1) return "Ночь (Тихий рынок)";
+        if (h < 7) return "Азия (Пила)";
+        if (h < 12) return "Лондон (Начало)";
+        if (h < 17) return "Нью-Йорк (Объемы)";
+        return "Нью-Йорк (Вечер)";
+    }
+
+    internal static (string Session, string Phase, string Entropy, bool IsHighChaos) EvaluateMarketWeather(
+        bool isForex,
+        bool isSubminute,
+        bool isAssetOpen,
+        bool isOtcFeed,
+        DateTime utcNow,
+        string velocityRegime,
+        double velocityBpsPerBar,
+        double mainAdx,
+        double taScore,
+        double rsiVal,
+        bool bbSqueeze,
+        bool isRiskBlocked,
+        string gatekeeperReason,
+        SubminuteNoiseGatekeeper.NoiseAuditResult noiseAudit,
+        double atrBps,
+        ReadOnlySpan<MiniAppController.OhlcCandle> closedCandles)
+    {
+        string session = ResolveMarketSession(isForex, isAssetOpen, isOtcFeed, utcNow);
+
+        double er = 0.5;
+        double netMoveBps = 0.0;
+        int erSpan = Math.Min(14, closedCandles.Length - 1);
+        if (erSpan >= 4)
+        {
+            int startIdx = closedCandles.Length - 1 - erSpan;
+            double pathSum = 0.0;
+            for (int i = startIdx + 1; i < closedCandles.Length; i++)
+            {
+                pathSum += Math.Abs(closedCandles[i].Close - closedCandles[i - 1].Close);
+            }
+            double pStart = closedCandles[startIdx].Close;
+            double pEnd = closedCandles[^1].Close;
+            double netMove = Math.Abs(pEnd - pStart);
+            er = pathSum > 1e-12 ? Math.Clamp(netMove / pathSum, 0.0, 1.0) : 0.0;
+            if (pStart > 0)
+            {
+                netMoveBps = ((pEnd - pStart) / pStart) * 10000.0;
+            }
+        }
+
+        double vel = Math.Abs(velocityBpsPerBar);
+        double effectiveAtrBps = Math.Max(atrBps, noiseAudit.LocalAtrBps);
+        double noiseFloorBps = Math.Max(0.5, noiseAudit.NoiseFloorBps);
+        double deadVel = isSubminute ? 0.12 : 0.25;
+        double deadAtrBps = isSubminute ? 0.45 : 1.2;
+        double chaosVel = Math.Max(noiseFloorBps * 4.5, isSubminute ? 4.5 : 8.0);
+
+        bool isGatekeeperDead = isRiskBlocked && gatekeeperReason.Contains("застоя", StringComparison.OrdinalIgnoreCase);
+        bool isDead = isGatekeeperDead || (vel < deadVel && effectiveAtrBps < deadAtrBps && mainAdx < 18.0);
+
+        bool isGatekeeperSpike = isRiskBlocked &&
+            (gatekeeperReason.Contains("Сквиз", StringComparison.OrdinalIgnoreCase) ||
+             gatekeeperReason.Contains("Flash", StringComparison.OrdinalIgnoreCase));
+        bool isNoiseSpike = noiseAudit.RegimeDescription.Contains("спайк", StringComparison.OrdinalIgnoreCase);
+        bool isWhipsawChaos = er <= 0.16 && effectiveAtrBps >= noiseFloorBps * 1.8 && Math.Abs(noiseAudit.ZScore) >= 1.8;
+        bool isExtremeVelChaos = vel >= chaosVel * (er >= 0.65 ? 1.5 : 1.0);
+        bool isHighChaos = isGatekeeperSpike || isNoiseSpike || isWhipsawChaos || isExtremeVelChaos;
+
+        bool isSubNoise = !isDead && !isHighChaos &&
+            ((isSubminute && !noiseAudit.IsTradeableImpulse && effectiveAtrBps < noiseFloorBps) ||
+             (er < 0.18 && mainAdx < 17.0));
+
+        string entropy = isDead
+            ? "Мертвый рынок"
+            : isHighChaos
+                ? "ВЫСОКАЯ (Хаос / Опасно!)"
+                : isSubNoise
+                    ? "Повышенная (Шум)"
+                    : "В норме (Безопасно)";
+
+        string phase;
+        if (isDead)
+        {
+            phase = "Боковик (Штиль)";
+        }
+        else if (isHighChaos && er <= 0.25 && Math.Abs(taScore) < 0.35)
+        {
+            phase = "Боковик (Пила)";
+        }
+        else if (bbSqueeze && mainAdx < 20.0 && Math.Abs(taScore) < 0.30 && er < 0.35)
+        {
+            phase = "Сжатие (Ожидание)";
+        }
+        else if (velocityRegime.Contains("UP", StringComparison.Ordinal))
+        {
+            phase = (taScore < -0.25 && mainAdx >= 22.0 && netMoveBps < 0)
+                ? "Отскок (Коррекция)"
+                : (!isSubNoise ? "Бычий импульс" : "Боковик (Пила)");
+        }
+        else if (velocityRegime.Contains("DOWN", StringComparison.Ordinal))
+        {
+            phase = (taScore > 0.25 && mainAdx >= 22.0 && netMoveBps > 0)
+                ? "Откат (Коррекция)"
+                : (!isSubNoise ? "Медвежий импульс" : "Боковик (Пила)");
+        }
+        else if (mainAdx >= 22.0 && (Math.Abs(taScore) >= 0.35 || (er >= 0.45 && Math.Abs(netMoveBps) >= Math.Max(effectiveAtrBps, 0.5) * 2.0)))
+        {
+            bool isBullTrend = Math.Abs(taScore) >= 0.20 ? taScore > 0 : netMoveBps >= 0;
+            phase = isBullTrend ? "Бычий тренд" : "Медвежий тренд";
+        }
+        else if (velocityRegime == "DECELERATING")
+        {
+            phase = "Замедление (Коррекция)";
+        }
+        else if (isSubminute && (noiseAudit.IsExtremeOverbought || (rsiVal >= 66.0 && mainAdx < 28.0)))
+        {
+            phase = "Перекупленность (Сброс)";
+        }
+        else if (isSubminute && (noiseAudit.IsExtremeOversold || (rsiVal <= 34.0 && mainAdx < 28.0)))
+        {
+            phase = "Перепроданность (Отскок)";
+        }
+        else if (!isSubminute && rsiVal >= 64.0)
+        {
+            phase = (rsiVal >= 72.0 && er < 0.30) ? "Перекупленность (Сброс)" : "Бычий тренд (Пологий)";
+        }
+        else if (!isSubminute && rsiVal <= 36.0)
+        {
+            phase = (rsiVal <= 28.0 && er < 0.30) ? "Перепроданность (Отскок)" : "Медвежий тренд (Пологий)";
+        }
+        else if (isSubNoise || (er < 0.18 && mainAdx < 18.0 && Math.Abs(taScore) < 0.20))
+        {
+            phase = (er < 0.18 && effectiveAtrBps >= noiseFloorBps) ? "Боковик (Пила)" : "Истинный Флэт";
+        }
+        else if (taScore >= 0.18 || (rsiVal >= 54.0 && taScore > -0.05))
+        {
+            phase = "Умеренный рост";
+        }
+        else if (taScore <= -0.18 || (rsiVal <= 46.0 && taScore < 0.05))
+        {
+            phase = "Умеренное падение";
+        }
+        else
+        {
+            phase = "Истинный Флэт";
+        }
+
+        return (session, phase, entropy, isHighChaos);
+    }
+
     private async Task<AnalysisResponseDto> BuildResponseDtoAsync(
         PreparedCandleData prep,
         string timeframe,
@@ -1247,43 +1408,30 @@ public class MarketAnalysisOrchestrator(
         var stats = await SignalTracker.GetOverallStatsAsync();
         var assetStats = await SignalTracker.GetStatsAsync(prep.CleanAsset, timeframe);
 
-        string uiMarketSession = "ВНЕБИРЖЕВАЯ (OTC)";
-        if (!prep.CleanAsset.Contains("BTC") && !prep.CleanAsset.Contains("ETH") && !prep.CleanAsset.Contains("SOL"))
-        {
-            int h = DateTime.UtcNow.Hour;
-            if (h >= 21 || h < 2) uiMarketSession = "Ночь (Тихий рынок)";
-            else if (h >= 2 && h < 8) uiMarketSession = "Азия (Пила)";
-            else if (h >= 8 && h < 13) uiMarketSession = "Лондон (Начало)";
-            else if (h >= 13 && h < 17) uiMarketSession = "Нью-Йорк (Объемы)";
-            else if (h >= 17 && h < 21) uiMarketSession = "Нью-Йорк (Вечер)";
-        }
-        else 
-        {
-            uiMarketSession = "КРИПТО";
-        }
-
-        string uiMarketPhase = "Боковик (Флэт)";
-        string regime = sensors.State.VelocityRegime ?? "";
-        if (regime.Contains("UP")) uiMarketPhase = "Бычий импульс";
-        else if (regime.Contains("DOWN")) uiMarketPhase = "Медвежий импульс";
-        else if (sensors.MainAdx >= 24.0 && Math.Abs(sensors.TaResult.score) >= 0.40) uiMarketPhase = sensors.TaResult.score > 0 ? "Бычий тренд" : "Медвежий тренд";
-        else if (regime == "DECELERATING") uiMarketPhase = "Замедление (Коррекция)";
-        else if (sensors.TaResult.rsiVal >= 62) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перекупленность (Сброс)" : "Бычий тренд (Пологий)";
-        else if (sensors.TaResult.rsiVal <= 38) uiMarketPhase = timeframe.StartsWith("s", StringComparison.OrdinalIgnoreCase) ? "Перепроданность (Отскок)" : "Медвежий тренд (Пологий)";
-        else if (sensors.TaResult.rsiVal >= 54) uiMarketPhase = "Умеренный рост";
-        else if (sensors.TaResult.rsiVal <= 46) uiMarketPhase = "Умеренное падение";
-        else uiMarketPhase = "Истинный Флэт";
-
-        string uiMarketEntropy = "В норме (Безопасно)";
-        double vel = Math.Abs(sensors.State.VelocityBpsPerSec);
-        double dangerVel = exec.IsSubminute ? 0.3 : 3.0; 
-        double deadVel   = exec.IsSubminute ? 0.02 : 0.1;
+        DateTime weatherUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+            : DateTime.UtcNow;
+        bool isOtcFeed = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.IsCurrentlyOtc(prep.CleanAsset);
+        bool isAssetOpen = !PriceFeed.UsePocketOption || PocketOptionWebSocketStream.IsAssetOpen(prep.CleanAsset);
         double atrBps = prep.CurrentLivePrice > 0 ? (sensors.MainAtr / prep.CurrentLivePrice) * 10000.0 : cm.NoiseAudit.LocalAtrBps;
-        double effectiveAtrBps = Math.Max(atrBps, cm.NoiseAudit.LocalAtrBps);
-        double deadAtrBps = exec.IsSubminute ? 0.45 : 1.2;
 
-        if (vel >= dangerVel) uiMarketEntropy = "ВЫСОКАЯ (Хаос / Опасно!)";
-        else if (vel < deadVel && effectiveAtrBps < deadAtrBps && sensors.MainAdx < 18.0) uiMarketEntropy = "Мертвый рынок";
+        var (uiMarketSession, uiMarketPhase, uiMarketEntropy, _) = EvaluateMarketWeather(
+            prep.IsForex,
+            exec.IsSubminute,
+            isAssetOpen,
+            isOtcFeed,
+            weatherUtc,
+            sensors.State.VelocityRegime ?? "",
+            sensors.State.VelocityBpsPerSec,
+            sensors.MainAdx,
+            sensors.TaResult.score,
+            sensors.TaResult.rsiVal,
+            sensors.BbSqueeze,
+            sensors.IsRiskBlocked,
+            sensors.Gatekeeper.Reason ?? "",
+            cm.NoiseAudit,
+            atrBps,
+            prep.ClosedCandles);
 
         string uiSmcDirection = 
             (cm.SmcSignal.SweepDirection ?? "").Contains("BULLISH") ? "BUY" : 
@@ -1296,109 +1444,6 @@ public class MarketAnalysisOrchestrator(
             (cm.SmcSignal.FvgType ?? "").Contains("BEARISH") ? "PUT" : 
             "NEUTRAL";
         int uiSmcConfidence = uiSmcDirection == "NEUTRAL" ? 50 : 50 + (int)Math.Clamp(Math.Max(5, Math.Abs(cm.Consensus.SmcScore * 15.0)), 5, 15);
-
-        // Copilot Tactical Advice
-        CopilotAdviceDto copilotAdvice;
-        if (exec.IsCbHalted)
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "CIRCUIT_BREAKER",
-                Title = "🛡️ Аварийный тормоз (Circuit Breaker)",
-                Message = $"Зафиксирована серия убытков на повышенной волатильности. Вход временно заблокирован для защиты депозита, нейросеть продолжает фоновое обучение.",
-                QualityScore = 35
-            };
-        }
-        else if (exec.IsGoldenSetup && exec.IsDirectional && cm.Consensus.Probability >= 57)
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "GOLDEN",
-                Title = "⭐ Снайперский импульс (Golden Setup)",
-                Message = $"Все 3 уровня анализа синхронны: нейросеть ({ml.Prediction?.ModelVersion ?? "Neural Brain"}), контекст старшего ТФ и импульс волатильности ({cm.NoiseAudit.LocalAtrBps:F1} bps) подтверждают {cm.Consensus.FinalDirection}. Порог шума преодолен.",
-                QualityScore = 96
-            };
-        }
-        else if (exec.IsSubminute && !cm.NoiseAudit.IsTradeableImpulse)
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "CAUTION",
-                Title = $"⚡ Вход в консолидации ({cm.Consensus.FinalDirection})",
-                Message = $"Амплитуда свечей ({cm.NoiseAudit.LocalAtrBps:F2} bps) ниже порога шума брокера ({cm.NoiseAudit.NoiseFloorBps:F1} bps). Направление — {cm.Consensus.FinalDirection} ({cm.Consensus.Probability}%). Ожидайте смену свечи для входа.",
-                RecommendedAsset = prep.CleanAsset,
-                RecommendedTf = timeframe.ToUpper(),
-                QualityScore = Math.Min(65, cm.Consensus.Probability)
-            };
-        }
-        else if (cm.ConflictPenalty < 1.0)
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "CONFLICT",
-                Title = "⚠️ Конфликт таймфреймов",
-                Message = $"На {timeframe} локальный импульс спорит со старшим трендом. Опасность ложного пробоя повышена.",
-                RecommendedAsset = prep.CleanAsset,
-                RecommendedTf = "M1",
-                QualityScore = 55
-            };
-        }
-        else if (exec.IsSubminute && vel >= dangerVel)
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "NOISE_GUARD",
-                Title = $"⚡ Брокерский шум на {timeframe.ToUpper()}",
-                Message = $"Энтропия рынка повышена ({uiMarketEntropy}). На микро-секундах высока доля случайных брокерских теней. Безопаснее перейти на 1M.",
-                RecommendedAsset = "EUR/USD OTC",
-                RecommendedTf = "M1",
-                QualityScore = 50
-            };
-        }
-        else if (sensors.MinutesToNews.HasValue && sensors.MinutesToNews.Value >= 0 && sensors.MinutesToNews.Value <= 15)
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "NEWS_RISK",
-                Title = "📰 Высокая новостная волатильность",
-                Message = $"Через {sensors.MinutesToNews.Value} мин выходит важная макро-новость. Спреды расширены, крупные игроки сокращают ликвидность.",
-                QualityScore = 48
-            };
-        }
-        else if (!exec.IsDirectional || cm.Consensus.Probability <= 52)
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "CAUTION",
-                Title = $"⚡ Вход в консолидации ({cm.Consensus.FinalDirection})",
-                Message = $"Рынок в стадии накопления ({uiMarketPhase}). Ожидайте смену свечи для входа {cm.Consensus.FinalDirection} ({cm.Consensus.Probability}%).",
-                RecommendedAsset = prep.CleanAsset,
-                RecommendedTf = timeframe.ToUpper(),
-                QualityScore = 65
-            };
-        }
-        else
-        {
-            copilotAdvice = new CopilotAdviceDto
-            {
-                Status = "NORMAL",
-                Title = $"🎯 Системный тренд ({cm.Consensus.FinalDirection})",
-                Message = $"Структура рынка устойчивая ({uiMarketPhase}). Математическое ожидание подтверждено нейросетью ({cm.Consensus.Probability}%).",
-                QualityScore = (int)Math.Clamp(cm.Consensus.Probability + 25, 75, 92)
-            };
-        }
-
-        int tfSec = prep.IntervalSecs;
-        if (tfSec > 0 && exec.IsSubminute && copilotAdvice != null && exec.IsDirectional)
-        {
-            long nowUnixSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            long nextCandleBoundary = (nowUnixSec - (nowUnixSec % tfSec)) + tfSec;
-            double secRemaining = Math.Max(0.1, nextCandleBoundary - (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0));
-            string timingAlert = secRemaining > 1.2
-                ? $"⏱ ВХОД НА СМЕНЕ СВЕЧИ: через {secRemaining:F1} сек (в {DateTimeOffset.FromUnixTimeSeconds(nextCandleBoundary).UtcDateTime:HH:mm:ss} UTC). Приготовьтесь нажать {cm.Consensus.FinalDirection}!"
-                : $"⚡ ВХОД СЕЙЧАС: новая свеча открыта! Нажимайте {cm.Consensus.FinalDirection} немедленно!";
-            copilotAdvice = copilotAdvice with { Message = timingAlert + "\n\n" + copilotAdvice.Message };
-        }
 
         ValutaMetrics.PredictionsTotal.WithLabels(
             prep.CleanAsset,
@@ -1461,8 +1506,7 @@ public class MarketAnalysisOrchestrator(
             goldenSetup = exec.IsGoldenSetup,
             confluenceLabel = cm.MtfResult.ConfluenceLabel,
             confluenceRatio = cm.MtfResult.ConfluenceRatio,
-            lgbmModelVersion = ml.Prediction?.ModelVersion ?? "offline",
-            copilotAdvice = copilotAdvice
+            lgbmModelVersion = ml.Prediction?.ModelVersion ?? "offline"
         };
     }
 

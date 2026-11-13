@@ -1,4 +1,4 @@
-import { lastPriceVal } from './state.js?v=20261103_audit_v7';
+import { lastPriceVal } from './state.js?v=20261113_nocopilot';
 
 export function hapticImpact(style = 'medium') {
     try {
@@ -137,7 +137,6 @@ export function clearResults() {
     safeSetStyle('resultsTabBar', 'display', 'none');
     safeSetStyle('resultsGrid', 'display', 'none');
     safeSetStyle('marketWeatherCard', 'display', 'none');
-    safeSetStyle('aiCopilotCard', 'display', 'none');
     safeSetStyle('consensusRadarCard', 'display', 'none');
     safeSetStyle('tabContentAI', 'display', 'none');
     safeSetStyle('mlEnsembleCard', 'display', 'none');
@@ -187,12 +186,24 @@ export function renderMiniChart(containerId, values, color) {
     }).join('');
 }
 
-// Expiry candles: renders N real OHLC candlesticks (N = expiryCandles)
-export function renderExpiryCandles(containerId, ohlc, count) {
+function resolveExpiryCandleClass(direction, candle) {
+    if (direction !== undefined && direction !== null && String(direction).trim() !== '') {
+        const norm = normalizeDirection(direction);
+        if (norm === 'BUY') return 'exp-bull';
+        if (norm === 'PUT') return 'exp-bear';
+        return 'exp-neutral';
+    }
+    if (candle) return candle.c >= candle.o ? 'exp-bull' : 'exp-bear';
+    return 'exp-neutral';
+}
+
+// Expiry candles: renders canonical thick candle for 1-candle expiry (always visible regardless of doji/flat OHLC),
+// or N readable OHLC candlesticks when count > 1, colored by the final signal direction.
+export function renderExpiryCandles(containerId, ohlc, count, direction) {
     const container = document.getElementById(containerId);
-    if (!container || !ohlc || !ohlc.length) return;
-    const n = Math.max(1, Math.min(count || ohlc.length, ohlc.length));
-    const tail = ohlc.slice(-n).map(k => {
+    if (!container) return;
+
+    const tail = Array.isArray(ohlc) ? ohlc.map(k => {
         if (!k || typeof k !== 'object') return null;
         const o = Number(k.o ?? k.open ?? k.Open);
         const h = Number(k.h ?? k.high ?? k.High);
@@ -202,22 +213,46 @@ export function renderExpiryCandles(containerId, ohlc, count) {
             return null;
         }
         return { o, h: Math.max(h, o, c), l: Math.min(l, o, c), c };
-    }).filter(Boolean);
-    if (!tail.length) return;
+    }).filter(Boolean) : [];
+
+    const reqCount = Number(count) > 0 ? Math.max(1, Number(count) | 0) : (tail.length || 1);
+    const hasExplicitDirection = direction !== undefined && direction !== null && String(direction).trim() !== '';
+
+    if (!tail.length && !hasExplicitDirection && !(Number(count) > 0)) return;
+
+    // For single-candle expiry (standard 1-candle horizon) or missing OHLC, render crisp full-body candle
+    // so doji / newly-opened ticks never collapse to a hairline or upside-down cross.
+    if (reqCount <= 1 || tail.length < 2) {
+        const refCandle = tail.length ? tail[tail.length - 1] : null;
+        const cls = resolveExpiryCandleClass(direction, refCandle);
+        const norm = hasExplicitDirection ? normalizeDirection(direction) : (refCandle && refCandle.c < refCandle.o ? 'PUT' : 'BUY');
+        const bodyTop = norm === 'PUT' ? 6 : norm === 'NEUTRAL' ? 9 : 10;
+        const bodyH = 24;
+        const wickStyle = 'top:2.0px;height:35.0px';
+        const bodyStyle = `top:${bodyTop.toFixed(1)}px;height:${bodyH.toFixed(1)}px`;
+        container.innerHTML = `<div class='exp-candle forming'><div class='exp-wick ${cls}' style='${wickStyle}'></div><div class='exp-body ${cls}' style='${bodyStyle}'></div></div>`;
+        return;
+    }
+
+    const sliceTail = tail.slice(-Math.min(reqCount, tail.length));
     const H = 40;
-    const lo = Math.min(...tail.map(k => k.l));
-    const hi = Math.max(...tail.map(k => k.h));
+    const lo = Math.min(...sliceTail.map(k => k.l));
+    const hi = Math.max(...sliceTail.map(k => k.h));
     const span = hi - lo;
     const y = (p) => span < 1e-12 ? H / 2 : 2 + ((hi - p) / span) * (H - 4);
-    container.innerHTML = tail.map((k, i) => {
+    container.innerHTML = sliceTail.map((k, i) => {
         const yH = y(k.h), yL = y(k.l);
         const yO = y(k.o), yC = y(k.c);
-        const bodyTop = Math.min(yO, yC);
-        const bodyH = Math.max(2.5, Math.abs(yC - yO));
-        const forming = i === tail.length - 1 ? ' forming' : '';
-        const wickStyle = `top:${yH.toFixed(1)}px;height:${Math.max(1, yL - yH).toFixed(1)}px`;
+        const rawBodyH = Math.abs(yC - yO);
+        const bodyH = Math.max(5, rawBodyH);
+        const midBody = (yO + yC) / 2;
+        const bodyTop = Math.max(2, Math.min(H - 2 - bodyH, midBody - bodyH / 2));
+        const forming = i === sliceTail.length - 1 ? ' forming' : '';
+        const wickTop = Math.min(yH, bodyTop);
+        const wickBot = Math.max(yL, bodyTop + bodyH);
+        const wickStyle = `top:${wickTop.toFixed(1)}px;height:${Math.max(12, wickBot - wickTop).toFixed(1)}px`;
         const bodyStyle = `top:${bodyTop.toFixed(1)}px;height:${bodyH.toFixed(1)}px`;
-        const cls = k.c >= k.o ? 'exp-bull' : 'exp-bear';
+        const cls = resolveExpiryCandleClass(direction, k);
         return `<div class='exp-candle${forming}'><div class='exp-wick ${cls}' style='${wickStyle}'></div><div class='exp-body ${cls}' style='${bodyStyle}'></div></div>`;
     }).join('');
 }
@@ -880,147 +915,6 @@ if (typeof window !== 'undefined') {
         if (mq && typeof mq.addEventListener === 'function') {
             mq.addEventListener('change', onWindowOrViewportResize);
         }
-    }
-}
-
-// Session psychometrics tracker
-let lastAnalysisTimestamp = 0;
-let recentAnalysisCount = 0;
-let analysisCountResetTimer = null;
-let lastSpeedPenalty = 0;
-
-export function recordAnalysisPsychometrics() {
-    const now = Date.now();
-    let speedPenalty = 0;
-    
-    if (lastAnalysisTimestamp > 0) {
-        const deltaSec = (now - lastAnalysisTimestamp) / 1000;
-        if (deltaSec < 12) {
-            speedPenalty += 25; // impulsive clicking / tilt risk
-        } else if (deltaSec < 25) {
-            speedPenalty += 10;
-        }
-    }
-    
-    recentAnalysisCount++;
-    if (analysisCountResetTimer) clearTimeout(analysisCountResetTimer);
-    analysisCountResetTimer = setTimeout(() => {
-        recentAnalysisCount = 0;
-    }, 60000);
-    
-    if (recentAnalysisCount > 5) {
-        speedPenalty += 15; // overtrading
-    }
-
-    lastAnalysisTimestamp = now;
-    lastSpeedPenalty = speedPenalty;
-    return { speedPenalty };
-}
-
-export function getSessionPsychometrics() {
-    return { speedPenalty: lastSpeedPenalty };
-}
-
-export function updateAiCopilot(data, onActionCallback) {
-    const card = document.getElementById('aiCopilotCard');
-    if (!card) return;
-
-    let rawAdvice = data ? (data.copilotAdvice || data.CopilotAdvice) : null;
-    if (typeof rawAdvice === 'string') {
-        try {
-            rawAdvice = JSON.parse(rawAdvice);
-        } catch {
-            rawAdvice = { message: rawAdvice };
-        }
-    }
-    if (!rawAdvice) {
-        card.style.display = 'none';
-        return;
-    }
-
-    // Normalizing C# PascalCase vs JS camelCase fields
-    const status = (rawAdvice.status || rawAdvice.Status || 'NORMAL').toUpperCase();
-    const title = rawAdvice.title || rawAdvice.Title || 'Рекомендация Ко-пилота';
-    const message = rawAdvice.message || rawAdvice.Message || '';
-    const recommendedAsset = rawAdvice.recommendedAsset || rawAdvice.RecommendedAsset || null;
-    const recommendedTf = rawAdvice.recommendedTf || rawAdvice.RecommendedTf || null;
-    const qualityScore = Number(rawAdvice.qualityScore ?? rawAdvice.QualityScore ?? 85);
-
-    card.style.display = 'block';
-
-    const psycho = getSessionPsychometrics();
-    const focusScore = Math.max(30, Math.min(99, qualityScore - psycho.speedPenalty));
-
-    const focusDot = document.getElementById('copilotFocusDot');
-    const focusText = document.getElementById('copilotFocusText');
-    if (focusText) {
-        focusText.innerText = `Фокус: ${focusScore}%`;
-    }
-    if (focusDot) {
-        if (focusScore >= 80) {
-            focusDot.style.background = '#10b981';
-            focusDot.style.boxShadow = '0 0 8px #10b981';
-        } else if (focusScore >= 60) {
-            focusDot.style.background = '#f59e0b';
-            focusDot.style.boxShadow = '0 0 8px #f59e0b';
-        } else {
-            focusDot.style.background = '#ef4444';
-            focusDot.style.boxShadow = '0 0 8px #ef4444';
-        }
-    }
-
-    card.classList.remove('state-golden', 'state-danger', 'state-caution');
-    if (status === 'GOLDEN') {
-        card.classList.add('state-golden');
-    } else if (status === 'CIRCUIT_BREAKER' || status === 'NOISE_GUARD' || status === 'CONFLICT' || status === 'NEWS_RISK' || psycho.speedPenalty >= 25) {
-        card.classList.add('state-danger');
-    } else if (status === 'WAIT' || status === 'CAUTION') {
-        card.classList.add('state-caution');
-    }
-
-    const headlineEl = document.getElementById('copilotHeadline');
-    if (headlineEl) {
-        if (psycho.speedPenalty >= 25) {
-            headlineEl.innerText = '⚠️ Внимание: Высокая частота входов (Тильт-контроль)';
-        } else {
-            headlineEl.innerText = title;
-        }
-    }
-
-    const msgEl = document.getElementById('copilotMessage');
-    if (msgEl) {
-        if (psycho.speedPenalty >= 25) {
-            msgEl.innerText = `Ты делаешь частые запросы с интервалом менее 12 сек. Вход на эмоциях без паузы приводит к сливу в 78% случаев. ${message}`;
-        } else {
-            msgEl.innerText = message;
-        }
-    }
-
-    const actionWrap = document.getElementById('copilotActionWrap');
-    const actionBtn = document.getElementById('copilotActionBtn');
-    const actionLabel = document.getElementById('copilotActionLabel');
-
-    if (actionWrap && actionBtn && (recommendedAsset || recommendedTf)) {
-        actionWrap.style.display = 'block';
-        let btnText = '🎯 ';
-        const tfUpper = recommendedTf ? String(recommendedTf).toUpperCase() : '';
-        if (recommendedAsset && tfUpper) {
-            btnText += `Переключить на ${recommendedAsset} (${tfUpper})`;
-        } else if (recommendedAsset) {
-            btnText += `Переключить на ${recommendedAsset}`;
-        } else if (tfUpper) {
-            btnText += `Переключить на ${tfUpper}`;
-        }
-
-        if (actionLabel) actionLabel.innerText = btnText;
-
-        actionBtn.onclick = () => {
-            if (typeof onActionCallback === 'function') {
-                onActionCallback({ asset: recommendedAsset, tf: recommendedTf });
-            }
-        };
-    } else if (actionWrap) {
-        actionWrap.style.display = 'none';
     }
 }
 

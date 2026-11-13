@@ -1,7 +1,7 @@
-import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261103_audit_v7';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, onCopilotAction, setNetworkOnlineState, clearExpiredAuthParams } from './state.js?v=20261103_audit_v7';
+import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261113_nocopilot';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, setNetworkOnlineState, clearExpiredAuthParams } from './state.js?v=20261113_nocopilot';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261103_audit_v7';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261113_nocopilot';
 
 // 1. Telegram WebApp Lifecycle, Viewport & Theme Synchronization
 const syncViewport = () => {
@@ -99,8 +99,6 @@ if (tg) {
     window.addEventListener('resize', syncViewport, { passive: true });
 }
 
-onCopilotAction(applyCopilotRecommendation);
-
 const assetsList = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
 
 function getTopAssets() {
@@ -187,18 +185,9 @@ function toggleMenu(m) {
 }
 
 let switchThrottleTimer = null;
-let copilotExecTimer = null;
 let countdownTimerId = null;
 
-export function cancelCopilotTimer() {
-    if (copilotExecTimer) {
-        clearTimeout(copilotExecTimer);
-        copilotExecTimer = null;
-    }
-}
-
 function throttledWsSwitch() {
-    cancelCopilotTimer();
     cancelAnalysis();
     closePriceWebSocket(); // Immediate disconnect: prevents stale ticks from old pair leaking into UI
     updateCountdown();
@@ -270,44 +259,6 @@ function setTf(el) {
     resetSignalKey();
 }
 
-export function applyCopilotRecommendation(rec) {
-    if (!rec) return;
-    cancelCopilotTimer();
-    let assetChanged = false;
-    let tfChanged = false;
-    if (rec.asset && rec.asset !== currentAsset) {
-        setCurrentAsset(rec.asset);
-        const selEl = document.getElementById('selectedAsset');
-        if (selEl) selEl.textContent = rec.asset;
-        document.querySelectorAll('.asset-item').forEach(i => {
-            i.classList.toggle('active', i.getAttribute('data-asset') === rec.asset);
-        });
-        assetChanged = true;
-    }
-    if (rec.tf && rec.tf.toLowerCase() !== currentTf.toLowerCase()) {
-        const tfClean = rec.tf.toLowerCase();
-        setCurrentTf(tfClean);
-        const selEl = document.getElementById('selectedTf');
-        if (selEl) selEl.textContent = tfClean.toUpperCase();
-        document.querySelectorAll('.tf-btn').forEach(i => {
-            i.classList.toggle('active', (i.getAttribute('data-tf') || '').toLowerCase() === tfClean);
-        });
-        tfChanged = true;
-    }
-    if (assetChanged || tfChanged) {
-        const sphere = document.getElementById('mainSphere');
-        if (sphere) sphere.classList.remove('buy-signal', 'put-signal', 'neutral-signal');
-        throttledWsSwitch();
-        resetSignalKey();
-        copilotExecTimer = setTimeout(() => {
-            copilotExecTimer = null;
-            executeAnalysis();
-        }, 250);
-    } else {
-        executeAnalysis();
-    }
-}
-
 function handleGlobalInteraction(e) {
     const target = e.target;
     if (!target) return;
@@ -317,11 +268,6 @@ function handleGlobalInteraction(e) {
         hapticImpact('medium');
         executeAnalysis();
         return;
-    }
-
-    const copilotBtn = target.closest('#copilotActionBtn');
-    if (copilotBtn) {
-        hapticImpact('light');
     }
 
     const assetTrigger = target.closest('#assetBtn');
@@ -500,7 +446,6 @@ document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
         cancelAnalysis();
         closePriceWebSocket();
-        cancelCopilotTimer();
         if (countdownTimerId) {
             clearTimeout(countdownTimerId);
             countdownTimerId = null;
@@ -534,7 +479,6 @@ window.addEventListener('pageshow', () => {
 window.addEventListener('pagehide', () => {
     cancelAnalysis();
     closePriceWebSocket();
-    cancelCopilotTimer();
     if (countdownTimerId) {
         clearTimeout(countdownTimerId);
         countdownTimerId = null;
@@ -545,7 +489,6 @@ if (typeof document !== 'undefined') {
     document.addEventListener('freeze', () => {
         cancelAnalysis();
         closePriceWebSocket();
-        cancelCopilotTimer();
         if (countdownTimerId) {
             clearTimeout(countdownTimerId);
             countdownTimerId = null;

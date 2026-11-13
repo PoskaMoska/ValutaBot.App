@@ -42,17 +42,6 @@ const html = `
     <div id="consensusRadarCard">
         <!-- The elements above are actually inside here in real UI, but for tests just having it exist is enough -->
     </div>
-    <div id="aiCopilotCard" style="display:none;">
-        <div id="copilotFocusDot"></div>
-        <div id="copilotFocusText"></div>
-        <div id="copilotHeadline"></div>
-        <div id="copilotMessage"></div>
-        <div id="copilotActionWrap" style="display:none;">
-            <button id="copilotActionBtn">
-                <span id="copilotActionLabel"></span>
-            </button>
-        </div>
-    </div>
     <button id="btnGet"></button>
     <div id="mainSphere"></div>
     <div id="errorDisplay"></div>
@@ -89,15 +78,7 @@ const mockBackendResponse = {
         smcDirection: "PUT",
         smcConfidence: 65,
         ofDirection: "NEUTRAL",
-        ofConfidence: 0,
-        copilotAdvice: {
-            status: "GOLDEN",
-            title: "🏆 Идеальное совпадение таймфреймов (Golden Setup)",
-            message: "Младший и старший тренды синхронизированы.",
-            recommendedAsset: "EUR/USD OTC",
-            recommendedTf: "M1",
-            qualityScore: 95
-        }
+        ofConfidence: 0
     },
     config: { ml: true, smc: true, of: true }
 };
@@ -115,7 +96,6 @@ window.tg = null;
 window.getCustomInitData = () => "";
 window.currentAsset = "EUR/USD OTC";
 window.currentTf = "m1";
-window.applyCopilotRecommendation = () => {};
 
 // Load UI functions from ui.js
 try {
@@ -173,9 +153,10 @@ try {
 
 async function runTest() {
     let passed = 0;
-    let total = 19; // 17 for success, 2 for error
+    let total = 0;
 
     function assertEq(name, actual, expected) {
+        total++;
         if (actual === expected) {
             console.log(`[PASS] ${name}`);
             passed++;
@@ -215,9 +196,6 @@ async function runTest() {
     assertEq("SMC Radar is PUT", getVal('radarSmc').includes('ВНИЗ (65%)'), true);
     assertEq("OrderFlow Radar is DISABLED", getVal('radarOf') === '', true);
     assertEq("Confluence Card display", document.getElementById('confluenceCard').style.display, 'block');
-    assertEq("AI Copilot Card display", document.getElementById('aiCopilotCard').style.display, 'block');
-    assertEq("AI Copilot Headline matches", getVal('copilotHeadline'), '🏆 Идеальное совпадение таймфреймов (Golden Setup)');
-    assertEq("AI Copilot Action Wrap visible", document.getElementById('copilotActionWrap').style.display, 'block');
 
 
     // --- SCENARIO 2: Error 500 ---

@@ -35,14 +35,12 @@ function setupDOM() {
     window.getCustomInitData = () => "mock_tg_token";
     window.currentAsset = "EURUSD";
     window.currentTf = "s10";
-    window.applyCopilotRecommendation = () => {};
 
     const globalShim = `
 var currentTf = window.currentTf || "s10";
 var currentAsset = window.currentAsset || "EURUSD";
 var tg = window.tg;
 var getCustomInitData = window.getCustomInitData || function() { return ""; };
-var applyCopilotRecommendation = window.applyCopilotRecommendation || function() {};
 `;
 
     // Eval UI and API code inside window context
@@ -166,15 +164,7 @@ async function runAllTests() {
             goldenSetup: true,
             confluenceLabel: "💎 ИДЕАЛЬНЫЙ СИГНАЛ (3 ТФ - 100%)",
             confluenceRatio: 1.0,
-            llmReport: "Нейромозг PatchTST v3 подтверждает устойчивый восходящий тренд.",
-            copilotAdvice: {
-                status: "GOLDEN",
-                title: "🎯 Системный тренд (BUY)",
-                message: "Структура рынка устойчивая. Математическое ожидание подтверждено нейросетью (65%).",
-                recommendedAsset: "EURUSD",
-                recommendedTf: "S10",
-                qualityScore: 90
-            }
+            llmReport: "Нейромозг PatchTST v3 подтверждает устойчивый восходящий тренд."
         },
         config: { ml: true, smc: true, of: false },
         risk_management: { kelly_percentage: 12.5, volatility_filter_passed: true }
@@ -191,6 +181,10 @@ async function runAllTests() {
         assertEq("Market Session matches exactly", getVal(document, 'weatherSession'), 'Европейская сессия');
         assertEq("Market Phase matches exactly", getVal(document, 'weatherPhase'), 'Бычий импульс');
         assertEq("Market Entropy matches exactly", getVal(document, 'weatherEntropy'), 'НОРМАЛЬНАЯ (Безопасно)');
+        assertEq("Scenario 1 Session color is green", document.getElementById('weatherSession').style.color, 'rgb(16, 185, 129)');
+        assertEq("Scenario 1 Phase color is green", document.getElementById('weatherPhase').style.color, 'rgb(16, 185, 129)');
+        assertEq("Scenario 1 Entropy color is green", document.getElementById('weatherEntropy').style.color, 'rgb(16, 185, 129)');
+        assertEq("Scenario 1 Weather Title color is green", document.getElementById('weatherTitle').style.color, 'rgb(16, 185, 129)');
         
         // 2. Fact Measured Accuracy
         assert(getVal(document, 'resProbFact').includes('факт: 64%'), "Fact measured winrate displays 'факт: 64%'");
@@ -205,9 +199,13 @@ async function runAllTests() {
         assertEq("Golden badge main is visible", document.getElementById('goldenSetupBadgeMain').style.display, 'inline-block');
         assertEq("Main sphere has buy-signal class", document.getElementById('mainSphere').classList.contains('buy-signal'), true);
 
-        // 5. Copilot Card
-        assertEq("Copilot headline matches", getVal(document, 'copilotHeadline'), '🎯 Системный тренд (BUY)');
-        assertEq("Copilot message matches", getVal(document, 'copilotMessage'), 'Структура рынка устойчивая. Математическое ожидание подтверждено нейросетью (65%).');
+        // 5. Copilot Card removed from UI
+        assertEq("AI Copilot card is absent from DOM", document.getElementById('aiCopilotCard'), null);
+
+        // 6. Expiry Candle matches final BUY direction and keeps bold body
+        const buyBody = document.querySelector('#durChart .exp-body');
+        assert(buyBody !== null && buyBody.classList.contains('exp-bull'), "Expiry candle uses green exp-bull class for BUY");
+        assert(buyBody !== null && parseFloat(buyBody.style.height) >= 20, "Expiry candle keeps thick body height (>= 20px)");
     });
 
     // ----------------------------------------------------
@@ -243,15 +241,7 @@ async function runAllTests() {
             goldenSetup: false,
             confluenceLabel: "💎 СЛАБЫЙ СИГНАЛ (1 ТФ - 33%)",
             confluenceRatio: 0.33,
-            llmReport: null,
-            copilotAdvice: {
-                status: "CAUTION",
-                title: "⚡ Вход в консолидации (PUT)",
-                message: "Рынок в стадии накопления. Ожидайте смену свечи для входа PUT (52%).",
-                recommendedAsset: "USDJPY",
-                recommendedTf: "M1",
-                qualityScore: 65
-            }
+            llmReport: null
         },
         config: { ml: true, smc: true, of: false },
         risk_management: { kelly_percentage: 0.0, volatility_filter_passed: false }
@@ -274,10 +264,59 @@ async function runAllTests() {
         assertEq("Radar TA is removed", getVal(document, 'radarTa'), '');
         assertEq("Radar SMC is removed", getVal(document, 'radarSmc'), '');
 
-        // Copilot caution state
-        assertEq("Copilot Title is Caution", getVal(document, 'copilotHeadline'), '⚡ Вход в консолидации (PUT)');
-        assert(getVal(document, 'copilotMessage').includes('Рынок в стадии накопления'), "Copilot warning text is rendered");
+        // Market weather colors in noisy flat OTC consolidation
+        assertEq("Scenario 2 OTC Session color is purple", document.getElementById('weatherSession').style.color, 'rgb(139, 92, 246)');
+        assertEq("Scenario 2 Flat Phase color is amber", document.getElementById('weatherPhase').style.color, 'rgb(245, 158, 11)');
+        assertEq("Scenario 2 High Noise Entropy color is red", document.getElementById('weatherEntropy').style.color, 'rgb(239, 68, 68)');
+        assertEq("Scenario 2 Weather Title color reflects red danger", document.getElementById('weatherTitle').style.color, 'rgb(239, 68, 68)');
+
+        // Expiry candle matches final PUT direction
+        const putBody = document.querySelector('#durChart .exp-body');
+        assert(putBody !== null && putBody.classList.contains('exp-bear'), "Expiry candle uses red exp-bear class for PUT");
+        assert(putBody !== null && parseFloat(putBody.style.height) >= 20, "Expiry candle keeps thick body height (>= 20px) for PUT");
     });
+
+    // ----------------------------------------------------
+    // Scenario 3: Doji OHLC & Direction-Driven Expiry Candle
+    // ----------------------------------------------------
+    const payloadNeutral = {
+        result: {
+            direction: "NEUTRAL",
+            probability: 50,
+            duration: "1 мин",
+            expiryCandles: 1,
+            chartData: [1.1000, 1.1000, 1.1000],
+            chartOhlc: [{ o: 1.1000, h: 1.1010, l: 1.0999, c: 1.1000 }],
+            uiMarketSession: "Лондон (Начало)",
+            uiMarketPhase: "Боковик (Штиль)",
+            uiMarketEntropy: "Повышенная (Шум)"
+        },
+        config: { ml: true, smc: true, of: false }
+    };
+
+    await testScenario("Scenario 3: Doji OHLC with NEUTRAL direction & override checks", payloadNeutral, (document, window) => {
+        const neutralBody = document.querySelector('#durChart .exp-body');
+        const neutralWick = document.querySelector('#durChart .exp-wick');
+        assert(neutralBody !== null && neutralBody.classList.contains('exp-neutral'), "Neutral final direction renders exp-neutral purple candle");
+        assert(neutralWick !== null && neutralWick.classList.contains('exp-neutral'), "Neutral expiry wick matches exp-neutral class");
+        assert(neutralBody !== null && parseFloat(neutralBody.style.height) >= 20, "Doji OHLC still renders thick readable body (>= 20px)");
+
+        // Even if the historical OHLC candle closed green (c > o), final direction 'PUT' forces red exp-bear
+        window.renderExpiryCandles('durChart', [{ o: 1.1000, h: 1.1010, l: 1.0999, c: 1.1008 }], 1, 'PUT');
+        const forcedPutBody = document.querySelector('#durChart .exp-body');
+        assert(forcedPutBody !== null && forcedPutBody.classList.contains('exp-bear'), "Bullish historical candle becomes exp-bear when final direction is PUT");
+
+        // Flat gravestone doji with missing c>o becomes green exp-bull when final direction is BUY, and retains tall body
+        window.renderExpiryCandles('durChart', [{ o: 1.1000, h: 1.1025, l: 1.0999, c: 1.1000 }], 1, 'BUY');
+        const forcedBuyBody = document.querySelector('#durChart .exp-body');
+        assert(forcedBuyBody !== null && forcedBuyBody.classList.contains('exp-bull'), "Gravestone doji becomes exp-bull when final direction is BUY");
+        assert(forcedBuyBody !== null && parseFloat(forcedBuyBody.style.height) >= 20, "Gravestone doji body remains thick (>= 20px)");
+    });
+
+    // Ensure Market Weather stays 1x4 horizontally in style.css (never 1fr 1fr 2x2 grid)
+    const styleCss = fs.readFileSync(path.resolve(__dirname, '../../css/style.css'), 'utf8');
+    assert(!styleCss.includes('grid-template-columns: 1fr 1fr !important'), "Market Weather does not collapse to 2x2 on narrow viewports");
+    assert(styleCss.includes('repeat(4, minmax(0, 1fr))'), "Market Weather maintains 4-column horizontal grid");
 
     console.log(`\n=======================================================`);
     console.log(`TOTAL TESTS: ${totalTests} | PASSED: ${passedTests} | FAILED: ${failedTests}`);

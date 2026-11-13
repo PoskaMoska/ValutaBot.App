@@ -115,13 +115,3 @@ export function setCircuitBreakerState(active) {
     isCircuitBreakerActive = Boolean(active);
 }
 
-// AI Copilot Action Handler Delegate
-let _copilotCallback = null;
-export function onCopilotAction(fn) {
-    _copilotCallback = fn;
-}
-export function triggerCopilotAction(rec) {
-    if (typeof _copilotCallback === 'function') {
-        _copilotCallback(rec);
-    }
-}
