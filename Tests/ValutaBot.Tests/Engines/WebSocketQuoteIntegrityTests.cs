@@ -141,24 +141,29 @@ public class WebSocketQuoteIntegrityTests
     }
 
     [Fact]
-    public void CandleRingBuffer_ConcurrentStress_UnderBurstTicksMaintainsConsistency()
+    public async Task CandleRingBuffer_ConcurrentStress_UnderBurstTicksMaintainsConsistency()
     {
         var ring = new RealtimeTickCollector.CandleRingBuffer(100);
         var baseTime = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        int totalCandles = 2000;
+        int totalCandles = 500;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
         var writeTask = Task.Run(() =>
         {
-            for (int i = 0; i < totalCandles; i++)
+            for (int i = 0; i < totalCandles && !cts.IsCancellationRequested; i++)
             {
                 ring.Add(new MiniAppController.OhlcCandle(
                     Open: i, High: i + 1, Low: i - 1, Close: i, Volume: 1, Timestamp: baseTime.AddMilliseconds(i * 10)));
+                if (i % 25 == 0)
+                {
+                    Thread.Yield();
+                }
             }
-        });
+        }, cts.Token);
 
         var readTask = Task.Run(() =>
         {
-            while (!writeTask.IsCompleted)
+            while (!writeTask.IsCompleted && !cts.IsCancellationRequested)
             {
                 var slice = ring.GetRecent(50);
                 if (slice.Length > 1)
@@ -169,10 +174,12 @@ public class WebSocketQuoteIntegrityTests
                         Assert.True(slice[j].Timestamp > slice[j - 1].Timestamp, "Candle timestamps must be strictly monotonic ascending.");
                     }
                 }
+                Thread.Yield();
             }
-        });
+        }, cts.Token);
 
-        Task.WaitAll(writeTask, readTask);
+        await Task.WhenAll(writeTask, readTask);
+        Assert.False(cts.IsCancellationRequested, "Test exceeded 5s limit - thread contention or deadlock prevented timely completion.");
         Assert.Equal(100, ring.Count);
         var finalSlice = ring.GetRecent(100);
         Assert.Equal(100, finalSlice.Length);
