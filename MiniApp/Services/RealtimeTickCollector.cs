@@ -474,6 +474,37 @@ namespace ValutaBot.MiniApp
                     batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.CrowdSentiment });
                     batch.BatchCommands.Add(batchCmd);
                 }
+
+                // Separate long-retention archive for weekend s5 OTC candles (Fri 20:44Z - Sun 21:00Z)
+                const string weekendBatchSql = @"
+                    INSERT INTO weekend_otc_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume, crowd_sentiment)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (asset, interval, open_time) DO UPDATE SET
+                        high_price      = GREATEST(weekend_otc_candles.high_price,  EXCLUDED.high_price),
+                        low_price       = LEAST(weekend_otc_candles.low_price,      EXCLUDED.low_price),
+                        close_price     = EXCLUDED.close_price,
+                        volume          = weekend_otc_candles.volume + EXCLUDED.volume,
+                        crowd_sentiment = EXCLUDED.crowd_sentiment;";
+                foreach (var item in grouped)
+                {
+                    if (!string.Equals(item.Interval, "s5", StringComparison.OrdinalIgnoreCase)
+                        || !ValutaBot.MiniApp.Services.WeekendShadowExperimentService.IsWeekendOtcWindowUtc(item.OpenTime))
+                    {
+                        continue;
+                    }
+                    var weekendCmd = new NpgsqlBatchCommand(weekendBatchSql);
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Asset });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Interval });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.OpenTime.ToString("o") });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Open });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.High });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Low });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Close });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = (double)item.Volume });
+                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.CrowdSentiment });
+                    batch.BatchCommands.Add(weekendCmd);
+                }
+
                 await batch.ExecuteNonQueryAsync(ct);
                 
                 await tx.CommitAsync(ct);

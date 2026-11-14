@@ -203,6 +203,8 @@ def test_fastapi_predict_routes_all_subminute_intervals_to_quant():
             assert 0.50 <= body["confidence"] <= 0.80
             assert body["auc"] is not None and body["auc"] > 0.51
             assert isinstance(body["top_features"], list) and len(body["top_features"]) >= 3
+            assert body.get("raw_uncapped_prob") is not None
+            assert 0.20 <= body["raw_uncapped_prob"] <= 0.80
 
 
 def test_weekend_synthetic_otc_caps_probability_honestly():
@@ -217,3 +219,22 @@ def test_weekend_synthetic_otc_caps_probability_honestly():
     assert res_sat[0] in ("BUY", "PUT", "NEUTRAL")
     assert res_sat[1] <= 0.52
     assert res_sat[5].get("weekend_otc") is True
+    assert res_sat[5].get("raw_uncapped_prob") is not None
+    assert 0.20 <= res_sat[5]["raw_uncapped_prob"] <= 0.80
+
+    # Also verify /predict HTTP response carries raw_uncapped_prob while clamping confidence <= 0.52 on weekends
+    from fastapi.testclient import TestClient
+    import main as ml_main
+
+    secret = os.environ.get("INTERNAL_API_SECRET", "default_secret")
+    with TestClient(ml_main.app) as client:
+        resp = client.post(
+            "/predict",
+            json={"symbol": "EURUSD_otc", "interval": "s5", "candles": sat_candles, "is_forex": False},
+            headers={"X-Internal-Secret": secret},
+        )
+        assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text}"
+        body = resp.json()
+        assert body["confidence"] <= 0.52
+        assert body.get("raw_uncapped_prob") is not None
+        assert 0.20 <= body["raw_uncapped_prob"] <= 0.80

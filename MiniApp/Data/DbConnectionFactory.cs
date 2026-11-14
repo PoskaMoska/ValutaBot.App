@@ -642,6 +642,7 @@ namespace ValutaBot.App.MiniApp.Data
             // Initialize Trade Outcome Online Learning Engine
             await TradeOutcomeTracker.InitializeAsync();
             RealtimeTickCollector.Initialize();
+            await ValutaBot.MiniApp.Services.WeekendShadowExperimentService.InitializeAsync();
         }
 
         public static async Task<string?> GetBotStateAsync(string key, CancellationToken ct = default)

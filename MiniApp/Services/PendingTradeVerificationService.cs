@@ -8,6 +8,7 @@ using Microsoft.Extensions.Hosting;
 using ValutaBot.App.MiniApp.Data.Repositories;
 using ValutaBot.MiniApp.Services;
 using Dapper;
+using Npgsql;
 
 namespace ValutaBot.MiniApp;
 
@@ -54,6 +55,17 @@ public class PendingTradeVerificationService : BackgroundService
                 try { await SweepExpiredTradesAsync(stoppingToken); }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
                 catch (Exception ex) { BotLogger.Warn($"[PendingVerifier] Sweep error: {ex.Message}"); }
+
+                try
+                {
+                    DateTime refTime = PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+                        ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+                        : DateTime.UtcNow;
+                    await WeekendShadowExperimentService.VerifyPendingWeekendExperimentsAsync(refTime, stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+                catch (Exception ex) { BotLogger.Warn($"[WeekendExpVerifier] Sweep error: {ex.Message}"); }
+
                 await Task.Delay(_checkInterval, stoppingToken);
             }
         }
@@ -179,36 +191,10 @@ public class PendingTradeVerificationService : BackgroundService
 
         try
         {
-            string minIsoPrimary = targetGrid.AddSeconds(-15).ToString("yyyy-MM-ddTHH:mm:ss");
-            string maxIsoPrimary = targetGrid.AddSeconds(5).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
-
             await ValutaBot.App.MiniApp.Data.DbConnectionFactory.WithRetryAsync(async conn =>
             {
-                // Locate the exact s5 candle that closed at the contract expiry boundary targetGrid.
-                // Strict fidelity: The candle's close (open_time + 5s) MUST match targetGrid within [-1.5s, +3.0s].
-                // Old candles (e.g. from 5s-20s prior) are STRICTLY REJECTED to prevent settling on pre-expiry ticks!
-                exitPrice = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(@"
-                    SELECT close_price
-                    FROM (
-                        SELECT close_price, open_time
-                        FROM subminute_candles
-                        WHERE asset = @Asset AND interval = @Interval
-                          AND open_time >= @MinIso
-                          AND open_time <= @MaxIso
-                        ORDER BY open_time DESC
-                        LIMIT 5
-                    ) sub
-                    WHERE open_time::timestamptz + INTERVAL '5 seconds' >= @TargetGrid - INTERVAL '1500 milliseconds'
-                      AND open_time::timestamptz + INTERVAL '5 seconds' <= @TargetGrid + INTERVAL '3000 milliseconds'
-                    ORDER BY ABS(EXTRACT(EPOCH FROM (open_time::timestamptz + INTERVAL '5 seconds' - @TargetGrid))) ASC
-                    LIMIT 1
-                ", new { 
-                    Asset = cleanAsset, 
-                    Interval = verifyInterval, 
-                    MinIso = minIsoPrimary,
-                    MaxIso = maxIsoPrimary,
-                    TargetGrid = targetGrid
-                }, cancellationToken: ct, commandTimeout: 8));
+                exitPrice = await FindStrictS5ClosePriceAsync(
+                    conn, cleanAsset, targetGrid, includeWeekendArchiveFallback: false, ct);
 
                 // Calculate excursion (MFE / MAE) during trade lifetime [createdBucket, targetGrid] via Index Seek on UNIQUE(asset, interval, open_time)
                 if (exitPrice.HasValue && exitPrice.Value > 1e-8 && !double.IsNaN(exitPrice.Value) && !double.IsInfinity(exitPrice.Value))
@@ -405,5 +391,70 @@ public class PendingTradeVerificationService : BackgroundService
             ? (record.WasCorrect.Value ? "WIN" : (isExactDoji ? "TIE(LOSS)" : "LOSS")) 
             : "HOLD";
         BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {resultStr} @ {exitPrice.Value} (Target: {record.VerifyAt:HH:mm:ss}, PnL: {record.PnlBps:+#0.00;-#0.00;0.00} bps)");
+    }
+
+    internal static async Task<double?> FindStrictS5ClosePriceAsync(
+        NpgsqlConnection conn,
+        string candleAsset,
+        DateTime targetGridUtc,
+        bool includeWeekendArchiveFallback = false,
+        CancellationToken ct = default)
+    {
+        DateTime grid = targetGridUtc.Kind == DateTimeKind.Utc ? targetGridUtc : targetGridUtc.ToUniversalTime();
+        string minIso = grid.AddSeconds(-15).ToString("yyyy-MM-ddTHH:mm:ss");
+        string maxIso = grid.AddSeconds(5).ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ");
+
+        const string primarySql = @"
+            SELECT close_price
+            FROM (
+                SELECT close_price, open_time
+                FROM subminute_candles
+                WHERE asset = @Asset AND interval = 's5'
+                  AND open_time >= @MinIso
+                  AND open_time <= @MaxIso
+                ORDER BY open_time DESC
+                LIMIT 5
+            ) sub
+            WHERE open_time::timestamptz + INTERVAL '5 seconds' >= @TargetGrid - INTERVAL '1500 milliseconds'
+              AND open_time::timestamptz + INTERVAL '5 seconds' <= @TargetGrid + INTERVAL '3000 milliseconds'
+            ORDER BY ABS(EXTRACT(EPOCH FROM (open_time::timestamptz + INTERVAL '5 seconds' - @TargetGrid))) ASC
+            LIMIT 1;";
+
+        var price = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(primarySql, new
+        {
+            Asset = candleAsset,
+            MinIso = minIso,
+            MaxIso = maxIso,
+            TargetGrid = grid
+        }, cancellationToken: ct, commandTimeout: 8));
+
+        if ((price == null || price.Value <= 1e-8) && includeWeekendArchiveFallback)
+        {
+            const string archiveSql = @"
+                SELECT close_price
+                FROM (
+                    SELECT close_price, open_time
+                    FROM weekend_otc_candles
+                    WHERE asset = @Asset AND interval = 's5'
+                      AND open_time >= @MinIso
+                      AND open_time <= @MaxIso
+                    ORDER BY open_time DESC
+                    LIMIT 5
+                ) sub
+                WHERE open_time::timestamptz + INTERVAL '5 seconds' >= @TargetGrid - INTERVAL '1500 milliseconds'
+                  AND open_time::timestamptz + INTERVAL '5 seconds' <= @TargetGrid + INTERVAL '3000 milliseconds'
+                ORDER BY ABS(EXTRACT(EPOCH FROM (open_time::timestamptz + INTERVAL '5 seconds' - @TargetGrid))) ASC
+                LIMIT 1;";
+
+            price = await conn.QueryFirstOrDefaultAsync<double?>(new CommandDefinition(archiveSql, new
+            {
+                Asset = candleAsset,
+                MinIso = minIso,
+                MaxIso = maxIso,
+                TargetGrid = grid
+            }, cancellationToken: ct, commandTimeout: 8));
+        }
+
+        return price;
     }
 }

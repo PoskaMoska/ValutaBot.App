@@ -702,6 +702,9 @@ class SubminuteQuantPredictor:
 
         # Weekend synthetic OTC guard: live Fri 20:44Z - Sun 21:00Z PRNG feed is coin-flip;
         # still return directional guidance for UI, while keeping confidence <= 52% below auto-trade threshold.
+        uncapped_conf = float(np.clip(cal_conf, 0.50, 0.80))
+        raw_uncapped_prob = uncapped_conf if p_raw_up >= 0.50 else (1.0 - uncapped_conf)
+
         last_ts = max(int(r.get("openTime", r.get("open_time", 0))) for r in candles)
         weekend_otc = is_weekend_otc_unix(last_ts)
         if weekend_otc:
@@ -742,6 +745,7 @@ class SubminuteQuantPredictor:
             "n_train": iv_meta.get("n_train"),
             "p_tie": round(float(p_tie), 4),
             "weekend_otc": weekend_otc,
+            "raw_uncapped_prob": round(float(raw_uncapped_prob), 4),
             "top_features": top_features,
         }
         return (direction, float(cal_conf), MODEL_VERSION, 1, float(signed_raw), details)

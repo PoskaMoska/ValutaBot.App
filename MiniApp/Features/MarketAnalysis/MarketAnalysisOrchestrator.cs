@@ -1266,6 +1266,37 @@ public class MarketAnalysisOrchestrator(
             }
         }
 
+        if (isSubminute && prep.ClosedCandles is { Length: >= 4 } && prep.IntervalSecs > 0)
+        {
+            DateTime lastClosedUtc = prep.ClosedCandles[^1].Timestamp.Kind == DateTimeKind.Utc
+                ? prep.ClosedCandles[^1].Timestamp
+                : prep.ClosedCandles[^1].Timestamp.ToUniversalTime();
+            DateTime entryBarOpenUtc = lastClosedUtc.AddSeconds(prep.IntervalSecs);
+            if (ValutaBot.MiniApp.Services.WeekendShadowExperimentService.IsWeekendOtcWindowUtc(entryBarOpenUtc))
+            {
+                double expEntryPrice = prep.CurrentLivePrice;
+                if (PriceFeed.UsePocketOption
+                    && PocketOptionWebSocketStream.TryGetLivePrice(prep.CleanAsset, out double freshExpPrice, maxAgeSeconds: 2.0)
+                    && freshExpPrice > 0)
+                {
+                    expEntryPrice = freshExpPrice;
+                }
+
+                var expCandles = prep.ClosedCandles;
+                var expPred = ml.Prediction;
+                double expCrowd = liveCrowdSentiment;
+                var expDxy = sensors.DxyMetrics;
+                string expAsset = prep.CleanAsset;
+                string expTf = timeframe;
+                int expIvSecs = prep.IntervalSecs;
+                int expHorizon = targetHorizon;
+
+                _ = Task.Run(() => ValutaBot.MiniApp.Services.WeekendShadowExperimentService.TryRecordWeekendExperimentAsync(
+                    expAsset, expTf, expIvSecs, expHorizon, entryBarOpenUtc, expEntryPrice,
+                    expCandles, expPred, expCrowd, expDxy));
+            }
+        }
+
         return new ExecutionOutcome(
             currentLivePrice,
             isGoldenSetup,

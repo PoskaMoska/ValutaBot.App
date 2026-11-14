@@ -177,6 +177,7 @@ public class DataRetentionService : BackgroundService
         var subCutoff = DateTime.UtcNow.Subtract(subminuteRetention).ToString("o");
         var legacySubCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromHours(12)).ToString("o");
         var histCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromDays(30)).ToString("o");
+        var weekendArchiveCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromDays(90)).ToString("o");
         var shadowCutoff = DateTime.UtcNow.Subtract(shadowRetention);
         var stalePendingCutoff = DateTime.UtcNow.AddHours(-2).ToString("o");
 
@@ -217,6 +218,26 @@ public class DataRetentionService : BackgroundService
                   LIMIT 3000
                   FOR UPDATE SKIP LOCKED
               )", new { cutoff = stalePendingCutoff }, chunkSize: 3000);
+
+        await ExecuteChunkedDeleteSubminuteAsync(conn, "weekend_otc_candles (>90d)",
+            @"DELETE FROM weekend_otc_candles
+              WHERE ctid IN (
+                  SELECT ctid FROM weekend_otc_candles
+                  WHERE open_time < @cutoff
+                  ORDER BY open_time ASC
+                  LIMIT 5000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = weekendArchiveCutoff }, chunkSize: 5000);
+
+        await ExecuteChunkedDeleteSubminuteAsync(conn, "weekend_otc_experiments (>90d)",
+            @"DELETE FROM weekend_otc_experiments
+              WHERE ctid IN (
+                  SELECT ctid FROM weekend_otc_experiments
+                  WHERE created_at < @cutoff
+                  ORDER BY created_at ASC
+                  LIMIT 5000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = weekendArchiveCutoff }, chunkSize: 5000);
 
         // 6. Importance Sampling and Pruning for trade_outcomes
         int shadowDeleted = 0;

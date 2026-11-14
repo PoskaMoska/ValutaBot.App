@@ -115,7 +115,8 @@ public static class MLPythonService
         double? VarianceEstimate = null,
         double? RawConfidence = null,
         int? HorizonCandles = null,
-        System.Collections.Generic.List<string>? TopFeatures = null
+        System.Collections.Generic.List<string>? TopFeatures = null,
+        [property: JsonPropertyName("raw_uncapped_prob")] double? RawUncappedProb = null
     );
 
     public static void Init(string? baseUrl)
@@ -465,7 +466,8 @@ public static class MLPythonService
                     VarianceEstimate: result.VarianceEstimate,
                     RawConfidence:    result.RawConfidence,
                     HorizonCandles:   result.HorizonCandles,
-                    TopFeatures:      result.TopFeatures
+                    TopFeatures:      result.TopFeatures,
+                    RawUncappedProb:  result.RawUncappedProb
                 );
             }
             return null;

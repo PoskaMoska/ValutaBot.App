@@ -270,6 +270,7 @@ async def predict(request: Request):
                 "n_train": q_det.get("n_train"),
                 "variance_estimate": None,
                 "raw_confidence": round(float(q_raw), 4),
+                "raw_uncapped_prob": q_det.get("raw_uncapped_prob"),
                 "ml_score": round(float((q_raw - 0.5) * 2.0), 4),
                 "top_features": q_det.get("top_features") or [],
             }
