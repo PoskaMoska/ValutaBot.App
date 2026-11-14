@@ -225,7 +225,7 @@ def test_07_fastapi_e2e_predict_endpoint(api_client):
 
     payload = {
         "symbol": "EURUSD",
-        "interval": "s5",
+        "interval": "5m",
         "candles": candles,
         "mtf_candles": mtf,
         "is_forex": True,

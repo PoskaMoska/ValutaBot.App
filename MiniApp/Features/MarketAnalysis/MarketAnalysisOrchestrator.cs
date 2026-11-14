@@ -60,7 +60,8 @@ public class MarketAnalysisOrchestrator(
         double CurrentLivePrice,
         string DataHash,
         string? HigherTf,
-        MiniAppController.OhlcCandle[] ClosedHigherCandles
+        MiniAppController.OhlcCandle[] ClosedHigherCandles,
+        MiniAppController.OhlcCandle[] ClosedMicroCandles
     );
 
     private sealed record SensorsAndFeatures(
@@ -310,6 +311,24 @@ public class MarketAnalysisOrchestrator(
             }
         }
 
+        MiniAppController.OhlcCandle[] closedMicroCandles = [];
+        if (tfLower is "s10" or "s15" or "s30" or "m1" && closedCandles.Length > 0 && intervalSecs > 0)
+        {
+            DateTime curBarStart = closedCandles[^1].Timestamp.AddSeconds(intervalSecs);
+            try
+            {
+                var rawMicro = await _fetcher.FetchOhlcWithFallbackAsync(symbol, "s5", cleanAsset, 72);
+                if (rawMicro != null && rawMicro.Length > 0)
+                {
+                    closedMicroCandles = rawMicro.Where(c => c.Timestamp < curBarStart).ToArray();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug("[TRACE {TraceId}] Micro s5 candles unavailable: {Msg}", traceId, ex.Message);
+            }
+        }
+
         return new PreparedCandleData(
             cleanAsset,
             symbol,
@@ -325,7 +344,8 @@ public class MarketAnalysisOrchestrator(
             currentLivePrice,
             dataHash,
             higherTf,
-            closedHigherCandles
+            closedHigherCandles,
+            closedMicroCandles
         );
     }
 
@@ -648,8 +668,10 @@ public class MarketAnalysisOrchestrator(
 
         if (_settings.EnableMachineLearning)
         {
-            // Fast Path: In-process ONNX Runtime (strictly s5 + m1 as trained in dual_stream_brain_v5.onnx)
-            if (DualStreamOnnxService.Instance.IsModelLoaded && prep.TfLower.Equals("s5", StringComparison.OrdinalIgnoreCase))
+            // Fast Path: In-process ONNX Runtime only when metadata confirms validated positive accuracy (>= 55%)
+            if (DualStreamOnnxService.Instance.IsModelLoaded
+                && (DualStreamOnnxService.Instance.Metadata?.Accuracy ?? 0.0) >= 0.55
+                && prep.TfLower.Equals("s5", StringComparison.OrdinalIgnoreCase))
             {
                 double liveCrowd = PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset);
                 var tensors = BuildOnnxTensors(prep.ClosedCandles, prep.ClosedHigherCandles, prep.CurrentLivePrice, liveCrowd);
@@ -675,10 +697,18 @@ public class MarketAnalysisOrchestrator(
                 }
             }
 
-            // Fallback Path: Python HTTP microservice
+            // Fallback / Quant Path: Python HTTP microservice (serves SubminuteQuantPredictor for s5..m1)
             if (mlPrediction == null)
             {
-                mlPrediction = await MLPythonService.PredictAsync(prep.CleanAsset, prep.TfLower, prep.ClosedCandles, prep.IsForex, prep.ClosedHigherCandles, sensors.SmcResult, sensors.MacroPayload);
+                mlPrediction = await MLPythonService.PredictAsync(
+                    prep.CleanAsset,
+                    prep.TfLower,
+                    prep.ClosedCandles,
+                    prep.IsForex,
+                    prep.ClosedHigherCandles,
+                    sensors.SmcResult,
+                    sensors.MacroPayload,
+                    microCandles: prep.ClosedMicroCandles);
             }
         }
         
@@ -743,7 +773,11 @@ public class MarketAnalysisOrchestrator(
             // A-5 FIX: Raise conflictPenalty threshold from -0.01 to -0.05.
             // At -0.01 almost any pair of weak opposite-sign scores triggers the 30% penalty,
             // making it a near-permanent throttle instead of a genuine conflict guard.
-            conflictPenalty *= (sensors.TaResult.score * hResult.score < -0.05) ? 0.7 : 1.0;
+            bool isQuantSubminuteModel = ml.Prediction?.ModelVersion?.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase) == true;
+            if (!isQuantSubminuteModel)
+            {
+                conflictPenalty *= (sensors.TaResult.score * hResult.score < -0.05) ? 0.7 : 1.0;
+            }
         }
         var mtfResult = await _cmEngine.Evaluate4DMatrixAsync(
             prep.CleanAsset, timeframe, prep.IsForex, prep.Symbol,
@@ -945,6 +979,12 @@ public class MarketAnalysisOrchestrator(
         }
 
         bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (ml.Prediction != null && ml.Direction is "BUY" or "PUT");
+        bool isQuantSubminute = ml.Prediction?.ModelVersion?.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase) == true;
+        bool isSubminuteImpulseOk = !isSubminute || cm.NoiseAudit.IsTradeableImpulse
+            || (isQuantSubminute
+                && cm.NoiseAudit.LocalAtrBps >= cm.NoiseAudit.NoiseFloorBps
+                && !cm.NoiseAudit.RegimeDescription.Contains("спайк", StringComparison.OrdinalIgnoreCase)
+                && !cm.NoiseAudit.RegimeDescription.Contains("штиль", StringComparison.OrdinalIgnoreCase));
 
         bool canExecuteReal = isDirectional 
             && hasLiveNeuralSignal
@@ -952,10 +992,10 @@ public class MarketAnalysisOrchestrator(
             && cm.Consensus.Probability >= requiredProb 
             && !isCbHalted
             && !isCooldownActive
-            && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse)
-            && (!isS5 || (htfAligned && !isExhaustedOnS5));
+            && isSubminuteImpulseOk
+            && (!isS5 || isQuantSubminute || (htfAligned && !isExhaustedOnS5));
 
-        bool isS5Guarded = isS5 && (isExhaustedOnS5 || !htfAligned || isCooldownActive || cm.Consensus.Probability < requiredProb || !isPayoutAcceptable);
+        bool isS5Guarded = isS5 && ((!isQuantSubminute && (isExhaustedOnS5 || !htfAligned)) || isCooldownActive || cm.Consensus.Probability < requiredProb || !isPayoutAcceptable);
         bool allowShadowRecord = isDirectional
             && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);

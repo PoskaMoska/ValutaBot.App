@@ -364,6 +364,17 @@ public static class MLPythonService
         return baseSym;
     }
 
+    private static object[] MapCandlesForPython(MiniAppController.OhlcCandle[] source) =>
+        source.Select(c => new
+        {
+            openTime = new DateTimeOffset(DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc)).ToUnixTimeSeconds(),
+            open = c.Open,
+            high = c.High,
+            low = c.Low,
+            close = c.Close,
+            volume = c.Volume
+        }).Cast<object>().ToArray();
+
     public static async Task<MLPythonPrediction?> PredictAsync(
         string symbol,
         string interval,
@@ -372,7 +383,8 @@ public static class MLPythonService
         MiniAppController.OhlcCandle[]? mtfCandles = null,
         ValutaBot.MiniApp.SmcEngine.SmcAnalysisResult? smcResult = null,
         object? macroContext = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        MiniAppController.OhlcCandle[]? microCandles = null)
     {
         if (string.IsNullOrWhiteSpace(_baseUrl))
             return null;
@@ -380,49 +392,31 @@ public static class MLPythonService
         try
         {
             var binanceSymbol = MapSymbol(symbol, isForex);
-            
-            var mappedCandles = candles.Select(c => new {
-                openTime = new DateTimeOffset(DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc)).ToUnixTimeSeconds(),
-                open = c.Open,
-                high = c.High,
-                low = c.Low,
-                close = c.Close,
-                volume = c.Volume
-            }).ToArray();
+            var mappedCandles = MapCandlesForPython(candles);
 
-            object? mappedMtf = null;
-            if (mtfCandles != null && mtfCandles.Length > 0)
+            var payload = new Dictionary<string, object?>
             {
-                mappedMtf = mtfCandles.Select(c => new {
-                    openTime = new DateTimeOffset(DateTime.SpecifyKind(c.Timestamp, DateTimeKind.Utc)).ToUnixTimeSeconds(),
-                    open = c.Open,
-                    high = c.High,
-                    low = c.Low,
-                    close = c.Close,
-                    volume = c.Volume
-                }).ToArray();
-            }
+                ["symbol"] = binanceSymbol,
+                ["interval"] = interval,
+                ["candles"] = mappedCandles,
+                ["is_forex"] = isForex,
+                ["smc_bos_dir"] = smcResult?.BosDirection ?? "NONE",
+                ["smc_has_ob"] = smcResult?.HasOrderBlock ?? false,
+                ["smc_ob_type"] = smcResult?.OrderBlockType ?? "NONE",
+                ["smc_has_fvg"] = smcResult?.HasFvg ?? false,
+                ["smc_fvg_type"] = smcResult?.FvgType ?? "NONE",
+                ["smc_has_swp"] = smcResult?.HasLiquiditySweep ?? false,
+                ["smc_swp_dir"] = smcResult?.SweepDirection ?? "NONE",
+                ["of_delta_ratio"] = 1.0,
+                ["of_state"] = "NEUTRAL",
+                ["macro_context"] = macroContext
+            };
 
-            string smcBosDir = smcResult?.BosDirection ?? "NONE";
-            bool smcHasOb = smcResult?.HasOrderBlock ?? false;
-            string smcObType = smcResult?.OrderBlockType ?? "NONE";
-            bool smcHasFvg = smcResult?.HasFvg ?? false;
-            string smcFvgType = smcResult?.FvgType ?? "NONE";
-            bool smcHasSwp = smcResult?.HasLiquiditySweep ?? false;
-            string smcSwpDir = smcResult?.SweepDirection ?? "NONE";
-            object payload = mappedMtf != null 
-                ? new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex, mtf_candles = mappedMtf,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_ob_type = smcObType,
-                        smc_has_fvg = smcHasFvg, smc_fvg_type = smcFvgType,
-                        smc_has_swp = smcHasSwp, smc_swp_dir = smcSwpDir,
-                        of_delta_ratio = 1.0, of_state = "NEUTRAL",
-                        macro_context = macroContext }
-                : new { symbol = binanceSymbol, interval = interval, candles = mappedCandles, is_forex = isForex,
-                        smc_bos_dir = smcBosDir, smc_has_ob = smcHasOb, smc_ob_type = smcObType,
-                        smc_has_fvg = smcHasFvg, smc_fvg_type = smcFvgType,
-                        smc_has_swp = smcHasSwp, smc_swp_dir = smcSwpDir,
-                        of_delta_ratio = 1.0, of_state = "NEUTRAL",
-                        macro_context = macroContext };
+            if (mtfCandles != null && mtfCandles.Length > 0)
+                payload["mtf_candles"] = MapCandlesForPython(mtfCandles);
+
+            if (microCandles != null && microCandles.Length > 0)
+                payload["micro_candles"] = MapCandlesForPython(microCandles);
 
             byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(payload);
             using var content = new ByteArrayContent(jsonBytes);

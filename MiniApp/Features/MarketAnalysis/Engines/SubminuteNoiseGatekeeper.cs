@@ -34,13 +34,15 @@ public static class SubminuteNoiseGatekeeper
         int count = candles.Count;
 
         // 1. Порог микро-шума брокера Pocket Option (в bps = 0.0001)
+        // Порог шума калиброван на реальном распределении ATR5 Pocket Option (p15 dead-flat cutoff):
+        // ниже этих значений поток почти мёртв / высокая частота точных ничьих (TIE).
         double brokerNoiseFloorBps = (timeframe?.ToLowerInvariant()) switch
         {
-            "s5"  => 0.8,
-            "s10" => 1.0,
-            "s15" => 1.2,
-            "s30" => 1.5,
-            _     => 2.0
+            "s5"  => 0.20,
+            "s10" => 0.30,
+            "s15" => 0.38,
+            "s30" => 0.55,
+            _     => 0.75
         };
 
         // 1.5. Защита от поврежденных котировок (NaN / Infinity / <= 0) во всем входном массиве
@@ -119,7 +121,7 @@ public static class SubminuteNoiseGatekeeper
         bool isGapDojiSpike = (candleRange < avgTr * 0.5 && lastTr > 3.0 * avgTr) || (hasGap && lastTr > 3.0 * baseTr);
         bool isSpike = (baseTr > 1e-7 && lastTr > 3.0 * baseTr && !isPinbarShape) ||
                        isGapDojiSpike ||
-                       (candleRangeBps > 5.0 * brokerNoiseFloorBps && Math.Abs(zScore) >= 2.2);
+                       (candleRangeBps > Math.Max(4.5, 10.0 * brokerNoiseFloorBps) && Math.Abs(zScore) >= 2.5);
 
         // 5. Правило «Снайперского импульса»:
         // А) Амплитуда свечей превышает порог тикового шума брокера

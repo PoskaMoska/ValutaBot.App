@@ -153,7 +153,7 @@ namespace ValutaBot.Tests.Engines
         }
 
         [Fact]
-        public async Task EvaluateMatrixAsync_BullishWickRejection_BoostsProbability()
+        public async Task EvaluateMatrixAsync_BullishWickRejection_DoesNotInflateProbability()
         {
             var taSignal = new TaSignal(1.0, 70.0, 55, 100, 2.0, 10);
             var smcSignal = new SmcSignal("BULLISH_BOS", "NONE", "NONE", "NONE", "Bullish BOS");
@@ -174,7 +174,7 @@ namespace ValutaBot.Tests.Engines
             var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s10", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: noiseAudit);
 
             Assert.Equal("BUY", decision.FinalDirection);
-            Assert.True(decision.Probability >= 64, $"Expected probability >= 64% on Wick Rejection, got {decision.Probability}");
+            Assert.Equal(60, decision.Probability);
             Assert.Contains("Wick Rejection", decision.CombinedReasoningText);
         }
 
@@ -275,6 +275,59 @@ namespace ValutaBot.Tests.Engines
             Assert.Equal("BUY", decision.FinalDirection);
             Assert.True(decision.Probability <= 54, $"Expected FOMO crowd cap <= 54%, got {decision.Probability}");
             Assert.Contains("Перегрев толпы", decision.CombinedReasoningText);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_QuantSubminute_PreservesCalibratedProbThroughLowZScoreAndDeceleration()
+        {
+            var taSignal = new TaSignal(-1.2, 70.0, 80.0, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var mlSignal = new MlSignal("BUY", 0.62, 0.59, "neural_quant_v6");
+            var stateSignal = new StateSignal("DECELERATING", 10.0, -0.2);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "MTF", "MTF", new Dictionary<string, string>(), "PUT");
+            var noiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: false,
+                ZScore: 0.4,
+                LocalAtrBps: 0.9,
+                NoiseFloorBps: 0.20,
+                RegimeDescription: "Недостаточный импульс (0.4σ)"
+            );
+
+            var decision = await _engine.EvaluateMatrixAsync("EURUSD", "s5", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: noiseAudit);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.Equal(62, decision.Probability);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_QuantSubminute_StillCapsVolatilitySpikeAndFlatNoise()
+        {
+            var taSignal = new TaSignal(1.0, 70.0, 55.0, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var mlSignal = new MlSignal("BUY", 0.63, 0.59, "neural_quant_v6");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.3);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "MTF", "MTF", new Dictionary<string, string>(), "BUY");
+
+            var flatNoiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: false,
+                ZScore: 0.2,
+                LocalAtrBps: 0.12,
+                NoiseFloorBps: 0.20,
+                RegimeDescription: "Рыночный штиль (размах ниже шума)"
+            );
+            var spikeAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: false,
+                ZScore: 3.4,
+                LocalAtrBps: 10.0,
+                NoiseFloorBps: 0.20,
+                RegimeDescription: "Аномальный спайк волатильности"
+            );
+
+            var flatDecision = await _engine.EvaluateMatrixAsync("EURUSD", "s5", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: flatNoiseAudit);
+            var spikeDecision = await _engine.EvaluateMatrixAsync("EURUSD", "s5", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: spikeAudit);
+
+            Assert.Equal(52, flatDecision.Probability);
+            Assert.Equal(50, spikeDecision.Probability);
         }
     }
 }

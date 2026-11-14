@@ -52,8 +52,8 @@ public class SubminuteNoiseGatekeeperTests
     [Fact]
     public void LowAmplitudeBelowNoiseFloor_ReturnsUntradeable()
     {
-        // 0.2 bps candles (below 1.0 bps broker floor for s10)
-        var candles = CreateCandles(1.1000, 0.00002, count: 20);
+        // ~0.18 bps candles (below 0.30 bps calibrated broker floor for s10)
+        var candles = CreateCandles(1.1000, 0.00001, count: 20);
         var result = SubminuteNoiseGatekeeper.AuditCandleStream(candles, "s10");
 
         Assert.False(result.IsTradeableImpulse);

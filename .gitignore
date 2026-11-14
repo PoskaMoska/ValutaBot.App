@@ -46,6 +46,7 @@ node_modules/
 *.csv
 *.xlsx
 *.npz
+!ml_service/models/*.npz
 *.pt
 !ml_service/models/*.pt
 

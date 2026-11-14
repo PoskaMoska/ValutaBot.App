@@ -421,8 +421,6 @@ public class ConfluenceMatrixEngine(
         string finalDir;
         int finalProbPct;
 
-        const int RequiredProb = 58;
-        // S5 ceiling aligned with orchestrator's s5 adaptive threshold (60-65% across 70-92% payouts)
         const int S5ProbabilityCeiling = 65;
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
@@ -559,6 +557,7 @@ public class ConfluenceMatrixEngine(
         // ══════════════════════════════════════════════════════════════════════════
         // STAGE 2: SUBMINUTE NOISE & WICK REJECTION CALIBRATION
         // ══════════════════════════════════════════════════════════════════════════
+        bool isQuantSubminute = isNeuralBrain && mlSignal!.ModelVersion!.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase);
         bool hasRiskDampener = (mlLiveLosses >= 2) || (conflictPenalty < 1.0);
         if (noiseAudit.HasValue && finalDir is "BUY" or "PUT" && isSubMinute)
         {
@@ -574,15 +573,19 @@ public class ConfluenceMatrixEngine(
                 }
                 else if (na.LocalAtrBps >= na.NoiseFloorBps)
                 {
-                    // Аномальный спайк волатильности / ложный пробой (Squeeze / Flash Crash)
-                    finalProbPct = Math.Min(finalProbPct, 50);
-                    probCeiling = Math.Min(probCeiling, 50);
-                    safetyNotes.Add($"⚠️ Ложный пробой / Спайк волатильности: {na.RegimeDescription}. Вход нейтрализован риск-контролем.");
+                    bool isVolatilitySpike = na.RegimeDescription.Contains("спайк", StringComparison.OrdinalIgnoreCase);
+                    // Для calibrated quant-модели умеренный z-score (< 0.8σ) без спайка — валидный mean-reversion/micro-setup, не режем до 50%.
+                    if (!isQuantSubminute || isVolatilitySpike)
+                    {
+                        finalProbPct = Math.Min(finalProbPct, 50);
+                        probCeiling = Math.Min(probCeiling, 50);
+                        safetyNotes.Add($"⚠️ Ложный пробой / Спайк волатильности: {na.RegimeDescription}. Вход нейтрализован риск-контролем.");
+                    }
                 }
             }
             else
             {
-                // Здоровый импульс + Тень отскока (Wick Rejection) по тренду
+                // Информационная отметка о тени без +4%/+1% накрутки вероятности (эмпирический WR теней ниже безубытка)
                 bool hasWick = (finalDir == "BUY" && na.HasBullishWick) || (finalDir == "PUT" && na.HasBearishWick);
                 if (hasWick)
                 {
@@ -591,27 +594,21 @@ public class ConfluenceMatrixEngine(
                     {
                         if (mlLiveLosses >= 3)
                         {
-                            // CB hard stop: wick-бонус заблокирован полностью
                             safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (бонус 0%, демпфировано риск-контролем CB >= 3 убытков)");
                         }
                         else
                         {
-                            // Никогда не снижаем, не превышаем 60 и не пересекаем порог входа снизу
-                            int bumped = Math.Min(finalProbPct + 1, Math.Max(finalProbPct, 60));
-                            if (finalProbPct < RequiredProb && bumped >= RequiredProb) bumped = finalProbPct;
-                            finalProbPct = bumped;
-                            safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+1%, демпфировано до {finalProbPct}% из-за риск-контроля)");
+                            safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (0%, демпфировано риск-контролем)");
                         }
                     }
                     else
                     {
-                        finalProbPct = Math.Clamp(finalProbPct + 4, 50, 68);
-                        safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (+4%)");
+                        safetyNotes.Add($"🎯 Снайперский откат (Wick Rejection): {wickName} (информационно, 0% к вероятности)");
                     }
                 }
 
-                // Детекция экстремального выброса цены (Mean Reversion на затухании)
-                if (na.IsExtremeOverbought && taSignal.Rsi >= 78.0)
+                // Детекция экстремального выброса цены (Mean Reversion на затухании) — для neural_quant уже учтено в калиброванных признаках
+                if (!isQuantSubminute && na.IsExtremeOverbought && taSignal.Rsi >= 78.0)
                 {
                     if (finalDir == "BUY")
                     {
@@ -620,7 +617,7 @@ public class ConfluenceMatrixEngine(
                     }
                     safetyNotes.Add($"⚡ Mean Reversion: экстремальный вылет цены ({na.ZScore:F1}σ, RSI {taSignal.Rsi:F0}) — вероятность затухания и отскока вниз");
                 }
-                else if (na.IsExtremeOversold && taSignal.Rsi <= 22.0)
+                else if (!isQuantSubminute && na.IsExtremeOversold && taSignal.Rsi <= 22.0)
                 {
                     if (finalDir == "PUT")
                     {
@@ -632,7 +629,7 @@ public class ConfluenceMatrixEngine(
             }
         }
 
-        if (stateSignal != null && stateSignal.Regime == "DECELERATING" && finalDir is "BUY" or "PUT")
+        if (!isQuantSubminute && stateSignal != null && stateSignal.Regime == "DECELERATING" && finalDir is "BUY" or "PUT")
         {
             bool isOpposing = (finalDir == "BUY" && stateSignal.VelocityBpsPerSec > 0) ||
                               (finalDir == "PUT" && stateSignal.VelocityBpsPerSec < 0);

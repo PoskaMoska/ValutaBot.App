@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 
 from common import TF_MAP, is_forex_symbol, normalize_interval
 from models.patch_tst_predictor import PatchTSTPredictor
+from models.subminute_quant_predictor import SubminuteQuantPredictor
 
 # No default: without INTERNAL_API_SECRET all protected endpoints are rejected (fail closed).
 _API_SECRET = os.environ.get("INTERNAL_API_SECRET") or None
@@ -66,6 +67,12 @@ async def lifespan(app: FastAPI):
         log.info(f"[Startup] PatchTST Neural Brain warmed up (available: {active}, tag: {predictor._arch_tag})")
     except Exception as e:
         log.error(f"[Startup] PatchTST warm-up failed: {e}", exc_info=True)
+
+    try:
+        quant_predictor = SubminuteQuantPredictor.get_instance()
+        log.info(f"[Startup] SubminuteQuantPredictor warmed up (intervals: {sorted(quant_predictor.loaded_intervals)})")
+    except Exception as e:
+        log.error(f"[Startup] SubminuteQuantPredictor warm-up failed: {e}", exc_info=True)
 
     yield
 
@@ -195,6 +202,7 @@ async def predict(request: Request):
     interval_raw = data.get("interval") or data.get("timeframe") or "1m"
     candles = data.get("candles") or []
     mtf_candles = data.get("mtf_candles")
+    micro_candles = data.get("micro_candles")
 
     # Forex-only policy
     if not is_forex_symbol(symbol):
@@ -237,6 +245,35 @@ async def predict(request: Request):
             payout = p_val / 100.0 if p_val > 1.0 else p_val
         except (ValueError, TypeError):
             payout = None
+
+    quant_predictor = SubminuteQuantPredictor.get_instance()
+    if quant_predictor.is_available_for(interval):
+        if await request.is_disconnected():
+            return Response(status_code=499)
+        loop = asyncio.get_running_loop()
+        quant_res = await loop.run_in_executor(
+            inference_executor,
+            quant_predictor.predict,
+            symbol, interval, candles, mtf_candles, micro_candles
+        )
+        if quant_res is not None:
+            q_dir, q_conf, q_ver, q_hor, q_raw, q_det = quant_res
+            resp = {
+                "direction": q_dir,
+                "confidence": round(float(q_conf), 4),
+                "probability": round(float(q_conf), 4),
+                "model_version": q_ver,
+                "version": q_ver,
+                "horizon_candles": q_hor,
+                "accuracy": q_det.get("accuracy"),
+                "auc": q_det.get("auc"),
+                "n_train": q_det.get("n_train"),
+                "variance_estimate": None,
+                "raw_confidence": round(float(q_raw), 4),
+                "ml_score": round(float((q_raw - 0.5) * 2.0), 4),
+                "top_features": q_det.get("top_features") or [],
+            }
+            return Response(content=orjson.dumps(resp), media_type="application/json")
 
     patch_predictor = PatchTSTPredictor.get_instance()
     if not patch_predictor.is_available():
