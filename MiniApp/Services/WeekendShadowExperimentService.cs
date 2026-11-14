@@ -128,7 +128,7 @@ public static class WeekendShadowExperimentService
                             FROM subminute_candles
                             WHERE interval = 's5'
                               AND asset LIKE '%_PO'
-                              AND open_time >= (NOW() - INTERVAL '8 days')::text
+                              AND open_time >= to_char((NOW() AT TIME ZONE 'UTC') - INTERVAL '8 days', 'YYYY-MM-DD') || 'T00:00:00Z'
                               AND (
                                   (EXTRACT(DOW FROM (open_time::timestamptz AT TIME ZONE 'UTC')) = 5 AND (open_time::timestamptz AT TIME ZONE 'UTC')::time >= '20:44:00'::time)
                                OR EXTRACT(DOW FROM (open_time::timestamptz AT TIME ZONE 'UTC')) = 6
@@ -137,7 +137,7 @@ public static class WeekendShadowExperimentService
                             ON CONFLICT (asset, interval, open_time) DO NOTHING;
                         END IF;
                     END $$;
-                ");
+                ", commandTimeout: 120);
             });
             BotLogger.Info("[WeekendArchive] weekend_otc_candles & weekend_otc_experiments initialized.");
         }

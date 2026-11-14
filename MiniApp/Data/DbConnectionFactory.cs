@@ -292,7 +292,9 @@ namespace ValutaBot.App.MiniApp.Data
         {
             if (string.IsNullOrEmpty(GetConnectionString())) return;
 
-            await using var conn = await OpenMaintenanceAsync();
+            try
+            {
+                await using var conn = await OpenMaintenanceAsync();
             
             await conn.ExecuteAsync(@"
                 CREATE TABLE IF NOT EXISTS allowed_users (
@@ -480,8 +482,8 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_created_dir ON trade_outcomes(created_at DESC, direction) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_dir ON trade_outcomes(verified_at DESC, direction) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified ON trade_outcomes(asset, timeframe, verified_at DESC) WITH (fillfactor = 90);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes(created_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL WITH (fillfactor = 90);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_real ON trade_outcomes(verified_at DESC) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_real_trades ON trade_outcomes(created_at DESC) WITH (fillfactor = 90) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_verified_real ON trade_outcomes(verified_at DESC) WITH (fillfactor = 90) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_uncompacted_json ON trade_outcomes(created_at) WHERE features_json IS NOT NULL AND octet_length(features_json) > 2500;
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_ml_export ON trade_outcomes(created_at ASC) WHERE features_json IS NOT NULL AND was_win IS NOT NULL AND entry_price > 0 AND exit_price > 0;
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_asset_tf ON pending_trades(asset, timeframe);
@@ -490,7 +492,7 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_covering ON subminute_candles(asset, interval, open_time DESC) INCLUDE (open_price, high_price, low_price, close_price, volume) WITH (fillfactor = 90);
-                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified_real ON trade_outcomes(asset, timeframe, verified_at DESC) INCLUDE (was_win) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL WITH (fillfactor = 90);
+                CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified_real ON trade_outcomes(asset, timeframe, verified_at DESC) INCLUDE (was_win) WITH (fillfactor = 90) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_tz_expr;
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_tz_expr;
@@ -520,7 +522,7 @@ namespace ValutaBot.App.MiniApp.Data
                             autovacuum_vacuum_cost_limit = 2000,
                             autovacuum_vacuum_cost_delay = 2
                         );
-                    EXCEPTION WHEN others THEN END;
+                    EXCEPTION WHEN others THEN NULL; END;
                     BEGIN
                         ALTER TABLE trade_outcomes SET (
                             fillfactor = 85,
@@ -531,7 +533,7 @@ namespace ValutaBot.App.MiniApp.Data
                             toast.autovacuum_vacuum_scale_factor = 0.03,
                             toast.autovacuum_vacuum_cost_limit = 2000
                         );
-                    EXCEPTION WHEN others THEN END;
+                    EXCEPTION WHEN others THEN NULL; END;
                     BEGIN
                         ALTER TABLE pending_trades SET (
                             fillfactor = 70,
@@ -540,7 +542,7 @@ namespace ValutaBot.App.MiniApp.Data
                             autovacuum_vacuum_cost_limit = 500,
                             autovacuum_vacuum_cost_delay = 2
                         );
-                    EXCEPTION WHEN others THEN END;
+                    EXCEPTION WHEN others THEN NULL; END;
                     BEGIN
                         ALTER TABLE historical_candles SET (
                             fillfactor = 90,
@@ -550,13 +552,13 @@ namespace ValutaBot.App.MiniApp.Data
                             autovacuum_vacuum_cost_limit = 1000,
                             autovacuum_vacuum_cost_delay = 2
                         );
-                    EXCEPTION WHEN others THEN END;
+                    EXCEPTION WHEN others THEN NULL; END;
                     BEGIN
                         UPDATE trade_outcomes SET created_at = replace(created_at, ' ', 'T') WHERE created_at LIKE '% %';
                         UPDATE trade_outcomes SET verified_at = replace(verified_at, ' ', 'T') WHERE verified_at LIKE '% %';
                         UPDATE pending_trades SET created_at = replace(created_at, ' ', 'T') WHERE created_at LIKE '% %';
                         UPDATE pending_trades SET verify_at = replace(verify_at, ' ', 'T') WHERE verify_at LIKE '% %';
-                    EXCEPTION WHEN others THEN END;
+                    EXCEPTION WHEN others THEN NULL; END;
                     BEGIN
                         IF NOT EXISTS (
                             SELECT 1 FROM pg_cast
@@ -564,7 +566,7 @@ namespace ValutaBot.App.MiniApp.Data
                         ) THEN
                             CREATE CAST (text AS timestamptz) WITH INOUT AS ASSIGNMENT;
                         END IF;
-                    EXCEPTION WHEN others THEN END;
+                    EXCEPTION WHEN others THEN NULL; END;
                     BEGIN
                         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_trade_outcomes_direction') THEN
                             ALTER TABLE trade_outcomes ADD CONSTRAINT chk_trade_outcomes_direction
@@ -574,7 +576,7 @@ namespace ValutaBot.App.MiniApp.Data
                             ALTER TABLE pending_trades ADD CONSTRAINT chk_pending_trades_direction
                                 CHECK (direction IN ('BUY', 'PUT', 'SHADOW_BUY', 'SHADOW_PUT', 'HOLD', 'NEUTRAL', 'SHADOW_NEUTRAL'));
                         END IF;
-                    EXCEPTION WHEN others THEN END;
+                    EXCEPTION WHEN others THEN NULL; END;
                 END $$;
 
                 -- Preserve module_diagnostics across C# restarts (populated nightly by Python _daily_diagnostics_loop)
@@ -637,12 +639,16 @@ namespace ValutaBot.App.MiniApp.Data
                 );
             ");
 
-            BotLogger.Info("[PostgreSQL DB] Database tables initialized successfully.");
+                BotLogger.Info("[PostgreSQL DB] Database tables initialized successfully.");
+            }
+            finally
+            {
 
-            // Initialize Trade Outcome Online Learning Engine
-            await TradeOutcomeTracker.InitializeAsync();
-            RealtimeTickCollector.Initialize();
-            await ValutaBot.MiniApp.Services.WeekendShadowExperimentService.InitializeAsync();
+                // Initialize Trade Outcome Online Learning Engine
+                await TradeOutcomeTracker.InitializeAsync();
+                RealtimeTickCollector.Initialize();
+                await ValutaBot.MiniApp.Services.WeekendShadowExperimentService.InitializeAsync();
+            }
         }
 
         public static async Task<string?> GetBotStateAsync(string key, CancellationToken ct = default)

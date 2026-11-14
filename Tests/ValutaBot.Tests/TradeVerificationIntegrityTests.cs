@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Net;
+using System.Text.RegularExpressions;
 using ValutaBot.MiniApp;
 using Xunit;
 
@@ -89,5 +92,49 @@ public class TradeVerificationIntegrityTests
 
         Assert.True(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsNetworkTransient(ioEx));
         Assert.True(ValutaBot.App.MiniApp.Data.DbConnectionFactory.IsNetworkTransient(timeoutEx));
+    }
+
+    [Fact]
+    public void PostgresDdl_CreateIndex_And_ExceptionBlocks_HaveValidClauseOrder()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "ValutaBot.App.csproj")))
+        {
+            dir = dir.Parent;
+        }
+        Assert.NotNull(dir);
+
+        var targets = new List<string>
+        {
+            Path.Combine(dir!.FullName, "MiniApp", "Data", "DbConnectionFactory.cs"),
+            Path.Combine(dir.FullName, "MiniApp", "Services", "WeekendShadowExperimentService.cs")
+        };
+        string migrationsDir = Path.Combine(dir.FullName, "MiniApp", "Data", "Migrations");
+        if (Directory.Exists(migrationsDir))
+        {
+            targets.AddRange(Directory.GetFiles(migrationsDir, "*.sql"));
+        }
+
+        foreach (string path in targets)
+        {
+            string raw = File.ReadAllText(path);
+            string stripped = Regex.Replace(raw, @"--[^\r\n]*", string.Empty);
+
+            foreach (Match idx in Regex.Matches(stripped, @"CREATE(?:\s+UNIQUE)?\s+INDEX\b[^;]+;", RegexOptions.IgnoreCase | RegexOptions.Singleline))
+            {
+                Match withMatch = Regex.Match(idx.Value, @"\bWITH\s*\(", RegexOptions.IgnoreCase);
+                Match whereMatch = Regex.Match(idx.Value, @"\bWHERE\b", RegexOptions.IgnoreCase);
+                if (withMatch.Success && whereMatch.Success)
+                {
+                    Assert.True(
+                        withMatch.Index < whereMatch.Index,
+                        $"Invalid PostgreSQL CREATE INDEX clause order in {Path.GetFileName(path)}: WITH (...) must precede WHERE: {idx.Value}");
+                }
+            }
+
+            Assert.DoesNotMatch(
+                new Regex(@"\bEXCEPTION\s+WHEN\s+\w+\s+THEN\s+END\s*;", RegexOptions.IgnoreCase),
+                stripped);
+        }
     }
 }

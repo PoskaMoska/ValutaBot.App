@@ -21,8 +21,8 @@ WITH (fillfactor = 90);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_trade_outcomes_asset_tf_verified_real
 ON trade_outcomes (asset, timeframe, verified_at DESC)
 INCLUDE (was_win)
-WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL
-WITH (fillfactor = 90);
+WITH (fillfactor = 90)
+WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
 
 -- ----------------------------------------------------------------------------
 -- 3. HOT-TUNING RETENTION PARAMETERS FOR ACTIVE TABLES
