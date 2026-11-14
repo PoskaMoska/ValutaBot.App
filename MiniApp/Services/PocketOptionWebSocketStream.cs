@@ -28,6 +28,8 @@ public static class PocketOptionWebSocketStream
     private static CancellationTokenSource _cts = new CancellationTokenSource();
     private static long _lastMessageSw = System.Diagnostics.Stopwatch.GetTimestamp();
     private static long _lastTickSw = System.Diagnostics.Stopwatch.GetTimestamp();
+    private static long _lastRealTickSw = 0;
+    private static long _streamStartedSw = System.Diagnostics.Stopwatch.GetTimestamp();
     private static int _loopRunning = 0;
     private static CancellationTokenSource? _connectionCts;
     private static readonly object _streamLifecycleLock = new(); // D5 FIX: Synchronize Start/Stop/Launch
@@ -70,6 +72,13 @@ public static class PocketOptionWebSocketStream
     private static string? _cachedTradingUrl;
     private static int _consecutiveAuthFailures = 0;
     private static DateTime _lastAuthAlertUtc = DateTime.MinValue;
+    internal const double FeedStallAlertThresholdSec = 90.0;
+    internal const double FeedStallRepeatIntervalSec = 1800.0;
+    internal const double StartupStallGraceSec = 120.0;
+    internal enum FeedStallAction { None, RaiseAlert, SendRecovery }
+    private static readonly object _stallAlertLock = new();
+    private static bool _feedStallAlertActive = false;
+    private static DateTime _lastFeedStallAlertUtc = DateTime.MinValue;
 
     private static readonly ReadOnlyMemory<byte> PongBytes = "3"u8.ToArray();
     private static readonly ReadOnlyMemory<byte> PingBytes = "2"u8.ToArray();
@@ -671,6 +680,14 @@ public static class PocketOptionWebSocketStream
         var cts = new CancellationTokenSource();
         var oldCts = Interlocked.Exchange(ref _cts, cts);
         try { oldCts.Cancel(); oldCts.Dispose(); } catch { }
+
+        Volatile.Write(ref _streamStartedSw, System.Diagnostics.Stopwatch.GetTimestamp());
+        Volatile.Write(ref _lastRealTickSw, 0);
+        lock (_stallAlertLock)
+        {
+            _feedStallAlertActive = false;
+            _lastFeedStallAlertUtc = DateTime.MinValue;
+        }
 
         Status = "INITIALIZING";
         _ = RunConnectionLoopAsync(cts.Token);
@@ -1895,6 +1912,7 @@ public static class PocketOptionWebSocketStream
 
             Volatile.Write(ref _lastMessageSw, swNow);
             Volatile.Write(ref _lastTickSw, swNow);
+            Volatile.Write(ref _lastRealTickSw, swNow);
             ValutaBot.MiniApp.Services.ClockSkewMonitor.Record(tickTimeUtc);
             _metricCountersCache.GetOrAdd(candleKey, static k => ValutaMetrics.WebSocketTicksTotal.WithLabels(k)).Inc();
 
@@ -1913,6 +1931,56 @@ public static class PocketOptionWebSocketStream
         return fedToCandles;
     }
 
+    internal static FeedStallAction EvaluateFeedStallTransition(
+        bool isStopped,
+        long lastRealTickSw,
+        long streamStartedSw,
+        long currentSw,
+        DateTime utcNow,
+        ref bool alertActive,
+        ref DateTime lastAlertUtc,
+        out double idleSeconds)
+    {
+        idleSeconds = 0.0;
+        if (isStopped)
+        {
+            return FeedStallAction.None;
+        }
+
+        if (lastRealTickSw > 0)
+        {
+            idleSeconds = Math.Max(0.0, System.Diagnostics.Stopwatch.GetElapsedTime(lastRealTickSw, currentSw).TotalSeconds);
+        }
+        else
+        {
+            double uptimeSec = Math.Max(0.0, System.Diagnostics.Stopwatch.GetElapsedTime(streamStartedSw, currentSw).TotalSeconds);
+            if (uptimeSec < StartupStallGraceSec)
+            {
+                return FeedStallAction.None;
+            }
+            idleSeconds = uptimeSec;
+        }
+
+        if (idleSeconds >= FeedStallAlertThresholdSec)
+        {
+            if (!alertActive || (utcNow - lastAlertUtc).TotalSeconds >= FeedStallRepeatIntervalSec)
+            {
+                alertActive = true;
+                lastAlertUtc = utcNow;
+                return FeedStallAction.RaiseAlert;
+            }
+            return FeedStallAction.None;
+        }
+
+        if (alertActive && lastRealTickSw > 0)
+        {
+            alertActive = false;
+            return FeedStallAction.SendRecovery;
+        }
+
+        return FeedStallAction.None;
+    }
+
     private static async Task DbBatchFlusherAsync(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
@@ -1921,14 +1989,58 @@ public static class PocketOptionWebSocketStream
             {
                 await Task.Delay(15000, token);
 
+                long lastRealSw = Volatile.Read(ref _lastRealTickSw);
+                long startedSw = Volatile.Read(ref _streamStartedSw);
+                long currentSw = System.Diagnostics.Stopwatch.GetTimestamp();
+                DateTime nowUtc = DateTime.UtcNow;
+                string currentStatus = Status;
+                bool isStopped = string.Equals(currentStatus, "STOPPED", StringComparison.OrdinalIgnoreCase);
+
+                FeedStallAction action;
+                double idleSec;
+                lock (_stallAlertLock)
+                {
+                    action = EvaluateFeedStallTransition(
+                        isStopped, lastRealSw, startedSw, currentSw, nowUtc,
+                        ref _feedStallAlertActive, ref _lastFeedStallAlertUtc, out idleSec);
+                }
+
+                if (action == FeedStallAction.RaiseAlert)
+                {
+                    string brokerTimeStr = LastBrokerTickUtc == DateTime.MinValue
+                        ? "нет"
+                        : LastBrokerTickUtc.ToString("yyyy-MM-dd HH:mm:ss") + " UTC";
+                    BotLogger.NotifyAdmin($"[PO WS] Длительный простой потока котировок: нет живых тиков {idleSec:F0}с (Status={currentStatus}, LastBrokerTick={brokerTimeStr}, AuthFails={ConsecutiveAuthFailures}).");
+                }
+                else if (action == FeedStallAction.SendRecovery)
+                {
+                    BotLogger.NotifyAdmin($"[PO WS] Поток котировок Pocket Option восстановлен (Status={currentStatus}).");
+                }
+
+                string effectiveDbStatus = (IsConnected && lastRealSw > 0 && idleSec < 30.0)
+                    ? "ONLINE"
+                    : (idleSec >= 30.0 && IsConnected ? "STALLED" : currentStatus);
+
                 using var conn = DbConnectionFactory.GetConnection();
                 await conn.OpenAsync(token);
 
-                await conn.ExecuteAsync(@"
-                    INSERT INTO po_collector_state (id, last_tick_at, status)
-                    VALUES (1, now(), 'ONLINE')
-                    ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, status = EXCLUDED.status;
-                ");
+                if (lastRealSw > 0)
+                {
+                    DateTime actualLastTickUtc = nowUtc - System.Diagnostics.Stopwatch.GetElapsedTime(lastRealSw, currentSw);
+                    await conn.ExecuteAsync(@"
+                        INSERT INTO po_collector_state (id, last_tick_at, status)
+                        VALUES (1, @LastTickAt, @Status)
+                        ON CONFLICT (id) DO UPDATE SET last_tick_at = EXCLUDED.last_tick_at, status = EXCLUDED.status;
+                    ", new { LastTickAt = actualLastTickUtc, Status = effectiveDbStatus });
+                }
+                else
+                {
+                    await conn.ExecuteAsync(@"
+                        INSERT INTO po_collector_state (id, status)
+                        VALUES (1, @Status)
+                        ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status;
+                    ", new { Status = effectiveDbStatus });
+                }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)

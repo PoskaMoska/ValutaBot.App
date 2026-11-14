@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Options;
@@ -69,5 +70,66 @@ public class CircuitBreakerServiceTests
         var dict = field!.GetValue(cb) as ConcurrentDictionary<string, (DateTime QuarantinedUntil, string Reason)>;
         Assert.NotNull(dict);
         Assert.Empty(dict!);
+    }
+
+    [Fact]
+    public async Task ActivateHaltAsync_NotifiesAdminOncePerActiveHalt()
+    {
+        var settings = new TradingBotSettings { CircuitBreakerCooldownMinutes = 15 };
+        var cb = new CircuitBreakerService(Options.Create(settings), () => null!);
+        var captured = new ConcurrentQueue<string>();
+        string marker = $"streak-{Guid.NewGuid():N}";
+        Action<string> observer = msg =>
+        {
+            if (msg.Contains(marker, StringComparison.Ordinal))
+                captured.Enqueue(msg);
+        };
+
+        BotLogger.AlertObserverForTests += observer;
+        try
+        {
+            await cb.ActivateHaltAsync(marker);
+            await cb.ActivateHaltAsync(marker + "-duplicate");
+
+            Assert.True(cb.IsHalted());
+            Assert.Single(captured);
+            Assert.Contains("[CircuitBreaker]", captured.ToArray()[0]);
+        }
+        finally
+        {
+            BotLogger.AlertObserverForTests -= observer;
+        }
+    }
+
+    [Fact]
+    public void IsHalted_WhenCooldownExpires_NotifiesRecoveryOnce()
+    {
+        var settings = new TradingBotSettings { CircuitBreakerCooldownMinutes = 15 };
+        var cb = new CircuitBreakerService(Options.Create(settings), () => null!);
+
+        var haltedUntilField = typeof(CircuitBreakerService).GetField("_haltedUntil", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(haltedUntilField);
+        DateTime expiredTime = DateTime.UtcNow.AddSeconds(-2);
+        haltedUntilField!.SetValue(cb, (DateTime?)expiredTime);
+
+        string expectedStamp = expiredTime.ToString("HH:mm:ss");
+        var captured = new ConcurrentQueue<string>();
+        Action<string> observer = msg =>
+        {
+            if (msg.Contains("[CircuitBreaker]", StringComparison.Ordinal) && msg.Contains(expectedStamp, StringComparison.Ordinal))
+                captured.Enqueue(msg);
+        };
+
+        BotLogger.AlertObserverForTests += observer;
+        try
+        {
+            Assert.False(cb.IsHalted());
+            Assert.False(cb.IsHalted());
+            Assert.Single(captured);
+        }
+        finally
+        {
+            BotLogger.AlertObserverForTests -= observer;
+        }
     }
 }

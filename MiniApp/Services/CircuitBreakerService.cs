@@ -99,6 +99,7 @@ namespace ValutaBot.MiniApp.Services
 
         public bool IsHalted()
         {
+            DateTime? expiredCooldownAt = null;
             lock (_lock)
             {
                 // Refresh CB halt state from DB if cache is stale
@@ -120,11 +121,17 @@ namespace ValutaBot.MiniApp.Services
                 if (_haltedUntil.HasValue && DateTime.UtcNow >= _haltedUntil.Value)
                 {
                     _lastCooldownExpiredUtc = _haltedUntil.Value;
+                    expiredCooldownAt = _lastCooldownExpiredUtc;
                     _haltedUntil = null;
                     _haltReason = string.Empty;
-                    BotLogger.Info($"[CircuitBreaker] Cooldown expired. Fresh evaluation window starts after {_lastCooldownExpiredUtc:HH:mm:ss} UTC.");
-                    _ = Task.Run(async () => await DeleteHaltFromDbAsync());
                 }
+            }
+
+            if (expiredCooldownAt.HasValue)
+            {
+                BotLogger.Info($"[CircuitBreaker] Cooldown expired. Fresh evaluation window starts after {expiredCooldownAt.Value:HH:mm:ss} UTC.");
+                BotLogger.NotifyAdmin($"[CircuitBreaker] Пауза завершена ({expiredCooldownAt.Value:HH:mm:ss} UTC). Авто-торговля возобновлена.");
+                _ = Task.Run(async () => await DeleteHaltFromDbAsync());
             }
 
             // 2. Autonomous bypass: only active when NO explicit Halt is in effect
@@ -403,6 +410,7 @@ namespace ValutaBot.MiniApp.Services
             }
 
             BotLogger.Warn($"[CircuitBreaker] TRADING HALTED for {_settings.CircuitBreakerCooldownMinutes}m. Reason: {reason}");
+            BotLogger.NotifyAdmin($"[CircuitBreaker] Авто-торговля ОСТАНОВЛЕНА на {_settings.CircuitBreakerCooldownMinutes} мин (до {newHaltUntil:HH:mm:ss} UTC). Причина: {reason}");
 
             // Persist to DB (write-through)
             try
