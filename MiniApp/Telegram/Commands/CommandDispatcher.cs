@@ -19,6 +19,7 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
             new AdminRemoveUserCommand(),
             new AdminRemoveUserStateCommand(),
             new AdminPoAuthCommand(),
+            new AdminPaperCommand(),
             new AdminSabotageCommand(),
             new SubmitIdStateCommand()
         };

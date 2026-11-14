@@ -239,6 +239,16 @@ public class DataRetentionService : BackgroundService
                   FOR UPDATE SKIP LOCKED
               )", new { cutoff = weekendArchiveCutoff }, chunkSize: 5000);
 
+        await ExecuteChunkedDeleteSubminuteAsync(conn, "paper_trades (>90d)",
+            @"DELETE FROM paper_trades
+              WHERE ctid IN (
+                  SELECT ctid FROM paper_trades
+                  WHERE created_at < @cutoff
+                  ORDER BY created_at ASC
+                  LIMIT 5000
+                  FOR UPDATE SKIP LOCKED
+              )", new { cutoff = weekendArchiveCutoff }, chunkSize: 5000);
+
         // 6. Importance Sampling and Pruning for trade_outcomes
         int shadowDeleted = 0;
         int chopStrided = 0;

@@ -107,7 +107,8 @@ public class TradeVerificationIntegrityTests
         var targets = new List<string>
         {
             Path.Combine(dir!.FullName, "MiniApp", "Data", "DbConnectionFactory.cs"),
-            Path.Combine(dir.FullName, "MiniApp", "Services", "WeekendShadowExperimentService.cs")
+            Path.Combine(dir.FullName, "MiniApp", "Services", "WeekendShadowExperimentService.cs"),
+            Path.Combine(dir.FullName, "MiniApp", "Services", "PaperTradingService.cs")
         };
         string migrationsDir = Path.Combine(dir.FullName, "MiniApp", "Data", "Migrations");
         if (Directory.Exists(migrationsDir))

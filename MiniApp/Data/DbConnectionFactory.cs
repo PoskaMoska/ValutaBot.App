@@ -648,6 +648,7 @@ namespace ValutaBot.App.MiniApp.Data
                 await TradeOutcomeTracker.InitializeAsync();
                 RealtimeTickCollector.Initialize();
                 await ValutaBot.MiniApp.Services.WeekendShadowExperimentService.InitializeAsync();
+                await ValutaBot.MiniApp.Services.PaperTradingService.InitializeAsync();
             }
         }
 

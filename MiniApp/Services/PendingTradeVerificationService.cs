@@ -62,9 +62,10 @@ public class PendingTradeVerificationService : BackgroundService
                         ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
                         : DateTime.UtcNow;
                     await WeekendShadowExperimentService.VerifyPendingWeekendExperimentsAsync(refTime, stoppingToken);
+                    await PaperTradingService.VerifyPendingPaperTradesAsync(refTime, stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-                catch (Exception ex) { BotLogger.Warn($"[WeekendExpVerifier] Sweep error: {ex.Message}"); }
+                catch (Exception ex) { BotLogger.Warn($"[WeekendExp/PaperVerifier] Sweep error: {ex.Message}"); }
 
                 await Task.Delay(_checkInterval, stoppingToken);
             }

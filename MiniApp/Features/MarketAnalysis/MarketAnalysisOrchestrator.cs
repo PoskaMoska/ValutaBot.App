@@ -1266,34 +1266,76 @@ public class MarketAnalysisOrchestrator(
             }
         }
 
-        if (isSubminute && prep.ClosedCandles is { Length: >= 4 } && prep.IntervalSecs > 0)
+        if (prep.IntervalSecs is > 0 and <= 60 && prep.ClosedCandles is { Length: >= 4 })
         {
             DateTime lastClosedUtc = prep.ClosedCandles[^1].Timestamp.Kind == DateTimeKind.Utc
                 ? prep.ClosedCandles[^1].Timestamp
                 : prep.ClosedCandles[^1].Timestamp.ToUniversalTime();
             DateTime entryBarOpenUtc = lastClosedUtc.AddSeconds(prep.IntervalSecs);
+
+            double expEntryPrice = canExecuteReal ? currentLivePrice : prep.CurrentLivePrice;
+            if (!canExecuteReal
+                && PriceFeed.UsePocketOption
+                && PocketOptionWebSocketStream.TryGetLivePrice(prep.CleanAsset, out double freshExpPrice, maxAgeSeconds: 2.0)
+                && freshExpPrice > 0)
+            {
+                expEntryPrice = freshExpPrice;
+            }
+
+            string expAsset = prep.CleanAsset;
+            string expTf = timeframe;
+            int expIvSecs = prep.IntervalSecs;
+            int expHorizon = targetHorizon;
+            double simPayout = currentPayout;
+            string simModel = ml.Prediction?.ModelVersion ?? "";
+
             if (ValutaBot.MiniApp.Services.WeekendShadowExperimentService.IsWeekendOtcWindowUtc(entryBarOpenUtc))
             {
-                double expEntryPrice = prep.CurrentLivePrice;
-                if (PriceFeed.UsePocketOption
-                    && PocketOptionWebSocketStream.TryGetLivePrice(prep.CleanAsset, out double freshExpPrice, maxAgeSeconds: 2.0)
-                    && freshExpPrice > 0)
-                {
-                    expEntryPrice = freshExpPrice;
-                }
-
                 var expCandles = prep.ClosedCandles;
                 var expPred = ml.Prediction;
                 double expCrowd = liveCrowdSentiment;
                 var expDxy = sensors.DxyMetrics;
-                string expAsset = prep.CleanAsset;
-                string expTf = timeframe;
-                int expIvSecs = prep.IntervalSecs;
-                int expHorizon = targetHorizon;
 
                 _ = Task.Run(() => ValutaBot.MiniApp.Services.WeekendShadowExperimentService.TryRecordWeekendExperimentAsync(
                     expAsset, expTf, expIvSecs, expHorizon, entryBarOpenUtc, expEntryPrice,
                     expCandles, expPred, expCrowd, expDxy));
+
+                var (shouldWeekendBet, simDir, simProb) = ValutaBot.MiniApp.Services.PaperTradingService.EvaluateWeekendSimCandidate(
+                    ml.Prediction, cm.Consensus.FinalDirection, cm.Consensus.Probability, requiredProb,
+                    currentPayout, isAssetOpen, isSubminuteImpulseOk);
+
+                if (shouldWeekendBet && expEntryPrice > 0)
+                {
+                    bool timingOk = true;
+                    if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+                    {
+                        DateTime execRefTime = PocketOptionWebSocketStream.GetBrokerTimeUtc();
+                        long bucketTicks = TimeSpan.FromSeconds(expIvSecs).Ticks;
+                        DateTime barOpen = new DateTime(execRefTime.Ticks - (execRefTime.Ticks % bucketTicks), DateTimeKind.Utc);
+                        double elapsedAfterMl = (execRefTime - barOpen).TotalSeconds;
+                        double maxExecElapsed = expIvSecs switch { 5 => 1.3, 10 => 2.2, 15 => 2.8, 30 => 3.8, _ => 5.0 };
+                        timingOk = elapsedAfterMl <= maxExecElapsed;
+                    }
+
+                    if (timingOk)
+                    {
+                        _ = Task.Run(() => ValutaBot.MiniApp.Services.PaperTradingService.TryRecordPaperTradeAsync(
+                            ValutaBot.MiniApp.Services.PaperTradingService.AccountWeekendSim,
+                            expAsset, expTf, expIvSecs, expHorizon, entryBarOpenUtc, expEntryPrice,
+                            simDir, simProb, simPayout, simModel));
+                    }
+                }
+            }
+            else if (canExecuteReal && currentLivePrice > 0)
+            {
+                string realDir = cm.Consensus.FinalDirection;
+                int realProb = cm.Consensus.Probability;
+                double realEntry = currentLivePrice;
+
+                _ = Task.Run(() => ValutaBot.MiniApp.Services.PaperTradingService.TryRecordPaperTradeAsync(
+                    ValutaBot.MiniApp.Services.PaperTradingService.AccountWeekday,
+                    expAsset, expTf, expIvSecs, expHorizon, entryBarOpenUtc, realEntry,
+                    realDir, realProb, simPayout, simModel));
             }
         }
 
