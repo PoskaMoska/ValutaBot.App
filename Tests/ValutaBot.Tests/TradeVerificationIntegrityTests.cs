@@ -11,8 +11,8 @@ namespace ValutaBot.Tests;
 public class TradeVerificationIntegrityTests
 {
     [Theory]
-    [InlineData("BUY", 1.08500, 1.08500, false, 0.0)]     // Pocket Option ATM: Tie is NOT a win (WasWin = false)
-    [InlineData("PUT", 1.08500, 1.08500, false, 0.0)]     // Pocket Option ATM: Tie is NOT a win (WasWin = false)
+    [InlineData("BUY", 1.08500, 1.08500, null, 0.0)]     // Pocket Option ATM: Tie is a refund (neither win nor loss -> null)
+    [InlineData("PUT", 1.08500, 1.08500, null, 0.0)]     // Pocket Option ATM: Tie is a refund (neither win nor loss -> null)
     [InlineData("BUY", 1.08500, 1.08550, true, 4.61)]     // BUY win
     [InlineData("BUY", 1.08500, 1.08450, false, -4.61)]   // BUY loss
     [InlineData("PUT", 1.08500, 1.08450, true, 4.61)]     // PUT win
@@ -37,7 +37,7 @@ public class TradeVerificationIntegrityTests
         }
         else if (isExactDoji)
         {
-            wasCorrect = false; // Pocket Option ATM rule: Refund is NOT a win!
+            wasCorrect = null; // Pocket Option ATM rule: Tie refunds stake (neither win nor loss)
             pnlBps = 0.0;
         }
         else

@@ -254,7 +254,7 @@ async def predict(request: Request):
         quant_res = await loop.run_in_executor(
             inference_executor,
             quant_predictor.predict,
-            symbol, interval, candles, mtf_candles, micro_candles
+            symbol, interval, candles, mtf_candles, micro_candles, macro_ctx
         )
         if quant_res is not None:
             q_dir, q_conf, q_ver, q_hor, q_raw, q_det = quant_res

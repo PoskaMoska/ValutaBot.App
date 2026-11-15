@@ -154,7 +154,9 @@ namespace ValutaBot.App.MiniApp.Data.Repositories
             if (o.WasWin == null || Math.Abs(o.EntryPrice - o.ExitPrice) < 1e-7 || Math.Abs(o.PnlBps) < 1e-4)
             {
                 o.PnlBps = 0.0;
-                if (Math.Abs(o.EntryPrice - o.ExitPrice) < 1e-7 && (o.Direction == "BUY" || o.Direction == "PUT"))
+                if (Math.Abs(o.EntryPrice - o.ExitPrice) < 1e-7 &&
+                    o.Direction != null &&
+                    (o.Direction.EndsWith("BUY", StringComparison.Ordinal) || o.Direction.EndsWith("PUT", StringComparison.Ordinal)))
                 {
                     o.WasWin = null;
                 }

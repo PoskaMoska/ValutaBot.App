@@ -35,15 +35,21 @@ if SCRIPT_DIR not in sys.path:
 
 from models.subminute_quant_predictor import (
     ALL_FEATURES,
+    BASKET_FEATURES,
     CORE_FEATURES,
     DEFAULT_META_PATH,
     DEFAULT_NPZ_PATH,
     INTERVAL_SECONDS,
+    MICRO_FEATURES,
     MODEL_VERSION,
+    REGIME_FEATURES,
     compute_features_batch,
     eval_hgb_flat_batch,
+    is_synthetic_otc_mask,
     is_weekend_otc_mask,
+    mirror_feature_matrix,
     pack_hgb_for_npz,
+    usd_basket_sign,
 )
 
 TRAIN_INTERVALS = ["s5", "s10", "s15", "s30", "1min"]
@@ -81,10 +87,10 @@ def _predict_core_lr(
 def _make_hgb(tf: str, seed: int = 42) -> HistGradientBoostingClassifier:
     if tf == "1min":
         return HistGradientBoostingClassifier(
-            max_iter=260,
-            max_depth=4,
-            min_samples_leaf=400,
-            l2_regularization=12.0,
+            max_iter=240,
+            max_depth=3,
+            min_samples_leaf=450,
+            l2_regularization=20.0,
             learning_rate=0.03,
             early_stopping=True,
             validation_fraction=0.12,
@@ -115,41 +121,111 @@ def _make_hgb(tf: str, seed: int = 42) -> HistGradientBoostingClassifier:
 
 def _fit_robust_isotonic(dir_strength: np.ndarray, won: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Fits monotonic OOF non-tie win-rate calibration with tail block pooling so no tiny upper
-    sample tail produces inflated overconfident probabilities.
+    Fits monotonic OOF non-tie win-rate calibration over equal-count quantile bins
+    with Empirical Bayes shrinkage toward 0.50 and a 1-SE conservative tail guard
+    so small-N coin-flip streaks can never inflate tail confidence.
     """
+    x = np.asarray(dir_strength, dtype=np.float64)
+    y = np.asarray(won, dtype=np.float64)
+    valid = np.isfinite(x) & np.isfinite(y)
+    x = np.clip(x[valid], 0.50, 1.0)
+    y = np.clip(y[valid], 0.0, 1.0)
+    n = len(x)
+    if n < 200:
+        return np.array([0.50, 1.0], dtype=np.float64), np.array([0.50, 0.50], dtype=np.float64)
+
+    order = np.argsort(x, kind="mergesort")
+    xs_s = x[order]
+    ys_s = y[order]
+
+    bin_sz = max(min(1500, max(400, n // 60)), min(400, max(80, n // 12)))
+    n_bins = max(2, n // bin_sz)
+    edges = np.linspace(0, n, n_bins + 1, dtype=np.int64)
+
+    prior = 30.0
+    bx, by, bw = [], [], []
+    for i in range(n_bins):
+        lo, hi = int(edges[i]), int(edges[i + 1])
+        cnt = hi - lo
+        if cnt <= 0:
+            continue
+        wins = float(np.sum(ys_s[lo:hi]))
+        p_eb = (wins + 0.5 * prior) / (cnt + prior)
+        se = float(np.sqrt(max(p_eb * (1.0 - p_eb), 1e-6) / (cnt + prior)))
+        p_cons = float(np.clip(p_eb - 1.0 * se, 0.50, 0.75))
+        bx.append(float(np.mean(xs_s[lo:hi])))
+        by.append(p_cons)
+        bw.append(float(cnt))
+
     iso = IsotonicRegression(y_min=0.50, y_max=0.75, increasing=True, out_of_bounds="clip")
-    iso.fit(dir_strength, won)
+    iso.fit(np.array(bx, dtype=np.float64), np.array(by, dtype=np.float64), sample_weight=np.array(bw, dtype=np.float64))
 
     xs = np.asarray(iso.X_thresholds_, dtype=np.float64)
     ys = np.asarray(iso.y_thresholds_, dtype=np.float64)
-
-    # Pool upper tail if fewer than 200 samples support the rightmost segment
-    if len(xs) > 3:
-        tail_cutoff = xs[-2]
-        n_tail = int(np.sum(dir_strength >= tail_cutoff))
-        if n_tail < 200:
-            shrink_y = float(np.mean(won[dir_strength >= xs[-3]])) if np.sum(dir_strength >= xs[-3]) > 0 else ys[-2]
-            ys[-1] = min(ys[-1], max(ys[-2], shrink_y))
-
-    # Ensure strictly increasing xs for np.interp and anchor lower end cleanly at 0.50
     if xs[0] > 0.50:
         xs = np.insert(xs, 0, 0.50)
-        ys = np.insert(ys, 0, max(0.50, ys[0] - 0.01))
+        ys = np.insert(ys, 0, max(0.50, ys[0] - 0.005))
     if xs[-1] < 1.0:
         xs = np.append(xs, 1.0)
         ys = np.append(ys, ys[-1])
 
-    # Deduplicate any identical x coordinates keeping conservative average
     ux, idx = np.unique(xs, return_index=True)
     uy = np.maximum.accumulate(ys[idx])
     return ux, np.clip(uy, 0.50, 0.75)
 
 
+def _compute_usd_basket_df(df: pd.DataFrame, dt: int) -> Optional[pd.DataFrame]:
+    """
+    Computes strictly causal per-timestamp USD basket momentum (1m & 5m) and sync score
+    across major USD pairs, matching live MacroContextEngine.ComputeDollarBasketMetrics.
+    """
+    bars_1m = max(1, int(round(60.0 / max(1, dt))))
+    bars_5m = max(1, int(round(300.0 / max(1, dt))))
+    per_asset_1m: Dict[str, pd.Series] = {}
+    per_asset_5m: Dict[str, pd.Series] = {}
+
+    for asset, g in df.groupby("asset", sort=False):
+        u_sign = usd_basket_sign(asset)
+        if abs(u_sign) < 0.5:
+            continue
+        gs = g.sort_values("ts")
+        ts = gs["ts"].to_numpy()
+        c = np.maximum(gs["close_price"].to_numpy(), 1e-9)
+        n = len(c)
+        r1 = np.full(n, np.nan, dtype=np.float64)
+        r5 = np.full(n, np.nan, dtype=np.float64)
+        if n > bars_1m:
+            ok1 = (ts[bars_1m:] - ts[:-bars_1m]) <= int(max(dt, 60) * 1.6)
+            m1 = (c[bars_1m:] - c[:-bars_1m]) / np.maximum(c[:-bars_1m], 1e-9) * 10000.0 * u_sign
+            r1[bars_1m:] = np.where(ok1 & (np.abs(m1) <= 50.0), m1, np.nan)
+        if n > bars_5m:
+            ok5 = (ts[bars_5m:] - ts[:-bars_5m]) <= int(max(dt, 300) * 1.6)
+            m5 = (c[bars_5m:] - c[:-bars_5m]) / np.maximum(c[:-bars_5m], 1e-9) * 10000.0 * u_sign
+            r5[bars_5m:] = np.where(ok5 & (np.abs(m5) <= 80.0), m5, np.nan)
+        per_asset_1m[asset] = pd.Series(r1, index=ts)
+        per_asset_5m[asset] = pd.Series(r5, index=ts)
+
+    if len(per_asset_1m) < 3:
+        return None
+
+    m1_df = pd.DataFrame(per_asset_1m)
+    m5_df = pd.DataFrame(per_asset_5m)
+    dxy_1m = m1_df.median(axis=1, skipna=True)
+    dxy_5m = m5_df.median(axis=1, skipna=True)
+
+    signs = np.sign(m1_df.to_numpy())
+    med_sign = np.sign(dxy_1m.to_numpy())[:, None]
+    valid_cnt = np.sum(np.isfinite(m1_df.to_numpy()), axis=1)
+    agree_cnt = np.sum(np.where(np.isfinite(signs) & (med_sign != 0), (signs == med_sign).astype(np.float64), 0.0), axis=1)
+    bsync = np.where(valid_cnt >= 3, np.where(med_sign[:, 0] == 0, 0.5, agree_cnt / np.maximum(valid_cnt, 1)), np.nan)
+    return pd.DataFrame({"dxy_1m": dxy_1m.to_numpy(), "dxy_5m": dxy_5m.to_numpy(), "bsync": bsync}, index=m1_df.index)
+
+
 def build_dataset_for_interval(
     df: pd.DataFrame, dt: int, s5_map: Optional[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]]
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Builds chronological (X, fwd, ts, asset_norm) arrays cleanly across all assets."""
+    """Builds chronological (X, fwd, ts, asset_norm) arrays cleanly across all assets with jump guard."""
+    basket_df = _compute_usd_basket_df(df, dt)
     x_list, fwd_list, ts_list, asset_list = [], [], [], []
     for asset, g in df.groupby("asset", sort=False):
         g_s = g.sort_values("ts")
@@ -164,15 +240,48 @@ def build_dataset_for_interval(
         if dt > 5 and s5_map is not None and asset in s5_map:
             st, so, sc = s5_map[asset]
 
-        mat, valid_hist = compute_features_batch(ts, o, h, l, c, v, dt, s5_ts=st, s5_o=so, s5_c=sc)
+        u_sign = usd_basket_sign(asset)
+        basket_arrays = None
+        if basket_df is not None and abs(u_sign) > 0.5:
+            reidx = basket_df.reindex(ts)
+            basket_arrays = (
+                reidx["dxy_1m"].to_numpy(),
+                reidx["dxy_5m"].to_numpy(),
+                reidx["bsync"].to_numpy(),
+            )
+
+        mat, valid_hist = compute_features_batch(
+            ts, o, h, l, c, v, dt,
+            s5_ts=st, s5_o=so, s5_c=sc,
+            basket_arrays=basket_arrays,
+            usd_sign=u_sign,
+        )
         if len(mat) == 0:
             continue
         n = len(ts)
+
+        # Exclude FX<->OTC switchover discontinuities (>40 bps jump inside 45-bar indicator window)
+        prev_c = np.empty(n, dtype=np.float64)
+        prev_c[0] = o[0]
+        prev_c[1:] = c[:-1]
+        bar_r = (c - o) / np.maximum(o, 1e-9) * 10000.0
+        gap_r = (c - prev_c) / np.maximum(prev_c, 1e-9) * 10000.0
+        is_jump = (np.abs(gap_r) > 40.0) | (np.abs(bar_r) > 40.0)
+        cs_j = np.cumsum(np.insert(is_jump.astype(np.int32), 0, 0))
+        jump_win = np.zeros(n, dtype=bool)
+        w = 45
+        if n > w:
+            jump_win[w:] = (cs_j[w + 1:] - cs_j[1:-w]) > 0
+            jump_win[:w] = cs_j[1 : w + 1] > 0
+        else:
+            jump_win[:] = cs_j[1:] > 0
+
         valid_next = np.zeros(n, dtype=bool)
         valid_next[:-1] = (ts[1:] - ts[:-1]) == dt
         fwd = np.zeros(n, dtype=np.float64)
         fwd[:-1] = (c[1:] - o[1:]) / np.maximum(o[1:], 1e-9) * 10000.0
-        keep = valid_hist & valid_next
+        fwd_ok = np.abs(fwd) <= 40.0
+        keep = valid_hist & valid_next & (~jump_win) & fwd_ok
         if not np.any(keep):
             continue
 
@@ -255,7 +364,7 @@ def evaluate_real_outcomes(
     tf_key = "m1" if tf == "1min" else tf
     sub = oc_df[oc_df["timeframe"].str.lower() == tf_key]
     if len(sub) > 0:
-        sub = sub[~is_weekend_otc_mask(sub["ts"].to_numpy())]
+        sub = sub[~is_synthetic_otc_mask(sub["ts"].to_numpy())]
     if len(sub) == 0:
         return {"matched": 0}
 
@@ -328,25 +437,31 @@ def train_interval(
     aux_train: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
     dt = INTERVAL_SECONDS[tf]
-    # Exclude weekend synthetic PRNG OTC ticks (Fri 20:44Z - Sun 21:00Z) so models learn pure live FX patterns
-    fx_mask = (~is_weekend_otc_mask(ts_all)) & (~is_weekend_otc_mask(ts_all + dt))
+    X_raw_full = X_all
+    fwd_raw_full = fwd_all
+    ts_raw_full = ts_all
+
+    # Exclude weekend synthetic OTC (Fri 20:44Z - Sun 21:00Z) AND daily 21:00Z - 23:59Z rollover OTC
+    # so models learn pure live FX structure without PRNG/rollover contamination.
+    fx_mask = (~is_synthetic_otc_mask(ts_all)) & (~is_synthetic_otc_mask(ts_all + dt))
     X_all = X_all[fx_mask]
     fwd_all = fwd_all[fx_mask]
     ts_all = ts_all[fx_mask]
     assets_all = assets_all[fx_mask]
     if aux_train is not None:
         ax, af, ats = aux_train
-        aux_fx = (~is_weekend_otc_mask(ats)) & (~is_weekend_otc_mask(ats + dt))
+        aux_fx = (~is_synthetic_otc_mask(ats)) & (~is_synthetic_otc_mask(ats + dt))
         aux_train = (ax[aux_fx], af[aux_fx], ats[aux_fx])
 
     n_core = len(CORE_FEATURES)
-    max_hgb = n_core if tf == "s5" else len(ALL_FEATURES)
+    max_hgb = len(ALL_FEATURES) - len(MICRO_FEATURES) if tf == "s5" else len(ALL_FEATURES)
     full_nt_mask = fwd_all != 0
     active_hgb_cols = [
         j for j in range(max_hgb)
         if np.unique(X_all[full_nt_mask & ~np.isnan(X_all[:, j]), j]).size >= 2
     ]
     n_hgb = len(active_hgb_cols)
+    hgb_feature_names = [ALL_FEATURES[j] for j in active_hgb_cols]
     c_reg = 0.005 if tf == "1min" else 0.01
 
     X_hgb_all = X_all[:, active_hgb_cols]
@@ -374,14 +489,34 @@ def train_interval(
                 fw = np.concatenate([fw, aux_fwd[am]])
         return xh, xc, fw
 
-    def _fit_predict_fold_hgb(X_tr_f: np.ndarray, y_tr_f: np.ndarray, X_va_f: np.ndarray) -> np.ndarray:
+    def _fit_sym_lr(xc_tr: np.ndarray, y_tr: np.ndarray) -> Tuple[LogisticRegression, StandardScaler, np.ndarray]:
+        xc_fit = np.vstack([xc_tr, mirror_feature_matrix(xc_tr, CORE_FEATURES)])
+        y_fit = np.concatenate([y_tr, 1 - y_tr])
+        return _fit_core_lr(xc_fit, y_fit, c_reg=c_reg)
+
+    def _pred_sym_lr(lr_m: LogisticRegression, sc_m: StandardScaler, meds_m: np.ndarray, xc_va: np.ndarray) -> np.ndarray:
+        p1 = _predict_core_lr(lr_m, sc_m, meds_m, xc_va)
+        p2 = 1.0 - _predict_core_lr(lr_m, sc_m, meds_m, mirror_feature_matrix(xc_va, CORE_FEATURES))
+        return 0.5 * (p1 + p2)
+
+    def _fit_sym_hgb(xh_tr: np.ndarray, y_tr: np.ndarray) -> Tuple[HistGradientBoostingClassifier, List[int], List[str]]:
         f_cols = [
-            k for k in range(X_tr_f.shape[1])
-            if np.unique(X_tr_f[~np.isnan(X_tr_f[:, k]), k]).size >= 2
+            k for k in range(xh_tr.shape[1])
+            if np.unique(xh_tr[~np.isnan(xh_tr[:, k]), k]).size >= 2
         ]
+        f_names = [hgb_feature_names[k] for k in f_cols]
+        xs = xh_tr[:, f_cols]
+        xs_fit = np.vstack([xs, mirror_feature_matrix(xs, f_names)])
+        y_fit = np.concatenate([y_tr, 1 - y_tr])
         m_f = _make_hgb(tf, seed=42)
-        m_f.fit(X_tr_f[:, f_cols], y_tr_f)
-        return m_f.predict_proba(X_va_f[:, f_cols])[:, 1]
+        m_f.fit(xs_fit, y_fit)
+        return m_f, f_cols, f_names
+
+    def _pred_sym_hgb(m_f: HistGradientBoostingClassifier, f_cols: List[int], f_names: List[str], xh_va: np.ndarray) -> np.ndarray:
+        xs = xh_va[:, f_cols]
+        p1 = m_f.predict_proba(xs)[:, 1]
+        p2 = 1.0 - m_f.predict_proba(mirror_feature_matrix(xs, f_names))[:, 1]
+        return 0.5 * (p1 + p2)
 
     # 1) 3-Fold Chronological Expanding Walk-Forward CV for OOF & calibration
     n_total = len(ts_all)
@@ -404,9 +539,10 @@ def train_interval(
 
         xh_tr, xc_tr, fw_tr = _concat_train(tr_mask, t_cut, non_tie_only=True)
         y_tr = (fw_tr > 0).astype(np.int64)
-        lr_f, sc_f, meds_f = _fit_core_lr(xc_tr, y_tr, c_reg=c_reg)
-        oof_p_lr.append(_predict_core_lr(lr_f, sc_f, meds_f, X_core_all[va_slice]))
-        oof_p_hgb.append(_fit_predict_fold_hgb(xh_tr, y_tr, X_hgb_all[va_slice]))
+        lr_f, sc_f, meds_f = _fit_sym_lr(xc_tr, y_tr)
+        m_hgb_f, f_cols_f, f_names_f = _fit_sym_hgb(xh_tr, y_tr)
+        oof_p_lr.append(_pred_sym_lr(lr_f, sc_f, meds_f, X_core_all[va_slice]))
+        oof_p_hgb.append(_pred_sym_hgb(m_hgb_f, f_cols_f, f_names_f, X_hgb_all[va_slice]))
         oof_fwd.append(fwd_all[va_slice])
         oof_indices.extend(va_slice.tolist())
 
@@ -427,6 +563,7 @@ def train_interval(
 
     p_ens_oof = best_w * p_hgb_oof + (1.0 - best_w) * p_lr_oof
     oof_auc = float(roc_auc_score(y_oof_nt, p_ens_oof[nt_oof]))
+    oof_buy_pct = float(np.mean(p_ens_oof[nt_oof] >= 0.5)) * 100.0
     oof_dir_nt = np.maximum(p_ens_oof[nt_oof], 1.0 - p_ens_oof[nt_oof])
     oof_won_nt = (((p_ens_oof[nt_oof] >= 0.5) & (fwd_oof[nt_oof] > 0)) | ((p_ens_oof[nt_oof] < 0.5) & (fwd_oof[nt_oof] < 0))).astype(np.float64)
     oof_acc = float(np.mean(oof_won_nt))
@@ -436,7 +573,7 @@ def train_interval(
     top10_thr = float(np.percentile(oof_dir_nt, 90))
     oof_top10_wr = float(np.mean(oof_won_nt[oof_dir_nt >= top10_thr])) * 100.0
 
-    # Fit strict OOF monotonic calibrator
+    # Fit strict OOF monotonic calibrator on Clean FX
     iso_x, iso_y = _fit_robust_isotonic(oof_dir_nt, oof_won_nt)
 
     # 2) Separate Nov 13 Holdout Benchmark (candles + real trade_outcomes)
@@ -447,9 +584,10 @@ def train_interval(
     if np.sum(nov_tr_mask) >= 5000 and np.sum(nov_te_mask) >= 500:
         xh_ntr, xc_ntr, fw_ntr = _concat_train(nov_tr_mask, t_nov_cut, non_tie_only=True)
         y_ntr = (fw_ntr > 0).astype(np.int64)
-        lr_n, sc_n, meds_n = _fit_core_lr(xc_ntr, y_ntr, c_reg=c_reg)
-        p_hgb_nte = _fit_predict_fold_hgb(xh_ntr, y_ntr, X_hgb_all[nov_te_mask])
-        p_nte = best_w * p_hgb_nte + (1.0 - best_w) * _predict_core_lr(lr_n, sc_n, meds_n, X_core_all[nov_te_mask])
+        lr_n, sc_n, meds_n = _fit_sym_lr(xc_ntr, y_ntr)
+        m_hgb_n, f_cols_n, f_names_n = _fit_sym_hgb(xh_ntr, y_ntr)
+        p_hgb_nte = _pred_sym_hgb(m_hgb_n, f_cols_n, f_names_n, X_hgb_all[nov_te_mask])
+        p_nte = best_w * p_hgb_nte + (1.0 - best_w) * _pred_sym_lr(lr_n, sc_n, meds_n, X_core_all[nov_te_mask])
         f_nte = fwd_all[nov_te_mask]
         nt_n = f_nte != 0
         nov_auc = float(roc_auc_score((f_nte[nt_n] > 0).astype(np.int64), p_nte[nt_n]))
@@ -461,24 +599,51 @@ def train_interval(
         nov_info = {
             "nov13_auc": round(nov_auc, 4),
             "nov13_candle_top20_wr_nt": round(nov_top20_wr, 2),
+            "nov13_buy_pct": round(float(np.mean(p_nte[nt_n] >= 0.5)) * 100.0, 2),
             "nov13_real_outcomes": oc_res,
         }
 
     # Quality Gate
     gate_pass = bool(oof_auc >= 0.515 and max(oof_top20_wr, oof_top10_wr) >= 53.5)
 
-    # 3) Final Refit on Full History for Deployment
+    # 3) Final Refit on Full Clean-FX History with Exact Mirror Augmentation
     full_nt_mask = fwd_all != 0
     xh_full, xc_full, fw_full = _concat_train(full_nt_mask, None, non_tie_only=True)
     y_full_nt = (fw_full > 0).astype(np.int64)
-    lr_final, sc_final, meds_final = _fit_core_lr(xc_full, y_full_nt, c_reg=c_reg)
-    hgb_final = _make_hgb(tf, seed=42)
-    hgb_final.fit(xh_full, y_full_nt)
+    lr_final, sc_final, meds_final = _fit_sym_lr(xc_full, y_full_nt)
 
-    # Companion Tie-Hazard Classifier on ALL bars
+    xh_full_fit = np.vstack([xh_full, mirror_feature_matrix(xh_full, hgb_feature_names)])
+    y_full_fit = np.concatenate([y_full_nt, 1 - y_full_nt])
+    hgb_final = _make_hgb(tf, seed=42)
+    hgb_final.fit(xh_full_fit, y_full_fit)
+
+    # Out-of-sample Synthetic OTC + Rollover (21z-23z + Weekend) Calibrator
+    otc_nt_mask = is_synthetic_otc_mask(ts_raw_full) & (fwd_raw_full != 0)
+    otc_auc = 0.50
+    otc_top20_wr = 50.0
+    iso_otc_x = np.array([0.50, 1.0], dtype=np.float64)
+    iso_otc_y = np.array([0.50, 0.50], dtype=np.float64)
+    if np.sum(otc_nt_mask) >= 300:
+        xh_otc = X_raw_full[otc_nt_mask][:, active_hgb_cols]
+        xc_otc = X_raw_full[otc_nt_mask][:, :n_core]
+        fw_otc = fwd_raw_full[otc_nt_mask]
+        all_h_idx = list(range(len(active_hgb_cols)))
+        p_hgb_otc = _pred_sym_hgb(hgb_final, all_h_idx, hgb_feature_names, xh_otc)
+        p_lr_otc = _pred_sym_lr(lr_final, sc_final, meds_final, xc_otc)
+        p_otc = best_w * p_hgb_otc + (1.0 - best_w) * p_lr_otc
+        otc_auc = float(roc_auc_score((fw_otc > 0).astype(np.int64), p_otc))
+        otc_str = np.maximum(p_otc, 1.0 - p_otc)
+        otc_won = (((p_otc >= 0.5) & (fw_otc > 0)) | ((p_otc < 0.5) & (fw_otc < 0))).astype(np.float64)
+        thr_o20 = float(np.percentile(otc_str, 80))
+        otc_top20_wr = float(np.mean(otc_won[otc_str >= thr_o20])) * 100.0
+        iso_otc_x, iso_otc_y = _fit_robust_isotonic(otc_str, otc_won)
+
+    # Companion Tie-Hazard Classifier on ALL Clean-FX bars (symmetric mirror)
     all_main_mask = np.ones(len(ts_all), dtype=bool)
     xh_tie_all, _, fw_tie_all = _concat_train(all_main_mask, None, non_tie_only=False)
     y_tie_all = (fw_tie_all == 0).astype(np.int64)
+    xh_tie_fit = np.vstack([xh_tie_all, mirror_feature_matrix(xh_tie_all, hgb_feature_names)])
+    y_tie_fit = np.concatenate([y_tie_all, y_tie_all])
     tie_hgb = HistGradientBoostingClassifier(
         max_iter=150,
         max_depth=3,
@@ -487,7 +652,7 @@ def train_interval(
         learning_rate=0.05,
         random_state=42,
     )
-    tie_hgb.fit(xh_tie_all, y_tie_all)
+    tie_hgb.fit(xh_tie_fit, y_tie_fit)
 
     # Pack Pure-NumPy Arrays & Verify Exact Numeric Parity vs Sklearn (< 1e-8)
     npz_bundle: Dict[str, np.ndarray] = {}
@@ -500,6 +665,8 @@ def train_interval(
     npz_bundle[f"{tf}_lr_intercept"] = np.array([float(lr_final.intercept_[0])], dtype=np.float64)
     npz_bundle[f"{tf}_iso_x"] = iso_x.astype(np.float64)
     npz_bundle[f"{tf}_iso_y"] = iso_y.astype(np.float64)
+    npz_bundle[f"{tf}_iso_otc_x"] = iso_otc_x.astype(np.float64)
+    npz_bundle[f"{tf}_iso_otc_y"] = iso_otc_y.astype(np.float64)
 
     # Strict Numerical Parity Check (Last 2000 rows including any NaNs)
     sample_X = X_hgb_all[-min(2000, len(X_hgb_all)) :]
@@ -519,8 +686,13 @@ def train_interval(
         "n_core_features": int(n_core),
         "oof_auc": round(oof_auc, 4),
         "oof_accuracy": round(oof_acc, 4),
+        "oof_buy_pct": round(oof_buy_pct, 2),
         "oof_top20_wr_nt": round(oof_top20_wr, 2),
         "oof_top10_wr_nt": round(oof_top10_wr, 2),
+        "otc_rollover_n": int(np.sum(otc_nt_mask)),
+        "otc_rollover_auc": round(otc_auc, 4),
+        "otc_rollover_top20_wr_nt": round(otc_top20_wr, 2),
+        "otc_max_cal": round(float(np.max(iso_otc_y)), 4),
         "tie_dampen_threshold": 0.40,
         "parity_max_diff": float(max_parity_diff),
         **nov_info,
@@ -578,6 +750,9 @@ def main() -> None:
             "model_version": MODEL_VERSION,
             "trained_at_utc": datetime.now(timezone.utc).isoformat(),
             "core_features": CORE_FEATURES,
+            "regime_features": REGIME_FEATURES,
+            "basket_features": BASKET_FEATURES,
+            "micro_features": MICRO_FEATURES,
             "all_features": ALL_FEATURES,
             "intervals": {},
         }

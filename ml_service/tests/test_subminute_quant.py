@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ from models.subminute_quant_predictor import (
     compute_features_latest,
     eval_hgb_flat_batch,
     eval_hgb_flat_single,
+    mirror_feature_matrix,
     normalize_interval,
     pack_hgb_for_npz,
 )
@@ -130,7 +132,7 @@ def test_bogus_micro_candles_interval_rejected_safely():
 
 def test_loaded_production_bundle_all_5_timeframes_and_latency():
     if not (os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH)):
-        pytest.skip("subminute_quant_v6 model artifacts not present yet")
+        pytest.skip("subminute_quant_v7 model artifacts not present yet")
 
     predictor = SubminuteQuantPredictor.get_instance()
     assert predictor.is_available()
@@ -174,7 +176,7 @@ def test_loaded_production_bundle_all_5_timeframes_and_latency():
 
 def test_fastapi_predict_routes_all_subminute_intervals_to_quant():
     if not (os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH)):
-        pytest.skip("subminute_quant_v6 model artifacts not present yet")
+        pytest.skip("subminute_quant_v7 model artifacts not present yet")
 
     from fastapi.testclient import TestClient
     import main as ml_main
@@ -209,7 +211,7 @@ def test_fastapi_predict_routes_all_subminute_intervals_to_quant():
 
 def test_weekend_synthetic_otc_caps_probability_honestly():
     if not (os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH)):
-        pytest.skip("subminute_quant_v6 model artifacts not present yet")
+        pytest.skip("subminute_quant_v7 model artifacts not present yet")
 
     predictor = SubminuteQuantPredictor.get_instance()
     # Saturday 2026-11-14 14:00:00Z = 1794664800 -> synthetic weekend PRNG window
@@ -238,3 +240,37 @@ def test_weekend_synthetic_otc_caps_probability_honestly():
         assert body["confidence"] <= 0.52
         assert body.get("raw_uncapped_prob") is not None
         assert 0.20 <= body["raw_uncapped_prob"] <= 0.80
+
+
+def test_mirror_symmetry_and_macro_basket_fuzz_safety():
+    c = _synthetic_candles(n=90, dt=15, base_ts=1794500000)
+    feat = compute_features_latest(
+        c, "s15", symbol="EURUSD",
+        macro_context={"DxyMomentum1mBps": 2.4, "DxyMomentum5mBps": 4.1, "BasketSyncScore": 0.83},
+    )
+    assert feat is not None
+    mir = mirror_feature_matrix(feat, ALL_FEATURES)
+    back = mirror_feature_matrix(mir, ALL_FEATURES)
+    np.testing.assert_allclose(back, feat, rtol=0.0, atol=1e-12, equal_nan=True)
+
+    # Negate percentage steps cleanly via geometric inverse (1/P -> linear flip of steps)
+    if os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH):
+        predictor = SubminuteQuantPredictor.get_instance()
+        # Feature-level mirror evaluation symmetry via /predict macro fuzz resilience
+        res_fuzz = predictor.predict(
+            "EURUSD", "s15", c,
+            macro_context={"DxyMomentum1mBps": -888888.0, "DxyMomentum5mBps": float("nan"), "BasketSyncScore": 999.0},
+        )
+        assert res_fuzz is not None
+        assert res_fuzz[0] in ("BUY", "PUT", "NEUTRAL")
+        assert 0.50 <= res_fuzz[1] <= 0.80
+
+        # Daily rollover OTC window (Thu 22:15 UTC) triggers honest rollover calibrator without crashing
+        rollover_base_ts = int(datetime(2026, 11, 12, 22, 15, tzinfo=timezone.utc).timestamp())
+        rollover_candles = _synthetic_candles(n=120, dt=15, base_ts=rollover_base_ts)
+        res_roll = predictor.predict("EURUSD_PO", "s15", rollover_candles)
+        assert res_roll is not None
+        assert res_roll[5].get("rollover_otc") is True
+        assert res_roll[1] <= 0.52
+        for tf_key in ("s5", "s10", "s15", "s30", "1min"):
+            assert float(np.max(predictor.arrays[f"{tf_key}_iso_otc_y"])) <= 0.53

@@ -368,9 +368,9 @@ public class PendingTradeVerificationService : BackgroundService
         else if (isExactDoji)
         {
             // POCKET OPTION AT-THE-MONEY (ATM) TIE RULE:
-            // In binary options on Pocket Option, an exact tie (Entry == Exit) is a refund, NOT a win.
-            // WasWin MUST be false for BUY and PUT contracts, with PnL = 0 bps.
-            record.WasCorrect = false;
+            // In binary options on Pocket Option, an exact tie (Entry == Exit) refunds the stake (neither win nor loss).
+            // WasCorrect MUST be null for BUY and PUT contracts, with PnL = 0 bps.
+            record.WasCorrect = null;
             record.PnlBps = 0.0;
         }
         else 
@@ -389,8 +389,8 @@ public class PendingTradeVerificationService : BackgroundService
         // Note: SaveTradeOutcomeAsync already deletes pending trade by ID atomically in the same SQL batch
 
         string resultStr = record.WasCorrect.HasValue 
-            ? (record.WasCorrect.Value ? "WIN" : (isExactDoji ? "TIE(LOSS)" : "LOSS")) 
-            : "HOLD";
+            ? (record.WasCorrect.Value ? "WIN" : "LOSS") 
+            : (isExactDoji ? "TIE(REFUND)" : "HOLD");
         BotLogger.Info($"[PendingVerifier] {record.Id}: {record.Direction} {record.Asset}/{record.Timeframe} -> {resultStr} @ {exitPrice.Value} (Target: {record.VerifyAt:HH:mm:ss}, PnL: {record.PnlBps:+#0.00;-#0.00;0.00} bps)");
     }
 

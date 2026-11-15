@@ -97,6 +97,25 @@ public class PaperTradingServiceTests
         var rejectedNoise = PaperTradingService.EvaluateWeekendSimCandidate(
             strongBuyUncapped, "BUY", 52, requiredProbPct: 59, currentPayout: 84, isAssetOpen: true, isSubminuteImpulseOk: false);
         Assert.False(rejectedNoise.ShouldEnter);
+
+        // Low-payout asset (74% -> BE=57.47% -> EV floor=62%): 59% rejected for negative/thin EV, 63% allowed (no hard payout ban)
+        var rejectedNegativeEv = PaperTradingService.EvaluateWeekendSimCandidate(
+            strongBuyUncapped with { RawUncappedProb = 0.59 }, "BUY", 52, requiredProbPct: 58, currentPayout: 74, isAssetOpen: true, isSubminuteImpulseOk: true);
+        Assert.False(rejectedNegativeEv.ShouldEnter);
+
+        var acceptedHighConvLowPayout = PaperTradingService.EvaluateWeekendSimCandidate(
+            strongBuyUncapped with { RawUncappedProb = 0.63 }, "BUY", 52, requiredProbPct: 58, currentPayout: 74, isAssetOpen: true, isSubminuteImpulseOk: true);
+        Assert.Equal((true, "BUY", 63), acceptedHighConvLowPayout);
+    }
+
+    [Fact]
+    public void TryAcquireCooldownSlot_PreventsSimultaneousBursts()
+    {
+        var store = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        Assert.True(PaperTradingService.TryAcquireCooldownSlot("WEEKEND_SIM:ASSET:EURUSD_otc", 15.0, store));
+        Assert.False(PaperTradingService.TryAcquireCooldownSlot("WEEKEND_SIM:ASSET:EURUSD_otc", 15.0, store));
+        Assert.True(PaperTradingService.TryAcquireCooldownSlot("WEEKEND_SIM:ASSET:GBPUSD_otc", 15.0, store));
+        Assert.True(PaperTradingService.TryAcquireCooldownSlot("WEEKDAY:ASSET:EURUSD_otc", 15.0, store));
     }
 
     [Theory]

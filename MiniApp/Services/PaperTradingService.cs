@@ -238,8 +238,10 @@ public static class PaperTradingService
             return (false, "NEUTRAL", 50);
         }
 
-        // Waive only the artificial weekend <=52% clamp; simulate active high-conviction setups (>=55%)
-        int weekendSimFloor = Math.Max(55, Math.Min(requiredProbPct, 58) - 3);
+        // Require genuine positive EV above payout break-even + margin and >=60% on raw directional strength
+        double breakEvenPct = 10000.0 / (100.0 + Math.Max(currentPayout, 50));
+        int evPositiveFloor = (int)Math.Ceiling(breakEvenPct + 4.0);
+        int weekendSimFloor = Math.Max(60, Math.Max(requiredProbPct, evPositiveFloor));
         return probPct >= weekendSimFloor ? (true, dir, probPct) : (false, "NEUTRAL", probPct);
     }
 
@@ -362,6 +364,26 @@ public static class PaperTradingService
             : (false, postDelayPrice, adverseBps);
     }
 
+    internal static bool TryAcquireCooldownSlot(string cooldownKey, double cooldownSecs, ConcurrentDictionary<string, long>? store = null)
+    {
+        var dict = store ?? _cooldownSw;
+        long nowSw = System.Diagnostics.Stopwatch.GetTimestamp();
+        long newExpirySw = nowSw + (long)(cooldownSecs * System.Diagnostics.Stopwatch.Frequency);
+
+        while (true)
+        {
+            if (dict.TryGetValue(cooldownKey, out long prevExpirySw))
+            {
+                if (nowSw < prevExpirySw) return false;
+                if (dict.TryUpdate(cooldownKey, newExpirySw, prevExpirySw)) return true;
+            }
+            else if (dict.TryAdd(cooldownKey, newExpirySw))
+            {
+                return true;
+            }
+        }
+    }
+
     public static async Task TryRecordPaperTradeAsync(
         string accountMode,
         string cleanAsset,
@@ -386,21 +408,11 @@ public static class PaperTradingService
         double cooldownSecs = intervalSecs <= 5 ? 20.0 : Math.Max(tradeDurationSecs + 2.0, 15.0);
 
         string cooldownKey = $"{accountMode}:{cleanAsset}:{normTf}";
-        long nowSw = System.Diagnostics.Stopwatch.GetTimestamp();
-        long newExpirySw = nowSw + (long)(cooldownSecs * System.Diagnostics.Stopwatch.Frequency);
+        if (!TryAcquireCooldownSlot(cooldownKey, cooldownSecs)) return;
 
-        while (true)
-        {
-            if (_cooldownSw.TryGetValue(cooldownKey, out long prevExpirySw))
-            {
-                if (nowSw < prevExpirySw) return;
-                if (_cooldownSw.TryUpdate(cooldownKey, newExpirySw, prevExpirySw)) break;
-            }
-            else if (_cooldownSw.TryAdd(cooldownKey, newExpirySw))
-            {
-                break;
-            }
-        }
+        // Cross-TF per-asset dedup: prevent simultaneous s5/s10/s15/s30/m1 burst trades on the same price move
+        string assetCooldownKey = $"{accountMode}:ASSET:{cleanAsset}";
+        if (!TryAcquireCooldownSlot(assetCooldownKey, 15.0)) return;
 
         if (simulatedDelayMs > 0)
         {
