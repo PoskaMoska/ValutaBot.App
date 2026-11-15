@@ -16,8 +16,10 @@ namespace ValutaBot.MiniApp.Services;
 /// 24/7 Paper Trading Simulator backed by PostgreSQL (`paper_accounts`, `paper_trades`).
 /// Maintains two isolated virtual $100 accounts ($1 flat stake per trade) across s5..m1:
 ///  - WEEKDAY: mirrors real `canExecuteReal` signals during active weekday markets (24/7 day &amp; night).
-///  - WEEKEND_SIM: simulates live night/day bets during Fri 20:44Z - Sun 21:00Z using uncapped ML probabilities
+///  - WEEKEND_SIM: simulates live night/day bets during Fri 20:44Z - Sun 21:00Z using uncapped ML probabilities (&gt;=55%)
 ///    without altering live execution gates, UI signals, or weekday ML training labels.
+/// Models realistic Pocket Option Quick Trading execution (~250ms broker RTT delay, post-delay fill price,
+/// SlippageGate &lt;= 1.5 bps requote check, and exact millisecond tick expiration `t_fill + duration`).
 /// </summary>
 public static class PaperTradingService
 {
@@ -25,6 +27,8 @@ public static class PaperTradingService
     public const string AccountWeekendSim = "WEEKEND_SIM";
     public const double DefaultInitialBalanceUsd = 100.0;
     public const double DefaultStakeUsd = 1.0;
+    public const int DefaultSimulatedDelayMs = 250;
+    public const double MaxAdverseSlippageBps = 1.5;
 
     private static readonly ConcurrentDictionary<string, long> _cooldownSw =
         new(StringComparer.OrdinalIgnoreCase);
@@ -332,6 +336,32 @@ public static class PaperTradingService
         return "QUIET";
     }
 
+    /// <summary>
+    /// Validates post-delay execution quote against SlippageGate (&lt;= 1.5 bps adverse move).
+    /// Favorable movement passes and fills at the live post-delay tick; larger adverse spikes reject as requotes.
+    /// </summary>
+    internal static (bool Accepted, double FillPrice, double AdverseBps) EvaluatePostDelayFill(
+        string direction,
+        double signalPrice,
+        double postDelayPrice,
+        double maxAdverseBps = MaxAdverseSlippageBps)
+    {
+        if (direction is not ("BUY" or "PUT")) return (false, 0.0, 0.0);
+        if (signalPrice <= 1e-8 || !double.IsFinite(signalPrice) ||
+            postDelayPrice <= 1e-8 || !double.IsFinite(postDelayPrice))
+        {
+            return (false, 0.0, 0.0);
+        }
+
+        double adverseBps = direction == "BUY"
+            ? (postDelayPrice - signalPrice) / signalPrice * 10000.0
+            : (signalPrice - postDelayPrice) / signalPrice * 10000.0;
+
+        return adverseBps <= maxAdverseBps
+            ? (true, postDelayPrice, adverseBps)
+            : (false, postDelayPrice, adverseBps);
+    }
+
     public static async Task TryRecordPaperTradeAsync(
         string accountMode,
         string cleanAsset,
@@ -343,13 +373,13 @@ public static class PaperTradingService
         string direction,
         int probability,
         double payoutPct,
-        string modelVersion)
+        string modelVersion,
+        int simulatedDelayMs = DefaultSimulatedDelayMs)
     {
         if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
         if (direction is not ("BUY" or "PUT")) return;
         if (entryPrice <= 1e-8 || !double.IsFinite(entryPrice) || intervalSecs <= 0) return;
 
-        DateTime utcOpen = barOpenUtc.Kind == DateTimeKind.Utc ? barOpenUtc : barOpenUtc.ToUniversalTime();
         string normTf = TimeframeNormalizer.Normalize(timeframe).ToLowerInvariant();
         int horizonBars = Math.Max(1, targetHorizon);
         int tradeDurationSecs = Math.Max(horizonBars * intervalSecs, intervalSecs);
@@ -372,7 +402,37 @@ public static class PaperTradingService
             }
         }
 
-        DateTime verifyAtUtc = utcOpen.AddSeconds(tradeDurationSecs);
+        if (simulatedDelayMs > 0)
+        {
+            await Task.Delay(simulatedDelayMs).ConfigureAwait(false);
+        }
+
+        DateTime utcFallback = barOpenUtc.Kind == DateTimeKind.Utc ? barOpenUtc : barOpenUtc.ToUniversalTime();
+        double executedPrice = entryPrice;
+        DateTime fillUtc;
+
+        if (PriceFeed.UsePocketOption)
+        {
+            if (!PocketOptionWebSocketStream.TryGetLiveTick(cleanAsset, out double postPrice, out _, maxAgeSeconds: 2.5))
+            {
+                return;
+            }
+
+            var fillEval = EvaluatePostDelayFill(direction, entryPrice, postPrice, MaxAdverseSlippageBps);
+            if (!fillEval.Accepted)
+            {
+                return;
+            }
+
+            executedPrice = fillEval.FillPrice;
+            fillUtc = PocketOptionWebSocketStream.GetBrokerTimeUtc();
+        }
+        else
+        {
+            fillUtc = simulatedDelayMs > 0 ? DateTime.UtcNow : utcFallback;
+        }
+
+        DateTime verifyAtUtc = fillUtc.AddSeconds(tradeDurationSecs);
         double safePayout = double.IsFinite(payoutPct) && payoutPct > 0 ? Math.Clamp(payoutPct, 50.0, 99.0) : 82.0;
 
         try
@@ -401,15 +461,15 @@ public static class PaperTradingService
                         AccountMode = accountMode,
                         Asset = cleanAsset,
                         Timeframe = normTf,
-                        OpenTime = utcOpen.ToString("o"),
+                        OpenTime = fillUtc.ToString("o"),
                         VerifyAt = verifyAtUtc.ToString("o"),
                         Direction = direction,
                         Probability = probability,
                         PayoutPct = safePayout,
                         StakeUsd = stake,
-                        EntryPrice = entryPrice,
+                        EntryPrice = executedPrice,
                         ModelVersion = modelVersion ?? "",
-                        SessionName = ComputeUtcSession(utcOpen),
+                        SessionName = ComputeUtcSession(fillUtc),
                         CreatedAt = DateTime.UtcNow.ToString("o")
                     }, commandTimeout: 6);
             });
@@ -427,7 +487,8 @@ public static class PaperTradingService
 
         try
         {
-            DateTime cutoff = (brokerNowUtc.Kind == DateTimeKind.Utc ? brokerNowUtc : brokerNowUtc.ToUniversalTime()).AddSeconds(-4);
+            DateTime effectiveNowUtc = brokerNowUtc.Kind == DateTimeKind.Utc ? brokerNowUtc : brokerNowUtc.ToUniversalTime();
+            DateTime cutoff = effectiveNowUtc.AddMilliseconds(-1500);
 
             var pending = await DbConnectionFactory.WithRetryAsync(async conn =>
             {
@@ -463,26 +524,39 @@ public static class PaperTradingService
                     continue;
                 }
 
-                DateTime targetGrid = new DateTime(verifyUtc.Ticks - (verifyUtc.Ticks % s5Ticks), DateTimeKind.Utc);
                 string candleAsset = PriceFeed.CandleKey(row.Asset);
                 double? exitPrice = null;
 
-                try
+                bool streamFlowingNow = PriceFeed.UsePocketOption &&
+                    (PocketOptionWebSocketStream.TryGetLivePrice(candleAsset, out _, 3.0) ||
+                     PocketOptionWebSocketStream.IsLiveStreamFlowing(3.0));
+
+                if (RealtimeTickCollector.TryGetTickPriceAtOrBefore(candleAsset, verifyUtc, streamFlowingNow, out double tickExitPrice))
                 {
-                    exitPrice = await DbConnectionFactory.WithRetryAsync(
-                        conn => PendingTradeVerificationService.FindStrictS5ClosePriceAsync(
-                            conn, candleAsset, targetGrid, includeWeekendArchiveFallback: true, ct),
-                        ct);
+                    exitPrice = tickExitPrice;
                 }
-                catch { }
 
                 if (exitPrice == null || exitPrice.Value <= 1e-8)
                 {
-                    var recent = await RealtimeTickCollector.GetRecentCandles(candleAsset, "s5", 10);
-                    var match = recent?.FirstOrDefault(c => Math.Abs((c.Timestamp.AddSeconds(5) - targetGrid).TotalSeconds) <= 2.5);
-                    if (match != null && match.Close > 1e-8)
+                    long nearestGridTicks = ((verifyUtc.Ticks + (s5Ticks / 2)) / s5Ticks) * s5Ticks;
+                    DateTime targetGrid = new DateTime(nearestGridTicks, DateTimeKind.Utc);
+                    try
                     {
-                        exitPrice = match.Close;
+                        exitPrice = await DbConnectionFactory.WithRetryAsync(
+                            conn => PendingTradeVerificationService.FindStrictS5ClosePriceAsync(
+                                conn, candleAsset, targetGrid, includeWeekendArchiveFallback: true, ct),
+                            ct);
+                    }
+                    catch { }
+
+                    if (exitPrice == null || exitPrice.Value <= 1e-8)
+                    {
+                        var recent = await RealtimeTickCollector.GetRecentCandles(candleAsset, "s5", 10);
+                        var match = recent?.FirstOrDefault(c => Math.Abs((c.Timestamp.AddSeconds(5) - targetGrid).TotalSeconds) <= 2.5);
+                        if (match != null && match.Close > 1e-8)
+                        {
+                            exitPrice = match.Close;
+                        }
                     }
                 }
 
@@ -492,7 +566,7 @@ public static class PaperTradingService
 
                 if (exitPrice == null || exitPrice.Value <= 1e-8)
                 {
-                    double overdueSec = (DateTime.UtcNow - verifyUtc).TotalSeconds;
+                    double overdueSec = (effectiveNowUtc - verifyUtc).TotalSeconds;
                     if (overdueSec < 180) continue;
 
                     result = "GAP";
@@ -639,7 +713,7 @@ public static class PaperTradingService
                 ORDER BY account_mode ASC;", cancellationToken: ct, commandTimeout: 8))).ToList();
 
             var sb = new StringBuilder();
-            sb.AppendLine("💼 <b>Paper-симулятор ставок (виртуальный счёт)</b>\n");
+            sb.AppendLine("💼 <b>Paper-симулятор ставок (RTT ~250мс + тиковая экспирация)</b>\n");
 
             if (accounts.Count == 0)
             {
@@ -651,7 +725,7 @@ public static class PaperTradingService
             {
                 string label = acc.AccountMode == AccountWeekday
                     ? "📈 <b>WEEKDAY (будни 24/7 · боевые входы)</b>"
-                    : "🧪 <b>WEEKEND_SIM (выходные · без потолка 52%)</b>";
+                    : "🧪 <b>WEEKEND_SIM (выходные · ≥55%, проскальз. ≤1.5 bps)</b>";
                 sb.AppendLine(label);
 
                 double netPnl = acc.BalanceUsd - acc.InitialBalance;

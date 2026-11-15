@@ -180,6 +180,65 @@ namespace ValutaBot.MiniApp
 
         private static readonly ConcurrentDictionary<string, CandleRingBuffer> _ringBuffers = new(StringComparer.OrdinalIgnoreCase);
 
+        internal readonly record struct LiveTickSample(long BrokerUtcTicks, double Price);
+
+        private sealed class LiveTickRingBuffer
+        {
+            private const int MaxLiveTicksPerAsset = 3000;
+            private readonly LiveTickSample[] _samples = new LiveTickSample[MaxLiveTicksPerAsset];
+            private int _start;
+            private int _count;
+            private readonly object _lock = new();
+
+            public void Add(long brokerUtcTicks, double price)
+            {
+                if (brokerUtcTicks <= 0 || price <= 1e-8 || !double.IsFinite(price)) return;
+
+                lock (_lock)
+                {
+                    if (_count > 0)
+                    {
+                        int lastIdx = (_start + _count - 1) % MaxLiveTicksPerAsset;
+                        long lastTicks = _samples[lastIdx].BrokerUtcTicks;
+                        if (brokerUtcTicks < lastTicks) return;
+                        if (brokerUtcTicks == lastTicks)
+                        {
+                            _samples[lastIdx] = new LiveTickSample(brokerUtcTicks, price);
+                            return;
+                        }
+                    }
+
+                    if (_count == MaxLiveTicksPerAsset)
+                    {
+                        _samples[_start] = new LiveTickSample(brokerUtcTicks, price);
+                        _start = (_start + 1) % MaxLiveTicksPerAsset;
+                    }
+                    else
+                    {
+                        int idx = (_start + _count) % MaxLiveTicksPerAsset;
+                        _samples[idx] = new LiveTickSample(brokerUtcTicks, price);
+                        _count++;
+                    }
+                }
+            }
+
+            public LiveTickSample[] Snapshot()
+            {
+                lock (_lock)
+                {
+                    if (_count == 0) return Array.Empty<LiveTickSample>();
+                    var result = new LiveTickSample[_count];
+                    for (int i = 0; i < _count; i++)
+                    {
+                        result[i] = _samples[(_start + i) % MaxLiveTicksPerAsset];
+                    }
+                    return result;
+                }
+            }
+        }
+
+        private static readonly ConcurrentDictionary<string, LiveTickRingBuffer> _liveTickHistory = new(StringComparer.OrdinalIgnoreCase);
+
         // FIX 4 (2026-09-13): Bounded channel prevents unbounded memory growth during DB outages.
         // With CreateUnbounded, a PostgreSQL outage at ~100 ticks/sec fills ~30k events in 5min → OOM.
         // DropOldest: gaps in subminute_candles are acceptable; OOM is not.
@@ -230,6 +289,7 @@ namespace ValutaBot.MiniApp
             _m1.Clear();
             _ringBuffers.Clear();
             _recentCandlesCache.Clear();
+            _liveTickHistory.Clear();
             ValutaBot.MiniApp.Services.AutoTradingScannerService.ResetLastScannedTimes();
         }
 
@@ -241,6 +301,7 @@ namespace ValutaBot.MiniApp
             _s15.TryRemove(cleanAsset, out _);
             _s30.TryRemove(cleanAsset, out _);
             _m1.TryRemove(cleanAsset, out _);
+            _liveTickHistory.TryRemove(cleanAsset, out _);
             foreach (var tf in new[] { "s5", "s10", "s15", "s30", "1min", "m1" })
             {
                 _ringBuffers.TryRemove($"{cleanAsset}:{tf}", out _);
@@ -860,6 +921,11 @@ namespace ValutaBot.MiniApp
             string cleanAsset = PriceFeed.CandleKey(asset);
             long nowTicks = tickTimeUtc;
 
+            if (!isBackfill)
+            {
+                RecordLiveTick(cleanAsset, nowTicks, price);
+            }
+
             QueueTick(cleanAsset, "s5", price, nowTicks, TimeSpan.FromSeconds(5).Ticks, crowdSentiment);
             QueueTick(cleanAsset, "s10", price, nowTicks, TimeSpan.FromSeconds(10).Ticks, crowdSentiment);
             QueueTick(cleanAsset, "s15", price, nowTicks, TimeSpan.FromSeconds(15).Ticks, crowdSentiment);
@@ -873,6 +939,81 @@ namespace ValutaBot.MiniApp
             UpdateAccumulator(_m1, cleanAsset, price, nowTicks, TimeSpan.FromSeconds(60).Ticks, isBackfill, crowdSentiment);
             
             return Task.CompletedTask;
+        }
+
+        private static void RecordLiveTick(string cleanAsset, long brokerUtcTicks, double price)
+        {
+            var ring = _liveTickHistory.GetOrAdd(cleanAsset, static _ => new LiveTickRingBuffer());
+            ring.Add(brokerUtcTicks, price);
+        }
+
+        /// <summary>
+        /// Looks up the exact live broker quote held at targetUtc (last recorded tick at or before targetUtc)
+        /// from the in-memory tick ring buffer. Returns false if the buffer does not cover targetUtc or
+        /// if the feed was disconnected across targetUtc, so the caller can fall back to s5 candles.
+        /// </summary>
+        public static bool TryGetTickPriceAtOrBefore(
+            string asset,
+            DateTime targetUtc,
+            bool streamIsFlowingNow,
+            out double price,
+            double maxStaleTickAgeSec = 30.0)
+        {
+            string cleanAsset = PriceFeed.CandleKey(asset);
+            if (!_liveTickHistory.TryGetValue(cleanAsset, out var ring))
+            {
+                price = 0;
+                return false;
+            }
+
+            long targetTicks = (targetUtc.Kind == DateTimeKind.Utc ? targetUtc : targetUtc.ToUniversalTime()).Ticks;
+            var snapshot = ring.Snapshot();
+            return TryFindTickPriceAtOrBefore(snapshot, targetTicks, streamIsFlowingNow, out price, maxStaleTickAgeSec);
+        }
+
+        internal static bool TryFindTickPriceAtOrBefore(
+            ReadOnlySpan<LiveTickSample> samples,
+            long targetUtcTicks,
+            bool streamIsFlowingNow,
+            out double price,
+            double maxStaleTickAgeSec = 30.0)
+        {
+            price = 0;
+            if (samples.IsEmpty || samples[0].BrokerUtcTicks > targetUtcTicks)
+            {
+                return false;
+            }
+
+            int lo = 0;
+            int hi = samples.Length - 1;
+            int idx = -1;
+            while (lo <= hi)
+            {
+                int mid = lo + ((hi - lo) >> 1);
+                if (samples[mid].BrokerUtcTicks <= targetUtcTicks)
+                {
+                    idx = mid;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid - 1;
+                }
+            }
+
+            if (idx < 0) return false;
+
+            var chosen = samples[idx];
+            if (chosen.Price <= 1e-8 || !double.IsFinite(chosen.Price)) return false;
+
+            double ageBeforeTargetSec = (targetUtcTicks - chosen.BrokerUtcTicks) / (double)TimeSpan.TicksPerSecond;
+            if (ageBeforeTargetSec > maxStaleTickAgeSec) return false;
+
+            bool hasNewerTickAfterTarget = idx + 1 < samples.Length;
+            if (!hasNewerTickAfterTarget && !streamIsFlowingNow) return false;
+
+            price = chosen.Price;
+            return true;
         }
 
         public static bool IsAccumulatorCorrupted(string asset)

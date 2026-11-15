@@ -120,4 +120,99 @@ public class PaperTradingServiceTests
         Assert.True(cmd.CanHandle(1, "/sim", "/sim"));
         Assert.False(cmd.CanHandle(1, "/stats", "/stats"));
     }
+
+    [Fact]
+    public void EvaluatePostDelayFill_EnforcesAdverseSlippageGateAndUsesPostDelayFillPrice()
+    {
+        // BUY: +2.0 bps upward slippage -> adverse > 1.5 bps -> requote rejected
+        var rejectedBuy = PaperTradingService.EvaluatePostDelayFill("BUY", 1.00000, 1.00020);
+        Assert.False(rejectedBuy.Accepted);
+        Assert.True(rejectedBuy.AdverseBps > 1.5);
+
+        // BUY: +1.0 bps upward slippage -> within 1.5 bps -> accepted at actual post-delay fill price
+        var acceptedBuy = PaperTradingService.EvaluatePostDelayFill("BUY", 1.00000, 1.00010);
+        Assert.True(acceptedBuy.Accepted);
+        Assert.Equal(1.00010, acceptedBuy.FillPrice);
+
+        // BUY: favorable downward dip (-3.0 bps) -> accepted at better fill price
+        var favorableBuy = PaperTradingService.EvaluatePostDelayFill("BUY", 1.00000, 0.99970);
+        Assert.True(favorableBuy.Accepted);
+        Assert.Equal(0.99970, favorableBuy.FillPrice);
+        Assert.True(favorableBuy.AdverseBps < 0);
+
+        // PUT: -2.0 bps downward slippage -> adverse > 1.5 bps -> rejected
+        var rejectedPut = PaperTradingService.EvaluatePostDelayFill("PUT", 1.00000, 0.99980);
+        Assert.False(rejectedPut.Accepted);
+
+        // PUT: favorable +2.5 bps upward pop -> accepted at post-delay fill price
+        var favorablePut = PaperTradingService.EvaluatePostDelayFill("PUT", 1.00000, 1.00025);
+        Assert.True(favorablePut.Accepted);
+        Assert.Equal(1.00025, favorablePut.FillPrice);
+
+        // Invalid quote rejected
+        var invalid = PaperTradingService.EvaluatePostDelayFill("BUY", 1.00000, 0.0);
+        Assert.False(invalid.Accepted);
+    }
+
+    [Fact]
+    public void TryFindTickPriceAtOrBefore_HandlesExactTickFlatMarketColdStartAndStaleFeed()
+    {
+        long t0 = new DateTime(2026, 11, 15, 2, 0, 0, DateTimeKind.Utc).Ticks;
+        var samples = new RealtimeTickCollector.LiveTickSample[]
+        {
+            new(t0, 1.10000),
+            new(t0 + TimeSpan.FromSeconds(2.2).Ticks, 1.10012),
+            new(t0 + TimeSpan.FromSeconds(5.8).Ticks, 1.10025),
+        };
+
+        // Target at +5.250s (between +2.2s and +5.8s): newer tick at +5.8s confirms +2.2s held across expiry
+        Assert.True(RealtimeTickCollector.TryFindTickPriceAtOrBefore(
+            samples, t0 + TimeSpan.FromSeconds(5.25).Ticks, streamIsFlowingNow: false, out double heldPrice));
+        Assert.Equal(1.10012, heldPrice);
+
+        // Exact tick match
+        Assert.True(RealtimeTickCollector.TryFindTickPriceAtOrBefore(
+            samples, t0 + TimeSpan.FromSeconds(2.2).Ticks, streamIsFlowingNow: false, out double exactPrice));
+        Assert.Equal(1.10012, exactPrice);
+
+        // Flat market past last tick (+7.0s) when live stream is actively flowing -> uses +5.8s price
+        Assert.True(RealtimeTickCollector.TryFindTickPriceAtOrBefore(
+            samples, t0 + TimeSpan.FromSeconds(7.0).Ticks, streamIsFlowingNow: true, out double flatLivePrice));
+        Assert.Equal(1.10025, flatLivePrice);
+
+        // Same +7.0s when stream is NOT flowing -> refuses to settle blindly
+        Assert.False(RealtimeTickCollector.TryFindTickPriceAtOrBefore(
+            samples, t0 + TimeSpan.FromSeconds(7.0).Ticks, streamIsFlowingNow: false, out _));
+
+        // Target before oldest buffered tick (cold restart) -> returns false so DB s5 fallback handles it
+        Assert.False(RealtimeTickCollector.TryFindTickPriceAtOrBefore(
+            samples, t0 - TimeSpan.FromSeconds(1.0).Ticks, streamIsFlowingNow: true, out _));
+
+        // Stale >30s gap before target -> returns false
+        Assert.False(RealtimeTickCollector.TryFindTickPriceAtOrBefore(
+            samples, t0 + TimeSpan.FromSeconds(45.0).Ticks, streamIsFlowingNow: true, out _));
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task OnPriceUpdateAsync_RecordsLiveTicksAndExcludesBackfillForExactExpiryLookup()
+    {
+        const string testAsset = "EURUSD_otc";
+        RealtimeTickCollector.ResetAssetAccumulator(testAsset);
+
+        long baseTicks = DateTime.UtcNow.AddSeconds(-4).Ticks;
+        await RealtimeTickCollector.OnPriceUpdateAsync(testAsset, 1.09500, baseTicks, isBackfill: true);
+        await RealtimeTickCollector.OnPriceUpdateAsync(testAsset, 1.09510, baseTicks + TimeSpan.FromSeconds(1).Ticks, isBackfill: false);
+        await RealtimeTickCollector.OnPriceUpdateAsync(testAsset, 1.09525, baseTicks + TimeSpan.FromSeconds(3).Ticks, isBackfill: false);
+
+        // Backfill tick at baseTicks is excluded, so lookup at baseTicks + 0.5s finds nothing in live tick history
+        Assert.False(RealtimeTickCollector.TryGetTickPriceAtOrBefore(
+            testAsset, new DateTime(baseTicks + TimeSpan.FromSeconds(0.5).Ticks, DateTimeKind.Utc), streamIsFlowingNow: true, out _));
+
+        // Lookup at baseTicks + 2.5s resolves exact prior live tick (1.09510)
+        Assert.True(RealtimeTickCollector.TryGetTickPriceAtOrBefore(
+            testAsset, new DateTime(baseTicks + TimeSpan.FromSeconds(2.5).Ticks, DateTimeKind.Utc), streamIsFlowingNow: false, out double liveClose));
+        Assert.Equal(1.09510, liveClose);
+
+        RealtimeTickCollector.ResetAssetAccumulator(testAsset);
+    }
 }

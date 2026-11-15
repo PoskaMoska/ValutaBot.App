@@ -589,6 +589,12 @@ public static class PocketOptionWebSocketStream
     }
 
     public static bool TryGetLivePrice(string symbol, out double price, double maxAgeSeconds = 2.0)
+        => TryGetLiveTick(symbol, out price, out _, maxAgeSeconds);
+
+    /// <summary>
+    /// Reads the latest live broker tick price and broker UTC timestamp if fresh within maxAgeSeconds.
+    /// </summary>
+    public static bool TryGetLiveTick(string symbol, out double price, out DateTime brokerTickUtc, double maxAgeSeconds = 2.0)
     {
         if (_clockAnchor != null &&
             _livePrices.TryGetValue(PriceFeed.BaseAsset(symbol), out var slot) &&
@@ -600,11 +606,25 @@ public static class PocketOptionWebSocketStream
             if (arrivalAge <= maxAgeSeconds && brokerAge <= maxAgeSeconds && brokerAge >= -AnchorToleranceSec)
             {
                 price = tickPrice;
+                brokerTickUtc = new DateTime(brokerUtcTicks, DateTimeKind.Utc);
                 return true;
             }
         }
         price = 0;
+        brokerTickUtc = default;
         return false;
+    }
+
+    /// <summary>
+    /// True if any real WebSocket tick arrived within maxIdleSeconds and clock anchor is valid.
+    /// Used when an individual pair stays flat across an exact expiration timestamp while the stream is live.
+    /// </summary>
+    public static bool IsLiveStreamFlowing(double maxIdleSeconds = 3.0)
+    {
+        if (_clockAnchor == null) return false;
+        long lastRealSw = Volatile.Read(ref _lastRealTickSw);
+        if (lastRealSw <= 0) return false;
+        return System.Diagnostics.Stopwatch.GetElapsedTime(lastRealSw).TotalSeconds <= maxIdleSeconds;
     }
 
     public static void StartStream(string[]? assets = null)
