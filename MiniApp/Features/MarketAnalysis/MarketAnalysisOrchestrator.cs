@@ -935,17 +935,12 @@ public class MarketAnalysisOrchestrator(
         bool isPayoutAcceptable = currentPayout >= 70 && isAssetOpen;
 
         // ══════════════════════════════════════════════════════════════════════════
-        // ADAPTIVE PROBABILITY THRESHOLD (Based on Payout & Horizon Risk)
+        // ADAPTIVE PROBABILITY THRESHOLD (Based on Payout & Empirical Edge Margin)
         // ══════════════════════════════════════════════════════════════════════════
-        // Formula: Break-even win rate = 100 / (100 + payout). Target edge margin = +3.5%
-        // E.g. at 92% -> BE 52.1% (req 58%), at 82% -> BE 54.9% (req 59%), at 70% -> BE 58.8% (req 63%)
+        // Formula: Break-even win rate = 100 / (100 + payout). Target live margin = +5.5%, floor = 62%.
+        // E.g. at 92% -> BE 52.1% (req 62%), at 82% -> BE 54.9% (req 62%), at 75% -> 63%, at 70% -> 65%.
         double breakEvenWinRate = 100.0 / (100.0 + Math.Max(currentPayout, 50));
-        int adaptiveRequiredProb = Math.Max(58, (int)Math.Ceiling((breakEvenWinRate + 0.035) * 100.0));
-        if (isS5)
-        {
-            adaptiveRequiredProb += 2; // Extra hurdle against 5s tick noise and high tie rates
-        }
-        int requiredProb = adaptiveRequiredProb;
+        int requiredProb = Math.Max(62, (int)Math.Ceiling((breakEvenWinRate + 0.055) * 100.0));
 
         traceLines.Add($"[7.5 Adaptive Guard] Payout: {currentPayout}%, Порог: {requiredProb}% (BE: {breakEvenWinRate * 100:F1}%) | Толпа: {liveCrowdSentiment:F0}%");
 
@@ -1112,11 +1107,12 @@ public class MarketAnalysisOrchestrator(
                                      (cm.Consensus.FinalDirection == "PUT" && freshRealPrice < currentLivePrice);
                     double slippageBps = currentLivePrice > 0 ? (Math.Abs(freshRealPrice - currentLivePrice) / currentLivePrice * 10000.0) : double.PositiveInfinity;
 
-                    if (isAdverse && (double.IsNaN(slippageBps) || double.IsInfinity(slippageBps) || slippageBps > 1.5))
+                    double maxSlippageBps = ValutaBot.MiniApp.Services.PaperTradingService.GetMaxAdverseSlippageBps(prep.IntervalSecs);
+                    if (isAdverse && (double.IsNaN(slippageBps) || double.IsInfinity(slippageBps) || slippageBps > maxSlippageBps))
                     {
-                        _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: adverse slippage {SlippageBps:F2} bps exceeds 1.5 bps threshold (signal: {CurrentPrice}, fresh: {FreshPrice}, dir: {Dir})",
-                            prep.CleanAsset, timeframe, slippageBps, currentLivePrice, freshRealPrice, cm.Consensus.FinalDirection);
-                        traceLines.Add($"[8. SlippageGate]    [ОТКЛОНЕНО] Неблагоприятное проскальзывание {slippageBps:F2} bps превышает лимит 1.5 bps -> 0ms");
+                        _logger.LogWarning("[SlippageGate] Blocked {Asset} {Timeframe}: adverse slippage {SlippageBps:F2} bps exceeds {MaxSlippageBps:F2} bps threshold (signal: {CurrentPrice}, fresh: {FreshPrice}, dir: {Dir})",
+                            prep.CleanAsset, timeframe, slippageBps, maxSlippageBps, currentLivePrice, freshRealPrice, cm.Consensus.FinalDirection);
+                        traceLines.Add($"[8. SlippageGate]    [ОТКЛОНЕНО] Неблагоприятное проскальзывание {slippageBps:F2} bps превышает лимит {maxSlippageBps:F2} bps -> 0ms");
                         canExecuteReal = false;
                         allowShadowRecord = false;
                     }

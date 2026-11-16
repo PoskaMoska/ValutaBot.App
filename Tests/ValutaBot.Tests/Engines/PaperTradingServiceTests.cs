@@ -108,6 +108,17 @@ public class PaperTradingServiceTests
         Assert.Equal((true, "BUY", 63), acceptedHighConvLowPayout);
     }
 
+    [Theory]
+    [InlineData(5, 0.45)]
+    [InlineData(10, 0.65)]
+    [InlineData(15, 0.90)]
+    [InlineData(30, 1.20)]
+    [InlineData(60, 1.50)]
+    public void GetMaxAdverseSlippageBps_ScalesStrictlyWithCandleInterval(int intervalSecs, double expectedMaxBps)
+    {
+        Assert.Equal(expectedMaxBps, PaperTradingService.GetMaxAdverseSlippageBps(intervalSecs), precision: 4);
+    }
+
     [Fact]
     public void TryAcquireCooldownSlot_PreventsSimultaneousBursts()
     {

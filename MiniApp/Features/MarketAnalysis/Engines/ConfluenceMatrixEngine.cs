@@ -442,6 +442,7 @@ public class ConfluenceMatrixEngine(
                         (mtfResult.DominantDirection is not ("BUY" or "PUT") && !hasMtfDirection);
 
         int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
+        bool isQuantSubminute = isNeuralBrain && mlSignal!.ModelVersion!.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase);
         int probCeiling = 100; // жёсткий потолок вероятности, применяется после всех стадий
 
         if (isS5)
@@ -451,15 +452,20 @@ public class ConfluenceMatrixEngine(
 
         int ApplyRiskDampeners(int p, bool emitNotes)
         {
-            if (mlLiveLosses >= 3)
+            // Calibrated neural_quant outputs are already OOF-calibrated; subtracting -3%/-6% here
+            // drops signals below the entry hurdle permanently because SHADOW wins never reset _consecutiveLosses.
+            if (!isQuantSubminute)
             {
-                p = Math.Max(50, p - 6);
-                if (emitNotes) safetyNotes.Add($"⚠️ Circuit Breaker: {mlLiveLosses} убытка подряд на {asset}/{timeframe} (-6% уверенности)");
-            }
-            else if (mlLiveLosses == 2)
-            {
-                p = Math.Max(50, p - 3);
-                if (emitNotes) safetyNotes.Add($"⚠️ Осторожность: 2 убытка подряд на {asset}/{timeframe} (-3% уверенности)");
+                if (mlLiveLosses >= 3)
+                {
+                    p = Math.Max(50, p - 6);
+                    if (emitNotes) safetyNotes.Add($"⚠️ Circuit Breaker: {mlLiveLosses} убытка подряд на {asset}/{timeframe} (-6% уверенности)");
+                }
+                else if (mlLiveLosses == 2)
+                {
+                    p = Math.Max(50, p - 3);
+                    if (emitNotes) safetyNotes.Add($"⚠️ Осторожность: 2 убытка подряд на {asset}/{timeframe} (-3% уверенности)");
+                }
             }
 
             if (conflictPenalty < 1.0)
@@ -557,8 +563,7 @@ public class ConfluenceMatrixEngine(
         // ══════════════════════════════════════════════════════════════════════════
         // STAGE 2: SUBMINUTE NOISE & WICK REJECTION CALIBRATION
         // ══════════════════════════════════════════════════════════════════════════
-        bool isQuantSubminute = isNeuralBrain && mlSignal!.ModelVersion!.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase);
-        bool hasRiskDampener = (mlLiveLosses >= 2) || (conflictPenalty < 1.0);
+        bool hasRiskDampener = (!isQuantSubminute && mlLiveLosses >= 2) || (conflictPenalty < 1.0);
         if (noiseAudit.HasValue && finalDir is "BUY" or "PUT" && isSubMinute)
         {
             var na = noiseAudit.Value;

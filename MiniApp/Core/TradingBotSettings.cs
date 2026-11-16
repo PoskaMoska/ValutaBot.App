@@ -14,9 +14,9 @@ public class TradingBotSettings
     public bool EnableAutoCalibration { get; set; } = true;
 
     // CircuitBreaker settings (must not be hardcoded in services)
-    public int CircuitBreakerWindowSize { get; set; } = 10;                 // WINDOW_SIZE
-    public int CircuitBreakerMaxConsecutiveLosses { get; set; } = 3;        // MAX_CONSECUTIVE_LOSSES
-    public double CircuitBreakerMinWinRate { get; set; } = 0.40;            // MIN_WIN_RATE
+    public int CircuitBreakerWindowSize { get; set; } = 15;                 // WINDOW_SIZE
+    public int CircuitBreakerMaxConsecutiveLosses { get; set; } = 6;        // MAX_CONSECUTIVE_LOSSES
+    public double CircuitBreakerMinWinRate { get; set; } = 0.35;            // MIN_WIN_RATE
     public int CircuitBreakerCooldownMinutes { get; set; } = 15;            // COOLDOWN_MINUTES (15 min, dataset mode)
     public int CircuitBreakerDbCacheTtlSeconds { get; set; } = 30;          // DB_CACHE_TTL_SECONDS
 

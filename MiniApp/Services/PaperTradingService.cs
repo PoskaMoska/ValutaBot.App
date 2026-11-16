@@ -338,8 +338,17 @@ public static class PaperTradingService
         return "QUIET";
     }
 
+    public static double GetMaxAdverseSlippageBps(int intervalSecs) => intervalSecs switch
+    {
+        <= 5 => 0.45,
+        <= 10 => 0.65,
+        <= 15 => 0.90,
+        <= 30 => 1.20,
+        _ => MaxAdverseSlippageBps
+    };
+
     /// <summary>
-    /// Validates post-delay execution quote against SlippageGate (&lt;= 1.5 bps adverse move).
+    /// Validates post-delay execution quote against SlippageGate.
     /// Favorable movement passes and fills at the live post-delay tick; larger adverse spikes reject as requotes.
     /// </summary>
     internal static (bool Accepted, double FillPrice, double AdverseBps) EvaluatePostDelayFill(
@@ -430,7 +439,7 @@ public static class PaperTradingService
                 return;
             }
 
-            var fillEval = EvaluatePostDelayFill(direction, entryPrice, postPrice, MaxAdverseSlippageBps);
+            var fillEval = EvaluatePostDelayFill(direction, entryPrice, postPrice, GetMaxAdverseSlippageBps(intervalSecs));
             if (!fillEval.Accepted)
             {
                 return;

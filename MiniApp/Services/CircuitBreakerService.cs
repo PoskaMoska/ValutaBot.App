@@ -371,9 +371,9 @@ namespace ValutaBot.MiniApp.Services
                     reason = $"{consecutiveLosses} consecutive losses";
                 }
 
-                // Check 2: Win rate over the window (min 5 trades to evaluate, exclude ties)
+                // Check 2: Win rate over the window (min 10 trades to avoid variance-driven halts on tiny samples)
                 var resolvedTrades = recentOutcomes.Where(w => w.HasValue).Select(w => w!.Value).ToList();
-                if (!shouldHalt && resolvedTrades.Count >= 5)
+                if (!shouldHalt && resolvedTrades.Count >= 10)
                 {
                     int wins = resolvedTrades.Count(w => w);
                     double winRate = (double)wins / resolvedTrades.Count;

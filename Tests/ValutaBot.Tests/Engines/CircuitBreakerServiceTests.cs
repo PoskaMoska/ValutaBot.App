@@ -132,4 +132,13 @@ public class CircuitBreakerServiceTests
             BotLogger.AlertObserverForTests -= observer;
         }
     }
+
+    [Fact]
+    public void Defaults_PreventVarianceHaltsOnThreeLossesOrTinySamples()
+    {
+        var settings = new TradingBotSettings();
+        Assert.Equal(15, settings.CircuitBreakerWindowSize);
+        Assert.Equal(6, settings.CircuitBreakerMaxConsecutiveLosses);
+        Assert.Equal(0.35, settings.CircuitBreakerMinWinRate);
+    }
 }
