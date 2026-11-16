@@ -51,13 +51,14 @@ namespace ValutaBot.MiniApp
             }
         }
 
-        private record struct TickEvent(string Asset, string Interval, double Price, DateTime OpenTime, double CrowdSentiment = 50.0);
+        private record struct TickEvent(string Asset, string Interval, double Price, DateTime OpenTime, double CrowdSentiment = 50.0, bool ArchiveOtcOnly = false);
 
         private sealed class CandleBatchAggregate
         {
             public required string Asset { get; init; }
             public required string Interval { get; init; }
             public required DateTime OpenTime { get; init; }
+            public required bool ArchiveOtcOnly { get; init; }
             public double Open { get; set; }
             public double High { get; set; }
             public double Low { get; set; }
@@ -252,6 +253,8 @@ namespace ValutaBot.MiniApp
             });
 
         private static int _droppedTickCount = 0;
+        private static long _archivedOtcTicksQueued = 0;
+        internal static long ArchivedOtcTicksQueued => Interlocked.Read(ref _archivedOtcTicksQueued);
         private static DateTime _lastDropWarningAt = DateTime.MinValue;
 
         private static int _isInitialized = 0;
@@ -473,10 +476,10 @@ namespace ValutaBot.MiniApp
                 
                 // Single-pass O(N) aggregation: eliminates nested LINQ GroupBy/OrderBy/ToList allocations
                 // and guarantees correct Open (chronologically first tick) and Close (chronologically last tick).
-                var map = new Dictionary<(string Asset, string Interval, DateTime OpenTime), CandleBatchAggregate>();
+                var map = new Dictionary<(string Asset, string Interval, DateTime OpenTime, bool ArchiveOtcOnly), CandleBatchAggregate>();
                 foreach (var tick in buffer)
                 {
-                    var key = (tick.Asset, tick.Interval, tick.OpenTime);
+                    var key = (tick.Asset, tick.Interval, tick.OpenTime, tick.ArchiveOtcOnly);
                     if (!map.TryGetValue(key, out var agg))
                     {
                         agg = new CandleBatchAggregate
@@ -484,6 +487,7 @@ namespace ValutaBot.MiniApp
                             Asset = tick.Asset,
                             Interval = tick.Interval,
                             OpenTime = tick.OpenTime,
+                            ArchiveOtcOnly = tick.ArchiveOtcOnly,
                             Open = tick.Price,
                             High = tick.Price,
                             Low = tick.Price,
@@ -505,7 +509,8 @@ namespace ValutaBot.MiniApp
 
                 // Гарантируем строгий детерминированный порядок строк для исключения взаимных блокировок (Deadlocks)
                 var grouped = map.Values
-                    .OrderBy(g => g.Asset, StringComparer.Ordinal)
+                    .OrderBy(g => g.ArchiveOtcOnly)
+                    .ThenBy(g => g.Asset, StringComparer.Ordinal)
                     .ThenBy(g => g.Interval, StringComparer.Ordinal)
                     .ThenBy(g => g.OpenTime)
                     .ToList();
@@ -521,22 +526,7 @@ namespace ValutaBot.MiniApp
                         close_price     = EXCLUDED.close_price,
                         volume          = subminute_candles.volume + EXCLUDED.volume,
                         crowd_sentiment = EXCLUDED.crowd_sentiment;";
-                foreach (var item in grouped)
-                {
-                    var batchCmd = new NpgsqlBatchCommand(batchSql);
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Asset });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Interval });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.OpenTime.ToString("o") });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Open });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.High });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Low });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.Close });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = (double)item.Volume });
-                    batchCmd.Parameters.Add(new NpgsqlParameter { Value = item.CrowdSentiment });
-                    batch.BatchCommands.Add(batchCmd);
-                }
-
-                // Separate long-retention archive for weekend s5 OTC candles (Fri 20:44Z - Sun 21:00Z)
+                // Long-retention OTC s5 archive (weekend archive + parallel weekday *_OTC research stream)
                 const string weekendBatchSql = @"
                     INSERT INTO weekend_otc_candles (asset, interval, open_time, open_price, high_price, low_price, close_price, volume, crowd_sentiment)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -546,24 +536,37 @@ namespace ValutaBot.MiniApp
                         close_price     = EXCLUDED.close_price,
                         volume          = weekend_otc_candles.volume + EXCLUDED.volume,
                         crowd_sentiment = EXCLUDED.crowd_sentiment;";
+
+                static void AppendCandleCmd(NpgsqlBatch targetBatch, string sql, CandleBatchAggregate item)
+                {
+                    var cmd = new NpgsqlBatchCommand(sql);
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.Asset });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.Interval });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.OpenTime.ToString("o") });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.Open });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.High });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.Low });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.Close });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = (double)item.Volume });
+                    cmd.Parameters.Add(new NpgsqlParameter { Value = item.CrowdSentiment });
+                    targetBatch.BatchCommands.Add(cmd);
+                }
+
                 foreach (var item in grouped)
                 {
-                    if (!string.Equals(item.Interval, "s5", StringComparison.OrdinalIgnoreCase)
-                        || !ValutaBot.MiniApp.Services.WeekendShadowExperimentService.IsWeekendOtcWindowUtc(item.OpenTime))
+                    if (!item.ArchiveOtcOnly)
                     {
-                        continue;
+                        AppendCandleCmd(batch, batchSql, item);
+                        if (string.Equals(item.Interval, "s5", StringComparison.OrdinalIgnoreCase)
+                            && ValutaBot.MiniApp.Services.WeekendShadowExperimentService.IsWeekendOtcWindowUtc(item.OpenTime))
+                        {
+                            AppendCandleCmd(batch, weekendBatchSql, item);
+                        }
                     }
-                    var weekendCmd = new NpgsqlBatchCommand(weekendBatchSql);
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Asset });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Interval });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.OpenTime.ToString("o") });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Open });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.High });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Low });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.Close });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = (double)item.Volume });
-                    weekendCmd.Parameters.Add(new NpgsqlParameter { Value = item.CrowdSentiment });
-                    batch.BatchCommands.Add(weekendCmd);
+                    else
+                    {
+                        AppendCandleCmd(batch, weekendBatchSql, item);
+                    }
                 }
 
                 await batch.ExecuteNonQueryAsync(ct);
@@ -1035,9 +1038,32 @@ namespace ValutaBot.MiniApp
             return false;
         }
 
+        /// <summary>
+        /// Archives parallel *_OTC s5 ticks strictly into weekend_otc_candles (24/7 research dataset)
+        /// without touching subminute_candles, in-memory ring buffers, or AutoTradingScanner events.
+        /// </summary>
+        public static void ArchiveOtcTick(string otcAssetKey, double price, long tickTimeUtc, bool isBackfill = false, double crowdSentiment = 50.0)
+        {
+            if (string.IsNullOrWhiteSpace(otcAssetKey)) return;
+            long nowUtcTicks = DateTime.UtcNow.Ticks;
+            if (!PriceFeed.IsValidTick(price, tickTimeUtc, nowUtcTicks, isBackfill)) return;
+
+            long ticksPerBar = TimeSpan.FromSeconds(5).Ticks;
+            var openTime = new DateTime(tickTimeUtc - (tickTimeUtc % ticksPerBar), DateTimeKind.Utc);
+            double safeSentiment = double.IsFinite(crowdSentiment) && crowdSentiment >= 0.0 && crowdSentiment <= 100.0
+                ? crowdSentiment
+                : 50.0;
+            EnqueueTickEvent(new TickEvent(otcAssetKey, "s5", price, openTime, safeSentiment, ArchiveOtcOnly: true));
+        }
+
         private static void QueueTick(string asset, string interval, double price, long nowTicks, long intervalTicks, double crowdSentiment = 50.0)
         {
             var openTime = new DateTime(nowTicks - (nowTicks % intervalTicks), DateTimeKind.Utc);
+            EnqueueTickEvent(new TickEvent(asset, interval, price, openTime, crowdSentiment));
+        }
+
+        private static void EnqueueTickEvent(in TickEvent ev)
+        {
             if (_tickChannel.Reader.Count >= ChannelCapacity)
             {
                 long dropped = Interlocked.Increment(ref _droppedTickCount);
@@ -1049,9 +1075,13 @@ namespace ValutaBot.MiniApp
                 }
             }
 
-            if (!_tickChannel.Writer.TryWrite(new TickEvent(asset, interval, price, openTime, crowdSentiment)))
+            if (!_tickChannel.Writer.TryWrite(ev))
             {
                 Interlocked.Increment(ref _droppedTickCount);
+            }
+            else if (ev.ArchiveOtcOnly)
+            {
+                Interlocked.Increment(ref _archivedOtcTicksQueued);
             }
         }
 

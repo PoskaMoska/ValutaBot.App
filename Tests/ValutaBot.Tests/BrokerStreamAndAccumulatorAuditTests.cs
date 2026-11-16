@@ -255,5 +255,58 @@ namespace ValutaBot.Tests
             var metrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
             Assert.NotNull(metrics);
         }
+
+        [Fact]
+        public async Task HandleTick_ParallelOtcTick_ArchivesIsolatedFromLiveSpotFeed()
+        {
+            PocketOptionWebSocketStream.ResetClockAndWatermarksOnDstShift();
+            RealtimeTickCollector.ResetAllAccumulatorsAndRingBuffers();
+
+            var metaField = typeof(PocketOptionWebSocketStream).GetField(
+                "_assetMeta",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(metaField);
+            var assetMeta = (System.Collections.Concurrent.ConcurrentDictionary<string, PocketOptionWebSocketStream.PoAssetMeta>)metaField!.GetValue(null)!;
+            var hadReal = assetMeta.TryGetValue("EURUSD", out var prevReal);
+            var hadOtc = assetMeta.TryGetValue("EURUSD_otc", out var prevOtc);
+
+            int candleClosedCalls = 0;
+            Action<string, string> onClosed = (_, _) => Interlocked.Increment(ref candleClosedCalls);
+            RealtimeTickCollector.OnCandleClosed += onClosed;
+
+            try
+            {
+                assetMeta["EURUSD"] = new PocketOptionWebSocketStream.PoAssetMeta("EURUSD", 82, IsOpen: true, IsOtc: false);
+                assetMeta["EURUSD_otc"] = new PocketOptionWebSocketStream.PoAssetMeta("EURUSD_otc", 92, IsOpen: true, IsOtc: true);
+
+                double srvNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + PocketOptionWebSocketStream.ServerTimeOffsetSec;
+                long archivedBefore = RealtimeTickCollector.ArchivedOtcTicksQueued;
+
+                Assert.True(PocketOptionWebSocketStream.HandleTick("EURUSD", srvNow, 1.10020));
+                Assert.False(PocketOptionWebSocketStream.HandleTick("EURUSD_otc", srvNow, 1.11889));
+
+                Assert.True(PocketOptionWebSocketStream.TryGetLivePrice("EURUSD", out double livePrice, maxAgeSeconds: 5.0));
+                Assert.Equal(1.10020, livePrice);
+
+                var candles = await RealtimeTickCollector.GetRecentCandles("EURUSD", "s5", 10);
+                Assert.NotEmpty(candles);
+                Assert.All(candles, c => Assert.NotEqual(1.11889, c.Close));
+
+                Assert.Equal(archivedBefore + 1, RealtimeTickCollector.ArchivedOtcTicksQueued);
+                Assert.Equal(0, candleClosedCalls);
+
+                // Poisoned OTC tick must be rejected safely without queueing
+                Assert.False(PocketOptionWebSocketStream.HandleTick("EURUSD_otc", srvNow + 1.0, double.NaN));
+                Assert.Equal(archivedBefore + 1, RealtimeTickCollector.ArchivedOtcTicksQueued);
+            }
+            finally
+            {
+                RealtimeTickCollector.OnCandleClosed -= onClosed;
+                if (hadReal) assetMeta["EURUSD"] = prevReal!;
+                else assetMeta.TryRemove("EURUSD", out _);
+                if (hadOtc) assetMeta["EURUSD_otc"] = prevOtc!;
+                else assetMeta.TryRemove("EURUSD_otc", out _);
+            }
+        }
     }
 }

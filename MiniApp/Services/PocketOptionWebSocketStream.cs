@@ -1853,6 +1853,25 @@ public static class PocketOptionWebSocketStream
         }
     }
 
+    private static void ArchiveParallelOtcTick(
+        string baseAsset,
+        string rawAsset,
+        double srvTs,
+        double price,
+        long tickTimeUtc,
+        bool isBackfill)
+    {
+        if (!rawAsset.EndsWith("_otc", StringComparison.OrdinalIgnoreCase)) return;
+
+        string otcArchiveKey = baseAsset + "_OTC";
+        if (!TryAdvanceCandleWatermark(otcArchiveKey, srvTs, isBackfill)) return;
+
+        double otcCrowd = _crowdSentimentByRawSymbol.TryGetValue(rawAsset, out double rawVal) && double.IsFinite(rawVal)
+            ? rawVal
+            : 50.0;
+        RealtimeTickCollector.ArchiveOtcTick(otcArchiveKey, price, tickTimeUtc, isBackfill, otcCrowd);
+    }
+
     internal static bool HandleTick(string asset, double srvTs, double price, bool isBackfill = false)
     {
         long nowUtcTicks = DateTime.UtcNow.Ticks;
@@ -1887,6 +1906,10 @@ public static class PocketOptionWebSocketStream
 
         long swNow = System.Diagnostics.Stopwatch.GetTimestamp();
         var (baseAsset, candleKey) = GetAssetKeys(asset);
+
+        // Silently archive all *_otc s5 ticks into weekend_otc_candles (as *_OTC) 24/7 for correlation & OTC training
+        // without altering active live-FX routing, ring buffers, or AutoTradingScanner events.
+        ArchiveParallelOtcTick(baseAsset, asset, srvTs, price, tickTimeUtc, isBackfill);
 
         if (!IsActiveSymbolForBase(baseAsset, asset))
         {
