@@ -294,6 +294,44 @@ namespace ValutaBot.MiniApp
             _recentCandlesCache.Clear();
             _liveTickHistory.Clear();
             ValutaBot.MiniApp.Services.AutoTradingScannerService.ResetLastScannedTimes();
+            Interlocked.Exchange(ref _archivedOtcTicksQueued, 0);
+            EnsureChannelOpen();
+        }
+
+        internal static void EnsureChannelOpen()
+        {
+            if (!_tickChannel.Reader.Completion.IsCompleted) return;
+
+            bool acquired = false;
+            try
+            {
+                acquired = _dbWriteLock.Wait(TimeSpan.FromSeconds(2));
+            }
+            catch { }
+
+            try
+            {
+                if (_tickChannel.Reader.Completion.IsCompleted)
+                {
+                    var oldCts = _collectorCts;
+                    try { oldCts.Cancel(); oldCts.Dispose(); } catch { }
+                    _collectorCts = new CancellationTokenSource();
+                    _tickChannel = Channel.CreateBounded<TickEvent>(new BoundedChannelOptions(ChannelCapacity)
+                    {
+                        FullMode = BoundedChannelFullMode.DropOldest,
+                        SingleReader = false,
+                        SingleWriter = false
+                    });
+                    Interlocked.Exchange(ref _isInitialized, 0);
+                }
+            }
+            finally
+            {
+                if (acquired)
+                {
+                    try { _dbWriteLock.Release(); } catch { }
+                }
+            }
         }
 
         public static void ResetAssetAccumulator(string asset)
@@ -1077,6 +1115,18 @@ namespace ValutaBot.MiniApp
 
             if (!_tickChannel.Writer.TryWrite(ev))
             {
+                if (_tickChannel.Reader.Completion.IsCompleted)
+                {
+                    EnsureChannelOpen();
+                    if (_tickChannel.Writer.TryWrite(ev))
+                    {
+                        if (ev.ArchiveOtcOnly)
+                        {
+                            Interlocked.Increment(ref _archivedOtcTicksQueued);
+                        }
+                        return;
+                    }
+                }
                 Interlocked.Increment(ref _droppedTickCount);
             }
             else if (ev.ArchiveOtcOnly)
@@ -1150,6 +1200,11 @@ namespace ValutaBot.MiniApp
             catch (Exception ex)
             {
                 BotLogger.Warn($"[TickCollector] StopAsync notice: {ex.Message}");
+            }
+            finally
+            {
+                // Re-arm channel and state so subsequent in-process tests or restarts can safely ingest ticks
+                PrepareForInProcessRestart();
             }
         }
     }

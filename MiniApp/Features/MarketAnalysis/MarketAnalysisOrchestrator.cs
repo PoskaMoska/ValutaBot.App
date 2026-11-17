@@ -1321,7 +1321,20 @@ public class MarketAnalysisOrchestrator(
             }
             else
             {
-                traceLines.Add($"[8. База данных]     ПРОПУСК: Сигнал не прошел критерии входа ({cm.Consensus.Probability}%). Ожидаем >= {requiredProb}% -> {dbSw.ElapsedMilliseconds}ms");
+                string skipReason = !hasLiveNeuralSignal
+                    ? "ML нейросеть offline / резервный режим"
+                    : !entryPolicy.MeetsProbabilityGate
+                        ? $"вероятность {cm.Consensus.Probability}% < {requiredProb}%"
+                        : !isPayoutAcceptable
+                            ? $"доходность {currentPayout}% ниже минимальной"
+                            : isCbHalted
+                                ? "активен CircuitBreaker"
+                                : isCooldownActive
+                                    ? "активен кулдаун"
+                                    : !isSubminuteImpulseOk
+                                        ? "недостаточный импульс"
+                                        : "критерии входа не выполнены";
+                traceLines.Add($"[8. База данных]     ПРОПУСК: {skipReason} ({cm.Consensus.Probability}% vs порог {requiredProb}%) -> {dbSw.ElapsedMilliseconds}ms");
             }
         }
 
