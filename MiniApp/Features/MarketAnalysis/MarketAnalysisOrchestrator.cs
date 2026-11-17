@@ -909,6 +909,66 @@ public class MarketAnalysisOrchestrator(
 
     #region Pipeline Stage 5: Execution Guards & Trade Recording
 
+    internal readonly record struct AdaptiveEntryPolicy(
+        double BreakEvenWinRate,
+        double Margin,
+        double RequiredExactPct,
+        int RequiredProbPct,
+        string Session,
+        bool MeetsProbabilityGate);
+
+    /// <summary>
+    /// Computes the dynamic EV probability threshold from payout, timeframe variance (s10),
+    /// and UTC session regime (OVERLAP) without hard-banning pairs or sessions.
+    /// </summary>
+    internal static AdaptiveEntryPolicy EvaluateAdaptiveEntryPolicy(
+        int payoutPct,
+        string? timeframe,
+        DateTime utcNow,
+        bool isQuantSubminute,
+        double mlDirectionalConfidence,
+        int consensusProbabilityPct)
+    {
+        double breakEvenWinRate = 1.0 / (1.0 + Math.Max(payoutPct, 50) / 100.0);
+        double margin = 0.055;
+        if (payoutPct < 75)
+        {
+            margin += 0.010;
+        }
+        if (string.Equals(timeframe, "s10", StringComparison.OrdinalIgnoreCase))
+        {
+            margin += 0.020;
+        }
+        string session = TradeOutcomeTracker.ComputeSession(utcNow);
+        if (string.Equals(session, "OVERLAP", StringComparison.OrdinalIgnoreCase))
+        {
+            margin += 0.020;
+        }
+
+        double requiredExactPct = Math.Max(62.0, (breakEvenWinRate + margin) * 100.0);
+        int requiredProbPct = (int)Math.Ceiling(requiredExactPct);
+
+        bool meetsProbabilityGate;
+        if (isQuantSubminute && double.IsFinite(mlDirectionalConfidence) && mlDirectionalConfidence > 0.0)
+        {
+            double exactMlPct = Math.Clamp(mlDirectionalConfidence, 0.0, 1.0) * 100.0;
+            meetsProbabilityGate = exactMlPct >= requiredExactPct
+                && consensusProbabilityPct >= (int)Math.Floor(requiredExactPct);
+        }
+        else
+        {
+            meetsProbabilityGate = consensusProbabilityPct >= requiredProbPct;
+        }
+
+        return new AdaptiveEntryPolicy(
+            BreakEvenWinRate: breakEvenWinRate,
+            Margin: margin,
+            RequiredExactPct: requiredExactPct,
+            RequiredProbPct: requiredProbPct,
+            Session: session,
+            MeetsProbabilityGate: meetsProbabilityGate);
+    }
+
     private async Task<ExecutionOutcome> EvaluateExecutionAndRecordTradeAsync(
         PreparedCandleData prep,
         string timeframe,
@@ -934,15 +994,20 @@ public class MarketAnalysisOrchestrator(
         bool isAssetOpen = !PriceFeed.UsePocketOption || PocketOptionWebSocketStream.IsAssetOpen(prep.CleanAsset);
         bool isPayoutAcceptable = currentPayout >= 70 && isAssetOpen;
 
-        // ══════════════════════════════════════════════════════════════════════════
-        // ADAPTIVE PROBABILITY THRESHOLD (Based on Payout & Empirical Edge Margin)
-        // ══════════════════════════════════════════════════════════════════════════
-        // Formula: Break-even win rate = 100 / (100 + payout). Target live margin = +5.5%, floor = 62%.
-        // E.g. at 92% -> BE 52.1% (req 62%), at 82% -> BE 54.9% (req 62%), at 75% -> 63%, at 70% -> 65%.
-        double breakEvenWinRate = 100.0 / (100.0 + Math.Max(currentPayout, 50));
-        int requiredProb = Math.Max(62, (int)Math.Ceiling((breakEvenWinRate + 0.055) * 100.0));
+        bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (ml.Prediction != null && ml.Direction is "BUY" or "PUT");
+        bool isQuantSubminute = ml.Prediction?.ModelVersion?.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase) == true;
+        DateTime effectiveUtc = PocketOptionWebSocketStream.GetEffectiveUtcNow();
+        var entryPolicy = EvaluateAdaptiveEntryPolicy(
+            currentPayout,
+            prep.TfLower,
+            effectiveUtc,
+            isQuantSubminute,
+            ml.Confidence,
+            cm.Consensus.Probability);
+        double breakEvenWinRate = entryPolicy.BreakEvenWinRate;
+        int requiredProb = entryPolicy.RequiredProbPct;
 
-        traceLines.Add($"[7.5 Adaptive Guard] Payout: {currentPayout}%, Порог: {requiredProb}% (BE: {breakEvenWinRate * 100:F1}%) | Толпа: {liveCrowdSentiment:F0}%");
+        traceLines.Add($"[7.5 Adaptive Guard] Payout: {currentPayout}% | {entryPolicy.Session} | Порог: {entryPolicy.RequiredExactPct:F1}% (BE: {breakEvenWinRate * 100:F1}% + EV: {entryPolicy.Margin * 100:F1}%) | Толпа: {liveCrowdSentiment:F0}%");
 
         bool htfAligned = cm.MtfResult.DominantDirection == cm.Consensus.FinalDirection && isDirectional;
         bool isGoldenSetup = cm.MtfResult.IsGoldenSetup && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse);
@@ -973,8 +1038,6 @@ public class MarketAnalysisOrchestrator(
                 isExhaustedOnS5 = true;
         }
 
-        bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (ml.Prediction != null && ml.Direction is "BUY" or "PUT");
-        bool isQuantSubminute = ml.Prediction?.ModelVersion?.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase) == true;
         bool isSubminuteImpulseOk = !isSubminute || cm.NoiseAudit.IsTradeableImpulse
             || (isQuantSubminute
                 && cm.NoiseAudit.LocalAtrBps >= cm.NoiseAudit.NoiseFloorBps
@@ -984,13 +1047,13 @@ public class MarketAnalysisOrchestrator(
         bool canExecuteReal = isDirectional 
             && hasLiveNeuralSignal
             && isPayoutAcceptable
-            && cm.Consensus.Probability >= requiredProb 
+            && entryPolicy.MeetsProbabilityGate
             && !isCbHalted
             && !isCooldownActive
             && isSubminuteImpulseOk
             && (!isS5 || isQuantSubminute || (htfAligned && !isExhaustedOnS5));
 
-        bool isS5Guarded = isS5 && ((!isQuantSubminute && (isExhaustedOnS5 || !htfAligned)) || isCooldownActive || cm.Consensus.Probability < requiredProb || !isPayoutAcceptable);
+        bool isS5Guarded = isS5 && ((!isQuantSubminute && (isExhaustedOnS5 || !htfAligned)) || isCooldownActive || !entryPolicy.MeetsProbabilityGate || !isPayoutAcceptable);
         bool allowShadowRecord = isDirectional
             && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);

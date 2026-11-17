@@ -422,6 +422,7 @@ public class ConfluenceMatrixEngine(
         int finalProbPct;
 
         const int S5ProbabilityCeiling = 65;
+        const int S5QuantProbabilityCeiling = 68;
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
 
@@ -443,11 +444,12 @@ public class ConfluenceMatrixEngine(
 
         int mlLiveLosses = Math.Max(consecutiveLosses, Math.Max(autoCalib?.GetConsecutiveLosses("NeuralBrain", asset, timeframe) ?? 0, autoCalib?.GetConsecutiveLosses("LIGHTGBM", asset, timeframe) ?? 0));
         bool isQuantSubminute = isNeuralBrain && mlSignal!.ModelVersion!.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase);
+        int s5Ceiling = isQuantSubminute ? S5QuantProbabilityCeiling : S5ProbabilityCeiling;
         int probCeiling = 100; // жёсткий потолок вероятности, применяется после всех стадий
 
         if (isS5)
         {
-            probCeiling = Math.Min(probCeiling, S5ProbabilityCeiling);
+            probCeiling = Math.Min(probCeiling, s5Ceiling);
         }
 
         int ApplyRiskDampeners(int p, bool emitNotes)
@@ -488,7 +490,7 @@ public class ConfluenceMatrixEngine(
             // S5 Micro-Timeframe Noise Calibration
             if (isS5)
             {
-                finalProbPct = Math.Min(S5ProbabilityCeiling, finalProbPct);
+                finalProbPct = Math.Min(s5Ceiling, finalProbPct);
             }
 
             finalProbPct = ApplyRiskDampeners(finalProbPct, emitNotes: true);

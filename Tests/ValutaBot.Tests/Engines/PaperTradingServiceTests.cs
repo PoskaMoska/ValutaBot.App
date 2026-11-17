@@ -245,4 +245,41 @@ public class PaperTradingServiceTests
 
         RealtimeTickCollector.ResetAssetAccumulator(testAsset);
     }
+
+    [Fact]
+    public void EvaluateAdaptiveEntryPolicy_AppliesDynamicEvMarginsWithoutHardBans()
+    {
+        var londonUtc = new DateTime(2026, 11, 17, 10, 0, 0, DateTimeKind.Utc);
+        var overlapUtc = new DateTime(2026, 11, 17, 14, 0, 0, DateTimeKind.Utc);
+
+        // Low payout (<75%) requires BE + 6.5% (65.32% at 70%): block rounded 64.8%->65, allow true 65.6%->66
+        var lowPayBorderline = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            70, "s5", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.648, consensusProbabilityPct: 65);
+        Assert.False(lowPayBorderline.MeetsProbabilityGate);
+        Assert.True(lowPayBorderline.RequiredExactPct > 65.3);
+
+        var lowPayStrong = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            70, "s5", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.656, consensusProbabilityPct: 66);
+        Assert.True(lowPayStrong.MeetsProbabilityGate);
+
+        // Stage-2 dampeners (e.g. flat noise cap=52) must still block even if raw ML was high
+        var dampened = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            85, "s5", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.66, consensusProbabilityPct: 52);
+        Assert.False(dampened.MeetsProbabilityGate);
+
+        // s10 in LONDON keeps high-payout (>=85%) 62.2% entries, while weak low-payout (76%) 63.0% is filtered naturally
+        var s10HighPay = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            90, "s10", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.622, consensusProbabilityPct: 62);
+        Assert.True(s10HighPay.MeetsProbabilityGate);
+
+        var s10LowPay = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            76, "s10", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.630, consensusProbabilityPct: 63);
+        Assert.False(s10LowPay.MeetsProbabilityGate);
+
+        // OVERLAP session raises EV hurdle (+2%): s10 at 85% pay needs ~63.55%, blocking borderline 63.0%
+        var s10Overlap = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            85, "s10", overlapUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.630, consensusProbabilityPct: 63);
+        Assert.False(s10Overlap.MeetsProbabilityGate);
+        Assert.Equal("OVERLAP", s10Overlap.Session);
+    }
 }

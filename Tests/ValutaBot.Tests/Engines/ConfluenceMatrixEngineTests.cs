@@ -353,5 +353,33 @@ namespace ValutaBot.Tests.Engines
             Assert.Equal("BUY", decision.FinalDirection);
             Assert.Equal(64, decision.Probability);
         }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_QuantSubminute_PreservesHighConvictionUpTo68_WhileLegacyCapsAt65()
+        {
+            var taSignal = new TaSignal(1.0, 70.0, 55.0, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.3);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "MTF", "MTF", new Dictionary<string, string>(), "BUY");
+            var noiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: true,
+                ZScore: 1.0,
+                LocalAtrBps: 0.90,
+                NoiseFloorBps: 0.20,
+                RegimeDescription: "Импульс подтвержден"
+            );
+
+            var quantDecision = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s5", true, 1.0, taSignal, smcSignal,
+                new MlSignal("BUY", 0.66, 0.62, "neural_quant_v7"),
+                stateSignal, mtfResult, noiseAudit: noiseAudit);
+            var legacyDecision = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s5", true, 1.0, taSignal, smcSignal,
+                new MlSignal("BUY", 0.66, 0.62, "legacy_v4"),
+                stateSignal, mtfResult, noiseAudit: noiseAudit);
+
+            Assert.Equal(66, quantDecision.Probability);
+            Assert.Equal(65, legacyDecision.Probability);
+        }
     }
 }
