@@ -279,7 +279,9 @@ namespace ValutaBot.Tests
                 assetMeta["EURUSD"] = new PocketOptionWebSocketStream.PoAssetMeta("EURUSD", 82, IsOpen: true, IsOtc: false);
                 assetMeta["EURUSD_otc"] = new PocketOptionWebSocketStream.PoAssetMeta("EURUSD_otc", 92, IsOpen: true, IsOtc: true);
 
-                double srvNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + PocketOptionWebSocketStream.ServerTimeOffsetSec;
+                double srvNow = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0
+                    + PocketOptionWebSocketStream.ServerTimeOffsetSec
+                    + 0.5;
                 long archivedBefore = RealtimeTickCollector.ArchivedOtcTicksQueued;
 
                 Assert.True(PocketOptionWebSocketStream.HandleTick("EURUSD", srvNow, 1.10020));
@@ -306,6 +308,8 @@ namespace ValutaBot.Tests
                 else assetMeta.TryRemove("EURUSD", out _);
                 if (hadOtc) assetMeta["EURUSD_otc"] = prevOtc!;
                 else assetMeta.TryRemove("EURUSD_otc", out _);
+                PocketOptionWebSocketStream.ResetClockAndWatermarksOnDstShift();
+                RealtimeTickCollector.ResetAllAccumulatorsAndRingBuffers();
             }
         }
     }

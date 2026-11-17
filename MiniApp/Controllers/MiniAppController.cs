@@ -437,8 +437,11 @@ public static partial class MiniAppController
             BotLogger.Error("[Startup] Non-fatal DB initialization warning", dbInitEx);
         }
 
-        // Launch Autonomous Pocket Option OTC stream (24/7 direct socket feed)
-        PocketOptionWebSocketStream.StartStream();
+        // Launch Autonomous Pocket Option OTC stream (24/7 direct socket feed), skipped in Testing host
+        if (!app.Environment.IsEnvironment("Testing"))
+        {
+            PocketOptionWebSocketStream.StartStream();
+        }
 
         HttpFactory = app.Services.GetRequiredService<System.Net.Http.IHttpClientFactory>();
         MLPythonService.SetFactory(HttpFactory);
@@ -449,7 +452,10 @@ public static partial class MiniAppController
         ValutaBot.MiniApp.TradeOutcomeTracker.CircuitBreaker = cbService;
         ValutaBot.MiniApp.TradeOutcomeTracker.AutoCalib = app.Services.GetRequiredService<ValutaBot.MiniApp.IAutoCalibrationEngine>();
 
-        LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
+        if (!app.Environment.IsEnvironment("Testing"))
+        {
+            LatencyProbe.StartBackground(HttpFactory, app.Lifetime.ApplicationStopping);
+        }
         // SECURITY: Global HTTP Security Headers (prevent MIME-sniffing, XSS, Clickjacking, etc.)
         // Registered BEFORE UseStaticFiles to ensure static files (index.html, JS, CSS) receive security headers
         app.Use(async (context, next) =>
