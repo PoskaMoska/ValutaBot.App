@@ -590,7 +590,7 @@ public class ConfluenceMatrixEngine(
         // STAGE 2: SUBMINUTE NOISE & WICK REJECTION CALIBRATION
         // ══════════════════════════════════════════════════════════════════════════
         bool hasRiskDampener = (!isQuantSubminute && mlLiveLosses >= 2) || (conflictPenalty < 1.0);
-        if (noiseAudit.HasValue && finalDir is "BUY" or "PUT" && isSubMinute && !isQuantSubminute)
+        if (noiseAudit.HasValue && finalDir is "BUY" or "PUT" && isSubMinute)
         {
             var na = noiseAudit.Value;
             if (!na.IsTradeableImpulse)

@@ -936,12 +936,30 @@ public class MarketAnalysisOrchestrator(
                       || string.Equals(timeframe, "m1", StringComparison.OrdinalIgnoreCase)
                       || string.Equals(timeframe, "1m", StringComparison.OrdinalIgnoreCase);
 
-        // Positive-EV margin without artificial 62%+ glass ceiling that blocked 2,202 profitable 60.13% WR trades
-        double margin = isS30OrM1 ? 0.015 : 0.025;
+        // Positive-EV margin without artificial 62%+ glass ceiling that blocked profitable trades on s30/m1
+        double margin = isS30OrM1 ? 0.015 : 0.055;
+        if (payoutPct < 75)
+        {
+            margin += 0.010;
+        }
+        if (string.Equals(timeframe, "s10", StringComparison.OrdinalIgnoreCase))
+        {
+            margin += 0.020;
+        }
         string session = TradeOutcomeTracker.ComputeSession(utcNow);
+        if (!isS5 && string.Equals(session, "OVERLAP", StringComparison.OrdinalIgnoreCase))
+        {
+            margin += 0.020;
+        }
+        if (string.Equals(marketRegime, "CHAOS_EXPANSION", StringComparison.OrdinalIgnoreCase))
+        {
+            margin += 0.015;
+        }
 
-        double floorPct = isS5 ? 58.0 : (isS30OrM1 ? 56.0 : 57.0);
-        double requiredExactPct = Math.Clamp((breakEvenWinRate + margin) * 100.0, floorPct, 60.0);
+        // On s30/m1, allow positive-EV entries down to 56.0% without artificial 62% barrier.
+        // On s5/s10/etc, maintain minimum 62.0% floor to absorb execution slippage and fast tick latency.
+        double floorPct = isS30OrM1 ? 56.0 : 62.0;
+        double requiredExactPct = Math.Max(floorPct, (breakEvenWinRate + margin) * 100.0);
         int requiredProbPct = (int)Math.Ceiling(requiredExactPct);
 
         bool meetsProbabilityGate;
@@ -949,7 +967,7 @@ public class MarketAnalysisOrchestrator(
         {
             double exactMlPct = Math.Clamp(mlDirectionalConfidence, 0.0, 1.0) * 100.0;
             meetsProbabilityGate = exactMlPct >= requiredExactPct
-                || consensusProbabilityPct >= requiredProbPct;
+                && consensusProbabilityPct >= (int)Math.Floor(requiredExactPct);
         }
         else
         {
