@@ -338,13 +338,17 @@ public static class PaperTradingService
         return "QUIET";
     }
 
+    /// <summary>
+    /// Rejects adverse execution drift that exceeds the edge of subminute candles
+    /// (5s Spot FX moves average ~0.23 bps; even 0.10-0.45 bps adverse drift drops s5 WR from 61.7% to ~41%).
+    /// </summary>
     public static double GetMaxAdverseSlippageBps(int intervalSecs) => intervalSecs switch
     {
-        <= 5 => 0.45,
-        <= 10 => 0.65,
-        <= 15 => 0.90,
-        <= 30 => 1.20,
-        _ => MaxAdverseSlippageBps
+        <= 5 => 0.05,
+        <= 10 => 0.08,
+        <= 15 => 0.15,
+        <= 30 => 0.25,
+        _ => 0.40
     };
 
     /// <summary>

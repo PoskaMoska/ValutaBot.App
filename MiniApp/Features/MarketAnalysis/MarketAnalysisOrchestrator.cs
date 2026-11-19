@@ -919,7 +919,7 @@ public class MarketAnalysisOrchestrator(
 
     /// <summary>
     /// Computes the dynamic EV probability threshold from payout, timeframe variance (s10),
-    /// and UTC session regime (OVERLAP) without hard-banning pairs or sessions.
+    /// UTC session regime (OVERLAP for >=s10), and volatility regime (CHAOS_EXPANSION) without hard-banning pairs.
     /// </summary>
     internal static AdaptiveEntryPolicy EvaluateAdaptiveEntryPolicy(
         int payoutPct,
@@ -927,7 +927,8 @@ public class MarketAnalysisOrchestrator(
         DateTime utcNow,
         bool isQuantSubminute,
         double mlDirectionalConfidence,
-        int consensusProbabilityPct)
+        int consensusProbabilityPct,
+        string? marketRegime = null)
     {
         double breakEvenWinRate = 1.0 / (1.0 + Math.Max(payoutPct, 50) / 100.0);
         double margin = 0.055;
@@ -935,14 +936,19 @@ public class MarketAnalysisOrchestrator(
         {
             margin += 0.010;
         }
+        bool isS5 = string.Equals(timeframe, "s5", StringComparison.OrdinalIgnoreCase);
         if (string.Equals(timeframe, "s10", StringComparison.OrdinalIgnoreCase))
         {
             margin += 0.020;
         }
         string session = TradeOutcomeTracker.ComputeSession(utcNow);
-        if (string.Equals(session, "OVERLAP", StringComparison.OrdinalIgnoreCase))
+        if (!isS5 && string.Equals(session, "OVERLAP", StringComparison.OrdinalIgnoreCase))
         {
             margin += 0.020;
+        }
+        if (string.Equals(marketRegime, "CHAOS_EXPANSION", StringComparison.OrdinalIgnoreCase))
+        {
+            margin += 0.015;
         }
 
         double requiredExactPct = Math.Max(62.0, (breakEvenWinRate + margin) * 100.0);
@@ -1003,7 +1009,8 @@ public class MarketAnalysisOrchestrator(
             effectiveUtc,
             isQuantSubminute,
             ml.Confidence,
-            cm.Consensus.Probability);
+            cm.Consensus.Probability,
+            cm.EffectiveMarketRegime);
         double breakEvenWinRate = entryPolicy.BreakEvenWinRate;
         int requiredProb = entryPolicy.RequiredProbPct;
 

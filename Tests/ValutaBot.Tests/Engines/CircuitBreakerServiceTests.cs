@@ -137,8 +137,9 @@ public class CircuitBreakerServiceTests
     public void Defaults_PreventVarianceHaltsOnThreeLossesOrTinySamples()
     {
         var settings = new TradingBotSettings();
-        Assert.Equal(15, settings.CircuitBreakerWindowSize);
-        Assert.Equal(6, settings.CircuitBreakerMaxConsecutiveLosses);
-        Assert.Equal(0.35, settings.CircuitBreakerMinWinRate);
+        Assert.Equal(25, settings.CircuitBreakerWindowSize);
+        Assert.Equal(9, settings.CircuitBreakerMaxConsecutiveLosses);
+        Assert.Equal(0.32, settings.CircuitBreakerMinWinRate);
+        Assert.Equal(5, settings.CircuitBreakerCooldownMinutes);
     }
 }

@@ -109,14 +109,21 @@ public class PaperTradingServiceTests
     }
 
     [Theory]
-    [InlineData(5, 0.45)]
-    [InlineData(10, 0.65)]
-    [InlineData(15, 0.90)]
-    [InlineData(30, 1.20)]
-    [InlineData(60, 1.50)]
+    [InlineData(5, 0.05)]
+    [InlineData(10, 0.08)]
+    [InlineData(15, 0.15)]
+    [InlineData(30, 0.25)]
+    [InlineData(60, 0.40)]
     public void GetMaxAdverseSlippageBps_ScalesStrictlyWithCandleInterval(int intervalSecs, double expectedMaxBps)
     {
         Assert.Equal(expectedMaxBps, PaperTradingService.GetMaxAdverseSlippageBps(intervalSecs), precision: 4);
+
+        // Verify 5s candle gate rejects +0.20 bps adverse drift while allowing <=0.05 bps
+        if (intervalSecs == 5)
+        {
+            Assert.False(PaperTradingService.EvaluatePostDelayFill("BUY", 1.00000, 1.00002, expectedMaxBps).Accepted);
+            Assert.True(PaperTradingService.EvaluatePostDelayFill("BUY", 1.00000, 1.00000, expectedMaxBps).Accepted);
+        }
     }
 
     [Fact]
@@ -276,10 +283,24 @@ public class PaperTradingServiceTests
             76, "s10", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.630, consensusProbabilityPct: 63);
         Assert.False(s10LowPay.MeetsProbabilityGate);
 
-        // OVERLAP session raises EV hurdle (+2%): s10 at 85% pay needs ~63.55%, blocking borderline 63.0%
+        // OVERLAP session raises EV hurdle (+2%) on >=s10 (s10 at 85% needs ~63.55%), without throttling profitable OVERLAP s5 setups
         var s10Overlap = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
             85, "s10", overlapUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.630, consensusProbabilityPct: 63);
         Assert.False(s10Overlap.MeetsProbabilityGate);
         Assert.Equal("OVERLAP", s10Overlap.Session);
+
+        var s5Overlap = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            82, "s5", overlapUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.625, consensusProbabilityPct: 63);
+        Assert.True(s5Overlap.MeetsProbabilityGate);
+
+        // CHAOS_EXPANSION adds gentle +1.5% EV margin without hard-blocking strong 62.6%+ signals at high payout
+        var chaosBorderlineLowPay = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            75, "s5", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.635, consensusProbabilityPct: 64, marketRegime: "CHAOS_EXPANSION");
+        Assert.False(chaosBorderlineLowPay.MeetsProbabilityGate);
+        Assert.True(chaosBorderlineLowPay.RequiredExactPct > 64.0);
+
+        var chaosStrong = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            83, "s5", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.630, consensusProbabilityPct: 63, marketRegime: "CHAOS_EXPANSION");
+        Assert.True(chaosStrong.MeetsProbabilityGate);
     }
 }

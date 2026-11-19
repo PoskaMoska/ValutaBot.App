@@ -14,10 +14,11 @@ public class TradingBotSettings
     public bool EnableAutoCalibration { get; set; } = true;
 
     // CircuitBreaker settings (must not be hardcoded in services)
-    public int CircuitBreakerWindowSize { get; set; } = 15;                 // WINDOW_SIZE
-    public int CircuitBreakerMaxConsecutiveLosses { get; set; } = 6;        // MAX_CONSECUTIVE_LOSSES
-    public double CircuitBreakerMinWinRate { get; set; } = 0.35;            // MIN_WIN_RATE
-    public int CircuitBreakerCooldownMinutes { get; set; } = 15;            // COOLDOWN_MINUTES (15 min, dataset mode)
+    // Sized for high-frequency s5 trading so normal binomial variance at ~60% WR does not freeze all 6 pairs.
+    public int CircuitBreakerWindowSize { get; set; } = 25;                 // WINDOW_SIZE
+    public int CircuitBreakerMaxConsecutiveLosses { get; set; } = 9;        // MAX_CONSECUTIVE_LOSSES
+    public double CircuitBreakerMinWinRate { get; set; } = 0.32;            // MIN_WIN_RATE
+    public int CircuitBreakerCooldownMinutes { get; set; } = 5;             // COOLDOWN_MINUTES (5 min recovery)
     public int CircuitBreakerDbCacheTtlSeconds { get; set; } = 30;          // DB_CACHE_TTL_SECONDS
 
     public int DatasetReadinessThreshold { get; set; } = 1_000;            // Minimum outcomes before CB activates
