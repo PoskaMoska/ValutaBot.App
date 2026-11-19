@@ -149,17 +149,16 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
             else
             {
                 state.ConsecutiveLosses++;
-                if (state.ConsecutiveLosses >= 3)
+                // Raised from 3 to 8 consecutive losses (3 losses on s5 is normal 6% variance at 60% WR)
+                if (state.ConsecutiveLosses >= 8)
                 {
-                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(15);
+                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(3);
                     state.ConsecutiveLosses = 0;
-                    BotLogger.Warn($"[Drawdown Protection] 3 consecutive losses for {key}. Cooloff until {state.CooloffUntil:HH:mm:ss}");
+                    BotLogger.Warn($"[Drawdown Protection] 8 consecutive losses for {key}. Cooloff 3m until {state.CooloffUntil:HH:mm:ss}");
                 }
             }
 
-            // Rolling win-rate защита: обновляем ring buffer и проверяем win rate последних 10 сделок.
-            // Если < 35% побед — триггер cooloff (10 минут).
-            // До этого: 5 потерь из 7 (результат 71% lose) не триггерил систему если между ними были победы.
+            // Rolling win-rate защита: обновляем ring buffer
             state.RecentOutcomes[state.OutcomeIndex] = isWin;
             state.OutcomeIndex = (state.OutcomeIndex + 1) % 10;
             if (state.OutcomeCount < 10) state.OutcomeCount++;
@@ -170,17 +169,13 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
                 for (int i = 0; i < state.OutcomeCount; i++) if (state.RecentOutcomes[i]) wins++;
                 double rollingWinRate = (double)wins / state.OutcomeCount;
 
-                if (rollingWinRate < 0.35)
+                if (rollingWinRate <= 0.20)
                 {
-                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(10);
+                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(3);
                     state.ConsecutiveLosses = 0;
-                    // FIX H-5: Reset ring buffer after cooloff trigger.
-                    // Without this, the next trade after cooloff re-checks the same
-                    // stale 10-trade window, immediately triggers another 10-min cooloff,
-                    // trapping the bot in "1 trade per 10 minutes" mode all day.
                     state.OutcomeCount = 0;
                     state.OutcomeIndex = 0;
-                    BotLogger.Warn($"[Drawdown Protection] Rolling win rate {rollingWinRate:P0} < 35% for {key}. Cooloff 10 min until {state.CooloffUntil:HH:mm:ss}. Buffer reset.");
+                    BotLogger.Warn($"[Drawdown Protection] Rolling win rate {rollingWinRate:P0} <= 20% for {key}. Cooloff 3 min until {state.CooloffUntil:HH:mm:ss}. Buffer reset.");
                 }
             }
         }

@@ -938,9 +938,9 @@ class SubminuteQuantPredictor:
         iso_y = self.arrays[f"{canon}_iso_y"]
         fx_cal_conf = float(np.interp(raw_dir_strength, iso_x, iso_y))
 
-        # Select honest regime calibrator: clean FX vs synthetic/rollover/jump OTC
+        # Select honest regime calibrator: clean FX vs synthetic/rollover OTC (do not force OTC curve on FX momentum jumps)
         cal_conf = fx_cal_conf
-        if (weekend_otc or rollover_otc or jump_guarded) and f"{canon}_iso_otc_x" in self.arrays:
+        if (weekend_otc or rollover_otc) and f"{canon}_iso_otc_x" in self.arrays:
             otc_x = self.arrays[f"{canon}_iso_otc_x"]
             otc_y = self.arrays[f"{canon}_iso_otc_y"]
             cal_conf = float(np.interp(raw_dir_strength, otc_x, otc_y))

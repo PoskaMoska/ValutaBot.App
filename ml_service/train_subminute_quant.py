@@ -151,8 +151,7 @@ def _fit_robust_isotonic(dir_strength: np.ndarray, won: np.ndarray) -> Tuple[np.
             continue
         wins = float(np.sum(ys_s[lo:hi]))
         p_eb = (wins + 0.5 * prior) / (cnt + prior)
-        se = float(np.sqrt(max(p_eb * (1.0 - p_eb), 1e-6) / (cnt + prior)))
-        p_cons = float(np.clip(p_eb - 1.0 * se, 0.50, 0.75))
+        p_cons = float(np.clip(p_eb, 0.50, 0.75))
         bx.append(float(np.mean(xs_s[lo:hi])))
         by.append(p_cons)
         bw.append(float(cnt))

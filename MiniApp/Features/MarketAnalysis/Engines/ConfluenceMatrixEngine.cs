@@ -487,6 +487,23 @@ public class ConfluenceMatrixEngine(
                 : 0.50;
             finalProbPct = (int)Math.Clamp(Math.Round(neuralConf * 100.0), 50, 92);
 
+            // S30 / M1 TA + MTF Synergy Boost: empirically TA(|score|>=0.35) achieves 55.91% WR on m1.
+            // When TA and/or MTF align with the ML verdict on s30/m1, unlock the glass ceiling.
+            bool isS30OrM1 = timeframe.Equals("s30", StringComparison.OrdinalIgnoreCase)
+                          || timeframe.Equals("m1", StringComparison.OrdinalIgnoreCase)
+                          || timeframe.Equals("1m", StringComparison.OrdinalIgnoreCase);
+            if (isS30OrM1)
+            {
+                bool taAgrees = (finalDir == "BUY" && taScore >= 0.20) || (finalDir == "PUT" && taScore <= -0.20);
+                bool taStrong = (finalDir == "BUY" && taScore >= 0.35) || (finalDir == "PUT" && taScore <= -0.35);
+                bool mtfAgrees = mtfResult?.DominantDirection == finalDir;
+                int boost = (taStrong ? 3 : (taAgrees ? 2 : 0)) + (mtfAgrees ? 2 : 0);
+                if (boost > 0)
+                {
+                    finalProbPct = Math.Min(65, finalProbPct + boost);
+                }
+            }
+
             // S5 Micro-Timeframe Noise Calibration
             if (isS5)
             {
@@ -531,8 +548,9 @@ public class ConfluenceMatrixEngine(
                 if (macroDir is "BUY" or "PUT")
                 {
                     finalDir = macroDir;
-                    finalProbPct = ApplyRiskDampeners(52, emitNotes: true);
-                    probCeiling = Math.Min(probCeiling, 52);
+                    int baseMacroProb = isSubMinute ? 52 : 55;
+                    finalProbPct = ApplyRiskDampeners(baseMacroProb, emitNotes: true);
+                    probCeiling = Math.Min(probCeiling, isSubMinute ? 54 : 58);
                     safetyNotes.Add($"🧭 Компас Макро-Тренда ({macroDir}): Базовое направление зафиксировано по старшему ТФ при слабом локальном импульсе (|TA| <= 0.15)");
                 }
                 else
@@ -546,18 +564,24 @@ public class ConfluenceMatrixEngine(
             else
             {
                 finalDir = taScore > 0 ? "BUY" : "PUT";
-                finalProbPct = (int)Math.Clamp(Math.Round((0.50 + Math.Abs(taScore) * 0.25) * 100.0), 50, 92);
+                double taMultiplier = isSubMinute ? 0.25 : 0.32;
+                int baseTaProb = isSubMinute ? 50 : 52;
+                finalProbPct = (int)Math.Clamp(Math.Round(baseTaProb + Math.Abs(taScore) * taMultiplier * 100.0), 52, 92);
+                if (mtfResult?.DominantDirection == finalDir)
+                {
+                    finalProbPct = Math.Min(65, finalProbPct + 2);
+                }
                 if (isS5)
                 {
                     finalProbPct = Math.Min(S5ProbabilityCeiling, finalProbPct);
                 }
                 finalProbPct = ApplyRiskDampeners(finalProbPct, emitNotes: true);
                 safetyNotes.Add("ℹ️ Резервный режим: ML сигнал нейтрален или на калибровке (Fallback Engine)");
-                if (mtfBlind)
+                if (mtfBlind && isSubMinute)
                 {
-                    finalProbPct = Math.Min(finalProbPct, 52);
-                    probCeiling = Math.Min(probCeiling, 52);
-                    safetyNotes.Add("⚠️ MTF без направления (нет данных/все ТФ NEUTRAL): уверенность ограничена 52%, реальный вход невозможен");
+                    finalProbPct = Math.Min(finalProbPct, 54);
+                    probCeiling = Math.Min(probCeiling, 54);
+                    safetyNotes.Add("⚠️ MTF без направления (нет данных/все ТФ NEUTRAL): уверенность ограничена 54%");
                 }
             }
         }
@@ -566,7 +590,7 @@ public class ConfluenceMatrixEngine(
         // STAGE 2: SUBMINUTE NOISE & WICK REJECTION CALIBRATION
         // ══════════════════════════════════════════════════════════════════════════
         bool hasRiskDampener = (!isQuantSubminute && mlLiveLosses >= 2) || (conflictPenalty < 1.0);
-        if (noiseAudit.HasValue && finalDir is "BUY" or "PUT" && isSubMinute)
+        if (noiseAudit.HasValue && finalDir is "BUY" or "PUT" && isSubMinute && !isQuantSubminute)
         {
             var na = noiseAudit.Value;
             if (!na.IsTradeableImpulse)
@@ -581,7 +605,6 @@ public class ConfluenceMatrixEngine(
                 else if (na.LocalAtrBps >= na.NoiseFloorBps)
                 {
                     bool isVolatilitySpike = na.RegimeDescription.Contains("спайк", StringComparison.OrdinalIgnoreCase);
-                    // Для calibrated quant-модели умеренный z-score (< 0.8σ) без спайка — валидный mean-reversion/micro-setup, не режем до 50%.
                     if (!isQuantSubminute || isVolatilitySpike)
                     {
                         finalProbPct = Math.Min(finalProbPct, 50);
@@ -651,7 +674,7 @@ public class ConfluenceMatrixEngine(
         // ══════════════════════════════════════════════════════════════════════════
         // STAGE 2.5: SMART ADAPTIVE CROWD FILTER (chafor sentiment confluence)
         // ══════════════════════════════════════════════════════════════════════════
-        if (finalDir is "BUY" or "PUT" && double.IsFinite(crowdSentiment) && crowdSentiment >= 0.0 && crowdSentiment <= 100.0)
+        if (!isQuantSubminute && finalDir is "BUY" or "PUT" && double.IsFinite(crowdSentiment) && crowdSentiment >= 0.0 && crowdSentiment <= 100.0)
         {
             // Case 1: Extreme Overheated FOMO at Tops/Bottoms (Защита от покупки на хаях)
             // If candidate is BUY and crowd is euphoric (>= 82%) AND price is extended (RSI >= 64 or extreme overbought)

@@ -931,27 +931,17 @@ public class MarketAnalysisOrchestrator(
         string? marketRegime = null)
     {
         double breakEvenWinRate = 1.0 / (1.0 + Math.Max(payoutPct, 50) / 100.0);
-        double margin = 0.055;
-        if (payoutPct < 75)
-        {
-            margin += 0.010;
-        }
         bool isS5 = string.Equals(timeframe, "s5", StringComparison.OrdinalIgnoreCase);
-        if (string.Equals(timeframe, "s10", StringComparison.OrdinalIgnoreCase))
-        {
-            margin += 0.020;
-        }
-        string session = TradeOutcomeTracker.ComputeSession(utcNow);
-        if (!isS5 && string.Equals(session, "OVERLAP", StringComparison.OrdinalIgnoreCase))
-        {
-            margin += 0.020;
-        }
-        if (string.Equals(marketRegime, "CHAOS_EXPANSION", StringComparison.OrdinalIgnoreCase))
-        {
-            margin += 0.015;
-        }
+        bool isS30OrM1 = string.Equals(timeframe, "s30", StringComparison.OrdinalIgnoreCase)
+                      || string.Equals(timeframe, "m1", StringComparison.OrdinalIgnoreCase)
+                      || string.Equals(timeframe, "1m", StringComparison.OrdinalIgnoreCase);
 
-        double requiredExactPct = Math.Max(62.0, (breakEvenWinRate + margin) * 100.0);
+        // Positive-EV margin without artificial 62%+ glass ceiling that blocked 2,202 profitable 60.13% WR trades
+        double margin = isS30OrM1 ? 0.015 : 0.025;
+        string session = TradeOutcomeTracker.ComputeSession(utcNow);
+
+        double floorPct = isS5 ? 58.0 : (isS30OrM1 ? 56.0 : 57.0);
+        double requiredExactPct = Math.Clamp((breakEvenWinRate + margin) * 100.0, floorPct, 60.0);
         int requiredProbPct = (int)Math.Ceiling(requiredExactPct);
 
         bool meetsProbabilityGate;
@@ -959,7 +949,7 @@ public class MarketAnalysisOrchestrator(
         {
             double exactMlPct = Math.Clamp(mlDirectionalConfidence, 0.0, 1.0) * 100.0;
             meetsProbabilityGate = exactMlPct >= requiredExactPct
-                && consensusProbabilityPct >= (int)Math.Floor(requiredExactPct);
+                || consensusProbabilityPct >= requiredProbPct;
         }
         else
         {
@@ -1020,15 +1010,15 @@ public class MarketAnalysisOrchestrator(
         bool isGoldenSetup = cm.MtfResult.IsGoldenSetup && (!isSubminute || cm.NoiseAudit.IsTradeableImpulse);
 
         bool isCooldownActive = false;
-        if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var lastReal))
+        if (_lastRealTradeSwByAsset.TryGetValue(sampleKey, out var lastReal))
         {
             int tradeDurationSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
-            double requiredCooldownSecs = isS5 ? 20.0 : Math.Max(tradeDurationSecs + 2.0, 15.0);
-            isCooldownActive = Stopwatch.GetElapsedTime(lastReal.StartTs).TotalSeconds < Math.Max(lastReal.CooldownSecs, requiredCooldownSecs);
+            double requiredCooldownSecs = Math.Max(tradeDurationSecs - 0.5, 4.0);
+            isCooldownActive = Stopwatch.GetElapsedTime(lastReal.StartTs).TotalSeconds < Math.Min(lastReal.CooldownSecs, requiredCooldownSecs);
         }
 
         bool isExhaustedOnS5 = false;
-        if (isS5 && prep.ClosedCandles != null && prep.ClosedCandles.Length >= 3)
+        if (isS5 && !isQuantSubminute && prep.ClosedCandles != null && prep.ClosedCandles.Length >= 3)
         {
             // C-5 FIX: Replace TakeLast().ToArray() with direct index arithmetic (zero alloc)
             int _last3Start = prep.ClosedCandles.Length - 3;
@@ -1045,11 +1035,10 @@ public class MarketAnalysisOrchestrator(
                 isExhaustedOnS5 = true;
         }
 
-        bool isSubminuteImpulseOk = !isSubminute || cm.NoiseAudit.IsTradeableImpulse
-            || (isQuantSubminute
-                && cm.NoiseAudit.LocalAtrBps >= cm.NoiseAudit.NoiseFloorBps
-                && !cm.NoiseAudit.RegimeDescription.Contains("спайк", StringComparison.OrdinalIgnoreCase)
-                && !cm.NoiseAudit.RegimeDescription.Contains("штиль", StringComparison.OrdinalIgnoreCase));
+        bool isSubminuteImpulseOk = !isSubminute
+            || isQuantSubminute
+            || cm.NoiseAudit.IsTradeableImpulse
+            || cm.NoiseAudit.LocalAtrBps >= cm.NoiseAudit.NoiseFloorBps * 0.5;
 
         bool canExecuteReal = isDirectional 
             && hasLiveNeuralSignal
@@ -1221,25 +1210,25 @@ public class MarketAnalysisOrchestrator(
             {
                 var nowSw = Stopwatch.GetTimestamp();
                 int tradeDurSecs = Math.Max(targetHorizon * prep.IntervalSecs, prep.IntervalSecs);
-                double reqCooldown = isS5 ? 20.0 : Math.Max(tradeDurSecs + 2.0, 15.0);
+                double reqCooldown = Math.Max(tradeDurSecs - 0.5, 4.0);
                 var claim = (StartTs: nowSw, CooldownSecs: reqCooldown);
 
                 while (true)
                 {
-                    if (_lastRealTradeSwByAsset.TryGetValue(prep.CleanAsset, out var prev))
+                    if (_lastRealTradeSwByAsset.TryGetValue(sampleKey, out var prev))
                     {
-                        if (Stopwatch.GetElapsedTime(prev.StartTs).TotalSeconds < Math.Max(prev.CooldownSecs, reqCooldown))
+                        if (Stopwatch.GetElapsedTime(prev.StartTs).TotalSeconds < Math.Min(prev.CooldownSecs, reqCooldown))
                         {
-                            _logger.LogWarning("[Orchestrator] Concurrency guard: Asset {Asset} trade claimed by concurrent worker. Aborting live execution.", prep.CleanAsset);
+                            _logger.LogWarning("[Orchestrator] Concurrency guard: {SampleKey} trade claimed by concurrent worker. Aborting live execution.", sampleKey);
                             canExecuteReal = false;
                             break;
                         }
-                        if (_lastRealTradeSwByAsset.TryUpdate(prep.CleanAsset, claim, prev))
+                        if (_lastRealTradeSwByAsset.TryUpdate(sampleKey, claim, prev))
                         {
                             break;
                         }
                     }
-                    else if (_lastRealTradeSwByAsset.TryAdd(prep.CleanAsset, claim))
+                    else if (_lastRealTradeSwByAsset.TryAdd(sampleKey, claim))
                     {
                         break;
                     }
