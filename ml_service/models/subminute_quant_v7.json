@@ -1,6 +1,6 @@
 {
   "model_version": "neural_quant_v8",
-  "trained_at_utc": "2026-11-20T14:58:59.928222+00:00",
+  "trained_at_utc": "2026-11-20T18:57:01.035403+00:00",
   "core_features": [
     "r0",
     "body_signed",
@@ -900,11 +900,11 @@
       "parity_max_diff": 0.0
     },
     "1min": {
-      "gate_pass": false,
-      "w_hgb": 0.75,
-      "n_train": 330999,
-      "n_total_bars": 29007,
-      "n_hgb_features": 84,
+      "gate_pass": true,
+      "w_hgb": 0.85,
+      "n_train": 371925,
+      "n_total_bars": 70842,
+      "n_hgb_features": 85,
       "hgb_feature_indices": [
         0,
         1,
@@ -945,6 +945,7 @@
         36,
         37,
         38,
+        39,
         40,
         41,
         42,
@@ -1032,6 +1033,7 @@
         36,
         37,
         38,
+        39,
         40,
         41,
         42,
@@ -1067,18 +1069,45 @@
         83,
         84
       ],
-      "oof_auc": 0.5193,
-      "oof_accuracy": 0.5171,
-      "oof_buy_pct": 50.13,
-      "oof_top20_wr_nt": 52.05,
-      "oof_top10_wr_nt": 52.18,
-      "max_cal": 0.5056,
-      "otc_rollover_n": 3546,
-      "otc_rollover_auc": 0.4964,
-      "otc_rollover_top20_wr_nt": 51.55,
-      "otc_max_cal": 0.5172,
+      "oof_auc": 0.5263,
+      "oof_accuracy": 0.5209,
+      "oof_buy_pct": 50.69,
+      "oof_top20_wr_nt": 53.4,
+      "oof_top10_wr_nt": 54.2,
+      "max_cal": 0.5351,
+      "otc_rollover_n": 25124,
+      "otc_rollover_auc": 0.5,
+      "otc_rollover_top20_wr_nt": 49.91,
+      "otc_max_cal": 0.5155,
       "tie_dampen_threshold": 0.4,
-      "parity_max_diff": 0.0
+      "parity_max_diff": 0.0,
+      "nov13_auc": 0.5147,
+      "nov13_candle_top20_wr_nt": 51.75,
+      "nov13_buy_pct": 50.67,
+      "nov13_real_outcomes": {
+        "matched": 304,
+        "all": {
+          "n": 304,
+          "w": 151,
+          "t": 12,
+          "l": 141,
+          "wr_nt": 51.71
+        },
+        "ge59": {
+          "n": 0,
+          "w": 0,
+          "t": 0,
+          "l": 0,
+          "wr_nt": 0.0
+        },
+        "top20": {
+          "n": 137,
+          "w": 69,
+          "t": 9,
+          "l": 59,
+          "wr_nt": 53.91
+        }
+      }
     }
   }
 }

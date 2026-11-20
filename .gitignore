@@ -45,6 +45,7 @@ node_modules/
 # Data
 *.csv
 *.xlsx
+*.parquet
 *.npz
 !ml_service/models/*.npz
 *.pt

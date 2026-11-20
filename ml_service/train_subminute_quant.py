@@ -34,6 +34,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from export_s5_archive import (
+    DEFAULT_ARCHIVE_PATH,
+    merge_candle_frames,
+    normalize_candle_frame,
+)
 from models.subminute_quant_predictor import (
     ALL_FEATURES,
     BASKET_FEATURES,
@@ -62,14 +67,31 @@ def _norm_asset(name: str) -> str:
 
 
 def _parse_unix_s(series: pd.Series) -> np.ndarray:
-    return pd.to_datetime(series, utc=True).to_numpy().astype("datetime64[s]").astype("int64")
+    try:
+        dt = pd.to_datetime(series, format="ISO8601", utc=True)
+    except ValueError:
+        dt = pd.to_datetime(series, utc=True)
+    return dt.dt.tz_localize(None).to_numpy().astype("datetime64[s]").astype("int64")
+
+
+def _query_df(conn: Any, sql: str, params: Optional[Tuple[Any, ...]] = None) -> pd.DataFrame:
+    with conn.cursor() as cur:
+        cur.execute(sql, params) if params is not None else cur.execute(sql)
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description] if cur.description else []
+    return pd.DataFrame(rows, columns=cols)
 
 
 def _fit_core_lr(
     X_core: np.ndarray, y: np.ndarray, c_reg: float
 ) -> Tuple[LogisticRegression, StandardScaler, np.ndarray]:
-    meds = np.nanmedian(X_core, axis=0)
-    meds = np.where(np.isfinite(meds), meds, 0.0)
+    n_cols = X_core.shape[1]
+    meds = np.zeros(n_cols, dtype=np.float64)
+    for j in range(n_cols):
+        col = X_core[:, j]
+        fin = col[np.isfinite(col)]
+        if len(fin) > 0:
+            meds[j] = float(np.median(fin))
     X_imp = np.where(np.isfinite(X_core), X_core, meds)
     scaler = StandardScaler()
     X_std = np.clip(scaler.fit_transform(X_imp), -8.0, 8.0)
@@ -376,6 +398,63 @@ def build_dataset_for_interval(
     return X[order], fwd[order], ts_all[order], assets[order]
 
 
+def resample_s5_grid(s5_df: pd.DataFrame, dt: int, phase: int = 0) -> pd.DataFrame:
+    """Resamples s5 OHLCV bars into an aligned `dt`-second grid at offset `phase`."""
+    bars_needed = dt // 5
+    if bars_needed < 2 or s5_df is None or s5_df.empty:
+        return pd.DataFrame(columns=["asset", "ts", "open_price", "high_price", "low_price", "close_price", "volume"])
+
+    asset_frames = []
+    for asset, g in s5_df.groupby("asset", sort=False):
+        gs = g.sort_values("ts")
+        ts_arr = gs["ts"].to_numpy()
+        bucket = ((ts_arr - phase) // dt) * dt + phase
+        dfb = pd.DataFrame(
+            {
+                "ts": bucket,
+                "o": gs["open_price"].to_numpy(),
+                "h": gs["high_price"].to_numpy(),
+                "l": gs["low_price"].to_numpy(),
+                "c": gs["close_price"].to_numpy(),
+                "v": gs["volume"].to_numpy(),
+            }
+        )
+        agg = (
+            dfb.groupby("ts", sort=False)
+            .agg(
+                open_price=("o", "first"),
+                high_price=("h", "max"),
+                low_price=("l", "min"),
+                close_price=("c", "last"),
+                volume=("v", "sum"),
+                cnt=("o", "count"),
+            )
+            .reset_index()
+        )
+        agg = agg[agg["cnt"] == bars_needed].drop(columns=["cnt"])
+        if len(agg) > 0:
+            agg["asset"] = asset
+            asset_frames.append(agg)
+
+    if not asset_frames:
+        return pd.DataFrame(columns=["asset", "ts", "open_price", "high_price", "low_price", "close_price", "volume"])
+    return pd.concat(asset_frames, ignore_index=True)
+
+
+def merge_interval_sources(*ordered_frames: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Combines candle frames ordered from lowest to highest fidelity (later sources win
+    on duplicate `(asset, ts)` pairs, e.g. historical_candles < s5-resampled < subminute_candles).
+    """
+    valid = [f for f in ordered_frames if f is not None and not f.empty]
+    if not valid:
+        return pd.DataFrame(columns=["asset", "ts", "open_price", "high_price", "low_price", "close_price", "volume"])
+
+    combined = pd.concat(valid, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["asset", "ts"], keep="last")
+    return combined.sort_values(["asset", "ts"], kind="mergesort").reset_index(drop=True)
+
+
 def build_phase_augmented_from_s5(
     s5_df: pd.DataFrame,
     dt: int,
@@ -391,44 +470,15 @@ def build_phase_augmented_from_s5(
         return None
     parts_x, parts_f, parts_ts = [], [], []
     for phase in range(5, dt, 5):
-        asset_frames = []
-        for asset, g in s5_df.groupby("asset", sort=False):
-            gs = g.sort_values("ts")
-            ts_arr = gs["ts"].to_numpy()
-            bucket = ((ts_arr - phase) // dt) * dt + phase
-            dfb = pd.DataFrame(
-                {
-                    "ts": bucket,
-                    "o": gs["open_price"].to_numpy(),
-                    "h": gs["high_price"].to_numpy(),
-                    "l": gs["low_price"].to_numpy(),
-                    "c": gs["close_price"].to_numpy(),
-                    "v": gs["volume"].to_numpy(),
-                }
-            )
-            agg = (
-                dfb.groupby("ts", sort=False)
-                .agg(
-                    open_price=("o", "first"),
-                    high_price=("h", "max"),
-                    low_price=("l", "min"),
-                    close_price=("c", "last"),
-                    volume=("v", "sum"),
-                    cnt=("o", "count"),
-                )
-                .reset_index()
-            )
-            agg = agg[agg["cnt"] == bars_needed].copy()
-            if len(agg) > 0:
-                agg["asset"] = asset
-                asset_frames.append(agg)
-        if asset_frames:
+        resampled = resample_s5_grid(s5_df, dt, phase=phase)
+        if not resampled.empty:
             Xp, fp, tsp, _ = build_dataset_for_interval(
-                pd.concat(asset_frames, ignore_index=True), dt, s5_map, s5_basket_df=s5_basket_df
+                resampled, dt, s5_map, s5_basket_df=s5_basket_df
             )
-            parts_x.append(Xp)
-            parts_f.append(fp)
-            parts_ts.append(tsp)
+            if len(Xp) > 0:
+                parts_x.append(Xp)
+                parts_f.append(fp)
+                parts_ts.append(tsp)
     if not parts_x:
         return None
     X_aug = np.vstack(parts_x)
@@ -798,38 +848,128 @@ def train_interval(
     return npz_bundle, meta_info
 
 
+def merge_existing_artifacts(
+    out_npz: str,
+    out_meta: str,
+    new_arrays: Dict[str, np.ndarray],
+    new_meta: Dict[str, Any],
+    updated_intervals: Sequence[str],
+) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    """Merge freshly trained interval arrays/metadata into an existing compatible bundle."""
+    with open(out_meta, "r", encoding="utf-8") as f:
+        prev_meta = json.load(f)
+    if prev_meta.get("all_features") != new_meta.get("all_features"):
+        raise RuntimeError(
+            "Cannot --merge-existing across incompatible feature schemas; run full training without --merge-existing."
+        )
+
+    prefixes = tuple(f"{tf}_" for tf in updated_intervals)
+    merged_arrays: Dict[str, np.ndarray] = {}
+    with np.load(out_npz, allow_pickle=False) as prev_npz:
+        for key in prev_npz.files:
+            if not key.startswith(prefixes):
+                merged_arrays[key] = prev_npz[key]
+    merged_arrays.update(new_arrays)
+
+    prev_intervals = prev_meta.get("intervals", {})
+    ordered_intervals: Dict[str, Any] = {}
+    for tf in TRAIN_INTERVALS:
+        if tf in new_meta.get("intervals", {}):
+            ordered_intervals[tf] = new_meta["intervals"][tf]
+        elif tf in prev_intervals:
+            ordered_intervals[tf] = prev_intervals[tf]
+    for tf, info in prev_intervals.items():
+        if tf not in ordered_intervals:
+            ordered_intervals[tf] = info
+
+    merged_meta = dict(new_meta)
+    merged_meta["intervals"] = ordered_intervals
+    return merged_arrays, merged_meta
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Subminute Quant Predictor (s5-1m)")
     parser.add_argument("--db-url", default=os.environ.get("DATABASE_URL", ""), help="PostgreSQL DSN")
     parser.add_argument("--out-npz", default=DEFAULT_NPZ_PATH)
     parser.add_argument("--out-meta", default=DEFAULT_META_PATH)
+    parser.add_argument("--archive-parquet", default=DEFAULT_ARCHIVE_PATH, help="Local s5 Parquet archive path")
+    parser.add_argument("--no-archive", action="store_true", help="Skip merging local s5 Parquet archive")
+    parser.add_argument("--no-historical-1m", action="store_true", help="Skip historical_candles for 1min")
+    parser.add_argument(
+        "--hist-since",
+        default="2026-11-09T00:00:00Z",
+        help="UTC ISO lower bound for historical_candles (default aligns to Pocket Option regime)",
+    )
+    parser.add_argument("--intervals", default=",".join(TRAIN_INTERVALS), help="Comma-separated intervals to train")
+    parser.add_argument(
+        "--merge-existing",
+        action="store_true",
+        help="Preserve unmodified intervals already present in --out-npz/--out-meta when retraining a subset",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Evaluate OOF metrics without saving model artifacts")
     args = parser.parse_args()
 
     if not args.db_url:
         raise SystemExit("DATABASE_URL / --db-url is required.")
 
+    requested_intervals = [tf.strip() for tf in args.intervals.split(",") if tf.strip() in TRAIN_INTERVALS]
+    if not requested_intervals:
+        requested_intervals = list(TRAIN_INTERVALS)
+
     t0 = time.time()
     cutoff_nov13 = int(pd.Timestamp("2026-11-13T00:00:00Z").timestamp())
-    print("[1/4] Loading subminute_candles (s5..1min) + trade_outcomes from PostgreSQL...", flush=True)
+    print("[1/4] Loading subminute_candles + archive/historical candles from PostgreSQL...", flush=True)
     interval_dfs: Dict[str, pd.DataFrame] = {}
+    hc_1m_df = pd.DataFrame()
     conn = psycopg2.connect(args.db_url, options="-c default_transaction_read_only=on", connect_timeout=20)
     try:
         for tf in TRAIN_INTERVALS:
             q_iv = "1min" if tf == "1min" else tf
-            df_iv = pd.read_sql_query(
+            df_iv = _query_df(
+                conn,
                 """
                 SELECT asset, open_time, open_price, high_price, low_price, close_price, volume
                 FROM subminute_candles
                 WHERE interval = %s
                 ORDER BY asset, open_time ASC
                 """,
-                conn,
                 params=(q_iv,),
             )
-            df_iv["ts"] = _parse_unix_s(df_iv["open_time"])
+            df_iv = normalize_candle_frame(df_iv)
+            df_iv["ts"] = _parse_unix_s(df_iv["open_time"]) if not df_iv.empty else np.array([], dtype=np.int64)
             interval_dfs[tf] = df_iv
 
-        oc_df = pd.read_sql_query(
+        if "1min" in requested_intervals and not args.no_historical_1m:
+            if args.hist_since:
+                hc_raw = _query_df(
+                    conn,
+                    """
+                    SELECT asset, open_time, open AS open_price, high AS high_price,
+                           low AS low_price, close AS close_price, volume
+                    FROM historical_candles
+                    WHERE interval = '1m' AND open_time >= %s
+                    ORDER BY asset, open_time ASC
+                    """,
+                    params=(args.hist_since,),
+                )
+            else:
+                hc_raw = _query_df(
+                    conn,
+                    """
+                    SELECT asset, open_time, open AS open_price, high AS high_price,
+                           low AS low_price, close AS close_price, volume
+                    FROM historical_candles
+                    WHERE interval = '1m'
+                    ORDER BY asset, open_time ASC
+                    """,
+                )
+            hc_1m_df = normalize_candle_frame(hc_raw)
+            if not hc_1m_df.empty:
+                hc_1m_df["ts"] = _parse_unix_s(hc_1m_df["open_time"])
+                print(f"      Loaded historical_candles (1m): {len(hc_1m_df):,} rows", flush=True)
+
+        oc_df = _query_df(
+            conn,
             """
             SELECT asset, timeframe, created_at, entry_price, exit_price
             FROM trade_outcomes
@@ -839,11 +979,20 @@ def main() -> None:
               AND exit_price > 0
             ORDER BY created_at ASC
             """,
-            conn,
         )
-        oc_df["ts"] = _parse_unix_s(oc_df["created_at"])
+        oc_df["ts"] = _parse_unix_s(oc_df["created_at"]) if not oc_df.empty else np.array([], dtype=np.int64)
     finally:
         conn.close()
+
+    if not args.no_archive and args.archive_parquet and os.path.exists(args.archive_parquet):
+        arch_s5 = pd.read_parquet(args.archive_parquet)
+        merged_s5 = merge_candle_frames(arch_s5, interval_dfs["s5"])
+        merged_s5["ts"] = _parse_unix_s(merged_s5["open_time"]) if not merged_s5.empty else np.array([], dtype=np.int64)
+        print(
+            f"      Merged local s5 archive ({len(arch_s5):,} rows) + DB ({len(interval_dfs['s5']):,}) -> {len(merged_s5):,} rows",
+            flush=True,
+        )
+        interval_dfs["s5"] = merged_s5
 
     s5_df = interval_dfs["s5"]
     s5_basket_df = _compute_usd_basket_df_from_s5(s5_df)
@@ -871,9 +1020,18 @@ def main() -> None:
         "intervals": {},
     }
 
-    for tf in TRAIN_INTERVALS:
+    for tf in requested_intervals:
         dt = INTERVAL_SECONDS[tf]
-        df = interval_dfs[tf]
+        db_df = interval_dfs[tf]
+        if dt > 5:
+            s5_zero_df = resample_s5_grid(s5_df, dt, phase=0)
+            if tf == "1min" and not hc_1m_df.empty:
+                df = merge_interval_sources(hc_1m_df, s5_zero_df, db_df)
+            else:
+                df = merge_interval_sources(s5_zero_df, db_df)
+        else:
+            df = db_df
+
         X_all, fwd_all, ts_all, assets_all = build_dataset_for_interval(
             df, dt, None if tf == "s5" else s5_map, s5_basket_df=s5_basket_df
         )
@@ -882,25 +1040,40 @@ def main() -> None:
         all_arrays.update(bundle)
         all_meta["intervals"][tf] = info
         print(
-            f"[{tf.upper():>4}] n={info['n_train']:,} | OOF_AUC={info['oof_auc']:.4f} | "
+            f"[{tf.upper():>4}] n={info['n_train']:,} | bars={info['n_total_bars']:,} | OOF_AUC={info['oof_auc']:.4f} | "
             f"OOF_top20_WR={info['oof_top20_wr_nt']:.2f}% | top10={info['oof_top10_wr_nt']:.2f}% | "
             f"max_cal={info['max_cal']*100:.2f}% | Nov13_AUC={info.get('nov13_auc', 0):.4f} | "
             f"gate={info['gate_pass']} (diff={info['parity_max_diff']:.1e})",
             flush=True,
         )
 
+    if args.dry_run:
+        print(f"\n[DRY-RUN] Finished in {time.time() - t0:.1f}s (artifacts untouched).", flush=True)
+        return
+
     # Require tradeable subminute horizons (s5..s30) to pass strict quality gate before saving deployment bundle.
     # 1min is still saved with honest gate_pass status (failing closed to NEUTRAL in inference if <53.5%).
-    failed = [tf for tf in ("s5", "s10", "s15", "s30") if not all_meta["intervals"][tf]["gate_pass"]]
+    failed = [tf for tf in ("s5", "s10", "s15", "s30") if tf in all_meta["intervals"] and not all_meta["intervals"][tf]["gate_pass"]]
     if failed:
         raise RuntimeError(f"Quality gate failed for required subminute intervals: {failed}")
-    if not all_meta["intervals"]["1min"]["gate_pass"]:
+    if "1min" in all_meta["intervals"] and not all_meta["intervals"]["1min"]["gate_pass"]:
         print("[WARN] 1min below strict 53.5% OOF gate — exported with gate_pass=False (fail-closed NEUTRAL shadow mode).", flush=True)
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.out_npz)), exist_ok=True)
-    np.savez_compressed(args.out_npz, **all_arrays)
-    with open(args.out_meta, "w", encoding="utf-8") as f:
+    if args.merge_existing and os.path.exists(args.out_npz) and os.path.exists(args.out_meta):
+        all_arrays, all_meta = merge_existing_artifacts(
+            args.out_npz, args.out_meta, all_arrays, all_meta, requested_intervals
+        )
+        print(f"[MERGE] Merged {requested_intervals} into existing {args.out_npz}", flush=True)
+
+    out_dir = os.path.dirname(os.path.abspath(args.out_npz))
+    os.makedirs(out_dir, exist_ok=True)
+    tmp_npz = os.path.join(out_dir, f".{os.path.basename(args.out_npz)}.tmp.npz")
+    tmp_meta = f"{args.out_meta}.tmp"
+    np.savez_compressed(tmp_npz, **all_arrays)
+    with open(tmp_meta, "w", encoding="utf-8") as f:
         json.dump(all_meta, f, indent=2)
+    os.replace(tmp_npz, args.out_npz)
+    os.replace(tmp_meta, args.out_meta)
 
     size_kb = os.path.getsize(args.out_npz) / 1024.0
     print(f"\n[DONE] Saved {args.out_npz} ({size_kb:.1f} KB) & {args.out_meta} in {time.time() - t0:.1f}s", flush=True)
