@@ -1,7 +1,7 @@
-import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261113_timing';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, setNetworkOnlineState, clearExpiredAuthParams, getTfSeconds, getTrafficLightThresholds } from './state.js?v=20261113_timing';
+import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261120_noliveprice';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, setNetworkOnlineState, clearExpiredAuthParams, getTfSeconds, getTrafficLightThresholds } from './state.js?v=20261120_noliveprice';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261113_timing';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261120_noliveprice';
 
 // 1. Telegram WebApp Lifecycle, Viewport & Theme Synchronization
 const syncViewport = () => {

@@ -2,6 +2,7 @@ using Dapper;
 using Microsoft.Extensions.Hosting;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,10 +14,10 @@ namespace ValutaBot.MiniApp.Services;
 
 public enum StorageZone
 {
-    Green,     // < 3.0 GB (58%): Full 30-day historical depth, no eviction
-    Yellow,    // 3.0 - 3.9 GB (76%): Importance sampling active, striding chop
-    Red,       // 3.9 - 4.8 GB (88-94%): Aggressive pruning, 15-20 min cycles
-    Emergency  // > 4.8 GB (94%): Critical purge, delete all non-essential data immediately
+    Green,     // < 3600 MB: Preserve up to 30 days of operational subminute history
+    Yellow,    // 3600 - 4000 MB: Gentle 12h/cycle watermark trimming of oldest candles (min 4d floor)
+    Red,       // 4000 - 4350 MB: 24h/cycle watermark trimming + 20-min cleanup + 6h shadow pruning
+    Emergency  // >= 4350 MB (critical purge >= 4400 MB): Critical purge leaving >= 600 MB WAL/sort buffer on 5 GB volume
 }
 
 public record StorageTelemetry(
@@ -30,16 +31,67 @@ public record StorageTelemetry(
 
 /// <summary>
 /// Intelligent Adaptive Database Storage Governor.
-/// Replaces blunt hardcoded retention with watermark-based tiering, importance sampling,
-/// and zero-downtime table-level autovacuum tuning.
+/// Uses a continuous high-watermark step-back on `subminute_candles` so disk space stabilizes
+/// naturally via VACUUM page reuse without multi-day step cliffs or infinite delete loops.
 /// </summary>
 public class DataRetentionService : BackgroundService
 {
-    private const double MaxVolumeCapacityMb = 5120.0; // Railway 5 GB starter volume (5 * 1024 MB)
-    private const double GreenThresholdMb    = 2200.0; // Safe operational zone (~3.7 GB physical disk with WAL)
-    private const double YellowThresholdMb   = 2800.0; // Importance sampling + 4d shadow window (~4.3 GB physical disk)
-    private const double RedThresholdMb      = 3200.0; // High-frequency cleanup every 15 min (~4.7 GB physical disk with WAL)
-    private const double EmergencyThresholdMb= 3300.0; // Critical purge before physical disk exceeds 90% (leaving safe WAL/temp buffer)
+    internal const double MaxVolumeCapacityMb = 5120.0; // Railway 5 GB starter volume (5 * 1024 MB)
+    internal const double GreenThresholdMb    = 3600.0; // Full operational retention up to 30d (< 3.6 GB)
+    internal const double YellowThresholdMb   = 4000.0; // Gentle continuous watermark trim (12h tail/cycle)
+    internal const double RedThresholdMb      = 4350.0; // >= 4000 MB: Red (24h/cycle, 20m poll); >= 4350 MB: Emergency
+    internal const double EmergencyThresholdMb= 4350.0; // Leaves ~770 MB buffer for 128 MB WAL + vacuum/sort temps on 5 GB volume
+    internal const int MinSafeSubminuteDays   = 4;
+    internal const int MaxSubminuteHistoryDays = 30;
+    internal const int MaxHistoricalCandlesDays = 90;
+
+    internal static StorageZone ClassifyStorageZone(double dbSizeMb) => dbSizeMb switch
+    {
+        < GreenThresholdMb  => StorageZone.Green,
+        < YellowThresholdMb => StorageZone.Yellow,
+        < RedThresholdMb    => StorageZone.Red,
+        _                   => StorageZone.Emergency
+    };
+
+    /// <summary>
+    /// Computes the upper cutoff timestamp for deleting the oldest tail of `subminute_candles`.
+    /// Steps forward from `oldestPoOpenTimeUtc` by a bounded window (never looping on `pg_database_size`
+    /// and never trimming inside the protected `MinSafeSubminuteDays` window during normal cycles).
+    /// </summary>
+    internal static DateTime? ComputeWatermarkSubminuteCutoffUtc(
+        StorageZone zone,
+        DateTime utcNow,
+        DateTime? oldestPoOpenTimeUtc)
+    {
+        DateTime normNow = utcNow.Kind == DateTimeKind.Utc ? utcNow : utcNow.ToUniversalTime();
+        if (zone == StorageZone.Green)
+        {
+            return normNow.AddDays(-MaxSubminuteHistoryDays);
+        }
+
+        if (!oldestPoOpenTimeUtc.HasValue)
+        {
+            return null;
+        }
+
+        DateTime oldest = oldestPoOpenTimeUtc.Value.Kind == DateTimeKind.Utc
+            ? oldestPoOpenTimeUtc.Value
+            : oldestPoOpenTimeUtc.Value.ToUniversalTime();
+        DateTime minKeep = normNow.AddDays(-MinSafeSubminuteDays);
+        if (oldest >= minKeep)
+        {
+            return null;
+        }
+
+        int stepHours = zone switch
+        {
+            StorageZone.Yellow => 12,
+            StorageZone.Red => 24,
+            _ => 48
+        };
+        DateTime stepped = oldest.AddHours(stepHours);
+        return stepped < minKeep ? stepped : minKeep;
+    }
 
     private static StorageTelemetry? _latestTelemetry;
     private static bool _tableTuningApplied = false;
@@ -71,7 +123,7 @@ public class DataRetentionService : BackgroundService
             var interval = (_latestTelemetry?.DatabaseSizeMb ?? 0) switch
             {
                 >= EmergencyThresholdMb => TimeSpan.FromMinutes(10),
-                >= RedThresholdMb       => TimeSpan.FromMinutes(20),
+                >= YellowThresholdMb    => TimeSpan.FromMinutes(20),
                 _                       => TimeSpan.FromHours(1)
             };
 
@@ -143,7 +195,6 @@ public class DataRetentionService : BackgroundService
         }
 
         // 4. Adaptive retention parameters based on Storage Zone
-        TimeSpan subminuteRetention;
         TimeSpan shadowRetention;
         bool doImportanceSampling;
         bool doRedZonePruning;
@@ -151,14 +202,12 @@ public class DataRetentionService : BackgroundService
         switch (telemetry.ActiveZone)
         {
             case StorageZone.Green:
-                subminuteRetention = TimeSpan.FromDays(7);
                 shadowRetention = TimeSpan.FromDays(2);
                 doImportanceSampling = true;
                 doRedZonePruning = false;
                 break;
 
             case StorageZone.Yellow:
-                subminuteRetention = TimeSpan.FromDays(4);
                 shadowRetention = TimeSpan.FromHours(24);
                 doImportanceSampling = true;
                 doRedZonePruning = true;
@@ -166,31 +215,53 @@ public class DataRetentionService : BackgroundService
 
             case StorageZone.Red:
             default:
-                // Preserve 4-day ML training window for PO subminute candles; reclaim disk via shadow/JSON pruning
-                subminuteRetention = TimeSpan.FromDays(4);
                 shadowRetention = TimeSpan.FromHours(6);
                 doImportanceSampling = true;
                 doRedZonePruning = true;
                 break;
         }
 
-        var subCutoff = DateTime.UtcNow.Subtract(subminuteRetention).ToString("o");
-        var legacySubCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromHours(12)).ToString("o");
-        var histCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromDays(30)).ToString("o");
-        var weekendArchiveCutoff = DateTime.UtcNow.Subtract(TimeSpan.FromDays(90)).ToString("o");
-        var shadowCutoff = DateTime.UtcNow.Subtract(shadowRetention);
-        var stalePendingCutoff = DateTime.UtcNow.AddHours(-2).ToString("o");
+        DateTime utcNow = DateTime.UtcNow;
+        DateTime? oldestPoUtc = null;
+        if (telemetry.ActiveZone != StorageZone.Green)
+        {
+            try
+            {
+                string? oldestStr = await conn.ExecuteScalarAsync<string?>(
+                    "SELECT open_time FROM subminute_candles WHERE asset LIKE '%_PO' ORDER BY open_time ASC LIMIT 1;",
+                    commandTimeout: 10);
+                if (!string.IsNullOrWhiteSpace(oldestStr) &&
+                    DateTime.TryParse(oldestStr, CultureInfo.InvariantCulture,
+                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsedOldest))
+                {
+                    oldestPoUtc = parsedOldest;
+                }
+            }
+            catch { }
+        }
 
-        // 5. Prune expired subminute candles using chunked deletions with FOR UPDATE SKIP LOCKED (ordered by open_time ASC for index scan)
-        int subPoDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (PO)",
-            @"DELETE FROM subminute_candles
-              WHERE ctid IN (
-                  SELECT ctid FROM subminute_candles
-                  WHERE asset LIKE '%_PO' AND open_time < @cutoff
-                  ORDER BY open_time ASC
-                  LIMIT 5000
-                  FOR UPDATE SKIP LOCKED
-              )", new { cutoff = subCutoff }, chunkSize: 5000);
+        DateTime? subCutoffUtc = ComputeWatermarkSubminuteCutoffUtc(telemetry.ActiveZone, utcNow, oldestPoUtc);
+        var legacySubCutoff = utcNow.Subtract(TimeSpan.FromHours(12)).ToString("o");
+        var histCutoff = utcNow.Subtract(TimeSpan.FromDays(MaxHistoricalCandlesDays)).ToString("o");
+        var weekendArchiveCutoff = utcNow.Subtract(TimeSpan.FromDays(90)).ToString("o");
+        var shadowCutoff = utcNow.Subtract(shadowRetention);
+        var stalePendingCutoff = utcNow.AddHours(-2).ToString("o");
+
+        // 5. Prune expired subminute candles using a single bounded watermark step per cycle
+        int subPoDeleted = 0;
+        if (subCutoffUtc.HasValue)
+        {
+            string subCutoff = subCutoffUtc.Value.ToString("o");
+            subPoDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (PO Watermark)",
+                @"DELETE FROM subminute_candles
+                  WHERE ctid IN (
+                      SELECT ctid FROM subminute_candles
+                      WHERE asset LIKE '%_PO' AND open_time < @cutoff
+                      ORDER BY open_time ASC
+                      LIMIT 5000
+                      FOR UPDATE SKIP LOCKED
+                  )", new { cutoff = subCutoff }, chunkSize: 5000);
+        }
 
         int subLegacyDeleted = await ExecuteChunkedDeleteSubminuteAsync(conn, "subminute_candles (legacy)",
             @"DELETE FROM subminute_candles
@@ -484,13 +555,7 @@ public class DataRetentionService : BackgroundService
         double dbSizeMb = dbSizeBytes / (1024.0 * 1024.0);
         double usagePct = Math.Clamp((dbSizeMb / MaxVolumeCapacityMb) * 100.0, 0.0, 100.0);
 
-        StorageZone zone = dbSizeMb switch
-        {
-            < GreenThresholdMb    => StorageZone.Green,
-            < YellowThresholdMb   => StorageZone.Yellow,
-            < RedThresholdMb      => StorageZone.Red,
-            _                     => StorageZone.Emergency
-        };
+        StorageZone zone = ClassifyStorageZone(dbSizeMb);
 
         var tableSizes = new Dictionary<string, double>();
         try

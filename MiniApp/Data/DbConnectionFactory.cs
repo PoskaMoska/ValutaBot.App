@@ -490,8 +490,6 @@ namespace ValutaBot.App.MiniApp.Data
                 CREATE INDEX IF NOT EXISTS idx_pending_trades_verify_at ON pending_trades(verify_at ASC);
                 ALTER TABLE subminute_candles ADD COLUMN IF NOT EXISTS crowd_sentiment DOUBLE PRECISION NOT NULL DEFAULT 50.0;
                 CREATE INDEX IF NOT EXISTS idx_subminute_candles_opentime ON subminute_candles(open_time DESC) WITH (fillfactor = 90);
-                CREATE INDEX IF NOT EXISTS idx_subminute_candles_asset_interval_time ON subminute_candles(asset, interval, open_time DESC) WITH (fillfactor = 90);
-                CREATE INDEX IF NOT EXISTS idx_subminute_candles_covering ON subminute_candles(asset, interval, open_time DESC) INCLUDE (open_price, high_price, low_price, close_price, volume) WITH (fillfactor = 90);
                 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_asset_tf_verified_real ON trade_outcomes(asset, timeframe, verified_at DESC) INCLUDE (was_win) WITH (fillfactor = 90) WHERE direction IN ('BUY', 'PUT') AND was_win IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_registrations_chat_id ON registrations(chat_id);
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_tz_expr;
@@ -502,6 +500,9 @@ namespace ValutaBot.App.MiniApp.Data
                 DROP INDEX IF EXISTS idx_trade_outcomes_created_at;
                 DROP INDEX IF EXISTS idx_trade_outcomes_verified_at;
                 DROP INDEX IF EXISTS idx_subminute_candles_lookup;
+                DROP INDEX IF EXISTS idx_subminute_candles_asset_interval_time;
+                DROP INDEX IF EXISTS idx_subminute_candles_covering;
+                DROP INDEX IF EXISTS idx_weekend_otc_candles_lookup;
                 DROP INDEX IF EXISTS idx_hist_candles_asset;
                 DROP TABLE IF EXISTS neutral_signals;
                 DROP INDEX IF EXISTS idx_subminute_candles_opentime_tz;

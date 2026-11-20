@@ -84,8 +84,7 @@ public static class WeekendShadowExperimentService
                         crowd_sentiment DOUBLE PRECISION NOT NULL DEFAULT 50.0,
                         UNIQUE(asset, interval, open_time)
                     );
-                    CREATE INDEX IF NOT EXISTS idx_weekend_otc_candles_lookup
-                        ON weekend_otc_candles(asset, interval, open_time DESC) WITH (fillfactor = 90);
+                    DROP INDEX IF EXISTS idx_weekend_otc_candles_lookup;
                     CREATE INDEX IF NOT EXISTS idx_weekend_otc_candles_opentime
                         ON weekend_otc_candles(open_time DESC) WITH (fillfactor = 90);
 

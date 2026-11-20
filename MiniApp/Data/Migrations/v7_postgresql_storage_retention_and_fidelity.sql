@@ -4,14 +4,14 @@
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
--- 1. INDEX-ONLY SCAN COVERING INDEX FOR SUBMINUTE CANDLES
--- Prevents query plan degeneration to Seq Scan when fetching depth-250 candles.
--- By including all OHLCV columns in the index payload, queries bypass heap pages entirely.
+-- 1. DROP BLOATED / DUPLICATE SUBMINUTE INDEXES SO POSTGRESQL HOT-UPDATES WORK
+-- Including mutable OHLC columns (close/high/low/volume) disables Heap-Only
+-- Tuple (HOT) in-place updates on 500ms tick upserts; unique(asset, interval, open_time)
+-- already satisfies backward scans cleanly.
 -- ----------------------------------------------------------------------------
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_subminute_candles_covering
-ON subminute_candles (asset, interval, open_time DESC)
-INCLUDE (open_price, high_price, low_price, close_price, volume)
-WITH (fillfactor = 90);
+DROP INDEX CONCURRENTLY IF EXISTS idx_subminute_candles_covering;
+DROP INDEX CONCURRENTLY IF EXISTS idx_subminute_candles_asset_interval_time;
+DROP INDEX CONCURRENTLY IF EXISTS idx_weekend_otc_candles_lookup;
 
 -- ----------------------------------------------------------------------------
 -- 2. PARTIAL COVERING INDEX FOR RECENT VERIFIED TRADE OUTCOMES

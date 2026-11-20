@@ -14,7 +14,7 @@ import {
     isNetworkOnline,
     setNetworkOnlineState,
     getCandleBoundaryWaitMs
-} from './state.js?v=20261113_timing';
+} from './state.js?v=20261120_noliveprice';
 
 function resolveAuthData() {
     try {
@@ -78,7 +78,7 @@ import {
     hapticImpact,
     hapticNotification,
     hapticSelection
-} from './ui.js?v=20261113_timing';
+} from './ui.js?v=20261120_noliveprice';
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -222,7 +222,7 @@ export function initPriceWebSocket() {
     const isSecondsTf = Boolean(currentTf && currentTf.startsWith('s'));
     const livePriceContainer = document.getElementById('livePriceContainer');
     
-    if (!isSecondsTf) {
+    if (!isSecondsTf || !livePriceContainer) {
         if (livePriceContainer) livePriceContainer.style.display = 'none';
         if (typeof navigator === 'undefined' || navigator.onLine) hideNetworkBanner();
         return;
