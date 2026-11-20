@@ -300,11 +300,11 @@ namespace ValutaBot.Tests.Engines
         }
 
         [Fact]
-        public async Task EvaluateMatrixAsync_QuantSubminute_StillCapsVolatilitySpikeAndFlatNoise()
+        public async Task EvaluateMatrixAsync_QuantSubminute_PreservesQuietFlatWhileCappingVolatilitySpike()
         {
             var taSignal = new TaSignal(1.0, 70.0, 55.0, 100, 2.0, 10);
             var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
-            var mlSignal = new MlSignal("BUY", 0.63, 0.59, "neural_quant_v6");
+            var mlSignal = new MlSignal("BUY", 0.63, 0.59, "neural_quant_v8");
             var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.3);
             var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "MTF", "MTF", new Dictionary<string, string>(), "BUY");
 
@@ -326,7 +326,7 @@ namespace ValutaBot.Tests.Engines
             var flatDecision = await _engine.EvaluateMatrixAsync("EURUSD", "s5", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: flatNoiseAudit);
             var spikeDecision = await _engine.EvaluateMatrixAsync("EURUSD", "s5", true, 1.0, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, noiseAudit: spikeAudit);
 
-            Assert.Equal(52, flatDecision.Probability);
+            Assert.Equal(63, flatDecision.Probability);
             Assert.Equal(50, spikeDecision.Probability);
         }
 

@@ -284,6 +284,16 @@ namespace ValutaBot.Tests
             Assert.True(sub.DxyMomentum15sBps < sub.DxyMomentum5sBps, $"dxy15s={sub.DxyMomentum15sBps} vs 5s={sub.DxyMomentum5sBps}");
             Assert.True(sub.DxyMomentum30sBps < sub.DxyMomentum15sBps, $"dxy30s={sub.DxyMomentum30sBps} vs 15s={sub.DxyMomentum15sBps}");
             Assert.Equal(1.0, sub.BasketSync5sScore);
+
+            // Point-in-time guarantee: ticks after target asOfUtc must NOT leak into an earlier candle's DXY snapshot
+            var snapshotsWithFuture = new Dictionary<string, (DateTime time, double price)[]>
+            {
+                ["EURUSD"] = snapshots["EURUSD"].Concat(new[] { (t0.AddSeconds(20), 1.2500) }).ToArray(),
+                ["USDJPY"] = snapshots["USDJPY"].Concat(new[] { (t0.AddSeconds(20), 120.00) }).ToArray(),
+            };
+            var subPointInTime = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeMetricsFromSnapshots(t0, snapshotsWithFuture);
+            Assert.Equal(sub.DxyMomentum5sBps, subPointInTime.DxyMomentum5sBps);
+            Assert.Equal(sub.DxyMomentum1mBps, subPointInTime.DxyMomentum1mBps);
         }
 
         [Fact]

@@ -580,8 +580,10 @@ public class ConfluenceMatrixEngine(
             var na = noiseAudit.Value;
             if (!na.IsTradeableImpulse)
             {
-                // Затухание волатильности или шумовой флэт: не блокируем сигнал, но честно калибруем вероятность
-                if (na.LocalAtrBps < na.NoiseFloorBps && finalProbPct > 52)
+                // Для устаревших моделей калибруем шумовой флэт до 52%.
+                // neural_quant_* уже обучены на zero_rng_rate10/tie_rate/atr5 и имеют встроенный tie_hgb-демпфер
+                // (живая статистика показала 64.9% WR на таких сигналах, урезанных C# до 52%).
+                if (!isQuantSubminute && na.LocalAtrBps < na.NoiseFloorBps && finalProbPct > 52)
                 {
                     finalProbPct = 52;
                     probCeiling = Math.Min(probCeiling, 52);

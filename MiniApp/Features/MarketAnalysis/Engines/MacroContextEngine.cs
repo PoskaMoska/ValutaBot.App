@@ -147,7 +147,7 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
             }
         }
 
-        public static DollarBasketMetrics ComputeDollarBasketMetrics()
+        public static DollarBasketMetrics ComputeDollarBasketMetrics(DateTime? asOfUtc = null)
         {
             var snapshots = new Dictionary<string, (DateTime time, double price)[]>(StringComparer.OrdinalIgnoreCase);
             string[] trackedPairs = { "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD", "USDCHF" };
@@ -159,7 +159,11 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
                         snapshots[pair] = queue.ToArray();
                 }
             }
-            return ComputeMetricsFromSnapshots(DateTime.UtcNow, snapshots);
+            DateTime refNow = asOfUtc ?? (
+                ValutaBot.MiniApp.PriceFeed.UsePocketOption && ValutaBot.MiniApp.PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue
+                    ? ValutaBot.MiniApp.PocketOptionWebSocketStream.GetBrokerTimeUtc()
+                    : DateTime.UtcNow);
+            return ComputeMetricsFromSnapshots(refNow, snapshots);
         }
 
         internal static DollarBasketMetrics ComputeMetricsFromSnapshots(
@@ -181,13 +185,20 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
             // Major Dollar pairs: EURUSD, GBPUSD, AUDUSD (inverse USD), USDJPY, USDCAD, USDCHF (direct USD)
             string[] trackedPairs = { "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD", "USDCHF" };
 
-            static void AccumulateWindow((DateTime time, double price)[] arr, double currentPrice, DateTime cutoff, bool isUsdBase, List<double> target)
+            static void AccumulateWindow((DateTime time, double price)[] arr, int endIdx, double currentPrice, DateTime cutoff, bool isUsdBase, List<double> target)
             {
-                var item = arr.FirstOrDefault(x => x.time >= cutoff);
-                if (item.price > 0 && currentPrice > 0)
+                for (int i = 0; i <= endIdx; i++)
                 {
-                    double ret = (currentPrice - item.price) / item.price;
-                    target.Add(isUsdBase ? ret : -ret);
+                    if (arr[i].time >= cutoff)
+                    {
+                        var item = arr[i];
+                        if (item.price > 0 && currentPrice > 0)
+                        {
+                            double ret = (currentPrice - item.price) / item.price;
+                            target.Add(isUsdBase ? ret : -ret);
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -209,14 +220,21 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
             {
                 if (!snapshots.TryGetValue(pair, out var arr) || arr.Length < 2) continue;
 
-                double currentPrice = arr[^1].price;
+                int endIdx = arr.Length - 1;
+                while (endIdx >= 0 && arr[endIdx].time > now)
+                {
+                    endIdx--;
+                }
+                if (endIdx < 1) continue;
+
+                double currentPrice = arr[endIdx].price;
                 bool isUsdBase = IsUsdBase(pair);
 
-                AccumulateWindow(arr, currentPrice, cutoff5s, isUsdBase, usdReturns5s);
-                AccumulateWindow(arr, currentPrice, cutoff15s, isUsdBase, usdReturns15s);
-                AccumulateWindow(arr, currentPrice, cutoff30s, isUsdBase, usdReturns30s);
-                AccumulateWindow(arr, currentPrice, cutoff1m, isUsdBase, usdReturns1m);
-                AccumulateWindow(arr, currentPrice, cutoff5m, isUsdBase, usdReturns5m);
+                AccumulateWindow(arr, endIdx, currentPrice, cutoff5s, isUsdBase, usdReturns5s);
+                AccumulateWindow(arr, endIdx, currentPrice, cutoff15s, isUsdBase, usdReturns15s);
+                AccumulateWindow(arr, endIdx, currentPrice, cutoff30s, isUsdBase, usdReturns30s);
+                AccumulateWindow(arr, endIdx, currentPrice, cutoff1m, isUsdBase, usdReturns1m);
+                AccumulateWindow(arr, endIdx, currentPrice, cutoff5m, isUsdBase, usdReturns5m);
             }
 
             if (usdReturns1m.Count == 0 && usdReturns5s.Count == 0)

@@ -1,6 +1,6 @@
 {
   "model_version": "neural_quant_v8",
-  "trained_at_utc": "2026-11-20T18:57:01.035403+00:00",
+  "trained_at_utc": "2026-11-20T20:25:29.874071+00:00",
   "core_features": [
     "r0",
     "body_signed",
@@ -535,9 +535,9 @@
     },
     "s15": {
       "gate_pass": true,
-      "w_hgb": 0.65,
-      "n_train": 323464,
-      "n_total_bars": 119885,
+      "w_hgb": 0.85,
+      "n_train": 330537,
+      "n_total_bars": 122411,
       "n_hgb_features": 85,
       "hgb_feature_indices": [
         0,
@@ -703,16 +703,16 @@
         83,
         84
       ],
-      "oof_auc": 0.5572,
-      "oof_accuracy": 0.5429,
-      "oof_buy_pct": 49.72,
-      "oof_top20_wr_nt": 58.88,
-      "oof_top10_wr_nt": 60.23,
-      "max_cal": 0.5988,
+      "oof_auc": 0.5556,
+      "oof_accuracy": 0.5405,
+      "oof_buy_pct": 50.01,
+      "oof_top20_wr_nt": 58.68,
+      "oof_top10_wr_nt": 60.98,
+      "max_cal": 0.6137,
       "otc_rollover_n": 16741,
-      "otc_rollover_auc": 0.4954,
-      "otc_rollover_top20_wr_nt": 49.75,
-      "otc_max_cal": 0.503,
+      "otc_rollover_auc": 0.4947,
+      "otc_rollover_top20_wr_nt": 48.43,
+      "otc_max_cal": 0.5037,
       "tie_dampen_threshold": 0.4,
       "parity_max_diff": 0.0
     },

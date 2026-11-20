@@ -468,7 +468,23 @@ public class MarketAnalysisOrchestrator(
 
         int? minutesToNews = -1;
         var dayAnchors = await MacroContextEngine.GetDayLevelAnchorsAsync(prep.CleanAsset, prep.CurrentLivePrice);
-        var dxyMetrics = MacroContextEngine.ComputeDollarBasketMetrics();
+        DateTime? dxyAsOfUtc = null;
+        if (prep.ClosedCandles.Length > 0 && prep.IntervalSecs > 0 && prep.IntervalSecs <= 60)
+        {
+            DateTime closedCloseUtc = prep.ClosedCandles[^1].Timestamp.AddSeconds(prep.IntervalSecs);
+            DateTime liveRefUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+                ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+                : DateTime.UtcNow;
+            if (closedCloseUtc <= liveRefUtc.AddSeconds(1) && (liveRefUtc - closedCloseUtc).TotalSeconds <= 180.0)
+            {
+                dxyAsOfUtc = closedCloseUtc;
+            }
+        }
+        var dxyMetrics = MacroContextEngine.ComputeDollarBasketMetrics(dxyAsOfUtc);
+        if (dxyAsOfUtc.HasValue && dxyMetrics.DxyMomentum1mBps == 0.0 && dxyMetrics.DxyMomentum5sBps == 0.0 && dxyMetrics.BasketSyncScore == 0.5)
+        {
+            dxyMetrics = MacroContextEngine.ComputeDollarBasketMetrics();
+        }
         double liveSpreadBps = 0.0;
 
         double lastClosedClose = prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close > 0
