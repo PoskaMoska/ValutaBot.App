@@ -489,24 +489,6 @@ public class ConfluenceMatrixEngine(
                 : 0.50;
             finalProbPct = (int)Math.Clamp(Math.Round(neuralConf * 100.0), 50, 92);
 
-            // S30 / M1 TA + MTF Synergy Boost: empirically TA(|score|>=0.35) achieves 55.91% WR on m1.
-            // When TA and/or MTF align with the ML verdict on s30/m1, unlock the glass ceiling.
-            bool isS30OrM1 = timeframe.Equals("s30", StringComparison.OrdinalIgnoreCase)
-                          || timeframe.Equals("m1", StringComparison.OrdinalIgnoreCase)
-                          || timeframe.Equals("1m", StringComparison.OrdinalIgnoreCase);
-            if (isS30OrM1)
-            {
-                bool taAgrees = (finalDir == "BUY" && taScore >= 0.20) || (finalDir == "PUT" && taScore <= -0.20);
-                bool taStrong = (finalDir == "BUY" && taScore >= 0.35) || (finalDir == "PUT" && taScore <= -0.35);
-                bool mtfAgrees = mtfResult?.DominantDirection == finalDir;
-                bool stateAgrees = (finalDir == "BUY" && ofScore >= 0.15) || (finalDir == "PUT" && ofScore <= -0.15);
-                int boost = (taStrong ? 3 : (taAgrees ? 2 : 0)) + (mtfAgrees ? 2 : 0) + (stateAgrees ? 1 : 0);
-                if (boost > 0)
-                {
-                    finalProbPct = Math.Min(65, finalProbPct + boost);
-                }
-            }
-
             // S5 Micro-Timeframe Noise Calibration
             if (isS5)
             {

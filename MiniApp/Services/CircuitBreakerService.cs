@@ -287,7 +287,7 @@ namespace ValutaBot.MiniApp.Services
                 bool shouldQuarantine = false;
                 string qReason = string.Empty;
 
-                if (consecutiveLosses >= 8)
+                if (consecutiveLosses >= 5)
                 {
                     shouldQuarantine = true;
                     qReason = $"{consecutiveLosses} consecutive losses on {key}";
@@ -296,29 +296,29 @@ namespace ValutaBot.MiniApp.Services
                 {
                     int wins = recentAssetOutcomes.Count(w => w);
                     double winRate = (double)wins / recentAssetOutcomes.Count;
-                    if (winRate < 0.30)
+                    if (winRate < 0.38)
                     {
                         shouldQuarantine = true;
-                        qReason = $"Symbol WinRate {winRate:P0} ({wins}/{recentAssetOutcomes.Count}) < 30%";
+                        qReason = $"Symbol WinRate {winRate:P0} ({wins}/{recentAssetOutcomes.Count}) < 38%";
                     }
                 }
 
                 if (shouldQuarantine)
                 {
-                    var until = DateTime.UtcNow.AddMinutes(5);
+                    var until = DateTime.UtcNow.AddMinutes(15);
                     _symbolQuarantine[key] = (until, qReason);
                     _shadowRecoveryStreak[key] = 0;
 
-                    // If 8+ consecutive losses, quarantine only for 5m (or 2 shadow wins)
-                    if (consecutiveLosses >= 8)
+                    // Escalate sustained pair-wide losing streaks to pair-level quarantine
+                    if (consecutiveLosses >= 7)
                     {
                         _symbolQuarantine[cleanAsset] = (until, qReason);
                         _shadowRecoveryStreak[cleanAsset] = 0;
-                        BotLogger.Warn($"[CircuitBreaker] PAIR-LEVEL QUARANTINE activated for {cleanAsset} across all timeframes (5m). Reason: {qReason}");
+                        BotLogger.Warn($"[CircuitBreaker] PAIR-LEVEL QUARANTINE activated for {cleanAsset} across all timeframes (15m). Reason: {qReason}");
                     }
                     else
                     {
-                        BotLogger.Warn($"[CircuitBreaker] PER-SYMBOL QUARANTINE activated for {key} (5m or 2 shadow wins). Reason: {qReason}");
+                        BotLogger.Warn($"[CircuitBreaker] PER-SYMBOL QUARANTINE activated for {key} (15m or 2 shadow wins). Reason: {qReason}");
                     }
                 }
             }

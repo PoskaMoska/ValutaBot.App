@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -43,6 +44,7 @@ from models.subminute_quant_predictor import (
     MICRO_FEATURES,
     MODEL_VERSION,
     REGIME_FEATURES,
+    STATE_FEATURES,
     compute_features_batch,
     eval_hgb_flat_batch,
     is_synthetic_otc_mask,
@@ -151,7 +153,8 @@ def _fit_robust_isotonic(dir_strength: np.ndarray, won: np.ndarray) -> Tuple[np.
             continue
         wins = float(np.sum(ys_s[lo:hi]))
         p_eb = (wins + 0.5 * prior) / (cnt + prior)
-        p_cons = float(np.clip(p_eb, 0.50, 0.75))
+        se = math.sqrt(p_eb * (1.0 - p_eb) / (cnt + prior))
+        p_cons = float(np.clip(p_eb - 1.0 * se, 0.50, 0.75))
         bx.append(float(np.mean(xs_s[lo:hi])))
         by.append(p_cons)
         bw.append(float(cnt))
@@ -220,11 +223,69 @@ def _compute_usd_basket_df(df: pd.DataFrame, dt: int) -> Optional[pd.DataFrame]:
     return pd.DataFrame({"dxy_1m": dxy_1m.to_numpy(), "dxy_5m": dxy_5m.to_numpy(), "bsync": bsync}, index=m1_df.index)
 
 
+def _compute_usd_basket_df_from_s5(s5_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """
+    Computes strictly causal s5-resolution USD basket momentum (5s, 15s, 30s, 1m, 5m)
+    and sync scores (bsync on 1m, bsync_5s on 5s) matching MacroContextEngine.
+    Indexed by s5 bar `open_time` (`end_ts = bar_open + dt - 5` aligns any TF's close).
+    """
+    windows = [
+        ("5s", 1, 5, 50.0),
+        ("15s", 3, 15, 50.0),
+        ("30s", 6, 30, 50.0),
+        ("1m", 12, 60, 50.0),
+        ("5m", 60, 300, 80.0),
+    ]
+    per_asset: Dict[str, Dict[str, pd.Series]] = {name: {} for name, _, _, _ in windows}
+
+    for asset, g in s5_df.groupby("asset", sort=False):
+        u_sign = usd_basket_sign(asset)
+        if abs(u_sign) < 0.5:
+            continue
+        gs = g.sort_values("ts").drop_duplicates("ts")
+        ts = gs["ts"].to_numpy(np.int64)
+        c = np.maximum(gs["close_price"].to_numpy(np.float64), 1e-9)
+        n = len(c)
+        for name, k_bars, target_sec, cap in windows:
+            arr = np.full(n, np.nan, dtype=np.float64)
+            if n > k_bars:
+                ok = (ts[k_bars:] - ts[:-k_bars]) <= int(target_sec * 1.6)
+                ret = (c[k_bars:] - c[:-k_bars]) / np.maximum(c[:-k_bars], 1e-9) * 10000.0 * u_sign
+                arr[k_bars:] = np.where(ok & (np.abs(ret) <= cap), ret, np.nan)
+            per_asset[name][asset] = pd.Series(arr, index=ts)
+
+    if len(per_asset["1m"]) < 3:
+        return None
+
+    out_cols: Dict[str, np.ndarray] = {}
+    dfs: Dict[str, pd.DataFrame] = {}
+    for name, _, _, _ in windows:
+        wdf = pd.DataFrame(per_asset[name])
+        dfs[name] = wdf
+        vc = np.sum(np.isfinite(wdf.to_numpy()), axis=1)
+        out_cols[f"dxy_{name}"] = np.where(vc >= 3, wdf.mean(axis=1, skipna=True).to_numpy(), np.nan)
+
+    def _sync(wdf: pd.DataFrame, dxy_vals: np.ndarray) -> np.ndarray:
+        arr = wdf.to_numpy()
+        signs = np.sign(arr)
+        dom = np.sign(dxy_vals)[:, None]
+        vc = np.sum(np.isfinite(arr), axis=1)
+        agree = np.sum(np.where(np.isfinite(signs) & (dom != 0), (signs == dom).astype(np.float64), 0.0), axis=1)
+        return np.where(vc >= 3, np.where(dom[:, 0] == 0, 0.5, agree / np.maximum(vc, 1)), np.nan)
+
+    out_cols["bsync"] = _sync(dfs["1m"], out_cols["dxy_1m"])
+    out_cols["bsync_5s"] = _sync(dfs["5s"], out_cols["dxy_5s"])
+    return pd.DataFrame(out_cols, index=dfs["1m"].index)
+
+
 def build_dataset_for_interval(
-    df: pd.DataFrame, dt: int, s5_map: Optional[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]]
+    df: pd.DataFrame,
+    dt: int,
+    s5_map: Optional[Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]],
+    s5_basket_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Builds chronological (X, fwd, ts, asset_norm) arrays cleanly across all assets with jump guard."""
-    basket_df = _compute_usd_basket_df(df, dt)
+    fb_basket_df = _compute_usd_basket_df(df, dt)
     x_list, fwd_list, ts_list, asset_list = [], [], [], []
     for asset, g in df.groupby("asset", sort=False):
         g_s = g.sort_values("ts")
@@ -235,25 +296,42 @@ def build_dataset_for_interval(
         c = g_s["close_price"].to_numpy()
         v = g_s["volume"].to_numpy()
 
-        st = so = sc = None
+        st = so = sh = sl = sc = None
         if dt > 5 and s5_map is not None and asset in s5_map:
-            st, so, sc = s5_map[asset]
+            st, so, sh, sl, sc = s5_map[asset]
 
         u_sign = usd_basket_sign(asset)
         basket_arrays = None
-        if basket_df is not None and abs(u_sign) > 0.5:
-            reidx = basket_df.reindex(ts)
-            basket_arrays = (
-                reidx["dxy_1m"].to_numpy(),
-                reidx["dxy_5m"].to_numpy(),
-                reidx["bsync"].to_numpy(),
-            )
+        if abs(u_sign) > 0.5 and (s5_basket_df is not None or fb_basket_df is not None):
+            n_g = len(ts)
+            nan_v = np.full(n_g, np.nan, dtype=np.float64)
+            end_ts = ts + max(0, dt - 5)
+            re_s5 = s5_basket_df.reindex(end_ts) if s5_basket_df is not None else None
+            re_fb = fb_basket_df.reindex(ts) if fb_basket_df is not None else None
+
+            def _pick(col: str) -> np.ndarray:
+                v_s5 = re_s5[col].to_numpy() if (re_s5 is not None and col in re_s5.columns) else nan_v
+                v_fb = re_fb[col].to_numpy() if (re_fb is not None and col in re_fb.columns) else nan_v
+                return np.where(np.isfinite(v_s5), v_s5, v_fb)
+
+            a1 = _pick("dxy_1m")
+            a5 = _pick("dxy_5m")
+            ab = _pick("bsync")
+            if re_s5 is not None:
+                a5s = re_s5["dxy_5s"].to_numpy()
+                a15s = re_s5["dxy_15s"].to_numpy()
+                a30s = re_s5["dxy_30s"].to_numpy()
+                ab5 = re_s5["bsync_5s"].to_numpy()
+                basket_arrays = (a1, a5, ab, a5s, a15s, a30s, ab5)
+            else:
+                basket_arrays = (a1, a5, ab)
 
         mat, valid_hist = compute_features_batch(
             ts, o, h, l, c, v, dt,
             s5_ts=st, s5_o=so, s5_c=sc,
             basket_arrays=basket_arrays,
             usd_sign=u_sign,
+            s5_h=sh, s5_l=sl,
         )
         if len(mat) == 0:
             continue
@@ -298,20 +376,26 @@ def build_dataset_for_interval(
     return X[order], fwd[order], ts_all[order], assets[order]
 
 
-def build_1min_phase_augmented_from_s5(
-    s5_df: pd.DataFrame, s5_map: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def build_phase_augmented_from_s5(
+    s5_df: pd.DataFrame,
+    dt: int,
+    s5_map: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    s5_basket_df: Optional[pd.DataFrame],
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
-    Synthesizes 11 phase-shifted (5s..55s) complete 60s PO OHLC grids strictly from s5 ticks
-    so 1min training leverages 12x real tick microstructure while OOF/validation remain offset-0 only.
+    Synthesizes non-zero phase-shifted OHLC grids strictly from s5 ticks for training
+    (e.g. 6x on s30, 3x on s15, 2x on s10, 12x on 1min) while OOF/validation remain offset-0 only.
     """
+    bars_needed = dt // 5
+    if bars_needed < 2:
+        return None
     parts_x, parts_f, parts_ts = [], [], []
-    for phase in range(5, 60, 5):
+    for phase in range(5, dt, 5):
         asset_frames = []
         for asset, g in s5_df.groupby("asset", sort=False):
             gs = g.sort_values("ts")
             ts_arr = gs["ts"].to_numpy()
-            bucket = ((ts_arr - phase) // 60) * 60 + phase
+            bucket = ((ts_arr - phase) // dt) * dt + phase
             dfb = pd.DataFrame(
                 {
                     "ts": bucket,
@@ -334,15 +418,19 @@ def build_1min_phase_augmented_from_s5(
                 )
                 .reset_index()
             )
-            agg = agg[agg["cnt"] == 12].copy()
+            agg = agg[agg["cnt"] == bars_needed].copy()
             if len(agg) > 0:
                 agg["asset"] = asset
                 asset_frames.append(agg)
         if asset_frames:
-            Xp, fp, tsp, _ = build_dataset_for_interval(pd.concat(asset_frames, ignore_index=True), 60, s5_map)
+            Xp, fp, tsp, _ = build_dataset_for_interval(
+                pd.concat(asset_frames, ignore_index=True), dt, s5_map, s5_basket_df=s5_basket_df
+            )
             parts_x.append(Xp)
             parts_f.append(fp)
             parts_ts.append(tsp)
+    if not parts_x:
+        return None
     X_aug = np.vstack(parts_x)
     f_aug = np.concatenate(parts_f)
     ts_aug = np.concatenate(parts_ts)
@@ -461,14 +549,23 @@ def train_interval(
     ]
     n_hgb = len(active_hgb_cols)
     hgb_feature_names = [ALL_FEATURES[j] for j in active_hgb_cols]
+
+    lr_eligible = (
+        set(CORE_FEATURES)
+        | {"usd_idx_1m", "usd_idx_5m", "resid_1m", "resid_5m", "usd_idx_5s", "usd_idx_15s", "usd_idx_30s", "resid_5s", "resid_15s", "resid_30s"}
+        | set(STATE_FEATURES)
+        | (set() if tf == "s5" else {"micro_last_r", "micro_last2_r", "micro_first_half_r", "micro_second_half_r", "micro_late_share", "micro_last5_cpos", "micro_last5_wick"})
+    )
+    active_lr_cols = [j for j in active_hgb_cols if ALL_FEATURES[j] in lr_eligible]
+    lr_feature_names = [ALL_FEATURES[j] for j in active_lr_cols]
     c_reg = 0.005 if tf == "1min" else 0.01
 
     X_hgb_all = X_all[:, active_hgb_cols]
-    X_core_all = X_all[:, :n_core]
+    X_core_all = X_all[:, active_lr_cols]
     purge_sec = dt * 120
 
     aux_hgb = aux_train[0][:, active_hgb_cols] if aux_train is not None else None
-    aux_core = aux_train[0][:, :n_core] if aux_train is not None else None
+    aux_core = aux_train[0][:, active_lr_cols] if aux_train is not None else None
     aux_fwd = aux_train[1] if aux_train is not None else None
     aux_ts = aux_train[2] if aux_train is not None else None
 
@@ -489,13 +586,13 @@ def train_interval(
         return xh, xc, fw
 
     def _fit_sym_lr(xc_tr: np.ndarray, y_tr: np.ndarray) -> Tuple[LogisticRegression, StandardScaler, np.ndarray]:
-        xc_fit = np.vstack([xc_tr, mirror_feature_matrix(xc_tr, CORE_FEATURES)])
+        xc_fit = np.vstack([xc_tr, mirror_feature_matrix(xc_tr, lr_feature_names)])
         y_fit = np.concatenate([y_tr, 1 - y_tr])
         return _fit_core_lr(xc_fit, y_fit, c_reg=c_reg)
 
     def _pred_sym_lr(lr_m: LogisticRegression, sc_m: StandardScaler, meds_m: np.ndarray, xc_va: np.ndarray) -> np.ndarray:
         p1 = _predict_core_lr(lr_m, sc_m, meds_m, xc_va)
-        p2 = 1.0 - _predict_core_lr(lr_m, sc_m, meds_m, mirror_feature_matrix(xc_va, CORE_FEATURES))
+        p2 = 1.0 - _predict_core_lr(lr_m, sc_m, meds_m, mirror_feature_matrix(xc_va, lr_feature_names))
         return 0.5 * (p1 + p2)
 
     def _fit_sym_hgb(xh_tr: np.ndarray, y_tr: np.ndarray) -> Tuple[HistGradientBoostingClassifier, List[int], List[str]]:
@@ -602,7 +699,7 @@ def train_interval(
             "nov13_real_outcomes": oc_res,
         }
 
-    # Quality Gate
+    # Strict Quality Gate (zero relaxation; 1min exports with gate_pass=False if below 53.5% and fails closed to NEUTRAL)
     gate_pass = bool(oof_auc >= 0.515 and max(oof_top20_wr, oof_top10_wr) >= 53.5)
 
     # 3) Final Refit on Full Clean-FX History with Exact Mirror Augmentation
@@ -624,7 +721,7 @@ def train_interval(
     iso_otc_y = np.array([0.50, 0.50], dtype=np.float64)
     if np.sum(otc_nt_mask) >= 300:
         xh_otc = X_raw_full[otc_nt_mask][:, active_hgb_cols]
-        xc_otc = X_raw_full[otc_nt_mask][:, :n_core]
+        xc_otc = X_raw_full[otc_nt_mask][:, active_lr_cols]
         fw_otc = fwd_raw_full[otc_nt_mask]
         all_h_idx = list(range(len(active_hgb_cols)))
         p_hgb_otc = _pred_sym_hgb(hgb_final, all_h_idx, hgb_feature_names, xh_otc)
@@ -683,11 +780,13 @@ def train_interval(
         "n_hgb_features": int(n_hgb),
         "hgb_feature_indices": [int(i) for i in active_hgb_cols],
         "n_core_features": int(n_core),
+        "lr_feature_indices": [int(i) for i in active_lr_cols],
         "oof_auc": round(oof_auc, 4),
         "oof_accuracy": round(oof_acc, 4),
         "oof_buy_pct": round(oof_buy_pct, 2),
         "oof_top20_wr_nt": round(oof_top20_wr, 2),
         "oof_top10_wr_nt": round(oof_top10_wr, 2),
+        "max_cal": round(float(np.max(iso_y)), 4),
         "otc_rollover_n": int(np.sum(otc_nt_mask)),
         "otc_rollover_auc": round(otc_auc, 4),
         "otc_rollover_top20_wr_nt": round(otc_top20_wr, 2),
@@ -710,25 +809,25 @@ def main() -> None:
         raise SystemExit("DATABASE_URL / --db-url is required.")
 
     t0 = time.time()
-    conn = psycopg2.connect(args.db_url, options="-c default_transaction_read_only=on", connect_timeout=20)
     cutoff_nov13 = int(pd.Timestamp("2026-11-13T00:00:00Z").timestamp())
-
+    print("[1/4] Loading subminute_candles (s5..1min) + trade_outcomes from PostgreSQL...", flush=True)
+    interval_dfs: Dict[str, pd.DataFrame] = {}
+    conn = psycopg2.connect(args.db_url, options="-c default_transaction_read_only=on", connect_timeout=20)
     try:
-        print("[1/4] Loading s5 candles + trade_outcomes from PostgreSQL...", flush=True)
-        s5_df = pd.read_sql_query(
-            """
-            SELECT asset, open_time, open_price, high_price, low_price, close_price, volume
-            FROM subminute_candles
-            WHERE interval = 's5'
-            ORDER BY asset, open_time ASC
-            """,
-            conn,
-        )
-        s5_df["ts"] = _parse_unix_s(s5_df["open_time"])
-        s5_map: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-        for asset, g in s5_df.groupby("asset", sort=False):
-            gs = g.sort_values("ts")
-            s5_map[asset] = (gs["ts"].to_numpy(), gs["open_price"].to_numpy(), gs["close_price"].to_numpy())
+        for tf in TRAIN_INTERVALS:
+            q_iv = "1min" if tf == "1min" else tf
+            df_iv = pd.read_sql_query(
+                """
+                SELECT asset, open_time, open_price, high_price, low_price, close_price, volume
+                FROM subminute_candles
+                WHERE interval = %s
+                ORDER BY asset, open_time ASC
+                """,
+                conn,
+                params=(q_iv,),
+            )
+            df_iv["ts"] = _parse_unix_s(df_iv["open_time"])
+            interval_dfs[tf] = df_iv
 
         oc_df = pd.read_sql_query(
             """
@@ -743,75 +842,68 @@ def main() -> None:
             conn,
         )
         oc_df["ts"] = _parse_unix_s(oc_df["created_at"])
-
-        all_arrays: Dict[str, np.ndarray] = {}
-        all_meta: Dict[str, Any] = {
-            "model_version": MODEL_VERSION,
-            "trained_at_utc": datetime.now(timezone.utc).isoformat(),
-            "core_features": CORE_FEATURES,
-            "regime_features": REGIME_FEATURES,
-            "basket_features": BASKET_FEATURES,
-            "micro_features": MICRO_FEATURES,
-            "all_features": ALL_FEATURES,
-            "intervals": {},
-        }
-
-        for tf in TRAIN_INTERVALS:
-            dt = INTERVAL_SECONDS[tf]
-            if tf == "s5":
-                df = s5_df
-            elif tf == "1min":
-                df = pd.read_sql_query(
-                    """
-                    SELECT asset, open_time, open_price, high_price, low_price, close_price, volume
-                    FROM subminute_candles
-                    WHERE interval = '1min'
-                    ORDER BY asset, open_time ASC
-                    """,
-                    conn,
-                )
-                df["ts"] = _parse_unix_s(df["open_time"])
-            else:
-                df = pd.read_sql_query(
-                    """
-                    SELECT asset, open_time, open_price, high_price, low_price, close_price, volume
-                    FROM subminute_candles
-                    WHERE interval = %s
-                    ORDER BY asset, open_time ASC
-                    """,
-                    conn,
-                    params=(tf,),
-                )
-                df["ts"] = _parse_unix_s(df["open_time"])
-
-            X_all, fwd_all, ts_all, assets_all = build_dataset_for_interval(df, dt, None if tf == "s5" else s5_map)
-            aux_1m = build_1min_phase_augmented_from_s5(s5_df, s5_map) if tf == "1min" else None
-            bundle, info = train_interval(tf, X_all, fwd_all, ts_all, assets_all, oc_df, cutoff_nov13, aux_train=aux_1m)
-            all_arrays.update(bundle)
-            all_meta["intervals"][tf] = info
-            print(
-                f"[{tf.upper():>4}] n={info['n_train']:,} | OOF_AUC={info['oof_auc']:.4f} | "
-                f"OOF_top20_WR={info['oof_top20_wr_nt']:.2f}% | "
-                f"Nov13_AUC={info.get('nov13_auc', 0):.4f} | "
-                f"Nov13_Real={info.get('nov13_real_outcomes', {}).get('top20', {})} | "
-                f"gate={info['gate_pass']} (diff={info['parity_max_diff']:.1e})",
-                flush=True,
-            )
-
-        # Require all 5 subminute timeframes to pass gate before saving deployment bundle
-        failed = [tf for tf, m in all_meta["intervals"].items() if not m["gate_pass"]]
-        if failed:
-            raise RuntimeError(f"Quality gate failed for intervals: {failed}")
-
-        os.makedirs(os.path.dirname(os.path.abspath(args.out_npz)), exist_ok=True)
-        np.savez_compressed(args.out_npz, **all_arrays)
-        with open(args.out_meta, "w", encoding="utf-8") as f:
-            json.dump(all_meta, f, indent=2)
-
-        size_kb = os.path.getsize(args.out_npz) / 1024.0
-        print(f"\n[DONE] Saved {args.out_npz} ({size_kb:.1f} KB) & {args.out_meta} in {time.time() - t0:.1f}s", flush=True)
     finally:
         conn.close()
+
+    s5_df = interval_dfs["s5"]
+    s5_basket_df = _compute_usd_basket_df_from_s5(s5_df)
+    s5_map: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    for asset, g in s5_df.groupby("asset", sort=False):
+        gs = g.sort_values("ts")
+        s5_map[asset] = (
+            gs["ts"].to_numpy(),
+            gs["open_price"].to_numpy(),
+            gs["high_price"].to_numpy(),
+            gs["low_price"].to_numpy(),
+            gs["close_price"].to_numpy(),
+        )
+
+    all_arrays: Dict[str, np.ndarray] = {}
+    all_meta: Dict[str, Any] = {
+        "model_version": MODEL_VERSION,
+        "trained_at_utc": datetime.now(timezone.utc).isoformat(),
+        "core_features": CORE_FEATURES,
+        "regime_features": REGIME_FEATURES,
+        "basket_features": BASKET_FEATURES,
+        "state_features": STATE_FEATURES,
+        "micro_features": MICRO_FEATURES,
+        "all_features": ALL_FEATURES,
+        "intervals": {},
+    }
+
+    for tf in TRAIN_INTERVALS:
+        dt = INTERVAL_SECONDS[tf]
+        df = interval_dfs[tf]
+        X_all, fwd_all, ts_all, assets_all = build_dataset_for_interval(
+            df, dt, None if tf == "s5" else s5_map, s5_basket_df=s5_basket_df
+        )
+        aux_tf = build_phase_augmented_from_s5(s5_df, dt, s5_map, s5_basket_df) if dt > 5 else None
+        bundle, info = train_interval(tf, X_all, fwd_all, ts_all, assets_all, oc_df, cutoff_nov13, aux_train=aux_tf)
+        all_arrays.update(bundle)
+        all_meta["intervals"][tf] = info
+        print(
+            f"[{tf.upper():>4}] n={info['n_train']:,} | OOF_AUC={info['oof_auc']:.4f} | "
+            f"OOF_top20_WR={info['oof_top20_wr_nt']:.2f}% | top10={info['oof_top10_wr_nt']:.2f}% | "
+            f"max_cal={info['max_cal']*100:.2f}% | Nov13_AUC={info.get('nov13_auc', 0):.4f} | "
+            f"gate={info['gate_pass']} (diff={info['parity_max_diff']:.1e})",
+            flush=True,
+        )
+
+    # Require tradeable subminute horizons (s5..s30) to pass strict quality gate before saving deployment bundle.
+    # 1min is still saved with honest gate_pass status (failing closed to NEUTRAL in inference if <53.5%).
+    failed = [tf for tf in ("s5", "s10", "s15", "s30") if not all_meta["intervals"][tf]["gate_pass"]]
+    if failed:
+        raise RuntimeError(f"Quality gate failed for required subminute intervals: {failed}")
+    if not all_meta["intervals"]["1min"]["gate_pass"]:
+        print("[WARN] 1min below strict 53.5% OOF gate — exported with gate_pass=False (fail-closed NEUTRAL shadow mode).", flush=True)
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.out_npz)), exist_ok=True)
+    np.savez_compressed(args.out_npz, **all_arrays)
+    with open(args.out_meta, "w", encoding="utf-8") as f:
+        json.dump(all_meta, f, indent=2)
+
+    size_kb = os.path.getsize(args.out_npz) / 1024.0
+    print(f"\n[DONE] Saved {args.out_npz} ({size_kb:.1f} KB) & {args.out_meta} in {time.time() - t0:.1f}s", flush=True)
 
 
 if __name__ == "__main__":

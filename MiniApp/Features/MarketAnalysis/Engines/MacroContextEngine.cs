@@ -23,7 +23,11 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
     public record DollarBasketMetrics(
         double DxyMomentum1mBps,
         double DxyMomentum5mBps,
-        double BasketSyncScore
+        double BasketSyncScore,
+        double DxyMomentum5sBps = 0.0,
+        double DxyMomentum15sBps = 0.0,
+        double DxyMomentum30sBps = 0.0,
+        double BasketSync5sScore = 0.5
     );
 
     /// <summary>
@@ -145,63 +149,88 @@ namespace ValutaBot.MiniApp.Features.MarketAnalysis.Engines
 
         public static DollarBasketMetrics ComputeDollarBasketMetrics()
         {
-            var now = DateTime.UtcNow;
+            var snapshots = new Dictionary<string, (DateTime time, double price)[]>(StringComparer.OrdinalIgnoreCase);
+            string[] trackedPairs = { "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD", "USDCHF" };
+            lock (_basketLock)
+            {
+                foreach (var pair in trackedPairs)
+                {
+                    if (_priceHistory.TryGetValue(pair, out var queue) && queue.Count >= 2)
+                        snapshots[pair] = queue.ToArray();
+                }
+            }
+            return ComputeMetricsFromSnapshots(DateTime.UtcNow, snapshots);
+        }
+
+        internal static DollarBasketMetrics ComputeMetricsFromSnapshots(
+            DateTime now,
+            IReadOnlyDictionary<string, (DateTime time, double price)[]> snapshots)
+        {
+            var cutoff5s = now.AddSeconds(-5);
+            var cutoff15s = now.AddSeconds(-15);
+            var cutoff30s = now.AddSeconds(-30);
             var cutoff1m = now.AddSeconds(-60);
             var cutoff5m = now.AddSeconds(-300);
 
+            var usdReturns5s = new List<double>();
+            var usdReturns15s = new List<double>();
+            var usdReturns30s = new List<double>();
             var usdReturns1m = new List<double>();
             var usdReturns5m = new List<double>();
 
             // Major Dollar pairs: EURUSD, GBPUSD, AUDUSD (inverse USD), USDJPY, USDCAD, USDCHF (direct USD)
             string[] trackedPairs = { "EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD", "USDCHF" };
 
-            lock (_basketLock)
+            static void AccumulateWindow((DateTime time, double price)[] arr, double currentPrice, DateTime cutoff, bool isUsdBase, List<double> target)
             {
-                foreach (var pair in trackedPairs)
+                var item = arr.FirstOrDefault(x => x.time >= cutoff);
+                if (item.price > 0 && currentPrice > 0)
                 {
-                    if (!_priceHistory.TryGetValue(pair, out var queue) || queue.Count < 2) continue;
-
-                    var arr = queue.ToArray();
-                    double currentPrice = arr[^1].price;
-
-                    // 1m return
-                    var item1m = arr.FirstOrDefault(x => x.time >= cutoff1m);
-                    if (item1m.price > 0 && currentPrice > 0)
-                    {
-                        double ret = (currentPrice - item1m.price) / item1m.price;
-                        double usdRet = IsUsdBase(pair) ? ret : -ret;
-                        usdReturns1m.Add(usdRet);
-                    }
-
-                    // 5m return
-                    var item5m = arr.FirstOrDefault(x => x.time >= cutoff5m);
-                    if (item5m.price > 0 && currentPrice > 0)
-                    {
-                        double ret = (currentPrice - item5m.price) / item5m.price;
-                        double usdRet = IsUsdBase(pair) ? ret : -ret;
-                        usdReturns5m.Add(usdRet);
-                    }
+                    double ret = (currentPrice - item.price) / item.price;
+                    target.Add(isUsdBase ? ret : -ret);
                 }
             }
 
-            if (usdReturns1m.Count == 0)
+            static (double AvgBps, double Sync) SummarizeBasket(List<double> returns)
+            {
+                if (returns.Count == 0) return (0.0, 0.5);
+                double avgBps = Math.Round(returns.Average() * 10000, 2);
+                int dominantSign = Math.Sign(avgBps);
+                double sync = 0.5;
+                if (dominantSign != 0 && returns.Count > 1)
+                {
+                    int agreeing = returns.Count(r => Math.Sign(r) == dominantSign);
+                    sync = Math.Round((double)agreeing / returns.Count, 2);
+                }
+                return (avgBps, sync);
+            }
+
+            foreach (var pair in trackedPairs)
+            {
+                if (!snapshots.TryGetValue(pair, out var arr) || arr.Length < 2) continue;
+
+                double currentPrice = arr[^1].price;
+                bool isUsdBase = IsUsdBase(pair);
+
+                AccumulateWindow(arr, currentPrice, cutoff5s, isUsdBase, usdReturns5s);
+                AccumulateWindow(arr, currentPrice, cutoff15s, isUsdBase, usdReturns15s);
+                AccumulateWindow(arr, currentPrice, cutoff30s, isUsdBase, usdReturns30s);
+                AccumulateWindow(arr, currentPrice, cutoff1m, isUsdBase, usdReturns1m);
+                AccumulateWindow(arr, currentPrice, cutoff5m, isUsdBase, usdReturns5m);
+            }
+
+            if (usdReturns1m.Count == 0 && usdReturns5s.Count == 0)
             {
                 return new DollarBasketMetrics(0.0, 0.0, 0.5);
             }
 
-            double dxy1m = Math.Round(usdReturns1m.Average() * 10000, 2);
-            double dxy5m = usdReturns5m.Count > 0 ? Math.Round(usdReturns5m.Average() * 10000, 2) : 0.0;
+            var (dxy5s, sync5s) = SummarizeBasket(usdReturns5s);
+            var (dxy15s, _) = SummarizeBasket(usdReturns15s);
+            var (dxy30s, _) = SummarizeBasket(usdReturns30s);
+            var (dxy1m, syncScore) = SummarizeBasket(usdReturns1m);
+            var (dxy5m, _) = SummarizeBasket(usdReturns5m);
 
-            // Measure cross-pair synchronization: what proportion of pairs agree with the aggregate USD direction
-            int dominantSign = Math.Sign(dxy1m);
-            double syncScore = 0.5;
-            if (dominantSign != 0 && usdReturns1m.Count > 1)
-            {
-                int agreeing = usdReturns1m.Count(r => Math.Sign(r) == dominantSign);
-                syncScore = Math.Round((double)agreeing / usdReturns1m.Count, 2);
-            }
-
-            return new DollarBasketMetrics(dxy1m, dxy5m, syncScore);
+            return new DollarBasketMetrics(dxy1m, dxy5m, syncScore, dxy5s, dxy15s, dxy30s, sync5s);
         }
 
         private static bool IsUsdBase(string pair)

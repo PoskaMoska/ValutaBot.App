@@ -381,5 +381,32 @@ namespace ValutaBot.Tests.Engines
             Assert.Equal(66, quantDecision.Probability);
             Assert.Equal(65, legacyDecision.Probability);
         }
+
+        [Theory]
+        [InlineData("s30")]
+        [InlineData("m1")]
+        public async Task EvaluateMatrixAsync_S30AndM1_DoesNotInflateMlProbabilityWithHeuristicBoost(string timeframe)
+        {
+            var taSignal = new TaSignal(0.85, 70.0, 55.0, 100, 2.0, 10);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var stateSignal = new StateSignal("TREND_BULLISH", 5.0, 0.45);
+            var mtfResult = new ConfluenceMatrixResult(1.0, true, 12, "MTF", "MTF", new Dictionary<string, string>(), "BUY");
+            var noiseAudit = new ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult(
+                IsTradeableImpulse: true,
+                ZScore: 1.0,
+                LocalAtrBps: 1.20,
+                NoiseFloorBps: 0.20,
+                RegimeDescription: "Импульс подтвержден"
+            );
+
+            var decision = await _engine.EvaluateMatrixAsync(
+                "EURUSD", timeframe, true, 1.0, taSignal, smcSignal,
+                new MlSignal("BUY", 0.56, 0.56, "neural_quant_v8"),
+                stateSignal, mtfResult, noiseAudit: noiseAudit);
+
+            Assert.Equal("BUY", decision.FinalDirection);
+            Assert.Equal(56, decision.Probability);
+            Assert.Equal(0.45, decision.OfScore, precision: 4);
+        }
     }
 }

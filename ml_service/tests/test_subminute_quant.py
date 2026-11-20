@@ -16,7 +16,9 @@ from models.subminute_quant_predictor import (
     ALL_FEATURES,
     DEFAULT_META_PATH,
     DEFAULT_NPZ_PATH,
+    MICRO_FEATURES,
     MODEL_VERSION,
+    STATE_FEATURES,
     SubminuteQuantPredictor,
     compute_features_batch,
     compute_features_latest,
@@ -112,9 +114,11 @@ def test_compute_features_latest_matches_batch_row():
     v = np.array([r["volume"] for r in c_1m], dtype=np.float64)
     st = np.array([r["openTime"] for r in c_s5], dtype=np.int64)
     so = np.array([r["open"] for r in c_s5], dtype=np.float64)
+    sh = np.array([r["high"] for r in c_s5], dtype=np.float64)
+    sl = np.array([r["low"] for r in c_s5], dtype=np.float64)
     sc = np.array([r["close"] for r in c_s5], dtype=np.float64)
 
-    batch_mat, _ = compute_features_batch(ts, o, h, l, c, v, 60, s5_ts=st, s5_o=so, s5_c=sc)
+    batch_mat, _ = compute_features_batch(ts, o, h, l, c, v, 60, s5_ts=st, s5_o=so, s5_c=sc, s5_h=sh, s5_l=sl)
     latest_row = compute_features_latest(c_1m, "m1", micro_candles=c_s5)
     assert latest_row is not None
     assert len(latest_row) == len(ALL_FEATURES)
@@ -127,7 +131,9 @@ def test_bogus_micro_candles_interval_rejected_safely():
     bogus_1m = _synthetic_candles(n=90, dt=60, base_ts=c_15[0]["openTime"])
     row = compute_features_latest(c_15, "s15", micro_candles=bogus_1m)
     assert row is not None
-    assert np.all(np.isnan(row[-7:]))
+    assert np.all(np.isnan(row[-len(MICRO_FEATURES):]))
+    for sf in STATE_FEATURES:
+        assert np.isnan(row[ALL_FEATURES.index(sf)])
 
 
 def test_loaded_production_bundle_all_5_timeframes_and_latency():
@@ -138,7 +144,10 @@ def test_loaded_production_bundle_all_5_timeframes_and_latency():
     assert predictor.is_available()
 
     for iv_in, dt in [("s5", 5), ("s10", 10), ("s15", 15), ("s30", 30), ("m1", 60)]:
-        assert predictor.is_available_for(iv_in), f"{iv_in} should be loaded and pass quality gate"
+        assert predictor.is_available_for(iv_in), f"{iv_in} should be loaded in SubminuteQuantPredictor"
+        iv_meta = predictor.get_interval_meta(iv_in)
+        if dt <= 30:
+            assert iv_meta.get("gate_pass") is True, f"{iv_in} must pass quality gate"
         candles = _synthetic_candles(n=120, dt=dt, base_ts=1794500000)
         micro = _synthetic_candles(n=480, dt=5, base_ts=candles[-40]["openTime"]) if dt > 5 else None
 
@@ -153,7 +162,10 @@ def test_loaded_production_bundle_all_5_timeframes_and_latency():
         assert direction in ("BUY", "PUT", "NEUTRAL")
         assert 0.50 <= conf <= 0.80
         assert 0.20 <= raw_conf <= 0.80
-        if direction == "BUY":
+        if not iv_meta.get("gate_pass"):
+            assert direction == "NEUTRAL"
+            assert conf == 0.50
+        elif direction == "BUY":
             assert raw_conf > 0.50
         elif direction == "PUT":
             assert raw_conf < 0.50
@@ -244,14 +256,28 @@ def test_weekend_synthetic_otc_caps_probability_honestly():
 
 def test_mirror_symmetry_and_macro_basket_fuzz_safety():
     c = _synthetic_candles(n=90, dt=15, base_ts=1794500000)
+    micro_s5 = _synthetic_candles(n=96, dt=5, base_ts=c[-30]["openTime"])
     feat = compute_features_latest(
-        c, "s15", symbol="EURUSD",
-        macro_context={"DxyMomentum1mBps": 2.4, "DxyMomentum5mBps": 4.1, "BasketSyncScore": 0.83},
+        c, "s15", micro_candles=micro_s5, symbol="EURUSD",
+        macro_context={
+            "DxyMomentum5sBps": 0.9,
+            "DxyMomentum15sBps": 1.6,
+            "DxyMomentum30sBps": 2.0,
+            "DxyMomentum1mBps": 2.4,
+            "DxyMomentum5mBps": 4.1,
+            "BasketSyncScore": 0.83,
+            "BasketSync5sScore": 0.80,
+        },
     )
     assert feat is not None
+    for fn in ("usd_idx_5s", "resid_5s", "sg_vel_z", "kal_dev_z", "micro_last5_cpos", "micro_last5_wick"):
+        assert np.isfinite(feat[ALL_FEATURES.index(fn)]), f"{fn} should be finite"
     mir = mirror_feature_matrix(feat, ALL_FEATURES)
     back = mirror_feature_matrix(mir, ALL_FEATURES)
     np.testing.assert_allclose(back, feat, rtol=0.0, atol=1e-12, equal_nan=True)
+    for fn in ("usd_idx_5s", "resid_5s", "sg_vel_z", "kal_dev_z", "micro_last5_cpos", "micro_last5_wick"):
+        idx_fn = ALL_FEATURES.index(fn)
+        assert mir[idx_fn] == pytest.approx(-feat[idx_fn], abs=1e-12)
 
     # Negate percentage steps cleanly via geometric inverse (1/P -> linear flip of steps)
     if os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH):

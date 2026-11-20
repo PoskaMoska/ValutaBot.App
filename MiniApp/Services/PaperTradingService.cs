@@ -347,7 +347,7 @@ public static class PaperTradingService
         <= 5 => 0.05,
         <= 10 => 0.08,
         <= 15 => 0.15,
-        <= 30 => 0.25,
+        <= 30 => 0.10,
         _ => 0.40
     };
 

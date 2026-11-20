@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-MODEL_VERSION = "neural_quant_v7"
+MODEL_VERSION = "neural_quant_v8"
 MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_NPZ_PATH = os.path.join(MODEL_DIR, "subminute_quant_v7.npz")
 DEFAULT_META_PATH = os.path.join(MODEL_DIR, "subminute_quant_v7.json")
@@ -150,6 +150,19 @@ BASKET_FEATURES: List[str] = [
     "basket_sync",
     "resid_1m",
     "resid_5m",
+    "usd_idx_5s",
+    "usd_idx_15s",
+    "usd_idx_30s",
+    "resid_5s",
+    "resid_15s",
+    "resid_30s",
+    "basket_sync_5s",
+]
+
+STATE_FEATURES: List[str] = [
+    "sg_vel_z",
+    "sg_acc_z",
+    "kal_dev_z",
 ]
 
 MICRO_FEATURES: List[str] = [
@@ -160,9 +173,11 @@ MICRO_FEATURES: List[str] = [
     "micro_late_share",
     "micro_path_eff",
     "micro_flips",
+    "micro_last5_cpos",
+    "micro_last5_wick",
 ]
 
-ALL_FEATURES: List[str] = CORE_FEATURES + REGIME_FEATURES + BASKET_FEATURES + MICRO_FEATURES
+ALL_FEATURES: List[str] = CORE_FEATURES + REGIME_FEATURES + BASKET_FEATURES + STATE_FEATURES + MICRO_FEATURES
 
 _MIRROR_FLIP_SIGN = {
     "r0", "body_signed", "r1", "r2", "r3", "accel",
@@ -171,7 +186,10 @@ _MIRROR_FLIP_SIGN = {
     "wick_asym", "streak", "dist_ema9_atr", "dist_ema21_atr", "dist_ema50_atr",
     "ema9_slope", "bb_z20",
     "usd_idx_1m", "usd_idx_5m", "resid_1m", "resid_5m",
+    "usd_idx_5s", "usd_idx_15s", "usd_idx_30s", "resid_5s", "resid_15s", "resid_30s",
+    "sg_vel_z", "sg_acc_z", "kal_dev_z",
     "micro_last_r", "micro_last2_r", "micro_first_half_r", "micro_second_half_r", "micro_late_share",
+    "micro_last5_cpos", "micro_last5_wick",
 }
 _MIRROR_ONE_MINUS = {
     "close_pos", "prev_close_pos", "m5_close_pos", "m15_close_pos", "donchian_pos20",
@@ -253,6 +271,74 @@ def _rolling_std(arr: np.ndarray, k: int) -> np.ndarray:
     return np.sqrt(var)
 
 
+def _rolling_mean_warmup(arr: np.ndarray, k: int, min_periods: int) -> np.ndarray:
+    n = len(arr)
+    out = _rolling_mean(arr, k)
+    if n >= min_periods:
+        hi = min(k - 1, n)
+        if hi > min_periods - 1:
+            cs = np.empty(hi + 1, dtype=np.float64)
+            cs[0] = 0.0
+            np.cumsum(arr[:hi], out=cs[1:])
+            cnts = np.arange(min_periods, hi + 1, dtype=np.float64)
+            out[min_periods - 1 : hi] = cs[min_periods : hi + 1] / cnts
+    return out
+
+
+def _rolling_std_warmup(arr: np.ndarray, k: int, min_periods: int) -> np.ndarray:
+    n = len(arr)
+    out = _rolling_std(arr, k)
+    if n >= min_periods:
+        hi = min(k - 1, n)
+        if hi > min_periods - 1:
+            cs1 = np.empty(hi + 1, dtype=np.float64)
+            cs2 = np.empty(hi + 1, dtype=np.float64)
+            cs1[0] = 0.0
+            cs2[0] = 0.0
+            np.cumsum(arr[:hi], out=cs1[1:])
+            np.cumsum(arr[:hi] * arr[:hi], out=cs2[1:])
+            cnts = np.arange(min_periods, hi + 1, dtype=np.float64)
+            m1 = cs1[min_periods : hi + 1] / cnts
+            m2 = cs2[min_periods : hi + 1] / cnts
+            out[min_periods - 1 : hi] = np.sqrt(np.maximum(m2 - m1 * m1, 0.0))
+    return out
+
+
+def _compute_savgol_kalman_arrays(close_arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Causal mirror-antisymmetric SavGol velocity/accel z-scores & Kalman deviation z-score."""
+    n = len(close_arr)
+    vel_z = np.full(n, np.nan, dtype=np.float64)
+    acc_z = np.full(n, np.nan, dtype=np.float64)
+    kal_z = np.full(n, np.nan, dtype=np.float64)
+    if n < 15:
+        return vel_z, acc_z, kal_z
+
+    c = np.maximum(np.asarray(close_arr, dtype=np.float64), 1e-9)
+    inst_v = np.zeros(n, dtype=np.float64)
+    inst_a = np.zeros(n, dtype=np.float64)
+    inst_v[4:] = ((2.0 * (c[4:] - c[:-4]) + (c[3:-1] - c[1:-3])) / 10.0) / c[2:-2] * 10000.0
+    d0 = c[:-4] - c[2:-2]
+    d1 = c[1:-3] - c[2:-2]
+    d3 = c[3:-1] - c[2:-2]
+    d4 = c[4:] - c[2:-2]
+    inst_a[4:] = ((2.0 * (d4 + d0) - (d3 + d1)) / 7.0) / c[2:-2] * 10000.0
+
+    sd_v = _rolling_std_warmup(inst_v, 60, min_periods=10)
+    sd_a = _rolling_std_warmup(inst_a, 60, min_periods=10)
+    vel_z = np.where(np.isfinite(sd_v), np.clip(inst_v / np.maximum(sd_v, 0.05), -8.0, 8.0), np.nan)
+    acc_z = np.where(np.isfinite(sd_a), np.clip(inst_a / np.maximum(sd_a, 0.01), -8.0, 8.0), np.nan)
+
+    diffs = np.abs(np.diff(c, prepend=c[0])) / c * 10000.0
+    atr_bps = _rolling_mean_warmup(diffs, 20, min_periods=5)
+    ema_fast = _ema(c, 7)
+    kal_z = np.where(
+        np.isfinite(atr_bps),
+        np.clip(((c - ema_fast) / c * 10000.0) / np.maximum(atr_bps, 0.05), -8.0, 8.0),
+        np.nan,
+    )
+    return vel_z, acc_z, kal_z
+
+
 def _ema(arr: np.ndarray, span: int) -> np.ndarray:
     n = len(arr)
     out = np.empty(n, dtype=np.float64)
@@ -327,8 +413,10 @@ def compute_features_batch(
     s5_o: Optional[np.ndarray] = None,
     s5_c: Optional[np.ndarray] = None,
     only_last: bool = False,
-    basket_arrays: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+    basket_arrays: Optional[Tuple[np.ndarray, ...]] = None,
     usd_sign: float = 0.0,
+    s5_h: Optional[np.ndarray] = None,
+    s5_l: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Computes the exact (N, len(ALL_FEATURES)) feature matrix and valid_history boolean mask
@@ -471,6 +559,21 @@ def compute_features_batch(
     basket_sync_f = np.full(n, np.nan, dtype=np.float64)
     resid_1m = np.full(n, np.nan, dtype=np.float64)
     resid_5m = np.full(n, np.nan, dtype=np.float64)
+    usd_idx_5s = np.full(n, np.nan, dtype=np.float64)
+    usd_idx_15s = np.full(n, np.nan, dtype=np.float64)
+    usd_idx_30s = np.full(n, np.nan, dtype=np.float64)
+    resid_5s = np.full(n, np.nan, dtype=np.float64)
+    resid_15s = np.full(n, np.nan, dtype=np.float64)
+    resid_30s = np.full(n, np.nan, dtype=np.float64)
+    basket_sync_5s = np.full(n, np.nan, dtype=np.float64)
+
+    def _lagged_pair_bps(k_bars: int, target_sec: int) -> np.ndarray:
+        out = np.full(n, np.nan, dtype=np.float64)
+        if n > k_bars:
+            dt_ok = (ts[k_bars:] - ts[:-k_bars]) <= int(max(dt, target_sec) * 1.6)
+            raw_m = (c[k_bars:] - c[:-k_bars]) / np.maximum(c[:-k_bars], 1e-9) * 10000.0
+            out[k_bars:] = np.where(dt_ok, raw_m, np.nan)
+        return out
 
     if basket_arrays is not None and abs(usd_sign) > 0.5:
         dxy_1m_arr = np.asarray(basket_arrays[0], dtype=np.float64)
@@ -480,15 +583,6 @@ def compute_features_batch(
 
         bars_1m = max(1, int(round(60.0 / max(1, dt))))
         bars_5m = max(1, int(round(300.0 / max(1, dt))))
-
-        def _lagged_pair_bps(k_bars: int, target_sec: int) -> np.ndarray:
-            out = np.full(n, np.nan, dtype=np.float64)
-            if n > k_bars:
-                dt_ok = (ts[k_bars:] - ts[:-k_bars]) <= int(max(dt, target_sec) * 1.6)
-                raw_m = (c[k_bars:] - c[:-k_bars]) / np.maximum(c[:-k_bars], 1e-9) * 10000.0
-                out[k_bars:] = np.where(dt_ok, raw_m, np.nan)
-            return out
-
         pair_1m = _lagged_pair_bps(bars_1m, 60)
         pair_5m = _lagged_pair_bps(bars_5m, 300)
 
@@ -501,6 +595,30 @@ def compute_features_batch(
         resid_1m = np.where(valid_b & np.isfinite(pair_1m), np.clip(pair_1m - u1, -50.0, 50.0), np.nan)
         resid_5m = np.where(valid_b & np.isfinite(pair_5m), np.clip(pair_5m - u5, -50.0, 50.0), np.nan)
 
+        if len(basket_arrays) >= 7:
+            dxy_5s_arr = np.asarray(basket_arrays[3], dtype=np.float64)
+            dxy_15s_arr = np.asarray(basket_arrays[4], dtype=np.float64)
+            dxy_30s_arr = np.asarray(basket_arrays[5], dtype=np.float64)
+            bsync5_arr = np.asarray(basket_arrays[6], dtype=np.float64)
+            valid_b5 = np.isfinite(dxy_5s_arr) & np.isfinite(bsync5_arr) & (bsync5_arr > 0.01)
+            usd_idx_5s = np.where(valid_b5, np.clip(dxy_5s_arr, -50.0, 50.0) * usd_sign, np.nan)
+            usd_idx_15s = np.where(
+                valid_b5 & np.isfinite(dxy_15s_arr), np.clip(dxy_15s_arr, -50.0, 50.0) * usd_sign, np.nan
+            )
+            usd_idx_30s = np.where(
+                valid_b5 & np.isfinite(dxy_30s_arr), np.clip(dxy_30s_arr, -50.0, 50.0) * usd_sign, np.nan
+            )
+            basket_sync_5s = np.where(valid_b5, np.clip(bsync5_arr, 0.0, 1.0), np.nan)
+
+    sg_vel_z = np.full(n, np.nan, dtype=np.float64)
+    sg_acc_z = np.full(n, np.nan, dtype=np.float64)
+    kal_dev_z = np.full(n, np.nan, dtype=np.float64)
+    pair_5s = _lagged_pair_bps(1, 5) if dt == 5 else np.full(n, np.nan, dtype=np.float64)
+    pair_15s = _lagged_pair_bps(3, 15) if dt == 5 else np.full(n, np.nan, dtype=np.float64)
+    pair_30s = _lagged_pair_bps(6, 30) if dt == 5 else np.full(n, np.nan, dtype=np.float64)
+    if dt == 5:
+        sg_vel_z, sg_acc_z, kal_dev_z = _compute_savgol_kalman_arrays(c)
+
     micro_last_r = np.full(n, np.nan, dtype=np.float64)
     micro_last2_r = np.full(n, np.nan, dtype=np.float64)
     micro_first_half_r = np.full(n, np.nan, dtype=np.float64)
@@ -508,12 +626,17 @@ def compute_features_batch(
     micro_late_share = np.full(n, np.nan, dtype=np.float64)
     micro_path_eff = np.full(n, np.nan, dtype=np.float64)
     micro_flips = np.full(n, np.nan, dtype=np.float64)
+    micro_last5_cpos = np.full(n, np.nan, dtype=np.float64)
+    micro_last5_wick = np.full(n, np.nan, dtype=np.float64)
 
     if dt > 5 and s5_ts is not None and s5_o is not None and s5_c is not None and len(s5_ts) >= 2:
         st = np.asarray(s5_ts, dtype=np.int64)
         so = np.maximum(np.asarray(s5_o, dtype=np.float64), 1e-9)
         sc = np.maximum(np.asarray(s5_c, dtype=np.float64), 1e-9)
+        sh = np.asarray(s5_h, dtype=np.float64) if s5_h is not None else None
+        sl = np.asarray(s5_l, dtype=np.float64) if s5_l is not None else None
         sr = (sc - so) / so * 10000.0
+        s5_vz, s5_az, s5_kz = _compute_savgol_kalman_arrays(sc)
         m_expected = dt // 5
         idx_range = [n - 1] if only_last else range(20, n)
         ends = np.searchsorted(st, ts + dt, side="left")
@@ -530,17 +653,46 @@ def compute_features_batch(
                 micro_last2_r[i] = float(np.sum(seg[-min(2, cnt) :]))
                 half = cnt // 2
                 fh = float(np.sum(seg[:half]))
-                sh = float(np.sum(seg[half:]))
+                sh_val = float(np.sum(seg[half:]))
                 micro_first_half_r[i] = fh
-                micro_second_half_r[i] = sh
+                micro_second_half_r[i] = sh_val
                 atr_val = atr20[i] if np.isfinite(atr20[i]) else np.nanmean(rng[max(0, i - 19) : i + 1])
-                micro_late_share[i] = (sh - fh) / max(float(atr_val), 0.05)
+                micro_late_share[i] = (sh_val - fh) / max(float(atr_val), 0.05)
                 abs_s = float(np.sum(np.abs(seg)))
                 micro_path_eff[i] = abs(float(np.sum(seg))) / max(abs_s, 0.05)
                 if cnt >= 3:
                     nz = np.sign(seg)
                     flips = int(np.sum((nz[1:] * nz[:-1]) < 0))
                     micro_flips[i] = float(flips) / float(cnt - 1)
+
+                last_pos = b_i - 1
+                sg_vel_z[i] = s5_vz[last_pos]
+                sg_acc_z[i] = s5_az[last_pos]
+                kal_dev_z[i] = s5_kz[last_pos]
+
+                if last_pos >= 1 and (st[last_pos] - st[last_pos - 1]) <= 8:
+                    pair_5s[i] = (sc[last_pos] - sc[last_pos - 1]) / sc[last_pos - 1] * 10000.0
+                if last_pos >= 3 and (st[last_pos] - st[last_pos - 3]) <= 24:
+                    pair_15s[i] = (sc[last_pos] - sc[last_pos - 3]) / sc[last_pos - 3] * 10000.0
+                if last_pos >= 6 and (st[last_pos] - st[last_pos - 6]) <= 48:
+                    pair_30s[i] = (sc[last_pos] - sc[last_pos - 6]) / sc[last_pos - 6] * 10000.0
+
+                if sh is not None and sl is not None:
+                    rng5 = float(sh[last_pos] - sl[last_pos])
+                    if rng5 > 1e-12:
+                        c5 = float(sc[last_pos])
+                        o5 = float(so[last_pos])
+                        h5 = float(sh[last_pos])
+                        l5 = float(sl[last_pos])
+                        micro_last5_cpos[i] = (c5 - l5) / rng5 - 0.5
+                        micro_last5_wick[i] = ((min(o5, c5) - l5) - (h5 - max(o5, c5))) / rng5
+                    else:
+                        micro_last5_cpos[i] = 0.0
+                        micro_last5_wick[i] = 0.0
+
+    resid_5s = np.where(np.isfinite(usd_idx_5s) & np.isfinite(pair_5s), np.clip(pair_5s - usd_idx_5s, -50.0, 50.0), np.nan)
+    resid_15s = np.where(np.isfinite(usd_idx_15s) & np.isfinite(pair_15s), np.clip(pair_15s - usd_idx_15s, -50.0, 50.0), np.nan)
+    resid_30s = np.where(np.isfinite(usd_idx_30s) & np.isfinite(pair_30s), np.clip(pair_30s - usd_idx_30s, -50.0, 50.0), np.nan)
 
     ema9_lag3 = lag(ema9, 3)
 
@@ -611,6 +763,16 @@ def compute_features_batch(
         basket_sync_f,
         resid_1m,
         resid_5m,
+        usd_idx_5s,
+        usd_idx_15s,
+        usd_idx_30s,
+        resid_5s,
+        resid_15s,
+        resid_30s,
+        basket_sync_5s,
+        sg_vel_z,
+        sg_acc_z,
+        kal_dev_z,
         micro_last_r,
         micro_last2_r,
         micro_first_half_r,
@@ -618,6 +780,8 @@ def compute_features_batch(
         micro_late_share,
         micro_path_eff,
         micro_flips,
+        micro_last5_cpos,
+        micro_last5_wick,
     ]
     mat = np.column_stack(cols)
 
@@ -654,7 +818,7 @@ def compute_features_latest(
     if np.any(~np.isfinite(o)) or np.any(~np.isfinite(c)) or np.any(c <= 0):
         return None
 
-    s5_ts = s5_o = s5_c = None
+    s5_ts = s5_o = s5_h = s5_l = s5_c = None
     if dt > 5 and micro_candles and len(micro_candles) >= 2:
         last_close_boundary = int(ts[-1]) + dt
         m_ord = sorted(
@@ -664,6 +828,8 @@ def compute_features_latest(
         if len(m_ord) >= 2:
             s5_ts = np.array([int(r.get("openTime", r.get("open_time", 0))) for r in m_ord], dtype=np.int64)
             s5_o = np.array([float(r.get("open", 0.0)) for r in m_ord], dtype=np.float64)
+            s5_h = np.array([float(r.get("high", r.get("close", 0.0))) for r in m_ord], dtype=np.float64)
+            s5_l = np.array([float(r.get("low", r.get("close", 0.0))) for r in m_ord], dtype=np.float64)
             s5_c = np.array([float(r.get("close", 0.0)) for r in m_ord], dtype=np.float64)
 
     basket_arrays = None
@@ -682,7 +848,22 @@ def compute_features_latest(
                 a1[-1] = d1
                 a5[-1] = d5
                 ab[-1] = bs
-                basket_arrays = (a1, a5, ab)
+                d5s = _extract_macro_field(raw_m, "DxyMomentum5sBps", "dxy_momentum_5s_bps")
+                d15s = _extract_macro_field(raw_m, "DxyMomentum15sBps", "dxy_momentum_15s_bps")
+                d30s = _extract_macro_field(raw_m, "DxyMomentum30sBps", "dxy_momentum_30s_bps")
+                bs5 = _extract_macro_field(raw_m, "BasketSync5sScore", "basket_sync_5s_score")
+                if d5s is not None:
+                    a5s = np.full(n_c, np.nan, dtype=np.float64)
+                    a15s = np.full(n_c, np.nan, dtype=np.float64)
+                    a30s = np.full(n_c, np.nan, dtype=np.float64)
+                    ab5 = np.full(n_c, np.nan, dtype=np.float64)
+                    a5s[-1] = d5s
+                    a15s[-1] = d15s if d15s is not None else np.nan
+                    a30s[-1] = d30s if d30s is not None else np.nan
+                    ab5[-1] = bs5 if (bs5 is not None and bs5 > 0.01) else bs
+                    basket_arrays = (a1, a5, ab, a5s, a15s, a30s, ab5)
+                else:
+                    basket_arrays = (a1, a5, ab)
 
     mat, _ = compute_features_batch(
         ts, o, h, l, c, v, dt,
@@ -690,6 +871,7 @@ def compute_features_latest(
         only_last=True,
         basket_arrays=basket_arrays,
         usd_sign=u_sign,
+        s5_h=s5_h, s5_l=s5_l,
     )
     if len(mat) == 0:
         return None
@@ -824,6 +1006,7 @@ class SubminuteQuantPredictor:
         self.arrays: Dict[str, np.ndarray] = {}
         self.meta: Dict[str, Any] = {}
         self.loaded_intervals: set[str] = set()
+        self.gated_intervals: set[str] = set()
         self._load()
 
     @classmethod
@@ -847,18 +1030,23 @@ class SubminuteQuantPredictor:
             with np.load(self.npz_path, allow_pickle=False) as z:
                 self.arrays = {k: z[k] for k in z.files}
             for iv, info in self.meta.get("intervals", {}).items():
-                if info.get("gate_pass") and f"{iv}_dir_roots" in self.arrays:
+                if f"{iv}_dir_roots" not in self.arrays:
+                    continue
+                if info.get("gate_pass"):
                     self.loaded_intervals.add(iv)
+                else:
+                    self.gated_intervals.add(iv)
         except Exception as exc:
             print(f"[SubminuteQuantPredictor] Load warning: {exc}")
             self.loaded_intervals.clear()
+            self.gated_intervals.clear()
 
     def is_available_for(self, interval: Optional[str]) -> bool:
         canon = normalize_interval(interval)
-        return canon is not None and canon in self.loaded_intervals
+        return canon is not None and (canon in self.loaded_intervals or canon in self.gated_intervals)
 
     def is_available(self) -> bool:
-        return len(self.loaded_intervals) > 0
+        return len(self.loaded_intervals) > 0 or len(self.gated_intervals) > 0
 
     def get_interval_meta(self, interval: Optional[str]) -> Dict[str, Any]:
         canon = normalize_interval(interval)
@@ -881,7 +1069,7 @@ class SubminuteQuantPredictor:
         Returns None if `interval` is not supported or model is unavailable.
         """
         canon = normalize_interval(interval)
-        if canon is None or canon not in self.loaded_intervals:
+        if canon is None or not (canon in self.loaded_intervals or canon in self.gated_intervals):
             return None
 
         feat = compute_features_latest(
@@ -900,19 +1088,21 @@ class SubminuteQuantPredictor:
         hgb_feats_len = int(iv_meta["n_hgb_features"])
         hgb_idx = iv_meta.get("hgb_feature_indices")
         core_len = int(iv_meta["n_core_features"])
+        lr_idx = iv_meta.get("lr_feature_indices")
 
         x_hgb = feat[hgb_idx] if hgb_idx is not None else feat[:hgb_feats_len]
         x_hgb_mir = feat_mir[hgb_idx] if hgb_idx is not None else feat_mir[:hgb_feats_len]
-        x_core = feat[:core_len]
-        x_core_mir = feat_mir[:core_len]
+        x_lr = feat[lr_idx] if lr_idx is not None else feat[:core_len]
+        x_lr_mir = feat_mir[lr_idx] if lr_idx is not None else feat_mir[:core_len]
+        lr_names = [ALL_FEATURES[int(j)] for j in lr_idx] if lr_idx is not None else CORE_FEATURES[:core_len]
 
         p_hgb = 0.5 * (
             eval_hgb_flat_single(self.arrays, f"{canon}_dir", x_hgb)
             + (1.0 - eval_hgb_flat_single(self.arrays, f"{canon}_dir", x_hgb_mir))
         )
         p_lr = 0.5 * (
-            float(_eval_lr(self.arrays, canon, x_core.reshape(1, -1))[0])
-            + (1.0 - float(_eval_lr(self.arrays, canon, x_core_mir.reshape(1, -1))[0]))
+            float(_eval_lr(self.arrays, canon, x_lr.reshape(1, -1))[0])
+            + (1.0 - float(_eval_lr(self.arrays, canon, x_lr_mir.reshape(1, -1))[0]))
         )
         w_hgb = float(iv_meta.get("w_hgb", 0.70))
         p_raw_up = w_hgb * p_hgb + (1.0 - w_hgb) * p_lr
@@ -971,9 +1161,10 @@ class SubminuteQuantPredictor:
             if m_rng > 1e-12:
                 intra_s5_cpos_centered = float(np.clip(((m_c - m_l) / m_rng - 0.5) * 2.0, -1.0, 1.0))
 
-        if not (weekend_otc or rollover_otc) and (abs(intra_z) > 0.02 or abs(intra_s5_cpos_centered) > 0.02):
-            # Antisymmetric intra-bar pullback / entry-displacement adjustment (preserves exact P -> -P symmetry)
-            intra_adj = float(np.clip(-0.0040 * intra_z - 0.0020 * intra_s5_cpos_centered, -0.012, 0.012))
+        if not (weekend_otc or rollover_otc) and (abs(intra_z) >= 0.25 or abs(intra_s5_cpos_centered) >= 0.40):
+            # Antisymmetric intra-bar pullback / late-chase refinement (deadzone suppresses boundary tick jitter)
+            eff_z = math.copysign(max(0.0, abs(intra_z) - 0.25), intra_z) if abs(intra_z) >= 0.25 else 0.0
+            intra_adj = float(np.clip(-0.0035 * eff_z - 0.0015 * intra_s5_cpos_centered, -0.010, 0.010))
             p_raw_up = float(np.clip(p_raw_up + intra_adj, 0.01, 0.99))
 
         # Calibrate directional strength monotonically via OOF isotonic curve
@@ -1006,9 +1197,11 @@ class SubminuteQuantPredictor:
         cal_conf = float(np.clip(cal_conf, 0.50, 0.80))
 
         # Check tie_rate20 hard dead guard (e.g. >= 75% zero-return bars in last 20)
+        # or honest OOF quality gate hold (model remains telemetry-active while failing closed to NEUTRAL)
+        gate_passed = bool(iv_meta.get("gate_pass", True))
         tie_rate20_idx = CORE_FEATURES.index("tie_rate20")
         tie_rate20_val = float(feat[tie_rate20_idx]) if np.isfinite(feat[tie_rate20_idx]) else 0.0
-        if tie_rate20_val >= 0.75 or cal_conf <= 0.505:
+        if (not gate_passed) or tie_rate20_val >= 0.75 or cal_conf <= 0.505:
             direction = "NEUTRAL"
             cal_conf = 0.50
             signed_raw = 0.50
@@ -1023,18 +1216,24 @@ class SubminuteQuantPredictor:
         meds = self.arrays[f"{canon}_lr_meds"]
         mean = self.arrays[f"{canon}_lr_mean"]
         scale = self.arrays[f"{canon}_lr_scale"]
-        x_imp = np.where(np.isfinite(x_core), x_core, meds)
+        x_imp = np.where(np.isfinite(x_lr), x_lr, meds)
         z_vals = (x_imp - mean) / np.maximum(scale, 1e-9)
         top_idx = np.argsort(np.abs(z_vals))[::-1][:3]
-        top_features = [f"{CORE_FEATURES[int(i)]}:{z_vals[int(i)]:+.2f}" for i in top_idx]
-        micro_start = len(CORE_FEATURES) + len(REGIME_FEATURES) + len(BASKET_FEATURES)
+        top_features = [f"{lr_names[int(i)]}:{z_vals[int(i)]:+.2f}" for i in top_idx]
+        micro_start = len(ALL_FEATURES) - len(MICRO_FEATURES)
         if INTERVAL_SECONDS[canon] > 5 and np.isfinite(feat[micro_start]):
             top_features.append(f"micro_last_r:{feat[micro_start]:+.2f}")
+        sg_idx = ALL_FEATURES.index("sg_vel_z")
+        if np.isfinite(feat[sg_idx]):
+            top_features.append(f"sg_vel_z:{feat[sg_idx]:+.2f}")
         if abs(intra_z) > 0.02 or intra_s5_bars:
             top_features.append(f"intra_z:{intra_z:+.2f}(n5={len(intra_s5_bars)})")
+        res5_idx = ALL_FEATURES.index("resid_5s")
+        if np.isfinite(feat[res5_idx]):
+            top_features.append(f"resid_5s:{feat[res5_idx]:+.2f}")
         basket_idx = ALL_FEATURES.index("resid_1m")
-        basket_active = bool(np.isfinite(feat[basket_idx]))
-        if basket_active:
+        basket_active = bool(np.isfinite(feat[basket_idx]) or np.isfinite(feat[res5_idx]))
+        if np.isfinite(feat[basket_idx]):
             top_features.append(f"usd_resid_1m:{feat[basket_idx]:+.2f}")
         if weekend_otc:
             top_features.insert(0, "weekend_prng_otc:1.00")
@@ -1042,11 +1241,14 @@ class SubminuteQuantPredictor:
             top_features.insert(0, "rollover_otc:1.00")
         elif jump_guarded:
             top_features.insert(0, f"jump_guarded:{jump_max5_val:.1f}")
+        if not gate_passed:
+            top_features.insert(0, "oof_gate_hold:1.00")
 
         details = {
             "accuracy": iv_meta.get("oof_accuracy"),
             "auc": iv_meta.get("oof_auc"),
             "n_train": iv_meta.get("n_train"),
+            "gate_pass": gate_passed,
             "p_tie": round(float(p_tie), 4),
             "weekend_otc": weekend_otc,
             "rollover_otc": rollover_otc,

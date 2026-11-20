@@ -131,9 +131,13 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
         );
     }
 
+    private const int MaxConsecutiveLosses = 5;
+    private const double MinRollingWinRate = 0.35;
+    private const int CooloffDurationMinutes = 10;
+
     /// <summary>
     /// Records trade outcome to manage drawdown cooloff phase.
-    /// Triggers 15-minute cooloff if 3 consecutive losses occur.
+    /// Triggers a 10-minute cooloff on 5 consecutive losses or when 10-trade rolling win rate drops below 35%.
     /// </summary>
     public void RecordTradeOutcome(string asset, string timeframe, bool isWin)
     {
@@ -149,16 +153,15 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
             else
             {
                 state.ConsecutiveLosses++;
-                // Raised from 3 to 8 consecutive losses (3 losses on s5 is normal 6% variance at 60% WR)
-                if (state.ConsecutiveLosses >= 8)
+                if (state.ConsecutiveLosses >= MaxConsecutiveLosses)
                 {
-                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(3);
+                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(CooloffDurationMinutes);
                     state.ConsecutiveLosses = 0;
-                    BotLogger.Warn($"[Drawdown Protection] 8 consecutive losses for {key}. Cooloff 3m until {state.CooloffUntil:HH:mm:ss}");
+                    BotLogger.Warn($"[Drawdown Protection] {MaxConsecutiveLosses} consecutive losses for {key}. Cooloff {CooloffDurationMinutes}m until {state.CooloffUntil:HH:mm:ss}");
                 }
             }
 
-            // Rolling win-rate защита: обновляем ring buffer
+            // Rolling win-rate protection over the last 10 trades
             state.RecentOutcomes[state.OutcomeIndex] = isWin;
             state.OutcomeIndex = (state.OutcomeIndex + 1) % 10;
             if (state.OutcomeCount < 10) state.OutcomeCount++;
@@ -169,13 +172,14 @@ public class WalkForwardValidationEngine : IWalkForwardValidationEngine
                 for (int i = 0; i < state.OutcomeCount; i++) if (state.RecentOutcomes[i]) wins++;
                 double rollingWinRate = (double)wins / state.OutcomeCount;
 
-                if (rollingWinRate <= 0.20)
+                if (rollingWinRate < MinRollingWinRate)
                 {
-                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(3);
+                    state.CooloffUntil = DateTime.UtcNow.AddMinutes(CooloffDurationMinutes);
                     state.ConsecutiveLosses = 0;
+                    // Reset ring buffer after trigger so stale outcomes do not immediately re-lock after cooloff
                     state.OutcomeCount = 0;
                     state.OutcomeIndex = 0;
-                    BotLogger.Warn($"[Drawdown Protection] Rolling win rate {rollingWinRate:P0} <= 20% for {key}. Cooloff 3 min until {state.CooloffUntil:HH:mm:ss}. Buffer reset.");
+                    BotLogger.Warn($"[Drawdown Protection] Rolling win rate {rollingWinRate:P0} < {MinRollingWinRate:P0} for {key}. Cooloff {CooloffDurationMinutes}m until {state.CooloffUntil:HH:mm:ss}. Buffer reset.");
                 }
             }
         }

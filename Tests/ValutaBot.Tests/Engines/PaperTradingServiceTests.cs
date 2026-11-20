@@ -112,7 +112,7 @@ public class PaperTradingServiceTests
     [InlineData(5, 0.05)]
     [InlineData(10, 0.08)]
     [InlineData(15, 0.15)]
-    [InlineData(30, 0.25)]
+    [InlineData(30, 0.10)]
     [InlineData(60, 0.40)]
     public void GetMaxAdverseSlippageBps_ScalesStrictlyWithCandleInterval(int intervalSecs, double expectedMaxBps)
     {
@@ -302,5 +302,15 @@ public class PaperTradingServiceTests
         var chaosStrong = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
             83, "s5", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.630, consensusProbabilityPct: 63, marketRegime: "CHAOS_EXPANSION");
         Assert.True(chaosStrong.MeetsProbabilityGate);
+
+        // s30 and m1 block noisy 56-59% signals (would lose EV on payout/slippage) while allowing genuine 61%+ edge without hard bans
+        var s30WeakBlocked = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            82, "s30", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.575, consensusProbabilityPct: 58);
+        Assert.False(s30WeakBlocked.MeetsProbabilityGate);
+        Assert.True(s30WeakBlocked.RequiredExactPct >= 60.4);
+
+        var m1StrongAllowed = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            90, "m1", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.610, consensusProbabilityPct: 61);
+        Assert.True(m1StrongAllowed.MeetsProbabilityGate);
     }
 }

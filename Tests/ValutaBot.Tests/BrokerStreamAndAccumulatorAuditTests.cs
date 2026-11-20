@@ -254,6 +254,36 @@ namespace ValutaBot.Tests
 
             var metrics = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeDollarBasketMetrics();
             Assert.NotNull(metrics);
+            Assert.True(double.IsFinite(metrics.DxyMomentum5sBps));
+            Assert.True(double.IsFinite(metrics.DxyMomentum15sBps));
+            Assert.True(double.IsFinite(metrics.DxyMomentum30sBps));
+
+            // Deterministic isolated snapshot test for subminute 5s/15s/30s/1m USD basket horizons
+            var t0 = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+            var snapshots = new Dictionary<string, (DateTime time, double price)[]>
+            {
+                ["EURUSD"] = new[]
+                {
+                    (t0.AddSeconds(-40), 1.1000),
+                    (t0.AddSeconds(-25), 1.1002),
+                    (t0.AddSeconds(-12), 1.1005),
+                    (t0.AddSeconds(-4),  1.1010),
+                    (t0,                 1.1021),
+                },
+                ["USDJPY"] = new[]
+                {
+                    (t0.AddSeconds(-40), 150.00),
+                    (t0.AddSeconds(-25), 149.95),
+                    (t0.AddSeconds(-12), 149.90),
+                    (t0.AddSeconds(-4),  149.85),
+                    (t0,                 149.70),
+                },
+            };
+            var sub = ValutaBot.MiniApp.Features.MarketAnalysis.Engines.MacroContextEngine.ComputeMetricsFromSnapshots(t0, snapshots);
+            Assert.True(sub.DxyMomentum5sBps < -9.0 && sub.DxyMomentum5sBps > -11.0, $"dxy5s={sub.DxyMomentum5sBps}");
+            Assert.True(sub.DxyMomentum15sBps < sub.DxyMomentum5sBps, $"dxy15s={sub.DxyMomentum15sBps} vs 5s={sub.DxyMomentum5sBps}");
+            Assert.True(sub.DxyMomentum30sBps < sub.DxyMomentum15sBps, $"dxy30s={sub.DxyMomentum30sBps} vs 15s={sub.DxyMomentum15sBps}");
+            Assert.Equal(1.0, sub.BasketSync5sScore);
         }
 
         [Fact]

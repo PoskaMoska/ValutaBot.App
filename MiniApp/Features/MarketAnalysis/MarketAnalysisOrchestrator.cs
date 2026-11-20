@@ -317,10 +317,26 @@ public class MarketAnalysisOrchestrator(
             DateTime microCutoff = referenceNowUtc.AddMilliseconds(250);
             try
             {
-                var rawMicro = await _fetcher.FetchOhlcWithFallbackAsync(symbol, "s5", cleanAsset, 72);
+                var rawMicro = await _fetcher.FetchOhlcWithFallbackAsync(symbol, "s5", cleanAsset, 96);
                 if (rawMicro != null && rawMicro.Length > 0)
                 {
-                    closedMicroCandles = rawMicro.Where(c => c.Timestamp.AddSeconds(5) <= microCutoff).ToArray();
+                    var filtered = rawMicro.Where(c => c.Timestamp.AddSeconds(5) <= microCutoff).ToArray();
+                    // Reject non-5s fallback/stub arrays (e.g. 1m candles returned for "s5" in fallback/mocks)
+                    bool isValidS5Grid = filtered.Length >= 2;
+                    if (isValidS5Grid)
+                    {
+                        int checkCount = Math.Min(filtered.Length - 1, 10);
+                        int startIdx = filtered.Length - 1 - checkCount;
+                        double[] steps = new double[checkCount];
+                        for (int i = 0; i < checkCount; i++)
+                            steps[i] = (filtered[startIdx + i + 1].Timestamp - filtered[startIdx + i].Timestamp).TotalSeconds;
+                        Array.Sort(steps);
+                        double medianStep = steps[checkCount / 2];
+                        if (medianStep > 8.0 || medianStep <= 0.0)
+                            isValidS5Grid = false;
+                    }
+                    if (isValidS5Grid)
+                        closedMicroCandles = filtered;
                 }
             }
             catch (Exception ex)
@@ -372,15 +388,19 @@ public class MarketAnalysisOrchestrator(
         }
         traceLines.Add($"[2. Gatekeeper]      Риск-контроль пройден ({(string.IsNullOrEmpty(gatekeeper.Reason) ? "Волатильность в норме" : gatekeeper.Reason)}) -> {gatekeeperSw.ElapsedMilliseconds}ms");
 
-        // 2. Continuous State (include post-close s5 micro-candles or live price when mid-candle so Savitzky-Golay/Kalman is never blind to the last seconds)
+        // 2. Continuous State (evaluate on uniform closed s5 grid when available so Savitzky-Golay dt is strictly uniform)
         double[] statePrices = prep.ClosedPrices;
-        if (prep.ClosedCandles.Length > 0 && prep.CurrentLivePrice > 0 && Math.Abs(prep.CurrentLivePrice - prep.ClosedCandles[^1].Close) > 1e-9)
+        string stateTimeframe = timeframe;
+        if (prep.ClosedMicroCandles.Length >= 10)
         {
-            statePrices = new double[prep.ClosedPrices.Length + 1];
-            Array.Copy(prep.ClosedPrices, statePrices, prep.ClosedPrices.Length);
-            statePrices[^1] = prep.CurrentLivePrice;
+            statePrices = new double[prep.ClosedMicroCandles.Length];
+            for (int i = 0; i < prep.ClosedMicroCandles.Length; i++)
+            {
+                statePrices[i] = prep.ClosedMicroCandles[i].Close;
+            }
+            stateTimeframe = "s5";
         }
-        var state = ContinuousStateEngine.EvaluateContinuousState(statePrices, prep.CleanAsset, timeframe, isAlreadyClosed: true);
+        var state = ContinuousStateEngine.EvaluateContinuousState(statePrices, prep.CleanAsset, stateTimeframe, isAlreadyClosed: true);
 
         // 3. SMC & TA Scoring in Parallel
         var engSw = Stopwatch.StartNew();
@@ -467,6 +487,10 @@ public class MarketAnalysisOrchestrator(
             DxyMomentum1mBps = S(dxyMetrics.DxyMomentum1mBps),
             DxyMomentum5mBps = S(dxyMetrics.DxyMomentum5mBps),
             BasketSyncScore = S(dxyMetrics.BasketSyncScore),
+            DxyMomentum5sBps = S(dxyMetrics.DxyMomentum5sBps),
+            DxyMomentum15sBps = S(dxyMetrics.DxyMomentum15sBps),
+            DxyMomentum30sBps = S(dxyMetrics.DxyMomentum30sBps),
+            BasketSync5sScore = S(dxyMetrics.BasketSync5sScore),
             SpreadBps = S(liveSpreadBps),
             PriceEntropy = S(priceEntropy),
             TrendMaturity = S(trendMaturity),
@@ -953,17 +977,15 @@ public class MarketAnalysisOrchestrator(
     {
         double breakEvenWinRate = 1.0 / (1.0 + Math.Max(payoutPct, 50) / 100.0);
         bool isS5 = string.Equals(timeframe, "s5", StringComparison.OrdinalIgnoreCase);
-        bool isS30OrM1 = string.Equals(timeframe, "s30", StringComparison.OrdinalIgnoreCase)
-                      || string.Equals(timeframe, "m1", StringComparison.OrdinalIgnoreCase)
-                      || string.Equals(timeframe, "1m", StringComparison.OrdinalIgnoreCase);
+        bool isS10 = string.Equals(timeframe, "s10", StringComparison.OrdinalIgnoreCase);
 
-        // Positive-EV margin without artificial 62%+ glass ceiling that blocked profitable trades on s30/m1
-        double margin = isS30OrM1 ? 0.015 : 0.055;
+        // Unified positive-EV margin across all horizons (+5.5% baseline over breakeven)
+        double margin = 0.055;
         if (payoutPct < 75)
         {
             margin += 0.010;
         }
-        if (string.Equals(timeframe, "s10", StringComparison.OrdinalIgnoreCase))
+        if (isS10)
         {
             margin += 0.020;
         }
@@ -977,9 +999,9 @@ public class MarketAnalysisOrchestrator(
             margin += 0.015;
         }
 
-        // On s30/m1, allow positive-EV entries down to 56.0% without artificial 62% barrier.
-        // On s5/s10/etc, maintain minimum 62.0% floor to absorb execution slippage and fast tick latency.
-        double floorPct = isS30OrM1 ? 56.0 : 62.0;
+        // Fast s5/s10 ticks need >=62.0% calibrated edge to absorb execution slippage;
+        // s15/s30/m1 enforce >=60.0% floor (or BE+5.5% = 60.45% at 82% payout) — zero hard bans, zero 56% leaks.
+        double floorPct = (isS5 || isS10) ? 62.0 : 60.0;
         double requiredExactPct = Math.Max(floorPct, (breakEvenWinRate + margin) * 100.0);
         int requiredProbPct = (int)Math.Ceiling(requiredExactPct);
 
@@ -1143,6 +1165,10 @@ public class MarketAnalysisOrchestrator(
             DxyMomentum1mBps = S(sensors.DxyMetrics.DxyMomentum1mBps),
             DxyMomentum5mBps = S(sensors.DxyMetrics.DxyMomentum5mBps),
             BasketSyncScore = S(sensors.DxyMetrics.BasketSyncScore),
+            DxyMomentum5sBps = S(sensors.DxyMetrics.DxyMomentum5sBps),
+            DxyMomentum15sBps = S(sensors.DxyMetrics.DxyMomentum15sBps),
+            DxyMomentum30sBps = S(sensors.DxyMetrics.DxyMomentum30sBps),
+            BasketSync5sScore = S(sensors.DxyMetrics.BasketSync5sScore),
             SpreadBps = S(sensors.LiveSpreadBps),
             TickCountLastCandle = prep.ClosedCandles is { Length: > 0 } ? S(prep.ClosedCandles[^1].Volume) : 0,
             CrowdSentiment = S(liveCrowdSentiment, 50.0),
@@ -1192,6 +1218,41 @@ public class MarketAnalysisOrchestrator(
                 NeuralBrain = GetNeuralBrainPayload()
             };
             return System.Text.Json.JsonSerializer.Serialize(shadowMlFeatures, _jsonOptions);
+        }
+
+        string? BuildMlTelemetryJson()
+        {
+            if (ml.Prediction == null) return null;
+            int intraS5Count = 0;
+            if (prep.ClosedMicroCandles is { Length: > 0 } && prep.ClosedCandles is { Length: > 0 } && prep.IntervalSecs > 5)
+            {
+                DateTime lastCloseBoundary = prep.ClosedCandles[^1].Timestamp.AddSeconds(prep.IntervalSecs);
+                foreach (var mc in prep.ClosedMicroCandles)
+                {
+                    if (mc.Timestamp >= lastCloseBoundary) intraS5Count++;
+                }
+            }
+            var telemetry = new
+            {
+                raw_uncapped_prob = ml.Prediction.RawUncappedProb is double r && double.IsFinite(r) ? Math.Round(r, 4) : (double?)null,
+                raw_confidence = Math.Round(S(ml.RawConfidence, 0.5), 4),
+                ml_prob = Math.Round(S(cm.Consensus.MlProb, 0.5), 4),
+                prob = cm.Consensus.Probability,
+                model_version = ml.Prediction.ModelVersion ?? "",
+                auc = ml.Prediction.Auc is double a && double.IsFinite(a) ? Math.Round(a, 4) : (double?)null,
+                top_features = ml.Prediction.TopFeatures ?? [],
+                intra_s5_count = intraS5Count,
+                dxy_5s = S(sensors.DxyMetrics.DxyMomentum5sBps),
+                dxy_15s = S(sensors.DxyMetrics.DxyMomentum15sBps),
+                dxy_30s = S(sensors.DxyMetrics.DxyMomentum30sBps),
+                dxy_1m = S(sensors.DxyMetrics.DxyMomentum1mBps),
+                basket_sync_5s = S(sensors.DxyMetrics.BasketSync5sScore, 0.5),
+                sg_vel_bps = S(sensors.State.VelocityBpsPerSec),
+                sg_acc_bps = S(sensors.State.AccelerationBpsPerSec2),
+                kalman_state = S(sensors.State.KalmanFilteredState),
+                velocity_regime = sensors.State.VelocityRegime ?? "STABLE"
+            };
+            return System.Text.Json.JsonSerializer.Serialize(telemetry);
         }
 
         double currentLivePrice = prep.CurrentLivePrice;
@@ -1279,6 +1340,7 @@ public class MarketAnalysisOrchestrator(
                     _lastSampleTimeByAssetTf[sampleKey] = DateTime.UtcNow;
                     var sourceDirections = GetSourceDirections();
                     string featuresJson = BuildFeaturesJson();
+                    string? mlTelemetryJson = BuildMlTelemetryJson();
                     _ = Task.Run(async () =>
                     {
                         try
@@ -1293,7 +1355,7 @@ public class MarketAnalysisOrchestrator(
                                 cm.Consensus.CombinedReasoningText ?? "",
                                 ml.Prediction?.ModelVersion ?? "",
                                 ml.Prediction?.Accuracy ?? 0.0,
-                                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null, liveCrowdSentiment, currentPayout);
+                                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, mlTelemetryJson, null, liveCrowdSentiment, currentPayout);
                         }
                         catch (Exception ex)
                         {
@@ -1320,6 +1382,7 @@ public class MarketAnalysisOrchestrator(
             
             var sourceDirections = GetSourceDirections();
             string shadowFeaturesJson = BuildShadowFeaturesJson();
+            string? shadowMlTelemetryJson = BuildMlTelemetryJson();
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
                 sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", cm.Consensus.OfScore, sensors.State.VelocityRegime ?? "STABLE",
                 cm.EffectiveMarketRegime,
@@ -1330,7 +1393,7 @@ public class MarketAnalysisOrchestrator(
                 cm.Consensus.CombinedReasoningText ?? "",
                 ml.Prediction?.ModelVersion ?? "",
                 ml.Prediction?.Accuracy ?? 0.0,
-                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null, liveCrowdSentiment, currentPayout);
+                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, shadowMlTelemetryJson, null, liveCrowdSentiment, currentPayout);
             dbSw.Stop();
             string shadowReason = isGlobalCbHalted ? ", Global CB halt guard" : (isSymbolQuarantined ? ", Per-symbol quarantine guard" 
                 : (!isPayoutAcceptable ? $", Payout/Closed guard ({currentPayout}%)"
