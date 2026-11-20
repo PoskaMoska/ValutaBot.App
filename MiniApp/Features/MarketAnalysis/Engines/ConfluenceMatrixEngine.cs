@@ -367,8 +367,10 @@ public class ConfluenceMatrixEngine(
             taScore = 0.0;
         }
 
-        // OF DISABLED: 35.8% empirical win-rate (anti-signal on live data).
-        double ofScore = 0.0;
+        // Continuous State (Savitzky-Golay 1st/2nd derivatives + Kalman state contribution)
+        double ofScore = (stateSignal != null && double.IsFinite(stateSignal.MomentumContribution))
+            ? Math.Clamp(stateSignal.MomentumContribution, -1.0, 1.0)
+            : 0.0;
 
         double smcScore = 0;
         if ((smcSignal.BosDirection ?? "").Contains("BULLISH")) smcScore += 0.5;
@@ -497,7 +499,8 @@ public class ConfluenceMatrixEngine(
                 bool taAgrees = (finalDir == "BUY" && taScore >= 0.20) || (finalDir == "PUT" && taScore <= -0.20);
                 bool taStrong = (finalDir == "BUY" && taScore >= 0.35) || (finalDir == "PUT" && taScore <= -0.35);
                 bool mtfAgrees = mtfResult?.DominantDirection == finalDir;
-                int boost = (taStrong ? 3 : (taAgrees ? 2 : 0)) + (mtfAgrees ? 2 : 0);
+                bool stateAgrees = (finalDir == "BUY" && ofScore >= 0.15) || (finalDir == "PUT" && ofScore <= -0.15);
+                int boost = (taStrong ? 3 : (taAgrees ? 2 : 0)) + (mtfAgrees ? 2 : 0) + (stateAgrees ? 1 : 0);
                 if (boost > 0)
                 {
                     finalProbPct = Math.Min(65, finalProbPct + boost);
@@ -713,7 +716,7 @@ public class ConfluenceMatrixEngine(
         coPilot.AppendLine("[Показания датчиков C# (Телеметрия)]");
         coPilot.AppendLine($" - Датчик ТА (RSI={taSignal.Rsi:F1}, ADX={taSignal.Adx:F1}): {taScore:F2} ({(taScore > 0.05 ? "BUY" : (taScore < -0.05 ? "PUT" : "NEUTRAL"))})");
         coPilot.AppendLine($" - Датчик старшего ТФ (MTF): {mtfResult?.DominantDirection ?? "NEUTRAL"}{(mtfResult?.IsGoldenSetup == true ? " [GOLDEN]" : "")}");
-        coPilot.AppendLine($" - Датчик скорости (Velocity): {stateSignal?.VelocityBpsPerSec ?? 0.0:F2} bps/s");
+        coPilot.AppendLine($" - Датчик скорости (Velocity / SavGol): {stateSignal?.VelocityBpsPerSec ?? 0.0:F2} bps/s (Score={ofScore:F2}, Regime={stateSignal?.Regime ?? "STABLE"})");
         coPilot.AppendLine($" - Датчик толпы (Crowd Sentiment): {crowdSentiment:F0}% {(crowdSentiment >= 50 ? "CALL" : "PUT")}");
         if (safetyNotes.Count > 0)
         {

@@ -314,13 +314,13 @@ public class MarketAnalysisOrchestrator(
         MiniAppController.OhlcCandle[] closedMicroCandles = [];
         if (tfLower is "s10" or "s15" or "s30" or "m1" && closedCandles.Length > 0 && intervalSecs > 0)
         {
-            DateTime curBarStart = closedCandles[^1].Timestamp.AddSeconds(intervalSecs);
+            DateTime microCutoff = referenceNowUtc.AddMilliseconds(250);
             try
             {
                 var rawMicro = await _fetcher.FetchOhlcWithFallbackAsync(symbol, "s5", cleanAsset, 72);
                 if (rawMicro != null && rawMicro.Length > 0)
                 {
-                    closedMicroCandles = rawMicro.Where(c => c.Timestamp < curBarStart).ToArray();
+                    closedMicroCandles = rawMicro.Where(c => c.Timestamp.AddSeconds(5) <= microCutoff).ToArray();
                 }
             }
             catch (Exception ex)
@@ -372,8 +372,15 @@ public class MarketAnalysisOrchestrator(
         }
         traceLines.Add($"[2. Gatekeeper]      Риск-контроль пройден ({(string.IsNullOrEmpty(gatekeeper.Reason) ? "Волатильность в норме" : gatekeeper.Reason)}) -> {gatekeeperSw.ElapsedMilliseconds}ms");
 
-        // 2. Continuous State
-        var state = ContinuousStateEngine.EvaluateContinuousState(prep.ClosedPrices, prep.CleanAsset, timeframe, isAlreadyClosed: true);
+        // 2. Continuous State (include post-close s5 micro-candles or live price when mid-candle so Savitzky-Golay/Kalman is never blind to the last seconds)
+        double[] statePrices = prep.ClosedPrices;
+        if (prep.ClosedCandles.Length > 0 && prep.CurrentLivePrice > 0 && Math.Abs(prep.CurrentLivePrice - prep.ClosedCandles[^1].Close) > 1e-9)
+        {
+            statePrices = new double[prep.ClosedPrices.Length + 1];
+            Array.Copy(prep.ClosedPrices, statePrices, prep.ClosedPrices.Length);
+            statePrices[^1] = prep.CurrentLivePrice;
+        }
+        var state = ContinuousStateEngine.EvaluateContinuousState(statePrices, prep.CleanAsset, timeframe, isAlreadyClosed: true);
 
         // 3. SMC & TA Scoring in Parallel
         var engSw = Stopwatch.StartNew();
@@ -444,6 +451,13 @@ public class MarketAnalysisOrchestrator(
         var dxyMetrics = MacroContextEngine.ComputeDollarBasketMetrics();
         double liveSpreadBps = 0.0;
 
+        double lastClosedClose = prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close > 0
+            ? prep.ClosedCandles[^1].Close
+            : prep.CurrentLivePrice;
+        double liveDisplacementBps = lastClosedClose > 0
+            ? (prep.CurrentLivePrice - lastClosedClose) / lastClosedClose * 10000.0
+            : 0.0;
+
         var macroPayload = new {
             DayRangePositionPct = S(dayAnchors.DayRangePositionPct, 0.5),
             DistToDayHighBps = S(dayAnchors.DistToDayHighBps),
@@ -466,6 +480,13 @@ public class MarketAnalysisOrchestrator(
             TickCountLastCandle = prep.ClosedCandles.Length > 0 ? S(prep.ClosedCandles[^1].Volume) : 0,
             CrowdSentiment = S(PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset), 50.0),
             Payout = S(PocketOptionWebSocketStream.GetAssetPayout(prep.CleanAsset), 82.0),
+            LivePrice = S(prep.CurrentLivePrice),
+            LiveDisplacementBps = S(liveDisplacementBps),
+            SavGolVelocityBps = S(state.VelocityBpsPerSec),
+            SavGolAccelBps = S(state.AccelerationBpsPerSec2),
+            KalmanState = S(state.KalmanFilteredState),
+            ContinuousMomentumScore = S(state.MomentumContribution),
+            VelocityRegime = state.VelocityRegime ?? "STABLE",
             Ta = new {
                 Score = S(taDetail.Score),
                 MicroVel = S(taDetail.MicroVel),
@@ -1076,6 +1097,7 @@ public class MarketAnalysisOrchestrator(
         {
             ["TechAnalysis"] = DirectionExtensions.FromScore(cm.Consensus.TaScore).ToSignal(),
             ["SMC"]          = DirectionExtensions.FromScore(cm.Consensus.SmcScore).ToSignal(),
+            ["OrderFlow"]    = DirectionExtensions.FromScore(cm.Consensus.OfScore).ToSignal(),
             ["NeuralBrain"]  = ml.Direction,
             ["LIGHTGBM"]     = ml.Direction,
         };
@@ -1262,7 +1284,7 @@ public class MarketAnalysisOrchestrator(
                         try
                         {
                             await SignalTracker.RecordPredictionAsync(cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, featuresJson,
-                                sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", 1.0, "NEUTRAL",
+                                sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", cm.Consensus.OfScore, sensors.State.VelocityRegime ?? "STABLE",
                                 cm.EffectiveMarketRegime,
                                 sensors.State.VelocityRegime ?? "UNKNOWN",
                                 sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal,
@@ -1299,7 +1321,7 @@ public class MarketAnalysisOrchestrator(
             var sourceDirections = GetSourceDirections();
             string shadowFeaturesJson = BuildShadowFeaturesJson();
             _ = SignalTracker.RecordPredictionAsync("SHADOW_" + cm.Consensus.FinalDirection, prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
-                sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", 1.0, "NEUTRAL",
+                sensors.SmcResult.BosDirection ?? "NONE", sensors.SmcResult.OrderBlockType != "NONE", sensors.SmcResult.FvgType != "NONE", cm.Consensus.OfScore, sensors.State.VelocityRegime ?? "STABLE",
                 cm.EffectiveMarketRegime,
                 sensors.State.VelocityRegime ?? "UNKNOWN",
                 sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal,

@@ -932,6 +932,50 @@ class SubminuteQuantPredictor:
         jump_max5_val = float(feat[jump_idx]) if np.isfinite(feat[jump_idx]) else 0.0
         jump_guarded = jump_max5_val > 30.0
 
+        # Intra-candle vision: refine live entry probability using closed s5 micro-candles inside the
+        # currently forming bar (openTime >= last_close_boundary) and real-time LiveDisplacementBps.
+        dt = INTERVAL_SECONDS[canon]
+        last_close_boundary = int(last_ts) + dt
+        last_close = float(max(candles, key=lambda r: int(r.get("openTime", r.get("open_time", 0)))).get("close", 0.0))
+        atr5_idx = CORE_FEATURES.index("atr5")
+        atr5_val = max(float(feat[atr5_idx]) if np.isfinite(feat[atr5_idx]) else 0.5, 0.20)
+
+        intra_s5_bars: List[Dict[str, Any]] = []
+        if dt > 5 and micro_candles:
+            intra_s5_bars = sorted(
+                (m for m in micro_candles if int(m.get("openTime", m.get("open_time", 0))) >= last_close_boundary),
+                key=lambda row: int(row.get("openTime", row.get("open_time", 0))),
+            )
+
+        intra_disp_bps: Optional[float] = None
+        if macro_context:
+            raw_m = macro_context.get("MacroContext") or macro_context.get("macro_context") or macro_context
+            if isinstance(raw_m, dict):
+                intra_disp_bps = _extract_macro_field(raw_m, "LiveDisplacementBps", "live_displacement_bps")
+
+        if intra_disp_bps is None and intra_s5_bars and last_close > 0:
+            s5_latest_c = float(intra_s5_bars[-1].get("close", last_close))
+            if s5_latest_c > 0:
+                intra_disp_bps = (s5_latest_c - last_close) / last_close * 10000.0
+
+        intra_z = 0.0
+        intra_s5_cpos_centered = 0.0
+        if intra_disp_bps is not None and math.isfinite(intra_disp_bps):
+            intra_z = float(np.clip(intra_disp_bps / atr5_val, -3.0, 3.0))
+        if intra_s5_bars:
+            m_last = intra_s5_bars[-1]
+            m_h = float(m_last.get("high", 0.0))
+            m_l = float(m_last.get("low", 0.0))
+            m_c = float(m_last.get("close", 0.0))
+            m_rng = m_h - m_l
+            if m_rng > 1e-12:
+                intra_s5_cpos_centered = float(np.clip(((m_c - m_l) / m_rng - 0.5) * 2.0, -1.0, 1.0))
+
+        if not (weekend_otc or rollover_otc) and (abs(intra_z) > 0.02 or abs(intra_s5_cpos_centered) > 0.02):
+            # Antisymmetric intra-bar pullback / entry-displacement adjustment (preserves exact P -> -P symmetry)
+            intra_adj = float(np.clip(-0.0040 * intra_z - 0.0020 * intra_s5_cpos_centered, -0.012, 0.012))
+            p_raw_up = float(np.clip(p_raw_up + intra_adj, 0.01, 0.99))
+
         # Calibrate directional strength monotonically via OOF isotonic curve
         raw_dir_strength = max(p_raw_up, 1.0 - p_raw_up)
         iso_x = self.arrays[f"{canon}_iso_x"]
@@ -986,6 +1030,8 @@ class SubminuteQuantPredictor:
         micro_start = len(CORE_FEATURES) + len(REGIME_FEATURES) + len(BASKET_FEATURES)
         if INTERVAL_SECONDS[canon] > 5 and np.isfinite(feat[micro_start]):
             top_features.append(f"micro_last_r:{feat[micro_start]:+.2f}")
+        if abs(intra_z) > 0.02 or intra_s5_bars:
+            top_features.append(f"intra_z:{intra_z:+.2f}(n5={len(intra_s5_bars)})")
         basket_idx = ALL_FEATURES.index("resid_1m")
         basket_active = bool(np.isfinite(feat[basket_idx]))
         if basket_active:

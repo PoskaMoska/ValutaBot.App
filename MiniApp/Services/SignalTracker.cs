@@ -110,6 +110,7 @@ public static class SignalTracker
             SourceDirections = sourceDirections ?? new Dictionary<string, string>(),
             Probability = probability,
             TaScore = taScore,
+            OfScore = ofDeltaRatio,
             SmcScore = smcScore,
             MlProb = mlProb,
             MlScore = mlScore,
