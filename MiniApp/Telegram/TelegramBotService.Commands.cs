@@ -18,7 +18,9 @@ public partial class TelegramBotService
             await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.AddAllUserAsync(chatId);
 
             string cleanText = text.Trim();
-            string command = cleanText.Split(' ')[0].Replace("@valutaPocket_bot", "").ToLower();
+            string rawCmd = cleanText.Split(' ')[0];
+            int atIdx = rawCmd.IndexOf('@');
+            string command = (atIdx >= 0 ? rawCmd[..atIdx] : rawCmd).ToLowerInvariant();
 
             bool isAdmin = await ValutaBot.App.MiniApp.Data.Repositories.UserRepository.IsAdminAsync(chatId);
 
@@ -77,14 +79,10 @@ public partial class TelegramBotService
         return $"{baseUrl}{separator}custom_user_id={chatId}&custom_user_sign={sign}&auth_date={authDate}";
     }
 
-    internal static async Task SendUserWelcome(string token, long chatId, string webAppUrl)
+    internal static object BuildUserReplyKeyboard(string token, long chatId, string webAppUrl)
     {
-        _ = ResetChatMenuButton(token, chatId);
         string customUrl = GetCustomWebAppUrl(webAppUrl, chatId, token);
-
-        string text = "✅ <b>Доступ открыт!</b>\n\nИспользуйте кнопку <b>📊 Открыть TradeAI</b> в меню внизу чата, чтобы запустить анализатор.";
-
-        var keyboard = new
+        return new
         {
             keyboard = new object[]
             {
@@ -100,18 +98,12 @@ public partial class TelegramBotService
             resize_keyboard = true,
             is_persistent = true
         };
-
-        await SendMessageWithKeyboard(token, chatId, text, keyboard);
     }
 
-    internal static async Task SendAdminWelcome(string token, long chatId, string webAppUrl)
+    internal static object BuildAdminReplyKeyboard(string token, long chatId, string webAppUrl)
     {
-        _ = ResetChatMenuButton(token, chatId);
         string customUrl = GetCustomWebAppUrl(webAppUrl, chatId, token);
-
-        string text = "👑 <b>Панель администратора TradeAI</b>";
-
-        var keyboard = new
+        return new
         {
             keyboard = new object[]
             {
@@ -124,13 +116,24 @@ public partial class TelegramBotService
                     new { text = "👥 Всего юзеров" },
                     new { text = "👑 Добавить админа" },
                     new { text = "🚫 Удалить доступ" }
-                },
-
+                }
             },
             resize_keyboard = true
         };
+    }
 
-        await SendMessageWithKeyboard(token, chatId, text, keyboard);
+    internal static async Task SendUserWelcome(string token, long chatId, string webAppUrl)
+    {
+        _ = ResetChatMenuButton(token, chatId);
+        string text = "✅ <b>Доступ открыт!</b>\n\nИспользуйте кнопку <b>📊 Открыть TradeAI</b> в меню внизу чата, чтобы запустить анализатор.";
+        await SendMessageWithKeyboard(token, chatId, text, BuildUserReplyKeyboard(token, chatId, webAppUrl));
+    }
+
+    internal static async Task SendAdminWelcome(string token, long chatId, string webAppUrl)
+    {
+        _ = ResetChatMenuButton(token, chatId);
+        string text = "👑 <b>Панель администратора TradeAI</b>";
+        await SendMessageWithKeyboard(token, chatId, text, BuildAdminReplyKeyboard(token, chatId, webAppUrl));
     }
 
     public static async Task AutoApproveUser(long chatId)

@@ -112,11 +112,17 @@ assert(window.location.search.includes('custom_user_id'), "Initial URL has query
 window.clearExpiredAuthParams();
 assert(!window.location.search.includes('custom_user_id') && !window.location.search.includes('auth_date'), "clearExpiredAuthParams purges stale auth params from URL");
 
-// 5. Auth Error Rendering includes seamless refresh button
+// 5. Auth Error Rendering includes seamless refresh button & distinguishes Access Denied
 window.renderError("Unauthorized (HTTP 401)");
 const errBox = window.document.getElementById('errorDisplay');
 assert(errBox.innerHTML.includes('btnRefreshSession'), "renderError renders seamless session refresh button on 401");
 assert(errBox.innerHTML.includes('Сессия авторизации устарела'), "renderError displays seamless auth renewal text instead of telling user to exit to bot");
+
+// Access Denied must NOT be masked as session expired or show btnRefreshSession
+window.renderError("Access Denied: Pocket Option registration and deposit required (HTTP 401)", "debug", { code: 'ACCESS_DENIED', botUsername: 'TradeBE_bot' });
+assert(errBox.innerHTML.includes('Доступ ограничен'), "renderError displays Доступ ограничен for ACCESS_DENIED instead of session expired");
+assert(!errBox.innerHTML.includes('btnRefreshSession'), "renderError does not render btnRefreshSession for ACCESS_DENIED");
+assert(errBox.innerHTML.includes('btnOpenBot'), "renderError renders btnOpenBot when botUsername is present on ACCESS_DENIED");
 
 // 6. Dynamic Auth Header reflects active Telegram WebApp
 const authHdr = window.getAuthHeader();
@@ -246,6 +252,45 @@ assert(window.getCandleBoundaryWaitMs('m1', 30000) === 0, "getCandleBoundaryWait
     window.cancelAnalysis();
     await new Promise(r => setTimeout(r, 650));
     assert(analyzeCalls === beforeCancel, "cancelAnalysis cancels pending green-zone boundary wait cleanly");
+
+    // 10. btnRefreshSession calls POST /api/auth/session cleanly (no blind location.reload loop)
+    let sessionRefreshCalls = 0;
+    let refreshedCallbackCount = 0;
+    let openedBotLinks = [];
+    window.onSessionRefreshed = () => { refreshedCallbackCount++; };
+    window.Telegram.WebApp.openTelegramLink = (u) => openedBotLinks.push(u);
+    window.Telegram.WebApp.close = () => {};
+
+    // Case A: server restores session via HttpOnly cookie or fresh initData -> hides error banner in-place
+    window.fetch = async (url, opts) => {
+        if (String(url).includes('/api/auth/session') && opts && opts.method === 'POST') {
+            sessionRefreshCalls++;
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({ authenticated: true, userId: 123, code: 'OK', botUsername: 'TradeBE_bot' })
+            };
+        }
+        return { ok: true, headers: { get: () => 'application/json' }, text: async () => '{}' };
+    };
+    window.renderError("Unauthorized (HTTP 401)");
+    const refreshBtnOk = window.document.getElementById('btnRefreshSession');
+    await refreshBtnOk.onclick();
+    assert(sessionRefreshCalls === 1 && refreshedCallbackCount === 1, "btnRefreshSession calls POST /api/auth/session and triggers onSessionRefreshed on 200 OK");
+    assert(window.document.getElementById('errorDisplay').style.display === 'none', "btnRefreshSession hides error panel when session is restored");
+
+    // Case B: server returns 401 TOKEN_EXPIRED -> switches button to bot re-auth deep link instead of reload loop
+    window.fetch = async () => ({
+        ok: false,
+        status: 401,
+        json: async () => ({ authenticated: false, code: 'TOKEN_EXPIRED', error: 'Custom authorization token expired', botUsername: 'TradeBE_bot' })
+    });
+    window.renderError("Custom authorization token expired (HTTP 401)");
+    const refreshBtnExp = window.document.getElementById('btnRefreshSession');
+    await refreshBtnExp.onclick();
+    assert(refreshBtnExp.innerText.includes('Обновить вход через бота'), "btnRefreshSession upgrades to Telegram bot deep-link when token is genuinely expired >24h");
+    refreshBtnExp.onclick();
+    assert(openedBotLinks.length === 1 && openedBotLinks[0] === 'https://t.me/TradeBE_bot?start=refresh', "Bot re-auth button opens t.me/<bot>?start=refresh deep link");
 
     console.log("=======================================================");
     console.log(`AUDIT 7 TESTS: ${total} | PASSED: ${passed} | FAILED: ${total - passed}`);

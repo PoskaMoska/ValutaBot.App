@@ -8,14 +8,27 @@ using System.Web;
 
 namespace ValutaBot.MiniApp;
 
+public enum TelegramInitDataValidationStatus
+{
+    Valid,
+    MissingOrEmpty,
+    Expired,
+    InvalidSignature
+}
+
 public static class TelegramInitDataValidator
 {
     public static bool Validate(string initData, string botToken, out long userId, out string? username)
     {
+        return ValidateDetailed(initData, botToken, out userId, out username) == TelegramInitDataValidationStatus.Valid;
+    }
+
+    public static TelegramInitDataValidationStatus ValidateDetailed(string initData, string botToken, out long userId, out string? username)
+    {
         userId = 0;
         username = null;
 
-        if (string.IsNullOrEmpty(initData)) return false;
+        if (string.IsNullOrEmpty(initData)) return TelegramInitDataValidationStatus.MissingOrEmpty;
 
         try
         {
@@ -29,7 +42,7 @@ public static class TelegramInitDataValidator
             // matching Telegram's WebApp data_check_string specification.
             var parsed = HttpUtility.ParseQueryString(initData);
             string? hash = parsed["hash"];
-            if (string.IsNullOrEmpty(hash)) return false;
+            if (string.IsNullOrEmpty(hash)) return TelegramInitDataValidationStatus.InvalidSignature;
 
             var sortedParams = parsed.AllKeys
                 .Where(k => k != "hash" && k != null)
@@ -53,14 +66,14 @@ public static class TelegramInitDataValidator
             catch
             {
                 Console.WriteLine("[InitData] Hash is not valid hex.");
-                return false;
+                return TelegramInitDataValidationStatus.InvalidSignature;
             }
 
             if (providedHashBytes.Length != expectedHashBytes.Length ||
                 !CryptographicOperations.FixedTimeEquals(providedHashBytes, expectedHashBytes))
             {
                 Console.WriteLine("[InitData] Hash mismatch detected for initData authorization.");
-                return false;
+                return TelegramInitDataValidationStatus.InvalidSignature;
             }
 
             // Extract user information (mandatory)
@@ -68,7 +81,7 @@ public static class TelegramInitDataValidator
             if (string.IsNullOrEmpty(userJson))
             {
                 Console.WriteLine("[InitData] Missing 'user' payload.");
-                return false;
+                return TelegramInitDataValidationStatus.InvalidSignature;
             }
 
             using (var doc = JsonDocument.Parse(userJson))
@@ -86,15 +99,15 @@ public static class TelegramInitDataValidator
             if (userId <= 0)
             {
                 Console.WriteLine("[InitData] User ID is missing or invalid (non-positive).");
-                return false;
+                return TelegramInitDataValidationStatus.InvalidSignature;
             }
 
-            // Check auth_date expiration
+            // Check auth_date expiration ONLY after cryptographic HMAC and user payload succeeded
             string? authDateStr = parsed["auth_date"];
             if (!long.TryParse(authDateStr, out long authDate))
             {
                 Console.WriteLine("[InitData] Missing or invalid auth_date.");
-                return false;
+                return TelegramInitDataValidationStatus.InvalidSignature;
             }
 
             var authTime = DateTimeOffset.FromUnixTimeSeconds(authDate).UtcDateTime;
@@ -103,15 +116,15 @@ public static class TelegramInitDataValidator
             if (authTime > now.AddSeconds(60) || (now - authTime).TotalHours > 24)
             {
                 Console.WriteLine($"[InitData] Session expired or invalid time: authTime={authTime:O}, current={now:O}");
-                return false;
+                return TelegramInitDataValidationStatus.Expired;
             }
 
-            return true;
+            return TelegramInitDataValidationStatus.Valid;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[InitData] Validation exception: {ex.Message}");
-            return false;
+            return TelegramInitDataValidationStatus.InvalidSignature;
         }
     }
 

@@ -153,3 +153,24 @@ export function setCircuitBreakerState(active) {
     isCircuitBreakerActive = Boolean(active);
 }
 
+// Auth Session Metadata (shared cleanly via state DAG root)
+export let sessionMeta = {
+    authenticated: false,
+    code: '',
+    botUsername: '',
+    lastAuthError: '',
+    shouldRetryAnalysisOnRefresh: false
+};
+export function setSessionMeta(patch) {
+    if (!patch || typeof patch !== 'object') return sessionMeta;
+    sessionMeta = Object.assign({}, sessionMeta, patch);
+    if (typeof window !== 'undefined') window.__valutabotSessionMeta = sessionMeta;
+    return sessionMeta;
+}
+export function getSessionMeta() {
+    if (typeof window !== 'undefined' && window.__valutabotSessionMeta) {
+        return window.__valutabotSessionMeta;
+    }
+    return sessionMeta;
+}
+

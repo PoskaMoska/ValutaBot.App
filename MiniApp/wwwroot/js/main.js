@@ -1,7 +1,7 @@
-import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261120_noliveprice';
-import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, setNetworkOnlineState, clearExpiredAuthParams, getTfSeconds, getTrafficLightThresholds } from './state.js?v=20261120_noliveprice';
+import { initPriceWebSocket, closePriceWebSocket, handleWakeupReconnect, resetWebSocketBackoff, syncTime, syncSession, executeAnalysis, cancelAnalysis, resetSignalKey } from './api.js?v=20261122_authfix';
+import { tg, getCustomInitData, currentAsset, currentTf, setCurrentAsset, setCurrentTf, timeOffset, setNetworkOnlineState, clearExpiredAuthParams, getTfSeconds, getTrafficLightThresholds, getSessionMeta, setSessionMeta } from './state.js?v=20261122_authfix';
 export { tg, getCustomInitData, currentAsset, currentTf };
-import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261120_noliveprice';
+import { switchResultTab, updateTrafficLight, showNetworkBanner, hideNetworkBanner, renderError, updateCanvasDimensions, hapticImpact, hapticSelection } from './ui.js?v=20261122_authfix';
 
 // 1. Telegram WebApp Lifecycle, Viewport & Theme Synchronization
 const syncViewport = () => {
@@ -389,6 +389,7 @@ function resumeLive() {
         if (document.hidden) return;
         hideNetworkBanner();
         resetWebSocketBackoff();
+        syncSession();
         syncTime().finally(updateCountdown);
         updateCountdown();
         // Защита от дублирующего соединения: если реконнект пробуждения сработал, второй вызов опускается
@@ -396,6 +397,20 @@ function resumeLive() {
             initPriceWebSocket();
         }
     }, 150);
+}
+
+if (typeof window !== 'undefined') {
+    window.onSessionRefreshed = () => {
+        resetWebSocketBackoff();
+        initPriceWebSocket();
+        const meta = typeof getSessionMeta === 'function' ? getSessionMeta() : null;
+        if (meta && meta.shouldRetryAnalysisOnRefresh) {
+            if (typeof setSessionMeta === 'function') {
+                setSessionMeta({ shouldRetryAnalysisOnRefresh: false });
+            }
+            executeAnalysis();
+        }
+    };
 }
 
 // Banner tap recovery
@@ -409,7 +424,9 @@ if (netAlertEl) {
 }
 
 syncTime().finally(updateCountdown);
-initPriceWebSocket();
+syncSession().finally(() => {
+    initPriceWebSocket();
+});
 setInterval(() => {
     if (!document.hidden && navigator.onLine) {
         syncTime();

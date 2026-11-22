@@ -24,6 +24,37 @@ public partial class TelegramBotService : BackgroundService
 
     private static readonly IMemoryCache UserLastActivity = new MemoryCache(new MemoryCacheOptions());
     private static string _webAppUrl = "https://chowder-dreamland-spotlight.ngrok-free.dev";
+    private static volatile string? _botUsername;
+
+    public static string? GetBotUsername()
+    {
+        if (!string.IsNullOrWhiteSpace(_botUsername))
+            return _botUsername;
+
+        string? envName = Environment.GetEnvironmentVariable("TELEGRAM_BOT_USERNAME");
+        return string.IsNullOrWhiteSpace(envName) ? null : envName.Trim().TrimStart('@');
+    }
+
+    internal static async Task WarmBotUsernameAsync(string token, CancellationToken ct = default)
+    {
+        if (!string.IsNullOrWhiteSpace(GetBotUsername()) || string.IsNullOrWhiteSpace(token))
+            return;
+
+        try
+        {
+            var client = TelegramNotifier.GetBotClient() ?? new TelegramBotClient(token);
+            var me = await client.GetMeAsync(ct);
+            if (!string.IsNullOrWhiteSpace(me.Username))
+            {
+                _botUsername = me.Username.Trim().TrimStart('@');
+                BotLogger.Info($"[TG Bot] Cached bot username: @{_botUsername}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[TG Bot] Non-fatal GetMeAsync username lookup failed: {ex.Message}");
+        }
+    }
 
     private static long _tgBlockedUntilTicks = 0;
     private static readonly ConcurrentDictionary<long, long> _lastOutboundTicksPerChat = new();
@@ -307,6 +338,8 @@ public partial class TelegramBotService : BackgroundService
         }
 
         Console.WriteLine($"[TG Bot] Service initialized. WebApp URL: {_webAppUrl}");
+
+        _ = WarmBotUsernameAsync(token, stoppingToken);
 
         try { await ValutaBot.App.MiniApp.Data.DbConnectionFactory.InitializeAsync(); } catch (Exception dbEx) { BotLogger.Warn($"[TG Bot] Startup DB init warning: {dbEx.Message}"); }
 

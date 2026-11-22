@@ -13,8 +13,61 @@ import {
     setCircuitBreakerState,
     isNetworkOnline,
     setNetworkOnlineState,
-    getCandleBoundaryWaitMs
-} from './state.js?v=20261120_noliveprice';
+    getCandleBoundaryWaitMs,
+    setSessionMeta,
+    getSessionMeta
+} from './state.js?v=20261122_authfix';
+
+function updateSessionMetaSafe(patch) {
+    try {
+        if (typeof setSessionMeta === 'function') return setSessionMeta(patch);
+    } catch (_) {}
+    if (typeof window !== 'undefined') {
+        window.__valutabotSessionMeta = Object.assign({}, window.__valutabotSessionMeta || {}, patch || {});
+        return window.__valutabotSessionMeta;
+    }
+    return patch || {};
+}
+
+export async function syncSession(timeoutMs = 3500) {
+    if (!checkNetworkOnline() || typeof fetch !== 'function') return null;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+        const res = await fetch('/api/auth/session', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'X-Telegram-Init-Data': resolveAuthData()
+            },
+            signal: controller ? controller.signal : undefined
+        });
+        let payload = null;
+        try { payload = await res.json(); } catch (_) {}
+        if (res.ok && payload && payload.authenticated) {
+            updateSessionMetaSafe({
+                authenticated: true,
+                code: 'OK',
+                botUsername: payload.botUsername || '',
+                lastAuthError: ''
+            });
+            return payload;
+        }
+        if (payload && (payload.code || payload.botUsername || payload.error)) {
+            updateSessionMetaSafe({
+                authenticated: false,
+                code: payload.code || `HTTP_${res.status}`,
+                botUsername: payload.botUsername || '',
+                lastAuthError: payload.error || ''
+            });
+        }
+        return payload;
+    } catch (_) {
+        return null;
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+    }
+}
 
 function resolveAuthData() {
     try {
@@ -78,7 +131,7 @@ import {
     hapticImpact,
     hapticNotification,
     hapticSelection
-} from './ui.js?v=20261120_noliveprice';
+} from './ui.js?v=20261122_authfix';
 
 // Tracks the last signal to detect unchanged results
 let lastSignalKey = null; // format: "ASSET_TF_DIRECTION_PROB"
@@ -355,6 +408,7 @@ export async function syncTime() {
         const w0 = Date.now();
         try {
             const r = await fetch('/api/time', {
+                credentials: 'same-origin',
                 headers: { 'X-Telegram-Init-Data': resolveAuthData() },
                 signal: controller.signal
             });
@@ -430,6 +484,7 @@ export async function executeAnalysis() {
 
     // Fetch early OHLC for the animated chart during the analysis phase
     fetch(`/api/chart-ohlc?asset=${encodeURIComponent(requestedAsset)}&timeframe=${encodeURIComponent(requestedTf)}`, {
+        credentials: 'same-origin',
         headers: {
             'X-Telegram-Init-Data': resolveAuthData()
         },
@@ -485,6 +540,7 @@ export async function executeAnalysis() {
 
     try {
         const res = await fetch(`/api/analyze?asset=${encodeURIComponent(requestedAsset)}&timeframe=${encodeURIComponent(requestedTf)}&_=${Date.now()}`, {
+            credentials: 'same-origin',
             headers: {
                 'X-Telegram-Init-Data': resolveAuthData()
             },
@@ -493,6 +549,8 @@ export async function executeAnalysis() {
 
         if (!res.ok) {
             let errorText = `HTTP_${res.status}: ${res.statusText || 'Error'}`;
+            let errCode = `HTTP_${res.status}`;
+            let errBotUsername = '';
             try {
                 let errData = null;
                 if (typeof res.text === 'function') {
@@ -500,6 +558,8 @@ export async function executeAnalysis() {
                 } else if (typeof res.json === 'function') {
                     errData = await res.json();
                 }
+                if (errData && errData.code) errCode = String(errData.code);
+                if (errData && errData.botUsername) errBotUsername = String(errData.botUsername);
                 if (errData && errData.error) errorText = `${errData.error} (HTTP ${res.status})`;
                 else if (errData && errData.detail) errorText = `${errData.detail} (HTTP ${res.status})`;
                 else if (errData && errData.title) errorText = `${errData.title} (HTTP ${res.status})`;
@@ -514,7 +574,11 @@ export async function executeAnalysis() {
                     errorText = 'Too many requests (HTTP 429)';
                 }
             }
-            throw new Error(errorText);
+            const err = new Error(errorText);
+            err.status = res.status;
+            err.code = errCode;
+            err.botUsername = errBotUsername;
+            throw err;
         }
 
         const contentType = (res.headers && typeof res.headers.get === 'function')
@@ -935,32 +999,64 @@ export async function executeAnalysis() {
             return;
         }
 
-        const isAuthError = Boolean(e && e.message && (e.message.includes('HTTP 401') || e.message.includes('HTTP_401') || e.message.includes('auth_date') || e.message.includes('authorization') || e.message.includes('Access Denied')));
+        const rawMsg = e && e.message ? String(e.message) : '';
+        const errCode = e && e.code ? String(e.code) : '';
+        const errBotUsername = e && e.botUsername ? String(e.botUsername) : '';
+        const isAccessDenied = Boolean(
+            errCode === 'ACCESS_DENIED' ||
+            /access denied|deposit required/i.test(rawMsg)
+        );
+        const isAuthError = !isAccessDenied && Boolean(
+            (e && e.status === 401) ||
+            errCode === 'TOKEN_EXPIRED' ||
+            errCode === 'TOKEN_MISSING' ||
+            errCode === 'INVALID_SIGNATURE' ||
+            /HTTP 401|HTTP_401|auth_date|expired|unauthorized|authorization|signature/i.test(rawMsg)
+        );
         const isNetworkErr = (!checkNetworkOnline()) || 
             (e instanceof TypeError && (
-                e.message.includes('fetch') || 
-                e.message.includes('NetworkError') || 
-                e.message.includes('Failed to fetch') || 
-                e.message.includes('Load failed') ||
-                e.message.includes('Network request failed')
+                rawMsg.includes('fetch') || 
+                rawMsg.includes('NetworkError') || 
+                rawMsg.includes('Failed to fetch') || 
+                rawMsg.includes('Load failed') ||
+                rawMsg.includes('Network request failed')
             ));
+
+        if (isAuthError || isAccessDenied) {
+            updateSessionMetaSafe({
+                authenticated: false,
+                code: errCode || (isAccessDenied ? 'ACCESS_DENIED' : 'UNAUTHORIZED'),
+                botUsername: errBotUsername || ((typeof getSessionMeta === 'function' ? getSessionMeta().botUsername : '') || ''),
+                lastAuthError: rawMsg,
+                shouldRetryAnalysisOnRefresh: isAuthError
+            });
+        }
+
         let errorMsg;
         if (isNetworkErr) {
             updateNetworkOnline(false);
             errorMsg = 'Сетевая ошибка: проверьте интернет-соединение или доступ к серверу';
             showNetworkBanner('Нет интернет-соединения. Нажмите для повтора');
             hapticNotification('error');
+        } else if (isAccessDenied) {
+            errorMsg = rawMsg || 'Access Denied: Pocket Option registration and deposit required';
+            hapticNotification('error');
         } else if (isAuthError) {
-            clearExpiredAuthParams();
+            // Only purge stale custom_user_id params after recording diagnostics when they actually expired
+            if ((errCode === 'TOKEN_EXPIRED' || rawMsg.includes('Custom authorization token expired')) && typeof clearExpiredAuthParams === 'function') {
+                clearExpiredAuthParams();
+            }
             errorMsg = 'Сессия авторизации устарела. Нажмите «Обновить сессию» для мгновенного восстановления без выхода из приложения.';
             hapticNotification('warning');
         } else {
-            errorMsg = e.message || 'Ошибка обработки анализа';
+            errorMsg = rawMsg || 'Ошибка обработки анализа';
             hapticNotification('error');
         }
         const safeLoc = getSafeLocationUrl();
-        const catchMsg = `• Длина токена: ${tg && tg.initData ? tg.initData.length : 0}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${safeLoc}`;
-        renderError(errorMsg, catchMsg);
+        const hdrLen = resolveAuthData().length;
+        const initLen = (tg && tg.initData) ? tg.initData.length : 0;
+        const catchMsg = `• Причина: ${rawMsg || 'N/A'}\n• Код: ${errCode || (e && e.status ? `HTTP_${e.status}` : 'N/A')}\n• Токен (initData/header): ${initLen}/${hdrLen}\n• Платформа: ${tg ? tg.platform : 'unknown'}\n• Адрес: ${safeLoc}`;
+        renderError(errorMsg, catchMsg, (isAuthError || isAccessDenied) ? { code: errCode || (isAccessDenied ? 'ACCESS_DENIED' : 'UNAUTHORIZED'), botUsername: errBotUsername } : null);
         
         if (window.Sentry && !isAuthError) {
             Sentry.captureException(e, {

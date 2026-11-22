@@ -262,7 +262,8 @@ public static partial class MiniAppController
                            host == "127.0.0.1";
                 })
                 .WithMethods("GET", "POST", "OPTIONS")
-                .WithHeaders("X-Telegram-Init-Data", "Content-Type", "Accept"));
+                .WithHeaders("X-Telegram-Init-Data", "Content-Type", "Accept")
+                .AllowCredentials());
         });
         builder.Services.AddHostedService<TelegramBotService>();
         // FIX #6: Verification of pending trades

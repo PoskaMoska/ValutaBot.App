@@ -16,7 +16,18 @@ namespace ValutaBot.App.MiniApp.Telegram.Commands
                                "1. Нажмите кнопку <b>📊 Открыть TradeAI</b> внизу экрана.\n" +
                                "2. Выберите интересующую валютную пару и таймфрейм.\n" +
                                "3. Бот проанализирует рынок по техническим индикаторам, объемам и выдаст точный прогноз (BUY/PUT) с процентом уверенности.";
-            await TelegramBotService.SendMessage(token, chatId, helpText);
+            if (isAdmin)
+            {
+                await TelegramBotService.SendMessageWithKeyboard(token, chatId, helpText, TelegramBotService.BuildAdminReplyKeyboard(token, chatId, webAppUrl));
+            }
+            else if (await TelegramBotService.IsUserAllowed(chatId))
+            {
+                await TelegramBotService.SendMessageWithKeyboard(token, chatId, helpText, TelegramBotService.BuildUserReplyKeyboard(token, chatId, webAppUrl));
+            }
+            else
+            {
+                await TelegramBotService.SendMessage(token, chatId, helpText);
+            }
         }
     }
 }

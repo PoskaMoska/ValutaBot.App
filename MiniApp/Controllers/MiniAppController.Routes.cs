@@ -46,7 +46,8 @@ public static partial class MiniAppController
         app.MapGet("/", async (HttpContext context) =>
         {
             context.Response.ContentType = "text/html; charset=utf-8";
-            
+            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+
             bool isNgrok = (context.Request.Host.Value ?? "").Contains("ngrok", StringComparison.OrdinalIgnoreCase);
             if (isNgrok &&
                 !context.Request.Headers.ContainsKey("ngrok-skip-browser-warning") &&
@@ -62,8 +63,31 @@ public static partial class MiniAppController
                 await context.Response.WriteAsync(bypassScript);
                 return;
             }
+
+            try { await AuthService.TryIssueSessionCookieFromQueryAsync(context); } catch { }
             await context.Response.SendFileAsync(System.IO.Path.Combine(app.Environment.WebRootPath, "index.html"));
         });
+
+        app.MapPost("/api/auth/session", async Task<IResult> (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+            var auth = await AuthService.IsRequestAuthorizedDetailed(context);
+            string? botUsername = TelegramBotService.GetBotUsername();
+
+            if (!auth.IsAuthorized)
+            {
+                return UnauthorizedAuthResponse(auth, botUsername);
+            }
+
+            AuthService.EnsureSessionCookieIfNeeded(context, auth);
+            return Results.Json(new
+            {
+                authenticated = true,
+                userId = auth.UserId,
+                code = "OK",
+                botUsername
+            });
+        }).RequireRateLimiting("Global");
 
         // /api/time for clock-drift compensation (synchronized with Pocket Option broker clock when active)
         app.MapGet("/api/time", (HttpContext context) =>
@@ -165,10 +189,11 @@ public static partial class MiniAppController
         app.MapGet("/api/fear-greed", async Task<IResult> (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
+            var auth = await AuthService.IsRequestAuthorizedDetailed(context);
+            if (!auth.IsAuthorized)
+                return UnauthorizedAuthResponse(auth);
 
+            AuthService.EnsureSessionCookieIfNeeded(context, auth);
             var fng = await GetFearGreedIndex();
             return Results.Json(fng);
         }).RequireRateLimiting("Global");
@@ -233,9 +258,11 @@ public static partial class MiniAppController
         app.MapGet("/api/analyze", async Task<IResult> (HttpContext context, string? asset, string? timeframe, double? payout) =>
         {
             context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
+            var auth = await AuthService.IsRequestAuthorizedDetailed(context);
+            if (!auth.IsAuthorized)
+                return UnauthorizedAuthResponse(auth);
+
+            AuthService.EnsureSessionCookieIfNeeded(context, auth);
 
             if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(timeframe))
                 return Results.Json(new { error = "asset and timeframe are required" }, statusCode: StatusCodes.Status400BadRequest);
@@ -326,9 +353,11 @@ public static partial class MiniAppController
 
         app.MapGet("/api/chart-ohlc", async Task<IResult> (HttpContext context, string? asset, string? timeframe, ValutaBot.MiniApp.MarketDataFetcher fetcher) =>
         {
-            var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-            if (!isAuthorized)
-                return Results.Json(new { error = authError }, statusCode: 401);
+            var auth = await AuthService.IsRequestAuthorizedDetailed(context);
+            if (!auth.IsAuthorized)
+                return UnauthorizedAuthResponse(auth);
+
+            AuthService.EnsureSessionCookieIfNeeded(context, auth);
 
             if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(timeframe))
                 return Results.Json(Array.Empty<OhlcCandle>());
@@ -787,6 +816,17 @@ public static partial class MiniAppController
     }
 
     #endregion
+
+    private static IResult UnauthorizedAuthResponse(AuthResult auth, string? cachedBotUsername = null)
+    {
+        return Results.Json(new
+        {
+            authenticated = false,
+            error = auth.ErrorMessage,
+            code = AuthService.FailureCodeToApiString(auth.Code),
+            botUsername = cachedBotUsername ?? TelegramBotService.GetBotUsername()
+        }, statusCode: StatusCodes.Status401Unauthorized);
+    }
 
     private static IResult SafeErrorResponse(HttpContext ctx, Exception ex, int status = 500)
     {

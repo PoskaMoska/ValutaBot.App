@@ -12,9 +12,11 @@ public static partial class MiniAppController
     {
         ArgumentNullException.ThrowIfNull(context);
         context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-        var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-        if (!isAuthorized)
-            return Results.Json(new { error = authError }, statusCode: 401);
+        var auth = await AuthService.IsRequestAuthorizedDetailed(context);
+        if (!auth.IsAuthorized)
+            return UnauthorizedAuthResponse(auth);
+
+        AuthService.EnsureSessionCookieIfNeeded(context, auth);
 
         var overall = await SignalTracker.GetOverallStatsAsync();
         var allStatsRaw = await SignalTracker.GetAllStatsAsync();
@@ -78,9 +80,11 @@ public static partial class MiniAppController
     {
         ArgumentNullException.ThrowIfNull(context);
         context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
-        var (isAuthorized, authError) = await AuthService.IsRequestAuthorized(context);
-        if (!isAuthorized)
-            return Results.Json(new { error = authError }, statusCode: 401);
+        var auth = await AuthService.IsRequestAuthorizedDetailed(context);
+        if (!auth.IsAuthorized)
+            return UnauthorizedAuthResponse(auth);
+
+        AuthService.EnsureSessionCookieIfNeeded(context, auth);
 
         var overall = await SignalTracker.GetOverallStatsAsync();
         var signals = await SignalTracker.GetSignalStatsAsync();

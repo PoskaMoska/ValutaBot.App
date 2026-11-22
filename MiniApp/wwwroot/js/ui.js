@@ -1,4 +1,4 @@
-import { lastPriceVal } from './state.js?v=20261120_noliveprice';
+import { lastPriceVal, getTg, getAuthHeader, getSessionMeta, setSessionMeta } from './state.js?v=20261122_authfix';
 
 export function hapticImpact(style = 'medium') {
     try {
@@ -379,14 +379,19 @@ function escapeHtml(str) {
         .replace(/'/g, '&#039;');
 }
 
-export function renderError(rawError, debugText) {
+export function renderError(rawError, debugText, authMeta = null) {
     const errDisp = document.getElementById('errorDisplay');
     if (!errDisp) return;
     let title = '⚠️ Ошибка';
     let desc = 'Произошла непредвиденная ошибка при обработке запроса.';
+    const errLower = rawError ? String(rawError).toLowerCase() : '';
+    const isAccessDenied = Boolean(
+        (authMeta && authMeta.code === 'ACCESS_DENIED') ||
+        errLower.includes('access denied') ||
+        errLower.includes('deposit required')
+    );
+
     if (rawError) {
-        const errLower = String(rawError).toLowerCase();
-        
         if (errLower.includes('circuit_breaker') || errLower.includes('предохранитель') || errLower.includes('приостановлен')) {
             title = '⚠️ ТОРГИ ПРИОСТАНОВЛЕНЫ';
             desc = String(rawError).replace(/^circuit_breaker:\s*/i, '') || 
@@ -396,12 +401,12 @@ export function renderError(rawError, debugText) {
             const match = String(rawError).match(/(\d+)s/);
             const sec = match ? ` на ${match[1]} сек.` : '';
             desc = `Слишком частые клики. Пожалуйста, подождите${sec} перед следующим сканированием.`;
-        } else if (errLower.includes('signature') || errLower.includes('initdata') || errLower.includes('unauthorized') || errLower.includes('401') || errLower.includes('403') || errLower.includes('сесси')) {
-            title = '⚠️ Ошибка авторизации';
-            desc = 'Сессия авторизации устарела. Нажмите кнопку ниже для бесшовного обновления сессии без выхода из приложения.';
-        } else if (errLower.includes('access denied') || errLower.includes('deposit required')) {
+        } else if (isAccessDenied) {
             title = '⚠️ Доступ ограничен';
             desc = 'Для использования бота необходима регистрация на Pocket Option и внесение депозита.';
+        } else if (errLower.includes('signature') || errLower.includes('initdata') || errLower.includes('unauthorized') || errLower.includes('expired') || errLower.includes('401') || errLower.includes('403') || errLower.includes('сесси')) {
+            title = '⚠️ Ошибка авторизации';
+            desc = 'Сессия авторизации устарела. Нажмите кнопку ниже для бесшовного обновления сессии без выхода из приложения.';
         } else if (errLower.includes('502') || errLower.includes('503') || errLower.includes('504') || errLower.includes('bad gateway') || errLower.includes('service unavailable') || errLower.includes('недоступен')) {
             title = '⚠️ Сервер перезагружается';
             desc = 'Сервер ValutaBot на Railway обновляется или временно недоступен. Попробуйте через 10–15 секунд.';
@@ -428,10 +433,27 @@ export function renderError(rawError, debugText) {
                 .replace(/internal server error/gi, 'Внутренняя ошибка сервера');
         }
     }
-    const isAuth = rawError && (String(rawError).toLowerCase().includes('401') || String(rawError).toLowerCase().includes('unauthorized') || String(rawError).toLowerCase().includes('сесси') || String(rawError).toLowerCase().includes('signature') || String(rawError).toLowerCase().includes('initdata'));
-    const actionBtnHtml = isAuth 
+
+    const activeMeta = Object.assign(
+        {},
+        (typeof getSessionMeta === 'function' ? getSessionMeta() : (typeof window !== 'undefined' && window.__valutabotSessionMeta ? window.__valutabotSessionMeta : {})),
+        authMeta || {}
+    );
+    const isAuth = !isAccessDenied && Boolean(
+        errLower && (
+            errLower.includes('401') ||
+            errLower.includes('unauthorized') ||
+            errLower.includes('сесси') ||
+            errLower.includes('signature') ||
+            errLower.includes('initdata') ||
+            errLower.includes('expired')
+        )
+    );
+    const actionBtnHtml = isAuth
         ? `<div style="margin-top:10px;"><button class="error-action-btn" id="btnRefreshSession">🔄 Обновить сессию</button></div>`
-        : '';
+        : (isAccessDenied && activeMeta.botUsername
+            ? `<div style="margin-top:10px;"><button class="error-action-btn" id="btnOpenBot">🤖 Перейти в бота</button></div>`
+            : '');
     errDisp.innerHTML = `
         <div class="error-header">${escapeHtml(title)}</div>
         <div class="error-desc">${escapeHtml(desc)}</div>
@@ -440,20 +462,129 @@ export function renderError(rawError, debugText) {
         <div class="error-debug-content" id="errorDebugContent" style="display: none;">${escapeHtml(debugText)}</div>
     `;
     errDisp.style.display = 'block';
+
+    const resolveWebApp = () => {
+        if (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp) return window.Telegram.WebApp;
+        if (typeof getTg === 'function') return getTg();
+        if (typeof window !== 'undefined' && window.tg) return window.tg;
+        return null;
+    };
+
+    const resolveInitHeader = () => {
+        try {
+            if (typeof getAuthHeader === 'function') {
+                const h = getAuthHeader();
+                if (h) return h;
+            }
+        } catch (_) {}
+        const w = resolveWebApp();
+        if (w && w.initData) return w.initData;
+        return '';
+    };
+
+    const openBotChat = (botUser, startParam = '') => {
+        const webApp = resolveWebApp();
+        const suffix = startParam ? `?start=${encodeURIComponent(startParam)}` : '';
+        if (botUser && webApp && typeof webApp.openTelegramLink === 'function') {
+            webApp.openTelegramLink(`https://t.me/${encodeURIComponent(botUser)}${suffix}`);
+            setTimeout(() => {
+                try { if (typeof webApp.close === 'function') webApp.close(); } catch (_) {}
+            }, 150);
+            return true;
+        }
+        if (webApp && typeof webApp.close === 'function') {
+            webApp.close();
+            return true;
+        }
+        return false;
+    };
+
+    if (isAccessDenied) {
+        const botBtn = document.getElementById('btnOpenBot');
+        if (botBtn) {
+            botBtn.onclick = () => {
+                hapticImpact('medium');
+                openBotChat(activeMeta.botUsername || '');
+            };
+        }
+    }
+
     if (isAuth) {
         const refreshBtn = document.getElementById('btnRefreshSession');
         if (refreshBtn) {
-            refreshBtn.onclick = () => {
+            refreshBtn.onclick = async () => {
                 hapticImpact('medium');
                 refreshBtn.disabled = true;
-                refreshBtn.innerText = 'Обновление...';
-                if (typeof window !== 'undefined') {
-                    try {
-                        const url = new URL(window.location.href);
-                        ['custom_user_id', 'custom_user_sign', 'auth_date', 'userId', 'userSign'].forEach(k => url.searchParams.delete(k));
-                        window.history.replaceState({}, document.title, url.toString());
-                    } catch (_) {}
-                    window.location.reload();
+                refreshBtn.innerText = 'Проверка сессии...';
+
+                try {
+                    if (typeof fetch !== 'function') throw new Error('fetch unavailable');
+                    const res = await fetch('/api/auth/session', {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: {
+                            'X-Telegram-Init-Data': resolveInitHeader()
+                        }
+                    });
+                    let payload = null;
+                    try { payload = await res.json(); } catch (_) {}
+
+                    if (res.ok && payload && payload.authenticated) {
+                        if (typeof setSessionMeta === 'function') {
+                            setSessionMeta({
+                                authenticated: true,
+                                code: 'OK',
+                                botUsername: payload.botUsername || activeMeta.botUsername || ''
+                            });
+                        }
+                        hapticNotification('success');
+                        errDisp.style.display = 'none';
+                        if (typeof window !== 'undefined' && typeof window.onSessionRefreshed === 'function') {
+                            window.onSessionRefreshed();
+                        }
+                        return;
+                    }
+
+                    const errCode = payload && payload.code ? payload.code : (activeMeta.code || '');
+                    const botUser = (payload && payload.botUsername) || activeMeta.botUsername || '';
+                    if (typeof setSessionMeta === 'function') {
+                        setSessionMeta({
+                            authenticated: false,
+                            code: errCode,
+                            botUsername: botUser,
+                            lastAuthError: (payload && payload.error) || ''
+                        });
+                    }
+
+                    if (errCode === 'ACCESS_DENIED') {
+                        hapticNotification('error');
+                        renderError('Access Denied: Pocket Option registration and deposit required', debugText, { code: 'ACCESS_DENIED', botUsername: botUser });
+                        return;
+                    }
+
+                    hapticNotification('warning');
+                    const hdrEl = errDisp.querySelector('.error-header');
+                    const descEl = errDisp.querySelector('.error-desc');
+                    if (hdrEl) hdrEl.textContent = '⚠️ Требуется обновить вход в боте';
+                    if (descEl) {
+                        descEl.textContent = 'Токен запуска открыт более 24 часов назад и на этом устройстве нет активной cookie-сессии. Нажмите кнопку ниже чтобы открыть чат с ботом и получить новую кнопку (/start) — далее вход сохранится на 14 дней.';
+                    }
+
+                    const webApp = resolveWebApp();
+                    if ((botUser && webApp && typeof webApp.openTelegramLink === 'function') || (webApp && typeof webApp.close === 'function')) {
+                        refreshBtn.disabled = false;
+                        refreshBtn.innerText = '🤖 Обновить вход через бота';
+                        refreshBtn.onclick = () => {
+                            hapticImpact('medium');
+                            openBotChat(botUser, 'refresh');
+                        };
+                    } else {
+                        refreshBtn.disabled = false;
+                        refreshBtn.innerText = 'Отправьте /start боту в Telegram';
+                    }
+                } catch (_) {
+                    refreshBtn.disabled = false;
+                    refreshBtn.innerText = '🔄 Повторить обновление';
                 }
             };
         }
