@@ -87,3 +87,24 @@ def test_explicit_unsustainable_low_payout_still_enforces_ev_guard():
     res = predictor.predict("EURUSD", "m1", candles, payout=0.50)
     assert res is not None
     assert res[0] == "HOLD"
+
+
+def test_patchtst_active_choppy_market_returns_direction_never_hold():
+    """Active choppy M5 market with normal payout emits BUY/PUT (>=0.51) while frozen flat returns HOLD."""
+    predictor = PatchTSTPredictor.get_instance()
+    predictor.drift_detector = OnlineDriftDetector()
+
+    choppy_m5 = _make_candles(1.1320, 0.000002, noise=0.00006, n=64)
+    res_chop = predictor.predict("EURUSD_PO", "m5", choppy_m5, payout=None)
+    assert res_chop is not None
+    direction, conf, *_ = res_chop
+    assert direction in ("BUY", "PUT"), f"Active M5 market should not collapse to {direction}"
+    assert 0.51 <= conf <= 0.58
+
+    frozen_m5 = [
+        {"open": 1.1320, "high": 1.1320, "low": 1.1320, "close": 1.1320, "volume": 0.0, "time": 1700000000 + i * 300}
+        for i in range(64)
+    ]
+    res_frozen = predictor.predict("EURUSD_PO", "m5", frozen_m5, payout=None)
+    assert res_frozen is not None
+    assert res_frozen[0] == "HOLD"

@@ -706,6 +706,81 @@ namespace ValutaBot.MiniApp
 
         private static readonly ConcurrentDictionary<string, (long TimestampTicks, int Limit, MiniAppController.OhlcCandle[] Candles)> _recentCandlesCache = new(StringComparer.OrdinalIgnoreCase);
 
+        private static MiniAppController.OhlcCandle ParseDbCandleRow(dynamic r, long intervalTicks)
+        {
+            DateTime rawTime = r.OpenTime is string s
+                ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
+                : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
+            DateTime alignedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
+            double crowd = r.CrowdSentiment != null
+                ? Convert.ToDouble(r.CrowdSentiment, System.Globalization.CultureInfo.InvariantCulture)
+                : 50.0;
+
+            return new MiniAppController.OhlcCandle(
+                Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture),
+                Convert.ToDouble(r.High, System.Globalization.CultureInfo.InvariantCulture),
+                Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture),
+                Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture),
+                Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
+                alignedTime,
+                crowd);
+        }
+
+        internal static MiniAppController.OhlcCandle[] MergeDbCandlesWithLive(
+            IEnumerable<MiniAppController.OhlcCandle> dbCandles,
+            IEnumerable<MiniAppController.OhlcCandle> ringTail,
+            MiniAppController.OhlcCandle? liveLastClosed,
+            MiniAppController.OhlcCandle? currentLiveCandle,
+            DateTime? liveOpenTimeUtc,
+            int limit)
+        {
+            if (limit <= 0) return Array.Empty<MiniAppController.OhlcCandle>();
+
+            var byTick = new SortedDictionary<long, MiniAppController.OhlcCandle>();
+            foreach (var c in dbCandles)
+            {
+                byTick.TryAdd(c.Timestamp.ToUniversalTime().Ticks, c);
+            }
+
+            foreach (var c in ringTail)
+            {
+                byTick.TryAdd(c.Timestamp.ToUniversalTime().Ticks, c);
+            }
+
+            if (liveLastClosed != null)
+            {
+                byTick.TryAdd(liveLastClosed.Timestamp.ToUniversalTime().Ticks, liveLastClosed);
+            }
+
+            if (liveOpenTimeUtc.HasValue)
+            {
+                byTick.Remove(liveOpenTimeUtc.Value.ToUniversalTime().Ticks);
+            }
+
+            if (currentLiveCandle != null)
+            {
+                long liveTicks = currentLiveCandle.Timestamp.ToUniversalTime().Ticks;
+                if (byTick.Count == 0 || liveTicks >= byTick.Keys.Last())
+                {
+                    byTick[liveTicks] = currentLiveCandle;
+                }
+            }
+
+            if (byTick.Count == 0) return Array.Empty<MiniAppController.OhlcCandle>();
+
+            int count = Math.Min(limit, byTick.Count);
+            int skip = byTick.Count - count;
+            var result = new MiniAppController.OhlcCandle[count];
+            int idx = 0;
+            int i = 0;
+            foreach (var kv in byTick)
+            {
+                if (i++ < skip) continue;
+                result[idx++] = kv.Value;
+            }
+            return result;
+        }
+
         public static async Task<MiniAppController.OhlcCandle[]> GetRecentCandles(string asset, string interval, int limit)
         {
             string cleanAsset = PriceFeed.CandleKey(asset);
@@ -760,64 +835,114 @@ namespace ValutaBot.MiniApp
                     }
                 }
 
+                bool hasDb = !string.IsNullOrEmpty(ValutaBot.App.MiniApp.Data.DbConnectionFactory.GetConnectionString());
+
                 if (hasRing && ring != null && (ring.Count > 0 || liveCandle != null))
                 {
-                    int closedToTake = liveCandle != null ? limit - 1 : limit;
-                    var closedCandles = ring.GetRecent(closedToTake);
+                    int closedToTake = liveCandle != null ? Math.Max(0, limit - 1) : limit;
+                    var closedCandles = closedToTake > 0
+                        ? ring.GetRecent(closedToTake)
+                        : Array.Empty<MiniAppController.OhlcCandle>();
 
-                    if (liveCandle != null)
+                    // Only serve purely from the 400-bar ring buffer when it satisfies the requested limit
+                    // (or when no PostgreSQL DB is configured, e.g. unit tests / offline mode).
+                    // Larger requests (1,500-14,400 m1 bars for M30/H1/H4) fall through to SQL.
+                    if (!hasDb || closedCandles.Length >= closedToTake)
                     {
-                        if (closedCandles.Length > 0 && closedCandles[^1].Timestamp >= liveCandle.Timestamp)
+                        if (liveCandle != null)
                         {
-                            return closedCandles.Length > limit
-                                ? closedCandles[^limit..]
-                                : closedCandles;
-                        }
+                            if (closedCandles.Length > 0 && closedCandles[^1].Timestamp >= liveCandle.Timestamp)
+                            {
+                                return closedCandles.Length > limit
+                                    ? closedCandles[^limit..]
+                                    : closedCandles;
+                            }
 
-                        var combined = new MiniAppController.OhlcCandle[closedCandles.Length + 1];
-                        Array.Copy(closedCandles, 0, combined, 0, closedCandles.Length);
-                        combined[^1] = liveCandle;
-                        return combined;
+                            var combined = new MiniAppController.OhlcCandle[closedCandles.Length + 1];
+                            Array.Copy(closedCandles, 0, combined, 0, closedCandles.Length);
+                            combined[^1] = liveCandle;
+                            return combined;
+                        }
+                        return closedCandles;
                     }
-                    return closedCandles;
                 }
 
-                if (!hasRing && liveCandle != null)
+                if (!hasDb && !hasRing && liveCandle != null)
                 {
                     return new[] { liveCandle };
                 }
 
+                if (!hasDb)
+                {
+                    return Array.Empty<MiniAppController.OhlcCandle>();
+                }
+
                 await using var conn = await ValutaBot.App.MiniApp.Data.DbConnectionFactory.OpenConnectionAsync();
-                
+                int cmdTimeout = limit > 1000 ? 8 : 4;
+
                 var records = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(@"
                     SELECT open_time as ""OpenTime"", open_price as ""Open"", high_price as ""High"", low_price as ""Low"", close_price as ""Close"", volume as ""Volume"", COALESCE(crowd_sentiment, 50.0) as ""CrowdSentiment""
                     FROM subminute_candles
                     WHERE asset = @Asset AND interval = @Interval
                     ORDER BY open_time DESC
                     LIMIT @Limit;
-                ", new { Asset = cleanAsset, Interval = dbInterval, Limit = limit }, commandTimeout: 4))).ToList();
+                ", new { Asset = cleanAsset, Interval = dbInterval, Limit = limit }, commandTimeout: cmdTimeout))).ToList();
 
-                // Warm up the ring buffer with the loaded historical candles so subsequent queries hit the in-memory fast path
-                if (records.Count > 0)
+                var dbCandles = new List<MiniAppController.OhlcCandle>(records.Count);
+                foreach (var r in records)
+                {
+                    dbCandles.Add(ParseDbCandleRow(r, intervalTicks));
+                }
+
+                // For deeper M30/H1/H4 history on 1min, top up older bars from historical_candles if subminute_candles was pruned.
+                if (dbInterval == "1min" && dbCandles.Count < limit)
+                {
+                    int missingLimit = limit - dbCandles.Count;
+                    string? oldestCutoff = dbCandles.Count > 0
+                        ? dbCandles.Min(c => c.Timestamp).AddMinutes(1).ToString("O")
+                        : null;
+
+                    string histSql = oldestCutoff != null
+                        ? @"
+                            SELECT open_time as ""OpenTime"", open as ""Open"", high as ""High"", low as ""Low"", close as ""Close"", volume as ""Volume"", 50.0 as ""CrowdSentiment""
+                            FROM historical_candles
+                            WHERE asset = @Asset AND interval = '1m' AND open_time < @OldestCutoff
+                            ORDER BY open_time DESC
+                            LIMIT @MissingLimit;"
+                        : @"
+                            SELECT open_time as ""OpenTime"", open as ""Open"", high as ""High"", low as ""Low"", close as ""Close"", volume as ""Volume"", 50.0 as ""CrowdSentiment""
+                            FROM historical_candles
+                            WHERE asset = @Asset AND interval = '1m'
+                            ORDER BY open_time DESC
+                            LIMIT @MissingLimit;";
+
+                    var histRecords = (await Dapper.SqlMapper.QueryAsync(conn, new CommandDefinition(
+                        histSql,
+                        new { Asset = cleanAsset, OldestCutoff = oldestCutoff, MissingLimit = missingLimit + 4 },
+                        commandTimeout: cmdTimeout))).ToList();
+
+                    if (histRecords.Count > 0)
+                    {
+                        var seenTicks = new HashSet<long>(dbCandles.Select(c => c.Timestamp.Ticks));
+                        foreach (var r in histRecords)
+                        {
+                            var hc = ParseDbCandleRow(r, intervalTicks);
+                            if (seenTicks.Add(hc.Timestamp.Ticks))
+                            {
+                                dbCandles.Add(hc);
+                            }
+                        }
+                    }
+                }
+
+                dbCandles.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+
+                // Warm up the 400-bar ring buffer with only the newest tail so future short queries stay in-memory
+                if (dbCandles.Count > 0)
                 {
                     var ringToWarm = _ringBuffers.GetOrAdd(cacheKey, _ => new CandleRingBuffer(400));
-                    var parsedList = records.Select(r =>
-                    {
-                        DateTime rawTime = r.OpenTime is string s
-                            ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
-                            : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
-                        DateTime alignedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
-                        double crowd = r.CrowdSentiment != null ? Convert.ToDouble(r.CrowdSentiment, System.Globalization.CultureInfo.InvariantCulture) : 50.0;
-                        return new MiniAppController.OhlcCandle(
-                            Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture),
-                            Convert.ToDouble(r.High, System.Globalization.CultureInfo.InvariantCulture),
-                            Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture),
-                            Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture),
-                            Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
-                            alignedTime,
-                            crowd);
-                    }).OrderBy(c => c.Timestamp).ToList();
-                    ringToWarm.AddRange(parsedList);
+                    int warmStart = Math.Max(0, dbCandles.Count - 400);
+                    ringToWarm.AddRange(dbCandles.Skip(warmStart));
                 }
 
                 ConcurrentDictionary<string, CandleAccumulator>? targetDict = interval switch
@@ -843,74 +968,8 @@ namespace ValutaBot.MiniApp
                     }
                 }
 
-                MiniAppController.OhlcCandle? missedClosed = null;
-                if (liveOpenTime.HasValue)
-                {
-                    long openTicks = liveOpenTime.Value.Ticks;
-                    records.RemoveAll(r =>
-                    {
-                        DateTime rawTime = r.OpenTime is string s
-                            ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
-                            : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
-                        long alignedTicks = rawTime.Ticks - (rawTime.Ticks % intervalTicks);
-                        return alignedTicks == openTicks;
-                    });
-
-                    if (liveLastClosed != null)
-                    {
-                        long lastClosedTicks = liveLastClosed.Timestamp.ToUniversalTime().Ticks;
-                        bool found = false;
-                        foreach (var r in records)
-                        {
-                            DateTime rawTime = r.OpenTime is string s
-                                ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
-                                : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
-                            long alignedTicks = rawTime.Ticks - (rawTime.Ticks % intervalTicks);
-                            if (alignedTicks == lastClosedTicks) { found = true; break; }
-                        }
-                        if (!found) missedClosed = liveLastClosed;
-                    }
-                }
-
-                int totalCount = records.Count + (currentLiveCandle != null ? 1 : 0) + (missedClosed != null ? 1 : 0);
-                int resultSize = Math.Min(limit, totalCount);
-                var result = new MiniAppController.OhlcCandle[resultSize];
-                
-                int resultIdx = 0;
-                int dbRecordsToTake = Math.Min(records.Count, resultSize - (currentLiveCandle != null ? 1 : 0) - (missedClosed != null ? 1 : 0));
-                
-                for (int i = dbRecordsToTake - 1; i >= 0; i--)
-                {
-                    var r = records[i];
-                    DateTime rawTime = r.OpenTime is string s
-                        ? DateTime.Parse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal)
-                        : Convert.ToDateTime(r.OpenTime, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime();
-                    DateTime parsedTime = new(rawTime.Ticks - (rawTime.Ticks % intervalTicks), DateTimeKind.Utc);
-                    double crowd = r.CrowdSentiment != null ? Convert.ToDouble(r.CrowdSentiment, System.Globalization.CultureInfo.InvariantCulture) : 50.0;
-
-                    result[resultIdx++] = new MiniAppController.OhlcCandle(
-                        Convert.ToDouble(r.Open, System.Globalization.CultureInfo.InvariantCulture), 
-                        Convert.ToDouble(r.High, System.Globalization.CultureInfo.InvariantCulture), 
-                        Convert.ToDouble(r.Low, System.Globalization.CultureInfo.InvariantCulture), 
-                        Convert.ToDouble(r.Close, System.Globalization.CultureInfo.InvariantCulture), 
-                        Convert.ToDouble(r.Volume, System.Globalization.CultureInfo.InvariantCulture),
-                        parsedTime,
-                        crowd);
-                }
-
-                if (missedClosed != null && resultIdx < resultSize)
-                {
-                    result[resultIdx++] = missedClosed;
-                }
-                if (currentLiveCandle != null && resultIdx < resultSize)
-                {
-                    result[resultIdx++] = currentLiveCandle;
-                }
-
-                if (resultIdx < resultSize)
-                {
-                    Array.Resize(ref result, resultIdx);
-                }
+                var ringTail = hasRing && ring != null ? ring.GetRecent(16) : Array.Empty<MiniAppController.OhlcCandle>();
+                var result = MergeDbCandlesWithLive(dbCandles, ringTail, liveLastClosed, currentLiveCandle, liveOpenTime, limit);
 
                 _recentCandlesCache[cacheKey] = (DateTime.UtcNow.Ticks, limit, result);
                 return result;

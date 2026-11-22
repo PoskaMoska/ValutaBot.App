@@ -300,3 +300,35 @@ def test_mirror_symmetry_and_macro_basket_fuzz_safety():
         assert res_roll[1] <= 0.52
         for tf_key in ("s5", "s10", "s15", "s30", "1min"):
             assert float(np.max(predictor.arrays[f"{tf_key}_iso_otc_y"])) <= 0.53
+
+
+def test_weekend_otc_active_candles_preserve_direction_never_neutral():
+    """On active non-flat Sunday OTC candles, tight calibration must NOT erase direction to NEUTRAL."""
+    if not (os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH)):
+        pytest.skip("SubminuteQuant v7 artifacts not present locally")
+
+    predictor = SubminuteQuantPredictor.get_instance()
+    sun_ts = int(datetime(2026, 11, 22, 11, 0, tzinfo=timezone.utc).timestamp())
+
+    for tf_key, dt in (("s5", 5), ("s10", 10), ("s15", 15), ("s30", 30), ("1min", 60)):
+        sun_candles = _synthetic_candles(n=120, dt=dt, base_ts=sun_ts)
+        res = predictor.predict("EURUSD_PO", tf_key, sun_candles)
+        assert res is not None
+        direction, conf, _, _, raw_conf, meta = res
+        assert meta.get("weekend_otc") is True
+        assert direction in ("BUY", "PUT"), f"{tf_key} collapsed active weekend OTC to {direction}"
+        assert 0.51 <= conf <= 0.52, f"{tf_key} conf={conf} outside [0.51, 0.52]"
+        if direction == "BUY":
+            assert raw_conf > 0.50
+        else:
+            assert raw_conf < 0.50
+
+    # Frozen dead-flat Sunday candles must still fail closed to NEUTRAL
+    flat_sun = [
+        {"open": 1.1000, "high": 1.1000, "low": 1.1000, "close": 1.1000, "volume": 1.0, "time": sun_ts + i * 60}
+        for i in range(120)
+    ]
+    res_flat = predictor.predict("EURUSD_PO", "1min", flat_sun)
+    assert res_flat is not None
+    assert res_flat[0] == "NEUTRAL"
+    assert res_flat[1] == pytest.approx(0.50, abs=1e-6)

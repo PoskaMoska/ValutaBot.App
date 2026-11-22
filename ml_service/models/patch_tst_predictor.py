@@ -711,8 +711,14 @@ class PatchTSTPredictor:
             p_buy = float(probs[1])
             p_put = float(probs[2])
 
-            # Preserve HOLD only when HOLD actually wins argmax or directional separation is near zero
-            if p_hold >= max(p_buy, p_put) or dir_margin < 0.02:
+            # Preserve HOLD only when candles are literally frozen dead (zero range)
+            # or when an unsustainable low payout (<80%) fails the EV hurdle below.
+            tail_window = candles[-20:] if len(candles) >= 20 else candles
+            tail_highs = [float(c.get("high", c.get("close", 0.0))) for c in tail_window]
+            tail_lows = [float(c.get("low", c.get("close", 0.0))) for c in tail_window]
+            is_frozen_dead = len(tail_window) == 0 or (max(tail_highs) - min(tail_lows)) <= 1e-9
+
+            if is_frozen_dead:
                 direction = "HOLD"
                 calibrated_prob = 0.50
                 raw_prob = 0.50
@@ -721,7 +727,15 @@ class PatchTSTPredictor:
                 p_buy_cond = p_buy / p_dir_sum
                 p_put_cond = p_put / p_dir_sum
 
-                if p_buy > p_put:
+                if abs(p_buy - p_put) > 1e-6:
+                    is_buy = p_buy > p_put
+                elif abs(float(raw_probs[1]) - float(raw_probs[2])) > 1e-6:
+                    is_buy = float(raw_probs[1]) >= float(raw_probs[2])
+                else:
+                    last_c = candles[-1]
+                    is_buy = float(last_c.get("close", 0.0)) >= float(last_c.get("open", 0.0))
+
+                if is_buy:
                     direction = "BUY"
                     raw_dir_prob = p_buy_cond
                 else:
@@ -735,6 +749,9 @@ class PatchTSTPredictor:
                 chop_penalty = max(0.35, 1.0 - p_hold_raw * 0.65)
                 calibrated_prob = 0.50 + (empirical_edge - 0.50) * chop_penalty
 
+                if p_hold >= max(p_buy, p_put) or dir_margin < 0.02:
+                    calibrated_prob = min(0.53, max(0.51, calibrated_prob))
+
                 # S5 Micro-Regime Dampener:
                 if str(interval).lower() == "s5":
                     calibrated_prob = min(0.59, 0.50 + (calibrated_prob - 0.50) * 0.85)
@@ -745,7 +762,7 @@ class PatchTSTPredictor:
                     calibrated_prob = 0.50
                     raw_prob = 0.50
                 else:
-                    calibrated_prob = max(0.50, min(0.92, round(float(calibrated_prob), 4)))
+                    calibrated_prob = max(0.51, min(0.92, round(float(calibrated_prob), 4)))
                     raw_prob = round(float(p_buy_cond), 4)
 
             self.drift_detector.record_prediction(

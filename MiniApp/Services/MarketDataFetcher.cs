@@ -88,9 +88,10 @@ public class MarketDataFetcher
 
         if (!(tfKey.StartsWith("s") || tfKey == "m1"))
         {
-            // Higher-TF context (m5, m15, ...) is aggregated from PO 1m candles aligned to true calendar boundaries.
+            // Higher-TF context (m5, m15, m30, h1, h4) is aggregated from PO 1m candles aligned to true calendar boundaries.
+            // Cap at 14,400 m1 bars (~10 days) so M30/H1/H4 get >= 50-60 bars instead of tripping Gatekeeper's 15-bar floor.
             int group = Math.Max(1, tfSecs / 60);
-            var m1 = await RealtimeTickCollector.GetRecentCandles(poKey, "m1", Math.Min((limit + 2) * group, 3000));
+            var m1 = await RealtimeTickCollector.GetRecentCandles(poKey, "m1", Math.Min((limit + 2) * group, 14400));
             return m1.Length >= group ? AggregateCalendarCandles(m1, tfSecs).TakeLast(limit).ToArray() : Array.Empty<MiniAppController.OhlcCandle>();
         }
 
@@ -116,7 +117,7 @@ public class MarketDataFetcher
         return (prices, volumes);
     }
 
-    private static MiniAppController.OhlcCandle[] AggregateCalendarCandles(MiniAppController.OhlcCandle[] candles, int tfSecs)
+    internal static MiniAppController.OhlcCandle[] AggregateCalendarCandles(MiniAppController.OhlcCandle[] candles, int tfSecs)
     {
         if (candles.Length == 0 || tfSecs <= 60) return candles;
         long bucketTicks = TimeSpan.FromSeconds(tfSecs).Ticks;

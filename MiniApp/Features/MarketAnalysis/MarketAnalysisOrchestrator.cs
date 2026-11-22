@@ -934,7 +934,7 @@ public class MarketAnalysisOrchestrator(
                 ? consensus.Probability
                 : (Math.Abs(fallbackScore) >= 0.25 && sensors.MainAdx >= 20.0
                     ? Math.Clamp(50 + (int)Math.Round(Math.Abs(fallbackScore) * 14.0), 52, 62)
-                    : 50);
+                    : Math.Clamp(51 + (int)Math.Round(Math.Abs(fallbackScore) * 8.0), 51, 54));
 
             string reasonSource = Math.Abs(fallbackScore) >= 0.05
                 ? "по консенсусу TA/SMC/MTF и импульса"
@@ -1813,7 +1813,7 @@ public class MarketAnalysisOrchestrator(
             uiMarketPhase = uiMarketPhase,
             uiMarketEntropy = uiMarketEntropy,
             direction = sensors.IsRiskBlocked ? "NEUTRAL" : (cm.Consensus.FinalDirection is "BUY" or "PUT" ? cm.Consensus.FinalDirection : (prep.ClosedCandles.Length > 0 && prep.ClosedCandles[^1].Close >= prep.ClosedCandles[^1].Open ? "BUY" : "PUT")),
-            probability = sensors.IsRiskBlocked ? 0 : Math.Clamp(cm.Consensus.Probability >= 50 ? cm.Consensus.Probability : 51, 50, 92),
+            probability = sensors.IsRiskBlocked ? 0 : Math.Clamp(cm.Consensus.Probability > 50 ? cm.Consensus.Probability : 51, 51, 92),
             duration = cm.Timeout.TimeoutText,
             expiryCandles = cm.Timeout.TimeoutCandles,
             adaptiveReasoning = cm.Consensus.CombinedReasoningText ?? string.Empty,

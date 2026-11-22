@@ -1197,20 +1197,35 @@ class SubminuteQuantPredictor:
         cal_conf = float(np.clip(cal_conf, 0.50, 0.80))
 
         # Check tie_rate20 hard dead guard (e.g. >= 75% zero-return bars in last 20)
-        # or honest OOF quality gate hold (model remains telemetry-active while failing closed to NEUTRAL)
+        # or honest OOF quality gate hold (model remains telemetry-active while failing closed to NEUTRAL).
+        # On active non-flat markets (including weekend/rollover OTC where cal_conf is tightly capped),
+        # preserve directional BUY/PUT tilt instead of forcing NEUTRAL / 50%.
         gate_passed = bool(iv_meta.get("gate_pass", True))
         tie_rate20_idx = CORE_FEATURES.index("tie_rate20")
         tie_rate20_val = float(feat[tie_rate20_idx]) if np.isfinite(feat[tie_rate20_idx]) else 0.0
-        if (not gate_passed) or tie_rate20_val >= 0.75 or cal_conf <= 0.505:
+        if (not gate_passed) or tie_rate20_val >= 0.75:
             direction = "NEUTRAL"
             cal_conf = 0.50
             signed_raw = 0.50
-        elif p_raw_up >= 0.50:
-            direction = "BUY"
-            signed_raw = cal_conf
         else:
-            direction = "PUT"
-            signed_raw = 1.0 - cal_conf
+            if abs(p_raw_up - 0.50) >= 1e-6:
+                is_buy = p_raw_up >= 0.50
+            else:
+                r0_val = float(feat[CORE_FEATURES.index("r0")]) if np.isfinite(feat[CORE_FEATURES.index("r0")]) else 0.0
+                r3_val = float(feat[CORE_FEATURES.index("sum_r3")]) if np.isfinite(feat[CORE_FEATURES.index("sum_r3")]) else 0.0
+                tie_mom = r0_val if abs(r0_val) > 1e-12 else r3_val
+                is_buy = tie_mom >= 0.0
+
+            cal_conf = max(0.51, cal_conf)
+            if weekend_otc:
+                cal_conf = min(cal_conf, 0.52)
+
+            if is_buy:
+                direction = "BUY"
+                signed_raw = cal_conf
+            else:
+                direction = "PUT"
+                signed_raw = 1.0 - cal_conf
 
         # Top standardized feature attributions (interpretable driver summary)
         meds = self.arrays[f"{canon}_lr_meds"]
