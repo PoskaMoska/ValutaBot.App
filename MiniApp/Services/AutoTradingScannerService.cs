@@ -72,6 +72,120 @@ public class AutoTradingScannerService : BackgroundService
         _  => 4.5
     };
 
+    /// <summary>
+    /// Returns true when the close of a closed 5s bar sits on an off-grid intermediate 5s phase
+    /// for <paramref name="targetTfSecs"/> (e.g. :05, :15 for s10; :05, :10, :20, :25 for s15),
+    /// so rolling s10/s15 scans trigger every 5 seconds without double-firing on native grid closes.
+    /// </summary>
+    internal static bool ShouldEnqueueRollingStepFromS5(DateTime closedS5OpenUtc, int targetTfSecs)
+    {
+        if (targetTfSecs <= 5 || targetTfSecs % 5 != 0)
+            return false;
+
+        var utcOpen = closedS5OpenUtc.Kind == DateTimeKind.Utc ? closedS5OpenUtc : closedS5OpenUtc.ToUniversalTime();
+        long closeUnixSec = new DateTimeOffset(utcOpen.AddSeconds(5)).ToUnixTimeSeconds();
+        long mod = ((closeUnixSec % targetTfSecs) + targetTfSecs) % targetTfSecs;
+        return mod != 0;
+    }
+
+    /// <summary>
+    /// Aggregates closed 5s OHLC candles into rolling <paramref name="tfSecs"/>-second bars ending cleanly
+    /// at <paramref name="anchorCloseUtc"/> (matching Python's phase-shifted resample_s5_grid logic).
+    /// Only complete buckets containing all <c>tfSecs / 5</c> consecutive s5 bars are emitted.
+    /// </summary>
+    internal static MiniAppController.OhlcCandle[] BuildRollingCandlesFromS5(
+        ReadOnlySpan<MiniAppController.OhlcCandle> s5Candles,
+        int tfSecs,
+        DateTime anchorCloseUtc,
+        int maxCount = 160)
+    {
+        if (s5Candles.IsEmpty || tfSecs <= 5 || tfSecs % 5 != 0 || maxCount <= 0)
+            return Array.Empty<MiniAppController.OhlcCandle>();
+
+        int barsNeeded = tfSecs / 5;
+        DateTime anchorUtc = anchorCloseUtc.Kind == DateTimeKind.Utc ? anchorCloseUtc : anchorCloseUtc.ToUniversalTime();
+        long anchorUnixSec = new DateTimeOffset(anchorUtc).ToUnixTimeSeconds();
+        long cutoffUnixMs = anchorUnixSec * 1000L + 250L;
+        long phaseSec = ((anchorUnixSec % tfSecs) + tfSecs) % tfSecs;
+
+        // Deduplicate & keep strictly closed s5 bars ascending by open timestamp
+        var closedBySec = new SortedDictionary<long, MiniAppController.OhlcCandle>();
+        for (int i = 0; i < s5Candles.Length; i++)
+        {
+            var c = s5Candles[i];
+            if (!double.IsFinite(c.Open) || !double.IsFinite(c.High) || !double.IsFinite(c.Low) || !double.IsFinite(c.Close) || c.Close <= 0)
+                continue;
+            var tsUtc = c.Timestamp.Kind == DateTimeKind.Utc ? c.Timestamp : c.Timestamp.ToUniversalTime();
+            long closeMs = new DateTimeOffset(tsUtc.AddSeconds(5)).ToUnixTimeMilliseconds();
+            if (closeMs > cutoffUnixMs)
+                continue;
+            long openSec = new DateTimeOffset(tsUtc).ToUnixTimeSeconds();
+            closedBySec[openSec] = tsUtc == c.Timestamp ? c : c with { Timestamp = tsUtc };
+        }
+
+        if (closedBySec.Count < barsNeeded)
+            return Array.Empty<MiniAppController.OhlcCandle>();
+
+        static long FloorDiv(long a, long d) => a >= 0 ? a / d : ((a - d + 1) / d);
+
+        var rolling = new List<MiniAppController.OhlcCandle>(closedBySec.Count / barsNeeded + 1);
+        long activeBucket = long.MinValue;
+        double bOpen = 0, bHigh = 0, bLow = 0, bClose = 0, bVol = 0, bCrowd = 50.0;
+        long prevBarSec = 0;
+        int countInBucket = 0;
+
+        void FlushIfComplete()
+        {
+            if (countInBucket == barsNeeded && activeBucket != long.MinValue && activeBucket + tfSecs <= anchorUnixSec)
+            {
+                var bucketOpenUtc = DateTimeOffset.FromUnixTimeSeconds(activeBucket).UtcDateTime;
+                rolling.Add(new MiniAppController.OhlcCandle(bOpen, bHigh, bLow, bClose, bVol, bucketOpenUtc, bCrowd));
+            }
+        }
+
+        foreach (var kv in closedBySec)
+        {
+            long openSec = kv.Key;
+            var bar = kv.Value;
+            long bucket = FloorDiv(openSec - phaseSec, tfSecs) * tfSecs + phaseSec;
+
+            if (bucket != activeBucket)
+            {
+                FlushIfComplete();
+                activeBucket = bucket;
+                bOpen = bar.Open;
+                bHigh = bar.High;
+                bLow = bar.Low;
+                bClose = bar.Close;
+                bVol = bar.Volume;
+                bCrowd = bar.CrowdSentiment;
+                prevBarSec = openSec;
+                countInBucket = 1;
+            }
+            else if (openSec - prevBarSec == 5)
+            {
+                if (bar.High > bHigh) bHigh = bar.High;
+                if (bar.Low < bLow) bLow = bar.Low;
+                bClose = bar.Close;
+                bVol += bar.Volume;
+                bCrowd = bar.CrowdSentiment;
+                prevBarSec = openSec;
+                countInBucket++;
+            }
+            else
+            {
+                // Gap inside bucket invalidates partial aggregation; reset state for next bucket
+                countInBucket = -1;
+            }
+        }
+        FlushIfComplete();
+
+        if (rolling.Count <= maxCount)
+            return rolling.ToArray();
+
+        return rolling.GetRange(rolling.Count - maxCount, maxCount).ToArray();
+    }
+
     public AutoTradingScannerService(IServiceProvider serviceProvider, ILogger<AutoTradingScannerService> logger, ICircuitBreakerService circuitBreaker, IOptions<TradingBotSettings> settings)
     {
         _serviceProvider = serviceProvider;
@@ -142,17 +256,32 @@ public class AutoTradingScannerService : BackgroundService
         var queuedKeys = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         var inFlightKeys = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
 
+        void EnqueueScan(string pair, string targetTf, long ts)
+        {
+            string key = $"{pair}:{targetTf}";
+            if (queuedKeys.TryAdd(key, 1))
+            {
+                if (!channel.Writer.TryWrite((pair, targetTf, ts)))
+                {
+                    queuedKeys.TryRemove(key, out _);
+                }
+            }
+        }
+
         Action<string, string> candleClosedHandler = (pair, tf) =>
         {
             if (_targetPairs.Contains(pair, StringComparer.OrdinalIgnoreCase) && _subminuteTfs.Contains(tf, StringComparer.OrdinalIgnoreCase))
             {
-                string key = $"{pair}:{tf}";
-                if (queuedKeys.TryAdd(key, 1))
+                long ts = Stopwatch.GetTimestamp();
+                EnqueueScan(pair, tf, ts);
+
+                if (tf.Equals("s5", StringComparison.OrdinalIgnoreCase)
+                    && RealtimeTickCollector.TryGetLatestClosedCandleTimeUtc(pair, "s5", out var closedS5OpenUtc))
                 {
-                    if (!channel.Writer.TryWrite((pair, tf, Stopwatch.GetTimestamp())))
-                    {
-                        queuedKeys.TryRemove(key, out _);
-                    }
+                    if (ShouldEnqueueRollingStepFromS5(closedS5OpenUtc, 10))
+                        EnqueueScan(pair, "s10", ts);
+                    if (ShouldEnqueueRollingStepFromS5(closedS5OpenUtc, 15))
+                        EnqueueScan(pair, "s15", ts);
                 }
             }
         };
@@ -244,8 +373,13 @@ public class AutoTradingScannerService : BackgroundService
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
 
-        long bucketTicks = TimeSpan.FromSeconds(tfSecs).Ticks;
+        bool isRollingWindowTf = tfSecs is 10 or 15;
+        long bucketTicks = isRollingWindowTf
+            ? TimeSpan.FromSeconds(5).Ticks
+            : TimeSpan.FromSeconds(tfSecs).Ticks;
         DateTime currentCandleOpen = new DateTime(refTime.Ticks - (refTime.Ticks % bucketTicks), DateTimeKind.Utc);
+        bool isShiftedRollingPhase = isRollingWindowTf
+            && (currentCandleOpen.Ticks % TimeSpan.FromSeconds(tfSecs).Ticks) != 0;
 
         // D3 defense-in-depth: elapsed time since bar open cannot be smaller than monotonic time spent in queue
         double elapsedFromOpen = Math.Max(
@@ -274,7 +408,17 @@ public class AutoTradingScannerService : BackgroundService
         {
             stoppingToken.ThrowIfCancellationRequested();
             int minCandles = _minCandlesPerTf.TryGetValue(tf, out int mc) ? mc : 80;
-            var recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 161);
+            MiniAppController.OhlcCandle[] recentCandles;
+            if (isShiftedRollingPhase)
+            {
+                int s5Limit = tfSecs == 10 ? 322 : 362;
+                var s5Raw = await RealtimeTickCollector.GetRecentCandles(pair, "s5", s5Limit);
+                recentCandles = BuildRollingCandlesFromS5(s5Raw, tfSecs, currentCandleOpen, 160);
+            }
+            else
+            {
+                recentCandles = await RealtimeTickCollector.GetRecentCandles(pair, tf, 161);
+            }
 
             if (recentCandles.Length >= minCandles)
             {

@@ -1292,6 +1292,25 @@ namespace ValutaBot.MiniApp
                 LastTickAgeMs: lastTickAgeMs);
         }
 
+        internal static bool TryGetLatestClosedCandleTimeUtc(string asset, string interval, out DateTime openTimeUtc)
+        {
+            string cleanAsset = PriceFeed.CandleKey(asset);
+            string dbInterval = interval == "m1" ? "1min" : interval;
+            string cacheKey = $"{cleanAsset}:{dbInterval}";
+            if (_ringBuffers.TryGetValue(cacheKey, out var ring))
+            {
+                var last = ring.GetRecent(1);
+                if (last.Length > 0)
+                {
+                    var ts = last[0].Timestamp;
+                    openTimeUtc = ts.Kind == DateTimeKind.Utc ? ts : ts.ToUniversalTime();
+                    return true;
+                }
+            }
+            openTimeUtc = default;
+            return false;
+        }
+
         public static bool IsAccumulatorCorrupted(string asset)
         {
             string cleanAsset = PriceFeed.CandleKey(asset);

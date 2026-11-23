@@ -1042,6 +1042,53 @@ public class MarketAnalysisOrchestrator(
             MeetsProbabilityGate: meetsProbabilityGate);
     }
 
+    /// <summary>
+    /// Resolves the active sub-minute entry bar boundary from the trailing closed bar close time
+    /// so rolling 5s-stepped s10/s15 phases validate timing and expiry against their true bar open
+    /// rather than raw clock modulo.
+    /// </summary>
+    internal static DateTime ResolveAnchorBarOpenUtc(
+        MiniAppController.OhlcCandle[]? closedCandles,
+        int intervalSecs,
+        DateTime refUtc)
+    {
+        DateTime utcRef = refUtc.Kind == DateTimeKind.Utc ? refUtc : refUtc.ToUniversalTime();
+        if (intervalSecs is > 0 and <= 60 && closedCandles is { Length: > 0 })
+        {
+            var lastTs = closedCandles[^1].Timestamp;
+            DateTime lastClosedUtc = lastTs.Kind == DateTimeKind.Utc ? lastTs : lastTs.ToUniversalTime();
+            DateTime candidateOpen = lastClosedUtc.AddSeconds(intervalSecs);
+            if (Math.Abs((utcRef - candidateOpen).TotalSeconds) <= 300.0)
+            {
+                return candidateOpen;
+            }
+        }
+
+        long bucketTicks = TimeSpan.FromSeconds(Math.Max(intervalSecs, 1)).Ticks;
+        return new DateTime(utcRef.Ticks - (utcRef.Ticks % bucketTicks), DateTimeKind.Utc);
+    }
+
+    /// <summary>
+    /// Empirical Western-session (LONDON/OVERLAP/NY) sub-minute dispersion-drift guard:
+    /// when PriceEntropy (stdev20/ATR) &gt; 0.85 AND ADX &gt;= 30 during Western liquidity hours,
+    /// 250ms broker fill drift systematically erodes sub-minute mean-reversion execution.
+    /// </summary>
+    internal static bool IsSubminuteDispersionDriftChop(
+        bool isSubminute,
+        string? session,
+        double priceEntropy,
+        double mainAdx)
+    {
+        if (!isSubminute)
+            return false;
+        if (session is not ("LONDON" or "OVERLAP" or "NY"))
+            return false;
+        return double.IsFinite(priceEntropy)
+            && double.IsFinite(mainAdx)
+            && priceEntropy > 0.85
+            && mainAdx >= 30.0;
+    }
+
     private async Task<ExecutionOutcome> EvaluateExecutionAndRecordTradeAsync(
         PreparedCandleData prep,
         string timeframe,
@@ -1117,6 +1164,15 @@ public class MarketAnalysisOrchestrator(
             || cm.NoiseAudit.IsTradeableImpulse
             || cm.NoiseAudit.LocalAtrBps >= cm.NoiseAudit.NoiseFloorBps * 0.5;
 
+        bool isChopDriftBlocked = IsSubminuteDispersionDriftChop(
+            isSubminute, entryPolicy.Session, sensors.PriceEntropy, sensors.MainAdx);
+        if (isChopDriftBlocked && isDirectional)
+        {
+            traceLines.Add($"[7.6 Chop/Drift]    [SHADOW] {entryPolicy.Session} дисперсионный дрейф (Entropy={sensors.PriceEntropy:F2} > 0.85, ADX={sensors.MainAdx:F1} >= 30) — реальный вход заблокирован");
+        }
+
+        DateTime anchorBarOpenUtc = ResolveAnchorBarOpenUtc(prep.ClosedCandles, prep.IntervalSecs, effectiveUtc);
+
         bool canExecuteReal = isDirectional 
             && hasLiveNeuralSignal
             && isPayoutAcceptable
@@ -1124,11 +1180,13 @@ public class MarketAnalysisOrchestrator(
             && !isCbHalted
             && !isCooldownActive
             && isSubminuteImpulseOk
+            && !isChopDriftBlocked
             && (!isS5 || isQuantSubminute || (htfAligned && !isExhaustedOnS5));
 
         bool isS5Guarded = isS5 && ((!isQuantSubminute && (isExhaustedOnS5 || !htfAligned)) || isCooldownActive || !entryPolicy.MeetsProbabilityGate || !isPayoutAcceptable);
+        bool isSubminuteDriftShadow = isSubminute && isChopDriftBlocked && entryPolicy.MeetsProbabilityGate;
         bool allowShadowRecord = isDirectional
-            && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded)
+            && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded || isSubminuteDriftShadow)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
 
         Dictionary<string, string> GetSourceDirections() => new()
@@ -1319,8 +1377,7 @@ public class MarketAnalysisOrchestrator(
             if (canExecuteReal && PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue && prep.IntervalSecs > 0)
             {
                 DateTime execRefTime = PocketOptionWebSocketStream.GetBrokerTimeUtc();
-                long bucketTicks = TimeSpan.FromSeconds(prep.IntervalSecs).Ticks;
-                DateTime barOpen = new DateTime(execRefTime.Ticks - (execRefTime.Ticks % bucketTicks), DateTimeKind.Utc);
+                DateTime barOpen = ResolveAnchorBarOpenUtc(prep.ClosedCandles, prep.IntervalSecs, execRefTime);
                 double elapsedAfterMl = (execRefTime - barOpen).TotalSeconds;
                 double maxExecElapsed = prep.IntervalSecs switch { 5 => 1.3, 10 => 2.2, 15 => 2.8, 30 => 3.8, _ => 5.0 };
                 if (elapsedAfterMl > maxExecElapsed)
@@ -1380,7 +1437,7 @@ public class MarketAnalysisOrchestrator(
                                 cm.Consensus.CombinedReasoningText ?? "",
                                 ml.Prediction?.ModelVersion ?? "",
                                 ml.Prediction?.Accuracy ?? 0.0,
-                                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, mlTelemetryJson, null, liveCrowdSentiment, currentPayout);
+                                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, mlTelemetryJson, null, liveCrowdSentiment, currentPayout, anchorBarOpenUtc);
                         }
                         catch (Exception ex)
                         {
@@ -1418,14 +1475,15 @@ public class MarketAnalysisOrchestrator(
                 cm.Consensus.CombinedReasoningText ?? "",
                 ml.Prediction?.ModelVersion ?? "",
                 ml.Prediction?.Accuracy ?? 0.0,
-                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, shadowMlTelemetryJson, null, liveCrowdSentiment, currentPayout);
+                sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, shadowMlTelemetryJson, null, liveCrowdSentiment, currentPayout, anchorBarOpenUtc);
             dbSw.Stop();
-            string shadowReason = isGlobalCbHalted ? ", Global CB halt guard" : (isSymbolQuarantined ? ", Per-symbol quarantine guard" 
+            string shadowReason = isGlobalCbHalted ? ", Global CB halt guard" : (isSymbolQuarantined ? ", Per-symbol quarantine guard"
+                : (isChopDriftBlocked ? $", Chop/Drift guard (Entropy={sensors.PriceEntropy:F2}, ADX={sensors.MainAdx:F1})"
                 : (!isPayoutAcceptable ? $", Payout/Closed guard ({currentPayout}%)"
-                : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard" 
-                : (isS5 && !htfAligned ? ", S5 HTF divergence guard" 
-                : (isS5 && isCooldownActive ? ", S5 cooldown guard" 
-                : (isS5 && cm.Consensus.Probability < 58 ? ", S5 prob threshold guard" : ""))))));
+                : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard"
+                : (isS5 && !htfAligned ? ", S5 HTF divergence guard"
+                : (isS5 && isCooldownActive ? ", S5 cooldown guard"
+                : (isS5 && cm.Consensus.Probability < 58 ? ", S5 prob threshold guard" : "")))))));
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {cm.Consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else
@@ -1440,7 +1498,7 @@ public class MarketAnalysisOrchestrator(
                 var sourceDirections = GetSourceDirections();
                 string shadowFeaturesJson = BuildShadowFeaturesJson();
                 _ = SignalTracker.RecordPredictionAsync("HOLD", prep.CleanAsset, timeframe, currentLivePrice, targetHorizon, prep.IntervalSecs, prep.IsForex, sourceDirections, cm.Consensus.Probability, cm.Consensus.TaScore, cm.Consensus.SmcScore, cm.Consensus.MlProb, cm.Consensus.MlScoreRaw, shadowFeaturesJson,
-                    "NONE", false, false, 1.0, "NEUTRAL", cm.EffectiveMarketRegime, sensors.State.VelocityRegime ?? "UNKNOWN", sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal, false, sensors.MinutesToNews ?? -1, "", "", 0.0, sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null, liveCrowdSentiment, currentPayout);
+                    "NONE", false, false, 1.0, "NEUTRAL", cm.EffectiveMarketRegime, sensors.State.VelocityRegime ?? "UNKNOWN", sensors.MainAtr, sensors.MainAdx, sensors.TaResult.rsiVal, false, sensors.MinutesToNews ?? -1, "", "", 0.0, sensors.PriceEntropy, sensors.TrendMaturity, sensors.PricePositionPct, sensors.BbSqueeze, null, null, null, liveCrowdSentiment, currentPayout, anchorBarOpenUtc);
                 traceLines.Add($"[8. База данных]     ФОНОВЫЙ СРЕЗ (HOLD): Сохранен для обучения ({cm.Consensus.Probability}%) -> {dbSw.ElapsedMilliseconds}ms");
             }
             else
@@ -1455,9 +1513,11 @@ public class MarketAnalysisOrchestrator(
                                 ? "активен CircuitBreaker"
                                 : isCooldownActive
                                     ? "активен кулдаун"
-                                    : !isSubminuteImpulseOk
-                                        ? "недостаточный импульс"
-                                        : "критерии входа не выполнены";
+                                    : isChopDriftBlocked
+                                        ? $"Chop/Drift защита ({entryPolicy.Session} Entropy={sensors.PriceEntropy:F2}, ADX={sensors.MainAdx:F1})"
+                                        : !isSubminuteImpulseOk
+                                            ? "недостаточный импульс"
+                                            : "критерии входа не выполнены";
                 traceLines.Add($"[8. База данных]     ПРОПУСК: {skipReason} ({cm.Consensus.Probability}% vs порог {requiredProb}%) -> {dbSw.ElapsedMilliseconds}ms");
             }
         }
@@ -1506,8 +1566,7 @@ public class MarketAnalysisOrchestrator(
                     if (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
                     {
                         DateTime execRefTime = PocketOptionWebSocketStream.GetBrokerTimeUtc();
-                        long bucketTicks = TimeSpan.FromSeconds(expIvSecs).Ticks;
-                        DateTime barOpen = new DateTime(execRefTime.Ticks - (execRefTime.Ticks % bucketTicks), DateTimeKind.Utc);
+                        DateTime barOpen = ResolveAnchorBarOpenUtc(prep.ClosedCandles, expIvSecs, execRefTime);
                         double elapsedAfterMl = (execRefTime - barOpen).TotalSeconds;
                         double maxExecElapsed = expIvSecs switch { 5 => 1.3, 10 => 2.2, 15 => 2.8, 30 => 3.8, _ => 5.0 };
                         timingOk = elapsedAfterMl <= maxExecElapsed;

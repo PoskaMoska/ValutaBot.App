@@ -41,7 +41,7 @@ public static class SignalTracker
         bool higherTfAligned = false, int minutesToNews = -1,
         string reasoningText = "", string mlModelVersion = "", double mlModelAccuracy = 0.0,
         double priceEntropy = 0.0, int trendMaturity = 0, double pricePositionPct = 0.5, bool bbSqueeze = false, string? taTelemetry = null, string? mlTelemetry = null, string? smcTelemetry = null,
-        double? crowdSentiment = null, double? payout = null)
+        double? crowdSentiment = null, double? payout = null, DateTime? anchorBarOpenUtc = null)
     {
 
         // Hard Circuit Breaker Guard: Never record a live order when Circuit Breaker is active!
@@ -60,7 +60,9 @@ public static class SignalTracker
         timeframeSecs = Math.Max(1, timeframeSecs);
         int durationSecs = Math.Max(1, expiryCandles) * timeframeSecs;
         long tfTicks = TimeSpan.FromSeconds(timeframeSecs).Ticks;
-        DateTime barOpen = new DateTime(now.Ticks - (now.Ticks % tfTicks), DateTimeKind.Utc);
+        DateTime barOpen = anchorBarOpenUtc.HasValue
+            ? (anchorBarOpenUtc.Value.Kind == DateTimeKind.Utc ? anchorBarOpenUtc.Value : anchorBarOpenUtc.Value.ToUniversalTime())
+            : new DateTime(now.Ticks - (now.Ticks % tfTicks), DateTimeKind.Utc);
         DateTime verifyAt = barOpen.AddSeconds(durationSecs);
         if (verifyAt <= now.AddMilliseconds(800))
         {
