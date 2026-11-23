@@ -424,7 +424,7 @@ public class ConfluenceMatrixEngine(
         int finalProbPct;
 
         const int S5ProbabilityCeiling = 65;
-        const int S5QuantProbabilityCeiling = 68;
+        const int S5QuantProbabilityCeiling = 75;
         bool isS5 = timeframe.Equals("s5", StringComparison.OrdinalIgnoreCase);
         bool hasMlVerdict = mlSignal != null && mlSignal.Direction is "BUY" or "PUT";
 

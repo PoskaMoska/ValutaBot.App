@@ -20,6 +20,7 @@ from models.subminute_quant_predictor import (
     MODEL_VERSION,
     STATE_FEATURES,
     SubminuteQuantPredictor,
+    canonical_asset_base,
     compute_features_batch,
     compute_features_latest,
     eval_hgb_flat_batch,
@@ -311,11 +312,16 @@ def test_weekend_otc_active_candles_preserve_direction_never_neutral():
     sun_ts = int(datetime(2026, 11, 22, 11, 0, tzinfo=timezone.utc).timestamp())
 
     for tf_key, dt in (("s5", 5), ("s10", 10), ("s15", 15), ("s30", 30), ("1min", 60)):
+        iv_meta = predictor.get_interval_meta(tf_key)
         sun_candles = _synthetic_candles(n=120, dt=dt, base_ts=sun_ts)
         res = predictor.predict("EURUSD_PO", tf_key, sun_candles)
         assert res is not None
         direction, conf, _, _, raw_conf, meta = res
         assert meta.get("weekend_otc") is True
+        if not iv_meta.get("gate_pass"):
+            assert direction == "NEUTRAL"
+            assert conf == pytest.approx(0.50, abs=1e-6)
+            continue
         assert direction in ("BUY", "PUT"), f"{tf_key} collapsed active weekend OTC to {direction}"
         assert 0.51 <= conf <= 0.52, f"{tf_key} conf={conf} outside [0.51, 0.52]"
         if direction == "BUY":
@@ -332,3 +338,66 @@ def test_weekend_otc_active_candles_preserve_direction_never_neutral():
     assert res_flat is not None
     assert res_flat[0] == "NEUTRAL"
     assert res_flat[1] == pytest.approx(0.50, abs=1e-6)
+
+
+def test_canonical_asset_base_and_per_pair_isotonic_shrinkage():
+    from train_subminute_quant import _fit_shrunk_pair_isotonic
+
+    assert canonical_asset_base("GBP/USD_PO") == "GBPUSD"
+    assert canonical_asset_base("eurusd_otc") == "EURUSD"
+    assert canonical_asset_base("USDJPY") == "USDJPY"
+    assert canonical_asset_base(None) == ""
+
+    glob_x = np.array([0.50, 0.55, 0.60, 0.70, 1.0])
+    glob_y = np.array([0.50, 0.54, 0.58, 0.65, 0.65])
+    rng = np.random.default_rng(42)
+
+    # Below min_samples -> None (falls back cleanly to global curve)
+    small_x = rng.uniform(0.50, 0.70, size=800)
+    small_y = (rng.random(800) < 0.72).astype(float)
+    assert _fit_shrunk_pair_isotonic(small_x, small_y, glob_x, glob_y, min_samples=1200) is None
+
+    # Sufficient OOF samples -> strictly monotonic blended curve in [0.50, 0.75]
+    pair_x = np.linspace(0.50, 0.72, 10000)
+    probs = np.clip(0.50 + 1.15 * (pair_x - 0.50), 0.50, 0.75)
+    pair_w = (rng.random(len(pair_x)) < probs).astype(float)
+    res = _fit_shrunk_pair_isotonic(pair_x, pair_w, glob_x, glob_y, min_samples=1200, shrink_n0=5000.0)
+    assert res is not None
+    ux, uy = res
+    assert len(ux) == len(uy) and len(ux) >= 4
+    assert np.all(np.diff(uy) >= -1e-12)
+    assert float(np.min(uy)) >= 0.50 and float(np.max(uy)) <= 0.75
+
+
+def test_per_asset_calibrator_routing_and_weekday_otc_isolation():
+    if not (os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH)):
+        pytest.skip("SubminuteQuant v7 artifacts not present locally")
+
+    predictor = SubminuteQuantPredictor.get_instance()
+    # Monday active FX session timestamp (2026-11-23 14:00:00Z -> clean FX window)
+    fx_ts = int(datetime(2026, 11, 23, 14, 0, 0, tzinfo=timezone.utc).timestamp())
+    c_fx = _synthetic_candles(n=120, dt=5, base_ts=fx_ts)
+
+    # Inject synthetic per-pair calibrator for GBPUSD cleanly in memory and restore afterward
+    orig_x = predictor.arrays.get("s5_GBPUSD_iso_x")
+    orig_y = predictor.arrays.get("s5_GBPUSD_iso_y")
+    try:
+        predictor.arrays["s5_GBPUSD_iso_x"] = np.array([0.50, 0.51, 1.0], dtype=np.float64)
+        predictor.arrays["s5_GBPUSD_iso_y"] = np.array([0.50, 0.73, 0.73], dtype=np.float64)
+
+        res_gbp = predictor.predict("GBPUSD_PO", "s5", c_fx)
+        res_unknown = predictor.predict("NZDUSD_PO", "s5", c_fx)
+        res_otc = predictor.predict("GBPUSD_otc", "s5", c_fx)
+
+        assert res_gbp is not None and res_unknown is not None and res_otc is not None
+        assert res_gbp[5].get("calibrator") == "pair:GBPUSD"
+        assert res_unknown[5].get("calibrator") == "global"
+        assert res_otc[5].get("calibrator") == "otc_rollover"
+        assert res_otc[1] <= 0.525
+    finally:
+        if orig_x is not None and orig_y is not None:
+            predictor.arrays["s5_GBPUSD_iso_x"] = orig_x
+            predictor.arrays["s5_GBPUSD_iso_y"] = orig_y
+        else:
+            predictor.arrays.pop("s5_GBPUSD_iso_x", None)
+            predictor.arrays.pop("s5_GBPUSD_iso_y", None)

@@ -1248,6 +1248,7 @@ public class MarketAnalysisOrchestrator(
                     if (mc.Timestamp >= lastCloseBoundary) intraS5Count++;
                 }
             }
+            var subsec = RealtimeTickCollector.ComputeSubsecondTickMetrics(prep.CleanAsset, DateTime.UtcNow);
             var telemetry = new
             {
                 raw_uncapped_prob = ml.Prediction.RawUncappedProb is double r && double.IsFinite(r) ? Math.Round(r, 4) : (double?)null,
@@ -1258,6 +1259,14 @@ public class MarketAnalysisOrchestrator(
                 auc = ml.Prediction.Auc is double a && double.IsFinite(a) ? Math.Round(a, 4) : (double?)null,
                 top_features = ml.Prediction.TopFeatures ?? [],
                 intra_s5_count = intraS5Count,
+                subsec_ticks_1_5s = subsec.Ticks1_5s,
+                subsec_ticks_5s = subsec.Ticks5s,
+                subsec_ticks_15s = subsec.Ticks15s,
+                subsec_accel_1_5s = subsec.AccelRatio1_5s,
+                subsec_ret_1_5s_bps = subsec.Ret1_5sBps,
+                subsec_ret_5s_bps = subsec.Ret5sBps,
+                subsec_purity_5s = subsec.DirPurity5s,
+                subsec_last_tick_age_ms = subsec.LastTickAgeMs,
                 dxy_5s = S(sensors.DxyMetrics.DxyMomentum5sBps),
                 dxy_15s = S(sensors.DxyMetrics.DxyMomentum15sBps),
                 dxy_30s = S(sensors.DxyMetrics.DxyMomentum30sBps),

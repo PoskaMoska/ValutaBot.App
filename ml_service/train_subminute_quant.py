@@ -50,6 +50,7 @@ from models.subminute_quant_predictor import (
     MODEL_VERSION,
     REGIME_FEATURES,
     STATE_FEATURES,
+    canonical_asset_base,
     compute_features_batch,
     eval_hgb_flat_batch,
     is_synthetic_otc_mask,
@@ -196,6 +197,32 @@ def _fit_robust_isotonic(dir_strength: np.ndarray, won: np.ndarray) -> Tuple[np.
     ux, idx = np.unique(xs, return_index=True)
     uy = np.maximum.accumulate(ys[idx])
     return ux, np.clip(uy, 0.50, 0.75)
+
+
+def _fit_shrunk_pair_isotonic(
+    dir_strength: np.ndarray,
+    won: np.ndarray,
+    global_iso_x: np.ndarray,
+    global_iso_y: np.ndarray,
+    min_samples: int = 1200,
+    shrink_n0: float = 5000.0,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Fits a pair-specific OOF monotonic calibrator when sufficient non-tie samples exist
+    (>= min_samples), then blends toward the global Clean-FX curve using Empirical-Bayes
+    shrinkage `w = n / (n + shrink_n0)` so strong pairs (e.g. GBPUSD) preserve honest lift
+    while small-sample variance stays conservatively regularized.
+    """
+    n = int(len(dir_strength))
+    if n < min_samples:
+        return None
+    raw_x, raw_y = _fit_robust_isotonic(dir_strength, won)
+    grid_x = np.unique(np.concatenate([global_iso_x, raw_x, np.array([0.50, 1.0], dtype=np.float64)]))
+    p_pair = np.interp(grid_x, raw_x, raw_y)
+    p_glob = np.interp(grid_x, global_iso_x, global_iso_y)
+    w = float(n) / (float(n) + shrink_n0)
+    blended_y = np.maximum.accumulate(np.clip(w * p_pair + (1.0 - w) * p_glob, 0.50, 0.75))
+    return grid_x.astype(np.float64), blended_y.astype(np.float64)
 
 
 def _compute_usd_basket_df(df: pd.DataFrame, dt: int) -> Optional[pd.DataFrame]:
@@ -497,6 +524,7 @@ def evaluate_real_outcomes(
     te_p_up: np.ndarray,
     iso_x: np.ndarray,
     iso_y: np.ndarray,
+    pair_isos: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
 ) -> Dict[str, Any]:
     tf_key = "m1" if tf == "1min" else tf
     sub = oc_df[oc_df["timeframe"].str.lower() == tf_key]
@@ -524,7 +552,9 @@ def evaluate_real_outcomes(
 
         p_up = float(gp[pos])
         raw_str = max(p_up, 1.0 - p_up)
-        cal_c = float(np.interp(raw_str, iso_x, iso_y))
+        base_asset = canonical_asset_base(row["asset"])
+        ix, iy = pair_isos.get(base_asset, (iso_x, iso_y)) if pair_isos else (iso_x, iso_y)
+        cal_c = float(np.interp(raw_str, ix, iy))
         is_buy = p_up >= 0.50
         ep = float(row["entry_price"])
         xp = float(row["exit_price"])
@@ -671,7 +701,7 @@ def train_interval(
         (0.67, 0.83),
         (0.83, 1.00),
     ]
-    oof_p_hgb, oof_p_lr, oof_fwd = [], [], []
+    oof_p_hgb, oof_p_lr, oof_fwd, oof_assets = [], [], [], []
     oof_indices: List[int] = []
 
     for lo_frac, hi_frac in fold_bounds:
@@ -690,11 +720,13 @@ def train_interval(
         oof_p_lr.append(_pred_sym_lr(lr_f, sc_f, meds_f, X_core_all[va_slice]))
         oof_p_hgb.append(_pred_sym_hgb(m_hgb_f, f_cols_f, f_names_f, X_hgb_all[va_slice]))
         oof_fwd.append(fwd_all[va_slice])
+        oof_assets.append(assets_all[va_slice])
         oof_indices.extend(va_slice.tolist())
 
     p_hgb_oof = np.concatenate(oof_p_hgb)
     p_lr_oof = np.concatenate(oof_p_lr)
     fwd_oof = np.concatenate(oof_fwd)
+    assets_oof = np.concatenate(oof_assets)
     nt_oof = fwd_oof != 0
     y_oof_nt = (fwd_oof[nt_oof] > 0).astype(np.int64)
 
@@ -719,8 +751,42 @@ def train_interval(
     top10_thr = float(np.percentile(oof_dir_nt, 90))
     oof_top10_wr = float(np.mean(oof_won_nt[oof_dir_nt >= top10_thr])) * 100.0
 
-    # Fit strict OOF monotonic calibrator on Clean FX
+    # Fit strict OOF monotonic calibrator on Clean FX (global + per-pair EB-shrunk)
     iso_x, iso_y = _fit_robust_isotonic(oof_dir_nt, oof_won_nt)
+
+    oof_bases_nt = np.array([canonical_asset_base(a) for a in assets_oof[nt_oof]], dtype=object)
+    p_ens_oof_nt = p_ens_oof[nt_oof]
+    pair_isos: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    per_asset_stats: Dict[str, Any] = {}
+    for base_asset in sorted({str(b) for b in oof_bases_nt if b}):
+        pm = oof_bases_nt == base_asset
+        n_pair = int(np.sum(pm))
+        if n_pair < 500:
+            continue
+        y_pair_dir = y_oof_nt[pm]
+        pair_auc = float(roc_auc_score(y_pair_dir, p_ens_oof_nt[pm])) if np.unique(y_pair_dir).size >= 2 else 0.50
+        pair_str = oof_dir_nt[pm]
+        pair_won = oof_won_nt[pm]
+        p20_thr = float(np.percentile(pair_str, 80))
+        p10_thr = float(np.percentile(pair_str, 90))
+        pair_top20 = float(np.mean(pair_won[pair_str >= p20_thr])) * 100.0
+        pair_top10 = float(np.mean(pair_won[pair_str >= p10_thr])) * 100.0
+        shrunk = _fit_shrunk_pair_isotonic(pair_str, pair_won, iso_x, iso_y, min_samples=1200, shrink_n0=5000.0)
+        if shrunk is not None:
+            pair_isos[base_asset] = shrunk
+            max_pair_cal = float(np.max(shrunk[1]))
+            shrink_w = round(n_pair / (n_pair + 5000.0), 3)
+        else:
+            max_pair_cal = float(np.max(iso_y))
+            shrink_w = 0.0
+        per_asset_stats[base_asset] = {
+            "n_oof": n_pair,
+            "shrink_w": shrink_w,
+            "oof_auc": round(pair_auc, 4),
+            "oof_top20_wr_nt": round(pair_top20, 2),
+            "oof_top10_wr_nt": round(pair_top10, 2),
+            "max_cal": round(max_pair_cal, 4),
+        }
 
     # 2) Separate Nov 13 Holdout Benchmark (candles + real trade_outcomes)
     t_nov_cut = cutoff_nov13 - purge_sec
@@ -741,7 +807,7 @@ def train_interval(
         won_n = (((p_nte[nt_n] >= 0.5) & (f_nte[nt_n] > 0)) | ((p_nte[nt_n] < 0.5) & (f_nte[nt_n] < 0))).astype(np.float64)
         thr_n20 = float(np.percentile(str_n, 80))
         nov_top20_wr = float(np.mean(won_n[str_n >= thr_n20])) * 100.0
-        oc_res = evaluate_real_outcomes(oc_df, tf, dt, ts_all[nov_te_mask], assets_all[nov_te_mask], p_nte, iso_x, iso_y)
+        oc_res = evaluate_real_outcomes(oc_df, tf, dt, ts_all[nov_te_mask], assets_all[nov_te_mask], p_nte, iso_x, iso_y, pair_isos=pair_isos)
         nov_info = {
             "nov13_auc": round(nov_auc, 4),
             "nov13_candle_top20_wr_nt": round(nov_top20_wr, 2),
@@ -811,6 +877,9 @@ def train_interval(
     npz_bundle[f"{tf}_lr_intercept"] = np.array([float(lr_final.intercept_[0])], dtype=np.float64)
     npz_bundle[f"{tf}_iso_x"] = iso_x.astype(np.float64)
     npz_bundle[f"{tf}_iso_y"] = iso_y.astype(np.float64)
+    for base_asset, (px, py) in pair_isos.items():
+        npz_bundle[f"{tf}_{base_asset}_iso_x"] = px.astype(np.float64)
+        npz_bundle[f"{tf}_{base_asset}_iso_y"] = py.astype(np.float64)
     npz_bundle[f"{tf}_iso_otc_x"] = iso_otc_x.astype(np.float64)
     npz_bundle[f"{tf}_iso_otc_y"] = iso_otc_y.astype(np.float64)
 
@@ -843,6 +912,7 @@ def train_interval(
         "otc_max_cal": round(float(np.max(iso_otc_y)), 4),
         "tie_dampen_threshold": 0.40,
         "parity_max_diff": float(max_parity_diff),
+        "per_asset": per_asset_stats,
         **nov_info,
     }
     return npz_bundle, meta_info
@@ -1046,6 +1116,12 @@ def main() -> None:
             f"gate={info['gate_pass']} (diff={info['parity_max_diff']:.1e})",
             flush=True,
         )
+        if info.get("per_asset"):
+            pa_str = " | ".join(
+                f"{k}:auc={v['oof_auc']:.3f},top10={v['oof_top10_wr_nt']:.1f}%,cal_max={v['max_cal']*100:.1f}%"
+                for k, v in info["per_asset"].items()
+            )
+            print(f"       per-pair: {pa_str}", flush=True)
 
     if args.dry_run:
         print(f"\n[DRY-RUN] Finished in {time.time() - t0:.1f}s (artifacts untouched).", flush=True)

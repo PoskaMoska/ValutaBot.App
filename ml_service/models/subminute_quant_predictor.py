@@ -66,11 +66,18 @@ def is_synthetic_otc_mask(ts_sec: np.ndarray) -> np.ndarray:
     return is_weekend_otc_mask(ts_sec) | is_rollover_otc_mask(ts_sec)
 
 
+def canonical_asset_base(symbol: Optional[str]) -> str:
+    """Normalizes symbol strings like 'EUR/USD', 'EURUSD_PO', or 'EURUSD_otc' -> 'EURUSD'."""
+    if not symbol:
+        return ""
+    return str(symbol).upper().replace("/", "").replace("_OTC", "").replace("_PO", "").strip()
+
+
 def usd_basket_sign(symbol: Optional[str]) -> float:
     """Returns +1.0 for direct USD pairs (USDJPY, USDCAD, USDCHF), -1.0 for inverse (EURUSD...), else 0.0."""
-    if not symbol:
+    s = canonical_asset_base(symbol)
+    if not s:
         return 0.0
-    s = str(symbol).upper().replace("/", "").replace("_OTC", "").replace("_PO", "").strip()
     if s.startswith("USD"):
         return 1.0
     if s.endswith("USD") or "USD" in s:
@@ -1167,18 +1174,30 @@ class SubminuteQuantPredictor:
             intra_adj = float(np.clip(-0.0035 * eff_z - 0.0015 * intra_s5_cpos_centered, -0.010, 0.010))
             p_raw_up = float(np.clip(p_raw_up + intra_adj, 0.01, 0.99))
 
-        # Calibrate directional strength monotonically via OOF isotonic curve
+        # Calibrate directional strength monotonically via OOF isotonic curve.
+        # Prefer pair-specific shrunk OOF curve for Clean FX when present; fall back cleanly to global.
         raw_dir_strength = max(p_raw_up, 1.0 - p_raw_up)
-        iso_x = self.arrays[f"{canon}_iso_x"]
-        iso_y = self.arrays[f"{canon}_iso_y"]
+        is_explicit_otc = "OTC" in str(symbol or "").upper()
+        asset_base = canonical_asset_base(symbol)
+        pair_iso_x_key = f"{canon}_{asset_base}_iso_x"
+        pair_iso_y_key = f"{canon}_{asset_base}_iso_y"
+        if (not is_explicit_otc) and asset_base and pair_iso_x_key in self.arrays and pair_iso_y_key in self.arrays:
+            iso_x = self.arrays[pair_iso_x_key]
+            iso_y = self.arrays[pair_iso_y_key]
+            calibrator_scope = f"pair:{asset_base}"
+        else:
+            iso_x = self.arrays[f"{canon}_iso_x"]
+            iso_y = self.arrays[f"{canon}_iso_y"]
+            calibrator_scope = "global"
         fx_cal_conf = float(np.interp(raw_dir_strength, iso_x, iso_y))
 
         # Select honest regime calibrator: clean FX vs synthetic/rollover OTC (do not force OTC curve on FX momentum jumps)
         cal_conf = fx_cal_conf
-        if (weekend_otc or rollover_otc) and f"{canon}_iso_otc_x" in self.arrays:
+        if (weekend_otc or rollover_otc or is_explicit_otc) and f"{canon}_iso_otc_x" in self.arrays:
             otc_x = self.arrays[f"{canon}_iso_otc_x"]
             otc_y = self.arrays[f"{canon}_iso_otc_y"]
             cal_conf = float(np.interp(raw_dir_strength, otc_x, otc_y))
+            calibrator_scope = "otc_rollover"
 
         # Soft tie-risk dampener when broker stream approaches dead/flat regime (>40% tie prob)
         tie_cap = float(iv_meta.get("tie_dampen_threshold", 0.40))
@@ -1269,6 +1288,7 @@ class SubminuteQuantPredictor:
             "rollover_otc": rollover_otc,
             "jump_guarded": jump_guarded,
             "basket_active": basket_active,
+            "calibrator": calibrator_scope,
             "raw_uncapped_prob": round(float(raw_uncapped_prob), 4),
             "top_features": top_features,
         }

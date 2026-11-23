@@ -355,7 +355,7 @@ namespace ValutaBot.Tests.Engines
         }
 
         [Fact]
-        public async Task EvaluateMatrixAsync_QuantSubminute_PreservesHighConvictionUpTo68_WhileLegacyCapsAt65()
+        public async Task EvaluateMatrixAsync_QuantSubminute_PreservesHighConvictionUpTo75_WhileLegacyCapsAt65()
         {
             var taSignal = new TaSignal(1.0, 70.0, 55.0, 100, 2.0, 10);
             var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
@@ -371,14 +371,19 @@ namespace ValutaBot.Tests.Engines
 
             var quantDecision = await _engine.EvaluateMatrixAsync(
                 "EURUSD", "s5", true, 1.0, taSignal, smcSignal,
-                new MlSignal("BUY", 0.66, 0.62, "neural_quant_v7"),
+                new MlSignal("BUY", 0.72, 0.65, "neural_quant_v8"),
+                stateSignal, mtfResult, noiseAudit: noiseAudit);
+            var cappedQuantDecision = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s5", true, 1.0, taSignal, smcSignal,
+                new MlSignal("BUY", 0.78, 0.68, "neural_quant_v8"),
                 stateSignal, mtfResult, noiseAudit: noiseAudit);
             var legacyDecision = await _engine.EvaluateMatrixAsync(
                 "EURUSD", "s5", true, 1.0, taSignal, smcSignal,
-                new MlSignal("BUY", 0.66, 0.62, "legacy_v4"),
+                new MlSignal("BUY", 0.72, 0.65, "legacy_v4"),
                 stateSignal, mtfResult, noiseAudit: noiseAudit);
 
-            Assert.Equal(66, quantDecision.Probability);
+            Assert.Equal(72, quantDecision.Probability);
+            Assert.Equal(75, cappedQuantDecision.Probability);
             Assert.Equal(65, legacyDecision.Probability);
         }
 

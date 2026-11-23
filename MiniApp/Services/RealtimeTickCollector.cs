@@ -1116,6 +1116,182 @@ namespace ValutaBot.MiniApp
             return true;
         }
 
+        internal readonly record struct SubsecondTickMetrics(
+            int Ticks1_5s,
+            int Ticks5s,
+            int Ticks15s,
+            double AccelRatio1_5s,
+            double Ret1_5sBps,
+            double Ret5sBps,
+            double DirPurity5s,
+            double LastTickAgeMs)
+        {
+            public static readonly SubsecondTickMetrics Empty = new(0, 0, 0, 0.0, 0.0, 0.0, 0.0, -1.0);
+        }
+
+        /// <summary>
+        /// Computes compact sub-second microstructure telemetry (tick arrival burst, 1.5s/5s return,
+        /// directional path purity, and tick staleness) purely from the in-memory live tick ring buffer.
+        /// </summary>
+        internal static SubsecondTickMetrics ComputeSubsecondTickMetrics(string asset, DateTime refUtc)
+        {
+            string cleanAsset = PriceFeed.CandleKey(asset);
+            if (!_liveTickHistory.TryGetValue(cleanAsset, out var ring))
+                return SubsecondTickMetrics.Empty;
+
+            var snapshot = ring.Snapshot();
+            long refTicks = (refUtc.Kind == DateTimeKind.Utc ? refUtc : refUtc.ToUniversalTime()).Ticks;
+            return ComputeSubsecondMetricsFromSamples(snapshot, refTicks);
+        }
+
+        internal static SubsecondTickMetrics ComputeSubsecondMetricsFromSamples(
+            ReadOnlySpan<LiveTickSample> samples,
+            long refUtcTicks)
+        {
+            if (samples.IsEmpty)
+                return SubsecondTickMetrics.Empty;
+
+            long maxAllowedFutureTicks = refUtcTicks + (5L * TimeSpan.TicksPerSecond);
+            int endIdx = samples.Length - 1;
+            while (endIdx >= 0 && samples[endIdx].BrokerUtcTicks > maxAllowedFutureTicks)
+            {
+                endIdx--;
+            }
+            if (endIdx < 0)
+                return SubsecondTickMetrics.Empty;
+
+            var latest = samples[endIdx];
+            if (latest.Price <= 1e-8 || !double.IsFinite(latest.Price))
+                return SubsecondTickMetrics.Empty;
+
+            long windowAnchorTicks = (latest.BrokerUtcTicks > refUtcTicks && (latest.BrokerUtcTicks - refUtcTicks) <= TimeSpan.TicksPerSecond)
+                ? latest.BrokerUtcTicks
+                : refUtcTicks;
+            double lastTickAgeMs = Math.Round(
+                Math.Max(0.0, (refUtcTicks - latest.BrokerUtcTicks) / (double)TimeSpan.TicksPerMillisecond),
+                1);
+
+            long win1_5Ticks = TimeSpan.FromSeconds(1.5).Ticks;
+            long win5Ticks = TimeSpan.FromSeconds(5.0).Ticks;
+            long win15Ticks = TimeSpan.FromSeconds(15.0).Ticks;
+            long cutoff1_5 = windowAnchorTicks - win1_5Ticks;
+            long cutoff5 = windowAnchorTicks - win5Ticks;
+            long cutoff15 = windowAnchorTicks - win15Ticks;
+            long stopLookback = cutoff5 - TimeSpan.FromSeconds(20.0).Ticks;
+            if (cutoff15 < stopLookback) stopLookback = cutoff15;
+
+            int ticks1_5 = 0;
+            int ticks5 = 0;
+            int ticks15 = 0;
+            int firstIdxIn1_5 = -1;
+            int firstIdxIn5 = -1;
+            int idxBefore1_5 = -1;
+            int idxBefore5 = -1;
+
+            for (int i = endIdx; i >= 0; i--)
+            {
+                long t = samples[i].BrokerUtcTicks;
+                if (t >= cutoff1_5)
+                {
+                    ticks1_5++;
+                    firstIdxIn1_5 = i;
+                }
+                else if (idxBefore1_5 < 0)
+                {
+                    idxBefore1_5 = i;
+                }
+
+                if (t >= cutoff5)
+                {
+                    ticks5++;
+                    firstIdxIn5 = i;
+                }
+                else if (idxBefore5 < 0)
+                {
+                    idxBefore5 = i;
+                }
+
+                if (t >= cutoff15)
+                {
+                    ticks15++;
+                }
+
+                if (t < stopLookback && idxBefore5 >= 0)
+                {
+                    break;
+                }
+            }
+
+            static double? ResolveBaseline(
+                ReadOnlySpan<LiveTickSample> s,
+                int end,
+                int idxBefore,
+                int firstInWin,
+                long cutoff,
+                long winLenTicks,
+                long maxStaleBaselineTicks)
+            {
+                if (idxBefore >= 0 && (cutoff - s[idxBefore].BrokerUtcTicks) <= maxStaleBaselineTicks)
+                {
+                    double px = s[idxBefore].Price;
+                    if (px > 1e-8 && double.IsFinite(px)) return px;
+                }
+                if (firstInWin >= 0 && firstInWin < end && (s[end].BrokerUtcTicks - s[firstInWin].BrokerUtcTicks) >= (winLenTicks / 2))
+                {
+                    double px = s[firstInWin].Price;
+                    if (px > 1e-8 && double.IsFinite(px)) return px;
+                }
+                return null;
+            }
+
+            double? base1_5 = ResolveBaseline(samples, endIdx, idxBefore1_5, firstIdxIn1_5, cutoff1_5, win1_5Ticks, TimeSpan.FromSeconds(15.0).Ticks);
+            double? base5 = ResolveBaseline(samples, endIdx, idxBefore5, firstIdxIn5, cutoff5, win5Ticks, TimeSpan.FromSeconds(20.0).Ticks);
+
+            double ret1_5Bps = base1_5 is > 1e-8 ? Math.Round((latest.Price - base1_5.Value) / base1_5.Value * 10000.0, 3) : 0.0;
+            double ret5Bps = base5 is > 1e-8 ? Math.Round((latest.Price - base5.Value) / base5.Value * 10000.0, 3) : 0.0;
+
+            double rate1_5 = ticks1_5 / 1.5;
+            double rate5 = ticks5 / 5.0;
+            double accelRatio1_5 = rate5 > 0.0 ? Math.Round(rate1_5 / rate5, 3) : 0.0;
+
+            double dirPurity5s = 0.0;
+            if (ticks5 > 0 && firstIdxIn5 >= 0)
+            {
+                bool hasBaseline5 = idxBefore5 >= 0 && (cutoff5 - samples[idxBefore5].BrokerUtcTicks) <= TimeSpan.FromSeconds(20.0).Ticks
+                                    && samples[idxBefore5].Price > 1e-8 && double.IsFinite(samples[idxBefore5].Price);
+                if (hasBaseline5 || firstIdxIn5 < endIdx)
+                {
+                    double startPx = hasBaseline5 ? samples[idxBefore5].Price : samples[firstIdxIn5].Price;
+                    int loopStart = hasBaseline5 ? firstIdxIn5 : firstIdxIn5 + 1;
+                    double prevPx = startPx;
+                    double pathLen = 0.0;
+                    for (int i = loopStart; i <= endIdx; i++)
+                    {
+                        double p = samples[i].Price;
+                        if (p > 1e-8 && double.IsFinite(p))
+                        {
+                            pathLen += Math.Abs(p - prevPx);
+                            prevPx = p;
+                        }
+                    }
+                    if (pathLen > 1e-12)
+                    {
+                        dirPurity5s = Math.Round(Math.Clamp((latest.Price - startPx) / pathLen, -1.0, 1.0), 3);
+                    }
+                }
+            }
+
+            return new SubsecondTickMetrics(
+                Ticks1_5s: ticks1_5,
+                Ticks5s: ticks5,
+                Ticks15s: ticks15,
+                AccelRatio1_5s: accelRatio1_5,
+                Ret1_5sBps: ret1_5Bps,
+                Ret5sBps: ret5Bps,
+                DirPurity5s: dirPurity5s,
+                LastTickAgeMs: lastTickAgeMs);
+        }
+
         public static bool IsAccumulatorCorrupted(string asset)
         {
             string cleanAsset = PriceFeed.CandleKey(asset);
