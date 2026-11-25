@@ -354,11 +354,11 @@ namespace ValutaBot.Tests
         }
 
         [Fact]
-        public void TrackedForexPairs_ExpandedTwelvePairs_AreValidUniqueAndZeroCopyInterned()
+        public void TrackedForexPairs_SixCoreUsdMajors_AreValidUniqueAndZeroCopyInterned()
         {
             Assert.Equal(6, PriceFeed.CoreUsdBasketPairs.Length);
-            Assert.Equal(12, PriceFeed.TrackedForexPairs.Length);
-            Assert.Equal(12, PriceFeed.TrackedForexPairs.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            Assert.Equal(6, PriceFeed.TrackedForexPairs.Length);
+            Assert.Equal(6, PriceFeed.TrackedForexPairs.Distinct(StringComparer.OrdinalIgnoreCase).Count());
             Assert.All(PriceFeed.TrackedForexPairs, pair =>
             {
                 Assert.Equal(6, pair.Length);
@@ -367,17 +367,17 @@ namespace ValutaBot.Tests
 
             string sqlIn = PriceFeed.BuildTrackedCandleKeysSqlInList();
             Assert.Contains("'EURUSD_PO'", sqlIn);
-            Assert.Contains("'EURJPY_PO'", sqlIn);
-            Assert.Contains("'GBPAUD_PO'", sqlIn);
+            Assert.Contains("'USDJPY_PO'", sqlIn);
+            Assert.DoesNotContain("'EURJPY_PO'", sqlIn);
 
-            string cross1 = PocketOptionWebSocketStream.ResolveCanonicalAsset("EURJPY_otc"u8);
-            string cross2 = PocketOptionWebSocketStream.ResolveCanonicalAsset("EURJPY_otc"u8);
-            Assert.Equal("EURJPY_otc", cross1);
-            Assert.Same(cross1, cross2);
+            string major1 = PocketOptionWebSocketStream.ResolveCanonicalAsset("EURUSD_otc"u8);
+            string major2 = PocketOptionWebSocketStream.ResolveCanonicalAsset("EURUSD_otc"u8);
+            Assert.Equal("EURUSD_otc", major1);
+            Assert.Same(major1, major2);
 
-            string crossGbpaud = PocketOptionWebSocketStream.ResolveCanonicalAsset("GBPAUD_otc"u8);
-            Assert.Equal("GBPAUD_otc", crossGbpaud);
-            Assert.Equal("GBPAUD_PO", PriceFeed.CandleKey(crossGbpaud));
+            string usdcad = PocketOptionWebSocketStream.ResolveCanonicalAsset("USDCAD_otc"u8);
+            Assert.Equal("USDCAD_otc", usdcad);
+            Assert.Equal("USDCAD_PO", PriceFeed.CandleKey(usdcad));
         }
     }
 }

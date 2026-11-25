@@ -17,11 +17,10 @@ public static class PriceFeed
         "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"
     };
 
-    /// <summary>All Pocket Option FX pairs (USD majors + liquid dual FX/OTC G10 crosses) tracked 24/7.</summary>
+    /// <summary>Active Pocket Option FX pairs (6 core USD majors matching trained models &amp; DB budget).</summary>
     public static readonly string[] TrackedForexPairs =
     {
-        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
-        "EURJPY", "GBPJPY", "AUDJPY", "EURGBP", "EURCHF", "GBPAUD"
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"
     };
 
     /// <summary>SQL-safe quoted candle keys (e.g. 'EURUSD_PO') matching TrackedForexPairs.</summary>

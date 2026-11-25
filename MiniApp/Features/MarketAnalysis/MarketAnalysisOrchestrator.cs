@@ -1236,7 +1236,7 @@ public class MarketAnalysisOrchestrator(
         bool isSubminuteDriftShadow = isSubminute && isChopDriftBlocked && entryPolicy.MeetsProbabilityGate;
         bool allowShadowRecord = isDirectional
             && (_settings.DatasetCollectionMode || isCbHalted || isShortHorizonGuarded || isSubminuteDriftShadow)
-            && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
+            && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 4.0);
 
         Dictionary<string, string> GetSourceDirections() => new()
         {

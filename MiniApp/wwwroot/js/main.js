@@ -99,10 +99,7 @@ if (tg) {
     window.addEventListener('resize', syncViewport, { passive: true });
 }
 
-const assetsList = [
-    'EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC',
-    'EUR/JPY OTC', 'GBP/JPY OTC', 'AUD/JPY OTC', 'EUR/GBP OTC', 'EUR/CHF OTC', 'GBP/AUD OTC'
-];
+const assetsList = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
 
 function getTopAssets() {
     try {
@@ -127,10 +124,7 @@ function escapeAttr(str) {
 
 function renderAssets(arr) {
     const top = getTopAssets();
-    const majors = [
-        'EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC',
-        'EUR/JPY OTC', 'GBP/JPY OTC', 'AUD/JPY OTC', 'EUR/GBP OTC', 'EUR/CHF OTC', 'GBP/AUD OTC'
-    ];
+    const majors = ['EUR/USD OTC', 'GBP/USD OTC', 'USD/JPY OTC', 'AUD/USD OTC', 'USD/CHF OTC', 'USD/CAD OTC'];
     return arr.map(a => {
         const safeA = escapeAttr(a);
         const star = top.indexOf(a) !== -1 ? '<span class="top-star">★</span>' : '';
