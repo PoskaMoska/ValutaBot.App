@@ -1017,32 +1017,45 @@ public class MarketAnalysisOrchestrator(
         string? marketRegime = null)
     {
         double breakEvenWinRate = 1.0 / (1.0 + Math.Max(payoutPct, 50) / 100.0);
-        bool isS5 = string.Equals(timeframe, "s5", StringComparison.OrdinalIgnoreCase);
-        bool isS10 = string.Equals(timeframe, "s10", StringComparison.OrdinalIgnoreCase);
+        string tfNorm = (timeframe ?? "s5").Trim().ToLowerInvariant();
+        bool isS5 = tfNorm == "s5";
+        bool isS10 = tfNorm == "s10";
+        bool isS15 = tfNorm == "s15";
 
-        // Unified positive-EV margin across all horizons (+5.5% baseline over breakeven)
-        double margin = 0.055;
+        // Horizon-calibrated EV margins: ultra-short s5/s10 carry higher fill-latency buffer;
+        // s15/s30/m1 scale honestly with real payout breakeven without dead-blocking calibrated tails.
+        double margin = tfNorm switch
+        {
+            "s5" => 0.055,
+            "s10" => 0.068,
+            "s15" => 0.045,
+            "s30" => 0.030,
+            "m1" or "1m" or "1min" => 0.020,
+            _ => 0.045
+        };
         if (payoutPct < 75)
         {
             margin += 0.010;
         }
-        if (isS10)
-        {
-            margin += 0.020;
-        }
         string session = TradeOutcomeTracker.ComputeSession(utcNow);
         if (!isS5 && string.Equals(session, "OVERLAP", StringComparison.OrdinalIgnoreCase))
         {
-            margin += 0.020;
+            margin += isS10 ? 0.022 : (isS15 ? 0.015 : 0.010);
         }
         if (string.Equals(marketRegime, "CHAOS_EXPANSION", StringComparison.OrdinalIgnoreCase))
         {
             margin += 0.015;
         }
 
-        // Fast s5/s10 ticks need >=62.0% calibrated edge to absorb execution slippage;
-        // s15/s30/m1 enforce >=60.0% floor (or BE+5.5% = 60.45% at 82% payout) — zero hard bans, zero 56% leaks.
-        double floorPct = (isS5 || isS10) ? 62.0 : 60.0;
+        double floorPct = tfNorm switch
+        {
+            "s5" => 59.0,
+            "s10" => 58.8,
+            "s15" => 58.0,
+            "s30" => 56.0,
+            "m1" or "1m" or "1min" => 54.0,
+            _ => 58.0
+        };
         double requiredExactPct = Math.Max(floorPct, (breakEvenWinRate + margin) * 100.0);
         int requiredProbPct = (int)Math.Ceiling(requiredExactPct);
 
@@ -1214,10 +1227,15 @@ public class MarketAnalysisOrchestrator(
             && !isChopDriftBlocked
             && (!isS5 || isQuantSubminute || (htfAligned && !isExhaustedOnS5));
 
-        bool isS5Guarded = isS5 && ((!isQuantSubminute && (isExhaustedOnS5 || !htfAligned)) || isCooldownActive || !entryPolicy.MeetsProbabilityGate || !isPayoutAcceptable);
+        bool isShortHorizon = isSubminute || prep.TfLower is "m1" or "1m" or "1min";
+        bool isShortHorizonGuarded = isShortHorizon
+            && ((isS5 && !isQuantSubminute && (isExhaustedOnS5 || !htfAligned))
+                || isCooldownActive
+                || !entryPolicy.MeetsProbabilityGate
+                || !isPayoutAcceptable);
         bool isSubminuteDriftShadow = isSubminute && isChopDriftBlocked && entryPolicy.MeetsProbabilityGate;
         bool allowShadowRecord = isDirectional
-            && (_settings.DatasetCollectionMode || isCbHalted || isS5Guarded || isSubminuteDriftShadow)
+            && (_settings.DatasetCollectionMode || isCbHalted || isShortHorizonGuarded || isSubminuteDriftShadow)
             && (!_lastSampleTimeByAssetTf.TryGetValue(sampleKey, out var lastShadowTime) || (DateTime.UtcNow - lastShadowTime).TotalMinutes >= 1.0);
 
         Dictionary<string, string> GetSourceDirections() => new()
@@ -1513,8 +1531,8 @@ public class MarketAnalysisOrchestrator(
                 : (!isPayoutAcceptable ? $", Payout/Closed guard ({currentPayout}%)"
                 : (isS5 && isExhaustedOnS5 ? ", S5 peak exhaustion guard"
                 : (isS5 && !htfAligned ? ", S5 HTF divergence guard"
-                : (isS5 && isCooldownActive ? ", S5 cooldown guard"
-                : (isS5 && cm.Consensus.Probability < 58 ? ", S5 prob threshold guard" : "")))))));
+                : (isCooldownActive ? $", {timeframe} cooldown guard"
+                : (!entryPolicy.MeetsProbabilityGate ? $", {timeframe} prob threshold guard ({cm.Consensus.Probability}% < {requiredProb}%)" : "")))))));
             traceLines.Add($"[8. DB Write:]     SHADOW TRADE: {currentLivePrice} (Prob: {cm.Consensus.Probability}%, Horizon: {targetHorizon}{shadowReason}) -> {dbSw.ElapsedMilliseconds}ms");
         }
         else

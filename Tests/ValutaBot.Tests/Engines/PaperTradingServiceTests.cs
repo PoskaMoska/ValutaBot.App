@@ -303,11 +303,24 @@ public class PaperTradingServiceTests
             83, "s5", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.630, consensusProbabilityPct: 63, marketRegime: "CHAOS_EXPANSION");
         Assert.True(chaosStrong.MeetsProbabilityGate);
 
-        // s30 and m1 block noisy 56-59% signals (would lose EV on payout/slippage) while allowing genuine 61%+ edge without hard bans
+        // s30 blocks borderline 57.5% at mediocre 82% payout (BE 54.95% + 3.0% = 57.95%),
+        // while high-payout 92% s30 (56.5%) and m1 (54.5% > BE 52.08% + 2.0% = 54.08%) are allowed cleanly.
         var s30WeakBlocked = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
             82, "s30", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.575, consensusProbabilityPct: 58);
         Assert.False(s30WeakBlocked.MeetsProbabilityGate);
-        Assert.True(s30WeakBlocked.RequiredExactPct >= 60.4);
+        Assert.True(s30WeakBlocked.RequiredExactPct >= 57.9);
+
+        var s30HighPayAllowed = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            92, "s30", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.565, consensusProbabilityPct: 57);
+        Assert.True(s30HighPayAllowed.MeetsProbabilityGate);
+
+        var m1LowPayBlocked = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            82, "m1", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.545, consensusProbabilityPct: 55);
+        Assert.False(m1LowPayBlocked.MeetsProbabilityGate);
+
+        var m1HighPayAllowed = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
+            92, "m1", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.545, consensusProbabilityPct: 55);
+        Assert.True(m1HighPayAllowed.MeetsProbabilityGate);
 
         var m1StrongAllowed = ValutaBot.MiniApp.Features.MarketAnalysis.MarketAnalysisOrchestrator.EvaluateAdaptiveEntryPolicy(
             90, "m1", londonUtc, isQuantSubminute: true, mlDirectionalConfidence: 0.610, consensusProbabilityPct: 61);
