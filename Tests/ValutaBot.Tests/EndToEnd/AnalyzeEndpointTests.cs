@@ -332,6 +332,27 @@ public class AnalyzeEndpointTests : IClassFixture<ValutaBotTestFactory>
         Assert.True(candles > 0, $"expiryCandles={candles}: фронтенд ожидает > 0 для отображения таймера");
     }
 
+    // ── 11b. UI fallback flags + cross pair routing ─────────────────────────
+    [Fact]
+    public async Task Analyze_UiFlags_ExposesMlFallbackAndModelMetadataForCrossPair()
+    {
+        var response = await _client.GetAsync("/api/analyze?asset=EUR/JPY+OTC&timeframe=m1");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var json = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var res = root.GetProperty("result");
+        var uiFlags = root.GetProperty("ui_flags");
+
+        string dir = res.GetProperty("direction").GetString() ?? "";
+        Assert.True(dir is "BUY" or "PUT", $"Expected BUY/PUT direction on cross pair, got '{dir}'");
+        Assert.True(uiFlags.TryGetProperty("is_ml_fallback", out var fallbackProp));
+        Assert.True(fallbackProp.ValueKind is JsonValueKind.True or JsonValueKind.False);
+        Assert.True(uiFlags.TryGetProperty("ml_model_version", out var verProp));
+        Assert.Equal(JsonValueKind.String, verProp.ValueKind);
+    }
+
     // ── 12. Dynamic Payout & Break-even Kelly EV Guard ──────────────────────
     [Fact]
     public async Task Analyze_DynamicPayout_CalculatesExpectedValueAndGuardsBreakEven()

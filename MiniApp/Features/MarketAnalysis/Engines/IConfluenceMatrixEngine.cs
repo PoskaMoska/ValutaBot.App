@@ -18,6 +18,15 @@ public record MlSignal(string Direction, double Confidence, double? Accuracy, st
 
 public record StateSignal(string Regime, double VelocityBpsPerSec, double MomentumContribution);
 
+/// <summary>
+/// Live sub-second microstructure and dispersion context passed by the Orchestrator
+/// into <see cref="IConfluenceMatrixEngine"/> for chase suppression and daytime chop calibration.
+/// </summary>
+public sealed record MatrixMicroContext(
+    RealtimeTickCollector.SubsecondTickMetrics? Subsecond = null,
+    double PriceEntropy = 0.0,
+    DateTime? UtcNow = null);
+
 public interface IConfluenceMatrixEngine
 {
     // D2-1 FIX: Parameter names now exactly match ConfluenceMatrixEngine implementation.
@@ -67,6 +76,22 @@ public interface IConfluenceMatrixEngine
         double volRatio = 1.0,
         ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
         double crowdSentiment = 50.0);
+
+    Task<ConsensusDecision> EvaluateMatrixAsync(
+        string asset,
+        string timeframe,
+        bool isSubMinute,
+        double conflictPenalty,
+        TaSignal taSignal,
+        SmcSignal smcSignal,
+        MlSignal mlSignal,
+        StateSignal stateSignal,
+        ConfluenceMatrixResult mtfResult,
+        int consecutiveLosses,
+        double volRatio,
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit,
+        double crowdSentiment,
+        MatrixMicroContext? microContext);
 }
 
 // Replaces ConsensusEngine.DecisionResult

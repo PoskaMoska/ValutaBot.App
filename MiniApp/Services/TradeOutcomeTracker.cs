@@ -37,12 +37,12 @@ public static class TradeOutcomeTracker
         int h = utc.Hour;
         // OVERLAP = London/NY crossover 13:00–16:00 UTC (highest volume, tightest spreads)
         if (h >= 13 && h < 16) return "OVERLAP";
-        // LONDON = 08:00–17:00 UTC
-        if (h >= 8 && h < 17) return "LONDON";
-        // NY = 13:00–21:00 UTC (already covers NY-only from 16–21)
+        // LONDON = 07:00–16:59 UTC (includes European pre-open 07Z where volatility & dispersion shift from Tokyo)
+        if (h >= 7 && h < 17) return "LONDON";
+        // NY = 17:00–20:59 UTC
         if (h >= 16 && h < 21) return "NY";
-        // TOKYO = 00:00–09:00 UTC
-        if (h >= 0 && h < 9) return "TOKYO";
+        // TOKYO = 00:00–06:59 UTC
+        if (h >= 0 && h < 7) return "TOKYO";
         return "QUIET";
     }
 

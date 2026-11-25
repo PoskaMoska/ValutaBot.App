@@ -10,6 +10,23 @@ namespace ValutaBot.MiniApp;
 public static class PriceFeed
 {
     public const string PoSuffix = "_PO";
+
+    /// <summary>Six core USD majors used for DXY basket coherence and weekend shadow tracking.</summary>
+    public static readonly string[] CoreUsdBasketPairs =
+    {
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"
+    };
+
+    /// <summary>All Pocket Option FX pairs (USD majors + liquid dual FX/OTC G10 crosses) tracked 24/7.</summary>
+    public static readonly string[] TrackedForexPairs =
+    {
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
+        "EURJPY", "GBPJPY", "AUDJPY", "EURGBP", "EURCHF", "GBPAUD"
+    };
+
+    /// <summary>SQL-safe quoted candle keys (e.g. 'EURUSD_PO') matching TrackedForexPairs.</summary>
+    public static string BuildTrackedCandleKeysSqlInList()
+        => string.Join(", ", Array.ConvertAll(TrackedForexPairs, static p => $"'{p}{PoSuffix}'"));
     public const double MaxAllowedPrice = 1_000_000.0;
     public const long MaxFutureTickLagTicks = 10L * TimeSpan.TicksPerSecond; // 10 seconds future guard
     public const long MaxPastTickLagTicks = 60L * TimeSpan.TicksPerSecond;   // 60 seconds past guard for live ticks

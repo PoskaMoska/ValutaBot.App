@@ -1116,7 +1116,7 @@ namespace ValutaBot.MiniApp
             return true;
         }
 
-        internal readonly record struct SubsecondTickMetrics(
+        public readonly record struct SubsecondTickMetrics(
             int Ticks1_5s,
             int Ticks5s,
             int Ticks15s,

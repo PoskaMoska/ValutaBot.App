@@ -938,8 +938,25 @@ export async function executeAnalysis() {
                     return `<span style='color:var(--subtext); display:flex; align-items:center; gap:4px;'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg> НЕЙТРАЛЬНО</span>`;
                 };
 
+                const mlVerRaw = String(data.lgbmModelVersion || data.ui_flags?.ml_model_version || '').trim();
+                const mlDirNorm = normalizeDirection(data.lgbmDirection);
+                const sigDirNorm = normalizeDirection(data.direction);
+                const isMlFallback = Boolean(data.ui_flags?.is_ml_fallback) || (sigDirNorm !== 'NEUTRAL' && mlDirNorm === 'NEUTRAL');
+                const mlLabelEl = document.getElementById('mlModelLabel');
+                if (mlLabelEl) {
+                    const cleanVer = mlVerRaw
+                        ? mlVerRaw.replace(/_(s\d+|1min)(_gated)?$/i, '').replace(/_/g, ' ').toUpperCase()
+                        : 'PATCHTST BRAIN';
+                    mlLabelEl.textContent = isMlFallback ? `${cleanVer} · ПАУЗА` : cleanVer;
+                }
                 const rMl = document.getElementById('radarMl');
-                if (rMl) rMl.innerHTML = formatDir(data.lgbmDirection, data.lgbmConfidence);
+                if (rMl) {
+                    if (isMlFallback) {
+                        rMl.innerHTML = "<span style='color:var(--subtext); font-weight:700;'>— НЕЙТРАЛЬНО <span style='font-size:0.75em; opacity:0.85;'>(сигнал TA/SMC)</span></span>";
+                    } else {
+                        rMl.innerHTML = formatDir(data.lgbmDirection, data.lgbmConfidence);
+                    }
+                }
 
                 const rSmc = document.getElementById('radarSmc');
                 if (rSmc) rSmc.innerHTML = formatDir(data.smcDirection, data.smcConfidence);

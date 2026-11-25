@@ -313,6 +313,36 @@ async function runAllTests() {
         assert(forcedBuyBody !== null && parseFloat(forcedBuyBody.style.height) >= 20, "Gravestone doji body remains thick (>= 20px)");
     });
 
+    // ----------------------------------------------------
+    // Scenario 4: ML NEUTRAL Fallback Transparency Label
+    // ----------------------------------------------------
+    const payloadMlFallback = {
+        result: {
+            direction: "PUT",
+            probability: 58,
+            duration: "1 мин",
+            expiryCandles: 1,
+            chartData: [1.1005, 1.1002, 1.1000],
+            lgbmDirection: "NEUTRAL",
+            lgbmConfidence: 50,
+            lgbmModelVersion: "neural_quant_v8_1min_gated",
+            uiMarketSession: "Внебиржевая (OTC)",
+            uiMarketPhase: "Медвежий тренд",
+            uiMarketEntropy: "В норме (Безопасно)"
+        },
+        ui_flags: {
+            is_ml_fallback: true,
+            ml_model_version: "neural_quant_v8_1min_gated"
+        },
+        config: { ml: true, smc: true, of: false }
+    };
+
+    await testScenario("Scenario 4: ML Gated Fallback shows dynamic model label & TA/SMC note", payloadMlFallback, (document) => {
+        assertEq("Fallback ML header displays dynamic model pause state", getVal(document, 'mlModelLabel'), 'NEURAL QUANT V8 · ПАУЗА');
+        assert(getVal(document, 'radarMl').includes('НЕЙТРАЛЬНО'), "Radar ML retains neutral state");
+        assert(getVal(document, 'radarMl').includes('сигнал TA/SMC'), "Radar ML clarifies TA/SMC fallback source");
+    });
+
     // Ensure Market Weather stays 1x4 horizontally in style.css (never 1fr 1fr 2x2 grid)
     const styleCss = fs.readFileSync(path.resolve(__dirname, '../../css/style.css'), 'utf8');
     assert(!styleCss.includes('grid-template-columns: 1fr 1fr !important'), "Market Weather does not collapse to 2x2 on narrow viewports");

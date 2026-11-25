@@ -344,6 +344,25 @@ public class ConfluenceMatrixEngine(
         return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, null, crowdSentiment);
     }
 
+    public Task<ConsensusDecision> EvaluateMatrixAsync(
+        string asset,
+        string timeframe,
+        bool isSubMinute,
+        double conflictPenalty,
+        TaSignal taSignal,
+        SmcSignal smcSignal,
+        MlSignal mlSignal,
+        StateSignal stateSignal,
+        ConfluenceMatrixResult mtfResult,
+        int consecutiveLosses,
+        double volRatio,
+        ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit,
+        double crowdSentiment,
+        MatrixMicroContext? microContext)
+    {
+        return EvaluateMatrixInternalAsync(asset, timeframe, isSubMinute, conflictPenalty, taSignal, smcSignal, mlSignal, stateSignal, mtfResult, consecutiveLosses, volRatio, noiseAudit, null, crowdSentiment, microContext);
+    }
+
     private Task<ConsensusDecision> EvaluateMatrixInternalAsync(
         string asset,
         string timeframe,
@@ -358,7 +377,8 @@ public class ConfluenceMatrixEngine(
         double volRatio = 1.0,
         ValutaBot.MiniApp.Features.MarketAnalysis.SubminuteNoiseGatekeeper.NoiseAuditResult? noiseAudit = null,
         OrderflowSignal? ofSignal = null,
-        double crowdSentiment = 50.0)
+        double crowdSentiment = 50.0,
+        MatrixMicroContext? microContext = null)
     {
         // Zero-allocation synchronous decision tree
         double taScore = taSignal.Score;
@@ -567,6 +587,74 @@ public class ConfluenceMatrixEngine(
                     finalProbPct = Math.Min(finalProbPct, 54);
                     probCeiling = Math.Min(probCeiling, 54);
                     safetyNotes.Add("⚠️ MTF без направления (нет данных/все ТФ NEUTRAL): уверенность ограничена 54%");
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════════
+        // STAGE 1.5: SUBMINUTE MICRO-TIMING & DAYTIME DISPERSION CALIBRATION
+        // ══════════════════════════════════════════════════════════════════════════
+        if (hasMlVerdict && isQuantSubminute && isSubMinute && microContext != null)
+        {
+            var dtUtc = microContext.UtcNow ?? DateTime.UtcNow;
+            var utc = dtUtc.Kind == DateTimeKind.Utc ? dtUtc : dtUtc.ToUniversalTime();
+            bool isDaytimeFx = utc.Hour is >= 7 and < 20;
+            bool isDaytimeChop = isDaytimeFx
+                && double.IsFinite(microContext.PriceEntropy)
+                && microContext.PriceEntropy > 0.85
+                && taSignal.Adx >= 30.0;
+
+            if (isDaytimeChop)
+            {
+                int chopCap = ((finalDir == "BUY" && taSignal.Rsi >= 66.0) || (finalDir == "PUT" && taSignal.Rsi <= 34.0)) ? 54 : 56;
+                finalProbPct = Math.Min(finalProbPct, chopCap);
+                probCeiling = Math.Min(probCeiling, chopCap);
+                safetyNotes.Add($"⚠️ Дневной дисперсионный дрейф (Entropy={microContext.PriceEntropy:F2}, ADX={taSignal.Adx:F1}): уверенность ограничена {chopCap}%");
+            }
+
+            if (microContext.Subsecond is { Ticks5s: >= 2 } ss && ss.LastTickAgeMs >= 0.0 && ss.LastTickAgeMs <= 2000.0)
+            {
+                double dirSign = finalDir == "BUY" ? 1.0 : -1.0;
+                double ret15Dir = ss.Ret1_5sBps * dirSign;
+                double ret5Dir = ss.Ret5sBps * dirSign;
+                string tfNorm = timeframe.ToLowerInvariant();
+                double chaseThrBps = tfNorm switch
+                {
+                    "s5" => 0.02,
+                    "s10" => 0.04,
+                    "s15" => 0.06,
+                    "s30" => 0.12,
+                    _ => 0.25
+                };
+
+                if (ss.Ticks1_5s > 0 && ret15Dir > chaseThrBps)
+                {
+                    int chaseCap = ret15Dir >= chaseThrBps * 7.5 ? 51 : 52;
+                    finalProbPct = Math.Min(finalProbPct, chaseCap);
+                    probCeiling = Math.Min(probCeiling, chaseCap);
+                    safetyNotes.Add($"⚠️ Микро-чейз 1.5с (+{ret15Dir:F2} bps в сторону {finalDir}): риск моментального отката после импульса");
+                }
+                else if (ss.Ticks1_5s == 0 && ret5Dir > chaseThrBps * 4.0)
+                {
+                    finalProbPct = Math.Min(finalProbPct, 54);
+                    probCeiling = Math.Min(probCeiling, 54);
+                    safetyNotes.Add($"⚠️ Микро-чейз 5с (+{ret5Dir:F2} bps в сторону {finalDir}): цена уже сместилась до входа");
+                }
+                else if (!isDaytimeChop
+                    && tfNorm is "s5" or "s10" or "s15"
+                    && finalProbPct is >= 55 and < 63
+                    && ss.Ticks1_5s >= 1
+                    && ret15Dir <= -0.15
+                    && ret5Dir <= -0.10)
+                {
+                    int lift = ret15Dir <= -0.25 ? 4 : 3;
+                    int maxLiftCap = Math.Min(63, s5Ceiling);
+                    int lifted = Math.Min(maxLiftCap, finalProbPct + lift);
+                    if (lifted > finalProbPct)
+                    {
+                        finalProbPct = lifted;
+                        safetyNotes.Add($"🎯 Снайперский микровход (1.5с/5с откат в сторону входа): +{lift}% -> {finalProbPct}%");
+                    }
                 }
             }
         }

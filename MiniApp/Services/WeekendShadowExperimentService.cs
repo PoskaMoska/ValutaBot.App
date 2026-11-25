@@ -282,6 +282,7 @@ public static class WeekendShadowExperimentService
     {
         if (string.IsNullOrEmpty(DbConnectionFactory.GetConnectionString())) return;
         if (entryPrice <= 1e-8 || closedCandles == null || closedCandles.Length < 4 || intervalSecs <= 0) return;
+        if (!PriceFeed.CoreUsdBasketPairs.Contains(cleanAsset, StringComparer.OrdinalIgnoreCase)) return;
 
         DateTime utcOpen = barOpenUtc.Kind == DateTimeKind.Utc ? barOpenUtc : barOpenUtc.ToUniversalTime();
         if (!IsWeekendOtcWindowUtc(utcOpen)) return;

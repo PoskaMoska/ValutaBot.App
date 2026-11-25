@@ -25,7 +25,7 @@ public class AutoTradingScannerService : BackgroundService
     private readonly ILogger<AutoTradingScannerService> _logger;
     private readonly ICircuitBreakerService _circuitBreaker;
     private readonly TradingBotSettings _settings;
-    private static readonly string[] _basePairs = { "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF" };
+    private static readonly string[] _basePairs = PriceFeed.TrackedForexPairs;
 
     // Candle keys the scanner listens to ("EURUSD_PO").
     private static readonly string[] _targetPairs = _basePairs.Select(PriceFeed.CandleKey).ToArray();
@@ -290,7 +290,8 @@ public class AutoTradingScannerService : BackgroundService
         try
         {
             var workers = new List<Task>();
-            for (int i = 0; i < 6; i++) // 6 concurrent workers matching all 6 monitored OTC currency pairs
+            int workerCount = Math.Clamp(_basePairs.Length, 6, 12);
+            for (int i = 0; i < workerCount; i++) // concurrent workers matching monitored FX currency pairs
             {
                 workers.Add(Task.Run(async () =>
                 {

@@ -36,14 +36,21 @@ public static class PocketOptionWebSocketStream
     private static bool _isDeferredStartPending = false;
     private static long _totalTicksIngested = 0;
 
-    private static readonly string[] BaseTrackedPairs = {
-        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"
-    };
+    private static readonly string[] BaseTrackedPairs = PriceFeed.TrackedForexPairs;
 
-    private static readonly string[] DefaultAssets = {
-        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
-        "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "AUDUSD_otc", "USDCAD_otc", "USDCHF_otc"
-    };
+    private static readonly string[] DefaultAssets = BuildDefaultAssets();
+
+    private static string[] BuildDefaultAssets()
+    {
+        var pairs = BaseTrackedPairs;
+        var assets = new string[pairs.Length * 2];
+        for (int i = 0; i < pairs.Length; i++)
+        {
+            assets[i] = pairs[i];
+            assets[pairs.Length + i] = pairs[i] + "_otc";
+        }
+        return assets;
+    }
 
     private static string[] _subscribedAssets = DefaultAssets;
 
@@ -113,6 +120,18 @@ public static class PocketOptionWebSocketStream
         if (span.SequenceEqual("AUDUSD_otc"u8)) return "AUDUSD_otc";
         if (span.SequenceEqual("USDCAD_otc"u8)) return "USDCAD_otc";
         if (span.SequenceEqual("USDCHF_otc"u8)) return "USDCHF_otc";
+        if (span.SequenceEqual("EURJPY"u8)) return "EURJPY";
+        if (span.SequenceEqual("GBPJPY"u8)) return "GBPJPY";
+        if (span.SequenceEqual("AUDJPY"u8)) return "AUDJPY";
+        if (span.SequenceEqual("EURGBP"u8)) return "EURGBP";
+        if (span.SequenceEqual("EURCHF"u8)) return "EURCHF";
+        if (span.SequenceEqual("GBPAUD"u8)) return "GBPAUD";
+        if (span.SequenceEqual("EURJPY_otc"u8)) return "EURJPY_otc";
+        if (span.SequenceEqual("GBPJPY_otc"u8)) return "GBPJPY_otc";
+        if (span.SequenceEqual("AUDJPY_otc"u8)) return "AUDJPY_otc";
+        if (span.SequenceEqual("EURGBP_otc"u8)) return "EURGBP_otc";
+        if (span.SequenceEqual("EURCHF_otc"u8)) return "EURCHF_otc";
+        if (span.SequenceEqual("GBPAUD_otc"u8)) return "GBPAUD_otc";
 
         string assetStr = Encoding.UTF8.GetString(span);
         return _canonicalAssetCache.GetOrAdd(assetStr, assetStr);

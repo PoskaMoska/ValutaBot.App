@@ -16,7 +16,7 @@ namespace ValutaBot.MiniApp;
 /// </summary>
 public class HistoricalCandleAccumulatorService : BackgroundService
 {
-    private static readonly string[] BaseAssets = { "EURUSD", "GBPUSD", "AUDUSD", "USDCAD", "USDCHF", "USDJPY" };
+    private static readonly string[] BaseAssets = PriceFeed.TrackedForexPairs;
     private static readonly string[] Assets = BaseAssets.Select(PriceFeed.CandleKey).ToArray();
     private const int MaxCandlesPerAsset = 300_000;
     private const string Interval = "1m";

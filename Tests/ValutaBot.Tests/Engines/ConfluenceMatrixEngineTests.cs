@@ -413,5 +413,72 @@ namespace ValutaBot.Tests.Engines
             Assert.Equal(56, decision.Probability);
             Assert.Equal(0.45, decision.OfScore, precision: 4);
         }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_SubsecondChase_SuppressesOverconfidentS5Entry()
+        {
+            var taSignal = new TaSignal(0.1, 55.0, 52.0, 1.1, 0.0, 0.0001, 22.0);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var stateSignal = new StateSignal("STABLE", 0.1, 0.0);
+            var mtfResult = new ConfluenceMatrixResult(0.50, false, 5, "MTF", "MTF", new Dictionary<string, string>(), "NEUTRAL");
+
+            var chaseSubsec = new RealtimeTickCollector.SubsecondTickMetrics(
+                Ticks1_5s: 3, Ticks5s: 6, Ticks15s: 12,
+                AccelRatio1_5s: 1.5, Ret1_5sBps: 0.22, Ret5sBps: 0.30, DirPurity5s: 0.8, LastTickAgeMs: 120.0);
+            var daytimeChopFree = new MatrixMicroContext(chaseSubsec, PriceEntropy: 0.65, UtcNow: new DateTime(2026, 11, 24, 10, 0, 0, DateTimeKind.Utc));
+
+            var chased = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s5", true, 1.0, taSignal, smcSignal,
+                new MlSignal("BUY", 0.64, 0.60, "neural_quant_v8"),
+                stateSignal, mtfResult, 0, 1.0, null, 50.0, daytimeChopFree);
+
+            Assert.Equal("BUY", chased.FinalDirection);
+            Assert.True(chased.Probability <= 52, $"Expected chase guard cap <= 52%, got {chased.Probability}%");
+            Assert.Contains("Микро-чейз", chased.CombinedReasoningText);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_SubsecondDoublePullback_LiftsStrongSetupWithoutChop()
+        {
+            var taSignal = new TaSignal(0.3, 58.0, 48.0, 1.1, 0.0, 0.0001, 22.0);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var stateSignal = new StateSignal("STABLE", -0.2, 0.0);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "MTF", "MTF", new Dictionary<string, string>(), "BUY");
+
+            var pullbackSubsec = new RealtimeTickCollector.SubsecondTickMetrics(
+                Ticks1_5s: 3, Ticks5s: 7, Ticks15s: 14,
+                AccelRatio1_5s: 1.3, Ret1_5sBps: -0.28, Ret5sBps: -0.20, DirPurity5s: -0.7, LastTickAgeMs: 150.0);
+            var cleanCtx = new MatrixMicroContext(pullbackSubsec, PriceEntropy: 0.65, UtcNow: new DateTime(2026, 11, 24, 18, 0, 0, DateTimeKind.Utc));
+
+            var lifted = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s5", true, 1.0, taSignal, smcSignal,
+                new MlSignal("BUY", 0.58, 0.60, "neural_quant_v8"),
+                stateSignal, mtfResult, 0, 1.0, null, 50.0, cleanCtx);
+
+            Assert.Equal("BUY", lifted.FinalDirection);
+            Assert.Equal(62, lifted.Probability);
+            Assert.Contains("Снайперский микровход", lifted.CombinedReasoningText);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_DaytimeDispersionChop_CapsCalibratedProbWhileNightPreservesIt()
+        {
+            var taSignal = new TaSignal(0.2, 56.0, 68.0, 1.1, 0.0, 0.0001, 34.0);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var stateSignal = new StateSignal("STABLE", 0.2, 0.1);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "MTF", "MTF", new Dictionary<string, string>(), "BUY");
+            var ml = new MlSignal("BUY", 0.64, 0.60, "neural_quant_v8");
+
+            var dayChop = new MatrixMicroContext(null, PriceEntropy: 1.05, UtcNow: new DateTime(2026, 11, 24, 14, 0, 0, DateTimeKind.Utc));
+            var nightHighEnt = new MatrixMicroContext(null, PriceEntropy: 1.05, UtcNow: new DateTime(2026, 11, 24, 3, 0, 0, DateTimeKind.Utc));
+
+            var dayDecision = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s5", true, 1.0, taSignal, smcSignal, ml, stateSignal, mtfResult, 0, 1.0, null, 50.0, dayChop);
+            var nightDecision = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s5", true, 1.0, taSignal, smcSignal, ml, stateSignal, mtfResult, 0, 1.0, null, 50.0, nightHighEnt);
+
+            Assert.True(dayDecision.Probability <= 54, $"Expected daytime chop cap <= 54%, got {dayDecision.Probability}%");
+            Assert.Equal(64, nightDecision.Probability);
+        }
     }
 }

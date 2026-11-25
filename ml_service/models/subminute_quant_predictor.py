@@ -172,6 +172,18 @@ STATE_FEATURES: List[str] = [
     "kal_dev_z",
 ]
 
+HTF_FEATURES: List[str] = [
+    "z_s60",
+    "z_s120",
+    "dist_ema120",
+    "ch60",
+    "ch120",
+    "er20",
+    "er60",
+    "m5_slope_z",
+    "m15_slope_z",
+]
+
 MICRO_FEATURES: List[str] = [
     "micro_last_r",
     "micro_last2_r",
@@ -182,9 +194,14 @@ MICRO_FEATURES: List[str] = [
     "micro_flips",
     "micro_last5_cpos",
     "micro_last5_wick",
+    "micro_last_z",
+    "micro_last2_z",
+    "micro_sec_half_z",
 ]
 
-ALL_FEATURES: List[str] = CORE_FEATURES + REGIME_FEATURES + BASKET_FEATURES + STATE_FEATURES + MICRO_FEATURES
+ALL_FEATURES: List[str] = (
+    CORE_FEATURES + REGIME_FEATURES + BASKET_FEATURES + STATE_FEATURES + HTF_FEATURES + MICRO_FEATURES
+)
 
 _MIRROR_FLIP_SIGN = {
     "r0", "body_signed", "r1", "r2", "r3", "accel",
@@ -195,12 +212,15 @@ _MIRROR_FLIP_SIGN = {
     "usd_idx_1m", "usd_idx_5m", "resid_1m", "resid_5m",
     "usd_idx_5s", "usd_idx_15s", "usd_idx_30s", "resid_5s", "resid_15s", "resid_30s",
     "sg_vel_z", "sg_acc_z", "kal_dev_z",
+    "z_s60", "z_s120", "dist_ema120", "m5_slope_z", "m15_slope_z",
     "micro_last_r", "micro_last2_r", "micro_first_half_r", "micro_second_half_r", "micro_late_share",
     "micro_last5_cpos", "micro_last5_wick",
+    "micro_last_z", "micro_last2_z", "micro_sec_half_z",
 }
 _MIRROR_ONE_MINUS = {
     "close_pos", "prev_close_pos", "m5_close_pos", "m15_close_pos", "donchian_pos20",
     "up_frac10", "up_frac20",
+    "ch60", "ch120",
 }
 _MIRROR_HUNDRED_MINUS = {"rsi7", "rsi14"}
 _MIRROR_SWAP = [("uwick_ratio", "lwick_ratio")]
@@ -703,6 +723,27 @@ def compute_features_batch(
 
     ema9_lag3 = lag(ema9, 3)
 
+    # Higher-horizon causal context & Kaufman efficiency ratios (vectorized, zero look-ahead)
+    z_s60 = _rolling_sum(ret, 60) / (eps_std20 * np.sqrt(60.0))
+    z_s120 = _rolling_sum(ret, 120) / (eps_std20 * np.sqrt(120.0))
+    ema120 = _ema(c, 120)
+    dist_ema120 = ((c - ema120) / np.maximum(ema120, 1e-9) * 10000.0) / eps_atr20
+    ch60 = _rolling_channel_pos(h, l, c, 60)
+    ch120 = _rolling_channel_pos(h, l, c, 120)
+    abs_ret = np.abs(ret)
+    er20 = np.abs(_rolling_sum(ret, 20)) / np.maximum(_rolling_sum(abs_ret, 20), 0.05)
+    er60 = np.abs(_rolling_sum(ret, 60)) / np.maximum(_rolling_sum(abs_ret, 60), 0.05)
+    ema5 = _ema(c, 5)
+    ema15 = _ema(c, 15)
+    ema5_lag5 = lag(ema5, 5)
+    ema15_lag15 = lag(ema15, 15)
+    m5_slope_z = ((ema5 - ema5_lag5) / np.maximum(ema5, 1e-9) * 10000.0) / eps_atr20
+    m15_slope_z = ((ema15 - ema15_lag15) / np.maximum(ema15, 1e-9) * 10000.0) / eps_atr20
+
+    micro_last_z = micro_last_r / eps_atr20
+    micro_last2_z = micro_last2_r / eps_atr20
+    micro_sec_half_z = micro_second_half_r / eps_atr20
+
     cols = [
         ret,
         body_signed,
@@ -780,6 +821,15 @@ def compute_features_batch(
         sg_vel_z,
         sg_acc_z,
         kal_dev_z,
+        z_s60,
+        z_s120,
+        dist_ema120,
+        ch60,
+        ch120,
+        er20,
+        er60,
+        m5_slope_z,
+        m15_slope_z,
         micro_last_r,
         micro_last2_r,
         micro_first_half_r,
@@ -789,6 +839,9 @@ def compute_features_batch(
         micro_flips,
         micro_last5_cpos,
         micro_last5_wick,
+        micro_last_z,
+        micro_last2_z,
+        micro_sec_half_z,
     ]
     mat = np.column_stack(cols)
 
@@ -1107,12 +1160,36 @@ class SubminuteQuantPredictor:
             eval_hgb_flat_single(self.arrays, f"{canon}_dir", x_hgb)
             + (1.0 - eval_hgb_flat_single(self.arrays, f"{canon}_dir", x_hgb_mir))
         )
-        p_lr = 0.5 * (
-            float(_eval_lr(self.arrays, canon, x_lr.reshape(1, -1))[0])
-            + (1.0 - float(_eval_lr(self.arrays, canon, x_lr_mir.reshape(1, -1))[0]))
-        )
         w_hgb = float(iv_meta.get("w_hgb", 0.70))
-        p_raw_up = w_hgb * p_hgb + (1.0 - w_hgb) * p_lr
+        w_lgb = float(iv_meta.get("w_lgb", 0.0))
+        has_lgb = w_lgb > 0.0 and f"{canon}_lgb_roots" in self.arrays
+        if has_lgb:
+            p_lgb = 0.5 * (
+                eval_hgb_flat_single(self.arrays, f"{canon}_lgb", x_hgb)
+                + (1.0 - eval_hgb_flat_single(self.arrays, f"{canon}_lgb", x_hgb_mir))
+            )
+        else:
+            p_lgb = p_hgb
+            w_lgb = 0.0
+
+        w_lr = float(iv_meta.get("w_lr", max(0.0, 1.0 - w_hgb - w_lgb)))
+        w_sum = w_hgb + w_lgb + w_lr
+        if w_sum > 0.0:
+            w_hgb /= w_sum
+            w_lgb /= w_sum
+            w_lr /= w_sum
+        else:
+            w_hgb, w_lgb, w_lr = 1.0, 0.0, 0.0
+
+        if w_lr > 0.0:
+            p_lr = 0.5 * (
+                float(_eval_lr(self.arrays, canon, x_lr.reshape(1, -1))[0])
+                + (1.0 - float(_eval_lr(self.arrays, canon, x_lr_mir.reshape(1, -1))[0]))
+            )
+        else:
+            p_lr = 0.5
+
+        p_raw_up = w_hgb * p_hgb + w_lgb * p_lgb + w_lr * p_lr
 
         # Tie probability hazard check (symmetric across mirror)
         p_tie = 0.0

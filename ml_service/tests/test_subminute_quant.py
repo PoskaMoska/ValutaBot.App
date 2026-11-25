@@ -16,6 +16,7 @@ from models.subminute_quant_predictor import (
     ALL_FEATURES,
     DEFAULT_META_PATH,
     DEFAULT_NPZ_PATH,
+    HTF_FEATURES,
     MICRO_FEATURES,
     MODEL_VERSION,
     STATE_FEATURES,
@@ -147,8 +148,7 @@ def test_loaded_production_bundle_all_5_timeframes_and_latency():
     for iv_in, dt in [("s5", 5), ("s10", 10), ("s15", 15), ("s30", 30), ("m1", 60)]:
         assert predictor.is_available_for(iv_in), f"{iv_in} should be loaded in SubminuteQuantPredictor"
         iv_meta = predictor.get_interval_meta(iv_in)
-        if dt <= 30:
-            assert iv_meta.get("gate_pass") is True, f"{iv_in} must pass quality gate"
+        assert iv_meta.get("gate_pass") is True, f"{iv_in} must pass quality gate"
         candles = _synthetic_candles(n=120, dt=dt, base_ts=1794500000)
         micro = _synthetic_candles(n=480, dt=5, base_ts=candles[-40]["openTime"]) if dt > 5 else None
 
@@ -271,14 +271,39 @@ def test_mirror_symmetry_and_macro_basket_fuzz_safety():
         },
     )
     assert feat is not None
-    for fn in ("usd_idx_5s", "resid_5s", "sg_vel_z", "kal_dev_z", "micro_last5_cpos", "micro_last5_wick"):
+    for fn in (
+        "usd_idx_5s", "resid_5s", "sg_vel_z", "kal_dev_z",
+        "z_s60", "dist_ema120", "ch60", "er20", "m5_slope_z", "m15_slope_z",
+        "micro_last5_cpos", "micro_last5_wick", "micro_last_z", "micro_last2_z", "micro_sec_half_z",
+    ):
         assert np.isfinite(feat[ALL_FEATURES.index(fn)]), f"{fn} should be finite"
     mir = mirror_feature_matrix(feat, ALL_FEATURES)
     back = mirror_feature_matrix(mir, ALL_FEATURES)
     np.testing.assert_allclose(back, feat, rtol=0.0, atol=1e-12, equal_nan=True)
-    for fn in ("usd_idx_5s", "resid_5s", "sg_vel_z", "kal_dev_z", "micro_last5_cpos", "micro_last5_wick"):
+    for fn in (
+        "usd_idx_5s", "resid_5s", "sg_vel_z", "kal_dev_z",
+        "z_s60", "dist_ema120", "m5_slope_z", "m15_slope_z",
+        "micro_last5_cpos", "micro_last5_wick", "micro_last_z", "micro_last2_z", "micro_sec_half_z",
+    ):
         idx_fn = ALL_FEATURES.index(fn)
         assert mir[idx_fn] == pytest.approx(-feat[idx_fn], abs=1e-12)
+    for ch_fn in ("ch60", "ch120"):
+        idx_ch = ALL_FEATURES.index(ch_fn)
+        assert mir[idx_ch] == pytest.approx(1.0 - feat[idx_ch], abs=1e-12)
+    for sym_fn in ("er20", "er60"):
+        idx_sym = ALL_FEATURES.index(sym_fn)
+        assert mir[idx_sym] == pytest.approx(feat[idx_sym], abs=1e-12)
+
+    # Full 120+ bar horizon verifies z_s120 + batch/latest exact schema layout (MICRO_FEATURES trailing)
+    assert ALL_FEATURES[-len(MICRO_FEATURES):] == MICRO_FEATURES
+    assert len(HTF_FEATURES) == 9
+    c_long = _synthetic_candles(n=130, dt=30, base_ts=1794500000)
+    micro_long = _synthetic_candles(n=240, dt=5, base_ts=c_long[-40]["openTime"])
+    feat_long = compute_features_latest(c_long, "s30", micro_candles=micro_long, symbol="EURUSD")
+    assert feat_long is not None
+    assert np.isfinite(feat_long[ALL_FEATURES.index("z_s120")])
+    mir_long = mirror_feature_matrix(feat_long, ALL_FEATURES)
+    assert mir_long[ALL_FEATURES.index("z_s120")] == pytest.approx(-feat_long[ALL_FEATURES.index("z_s120")], abs=1e-12)
 
     # Negate percentage steps cleanly via geometric inverse (1/P -> linear flip of steps)
     if os.path.exists(DEFAULT_NPZ_PATH) and os.path.exists(DEFAULT_META_PATH):
@@ -401,3 +426,75 @@ def test_per_asset_calibrator_routing_and_weekday_otc_isolation():
         else:
             predictor.arrays.pop("s5_GBPUSD_iso_x", None)
             predictor.arrays.pop("s5_GBPUSD_iso_y", None)
+
+
+def test_lightgbm_flat_npz_parity_and_ensemble_symmetry():
+    lgb = pytest.importorskip("lightgbm")
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from models.subminute_quant_predictor import CORE_FEATURES, ALL_FEATURES, mirror_feature_matrix
+    from train_subminute_quant import pack_lgb_for_npz
+
+    rng = np.random.default_rng(123)
+    hgb_idx = [i for i, f in enumerate(ALL_FEATURES) if not f.startswith("micro_")]
+    n_hgb = len(hgb_idx)
+    X = rng.normal(size=(600, n_hgb))
+    # Inject NaNs ONLY on col 2 so col 0 checks unseen-NaN handling in pack_lgb_for_npz
+    X[:100, 2] = np.nan
+    y = ((X[:, 0] + 0.5 * np.nan_to_num(X[:, 2])) > 0).astype(int)
+
+    m_lgb = lgb.LGBMClassifier(n_estimators=25, num_leaves=7, random_state=42, verbose=-1).fit(X, y)
+    m_hgb = HistGradientBoostingClassifier(max_iter=20, max_depth=3, random_state=42).fit(X, y)
+
+    X_unseen_nan = X[:120].copy()
+    X_unseen_nan[:40, 0] = np.nan
+
+    packed_lgb = pack_lgb_for_npz(m_lgb, "s5_lgb")
+    p_sk = m_lgb.predict_proba(X_unseen_nan)[:, 1]
+    p_np = eval_hgb_flat_batch(packed_lgb, "s5_lgb", X_unseen_nan)
+    assert float(np.max(np.abs(p_sk - p_np))) < 1e-8
+
+    n_core = len(CORE_FEATURES)
+    X_lr = np.nan_to_num(X[:, :n_core], 0.0)
+    sc = StandardScaler().fit(X_lr)
+    lr = LogisticRegression(random_state=42).fit(sc.transform(X_lr), y)
+
+    bundle = {}
+    bundle.update(pack_hgb_for_npz(m_hgb, "s5_dir"))
+    bundle.update(packed_lgb)
+    bundle.update(pack_hgb_for_npz(m_hgb, "s5_tie"))
+    bundle["s5_lr_meds"] = np.zeros(n_core, dtype=np.float64)
+    bundle["s5_lr_mean"] = sc.mean_.astype(np.float64)
+    bundle["s5_lr_scale"] = sc.scale_.astype(np.float64)
+    bundle["s5_lr_coef"] = lr.coef_[0].astype(np.float64)
+    bundle["s5_lr_intercept"] = np.array([float(lr.intercept_[0])], dtype=np.float64)
+    bundle["s5_iso_x"] = np.array([0.50, 0.70, 1.0], dtype=np.float64)
+    bundle["s5_iso_y"] = np.array([0.50, 0.65, 0.65], dtype=np.float64)
+
+    pred = SubminuteQuantPredictor.__new__(SubminuteQuantPredictor)
+    pred.arrays = bundle
+    pred.loaded_intervals = {"s5"}
+    pred.gated_intervals = set()
+    pred.meta = {
+        "intervals": {
+            "s5": {
+                "gate_pass": True,
+                "n_hgb_features": n_hgb,
+                "hgb_feature_indices": hgb_idx,
+                "n_core_features": n_core,
+                "lr_feature_indices": list(range(n_core)),
+                "w_hgb": 0.4,
+                "w_lgb": 0.4,
+                "w_lr": 0.2,
+                "tie_dampen_threshold": 0.99,
+            }
+        }
+    }
+
+    c_up = _synthetic_candles(n=100, dt=5)
+    c_dn = [{"openTime": c["openTime"], "open": 2.2 - c["open"], "high": 2.2 - c["low"], "low": 2.2 - c["high"], "close": 2.2 - c["close"], "volume": c["volume"]} for c in c_up]
+    r_up = pred.predict("EURUSD_PO", "s5", c_up)
+    r_dn = pred.predict("EURUSD_PO", "s5", c_dn)
+    assert r_up is not None and r_dn is not None
+    assert abs((1.0 - r_up[4]) - r_dn[4]) < 1e-4

@@ -352,5 +352,32 @@ namespace ValutaBot.Tests
                 RealtimeTickCollector.ResetAllAccumulatorsAndRingBuffers();
             }
         }
+
+        [Fact]
+        public void TrackedForexPairs_ExpandedTwelvePairs_AreValidUniqueAndZeroCopyInterned()
+        {
+            Assert.Equal(6, PriceFeed.CoreUsdBasketPairs.Length);
+            Assert.Equal(12, PriceFeed.TrackedForexPairs.Length);
+            Assert.Equal(12, PriceFeed.TrackedForexPairs.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            Assert.All(PriceFeed.TrackedForexPairs, pair =>
+            {
+                Assert.Equal(6, pair.Length);
+                Assert.True(AssetSanitizer.IsForexAsset(pair), $"{pair} must classify as Forex");
+            });
+
+            string sqlIn = PriceFeed.BuildTrackedCandleKeysSqlInList();
+            Assert.Contains("'EURUSD_PO'", sqlIn);
+            Assert.Contains("'EURJPY_PO'", sqlIn);
+            Assert.Contains("'GBPAUD_PO'", sqlIn);
+
+            string cross1 = PocketOptionWebSocketStream.ResolveCanonicalAsset("EURJPY_otc"u8);
+            string cross2 = PocketOptionWebSocketStream.ResolveCanonicalAsset("EURJPY_otc"u8);
+            Assert.Equal("EURJPY_otc", cross1);
+            Assert.Same(cross1, cross2);
+
+            string crossGbpaud = PocketOptionWebSocketStream.ResolveCanonicalAsset("GBPAUD_otc"u8);
+            Assert.Equal("GBPAUD_otc", crossGbpaud);
+            Assert.Equal("GBPAUD_PO", PriceFeed.CandleKey(crossGbpaud));
+        }
     }
 }

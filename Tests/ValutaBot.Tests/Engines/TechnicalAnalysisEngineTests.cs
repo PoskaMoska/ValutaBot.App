@@ -108,5 +108,32 @@ namespace ValutaBot.Tests.Engines
             Assert.Equal(0.0, detail.Score);
             Assert.Equal(50.0, detail.Confidence);
         }
+
+        [Fact]
+        public void ScoreTimeframeDetailed_SubMinuteRangingOverbought_RevertsBearishWithoutHmaNoise()
+        {
+            // Small subminute push (< 4 bps microVel) into overbought RSI > 70 should revert PUT (negative score)
+            // rather than chasing short HMA/velocity slope.
+            double[] prices = new double[30];
+            double[] vols = new double[30];
+            double p = 1.10000;
+            for (int i = 0; i < 30; i++)
+            {
+                p += (i >= 18) ? 0.00008 : 0.00001;
+                prices[i] = p;
+                vols[i] = 100.0;
+            }
+            var candles = prices.Select((c, i) => new MiniAppController.OhlcCandle(
+                i > 0 ? prices[i - 1] : c, c + 0.00003, (i > 0 ? prices[i - 1] : c) - 0.00003, c, 100.0,
+                DateTime.UtcNow.AddSeconds(i * 5))).ToArray();
+
+            var detail = new TechnicalAnalysisEngine().ScoreTimeframeDetailed("EURUSD", "s5", prices, vols, candles, adxOverride: 18.0, atrOverride: 0.00012);
+
+            Assert.Equal("RANGING_CHANNEL", detail.Regime);
+            Assert.Equal(0.0, detail.HmaContrib);
+            Assert.Equal(0.0, detail.VelContrib);
+            Assert.Equal(0.0, detail.VolStrengthContrib);
+            Assert.True(detail.Score < 0.0, $"Expected mean-reversion PUT score (< 0) on overbought RANGING_CHANNEL, got {detail.Score}");
+        }
     }
 }

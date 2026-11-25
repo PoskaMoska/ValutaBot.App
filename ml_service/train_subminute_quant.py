@@ -21,6 +21,10 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+# Keep OpenMP threads bounded so sklearn HistGBM and LightGBM never thrash or lock on multi-core hosts.
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("MKL_NUM_THREADS", "2")
+
 import numpy as np
 import pandas as pd
 import psycopg2
@@ -29,6 +33,11 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.preprocessing import StandardScaler
+
+try:
+    import lightgbm as lgb
+except ImportError:
+    lgb = None  # Graceful fallback to HGB + LR if LightGBM is absent
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -45,6 +54,7 @@ from models.subminute_quant_predictor import (
     CORE_FEATURES,
     DEFAULT_META_PATH,
     DEFAULT_NPZ_PATH,
+    HTF_FEATURES,
     INTERVAL_SECONDS,
     MICRO_FEATURES,
     MODEL_VERSION,
@@ -142,6 +152,99 @@ def _make_hgb(tf: str, seed: int = 42) -> HistGradientBoostingClassifier:
         validation_fraction=0.12,
         random_state=seed,
     )
+
+
+def _make_lgb(tf: str, seed: int = 42) -> Any:
+    if lgb is None:
+        return None
+    if tf == "1min":
+        return lgb.LGBMClassifier(
+            n_estimators=420,
+            num_leaves=15,
+            max_depth=4,
+            min_child_samples=400,
+            learning_rate=0.025,
+            subsample=0.8,
+            subsample_freq=1,
+            colsample_bytree=0.65,
+            reg_alpha=5.0,
+            reg_lambda=25.0,
+            n_jobs=2,
+            random_state=seed,
+            verbose=-1,
+        )
+    if tf == "s30":
+        return lgb.LGBMClassifier(
+            n_estimators=420,
+            num_leaves=23,
+            max_depth=4,
+            min_child_samples=300,
+            learning_rate=0.025,
+            subsample=0.8,
+            subsample_freq=1,
+            colsample_bytree=0.65,
+            reg_alpha=3.0,
+            reg_lambda=15.0,
+            n_jobs=2,
+            random_state=seed,
+            verbose=-1,
+        )
+    return lgb.LGBMClassifier(
+        n_estimators=420,
+        num_leaves=23,
+        max_depth=5,
+        min_child_samples=250,
+        learning_rate=0.025,
+        subsample=0.8,
+        subsample_freq=1,
+        colsample_bytree=0.65,
+        reg_alpha=2.0,
+        reg_lambda=12.0,
+        n_jobs=2,
+        random_state=seed,
+        verbose=-1,
+    )
+
+
+def pack_lgb_for_npz(model: Any, prefix: str) -> Dict[str, np.ndarray]:
+    """
+    Packs a binary LightGBM classifier into the exact flat NumPy node format read by
+    `eval_hgb_flat_single` / `eval_hgb_flat_batch`, routing NaNs identically to LightGBM
+    even on features that contained no NaNs during training (`missing_type != 'NaN'`).
+    """
+    dump = model.booster_.dump_model()
+    roots: List[int] = []
+    nodes_raw: List[List[Any]] = []
+
+    def add_node(node: Dict[str, Any]) -> int:
+        idx = len(nodes_raw)
+        if "leaf_value" in node:
+            nodes_raw.append([0, 0.0, 0, 0, 0, 1, float(node["leaf_value"])])
+            return idx
+        nodes_raw.append([0, 0.0, 0, 0, 0, 0, 0.0])
+        l_idx = add_node(node["left_child"])
+        r_idx = add_node(node["right_child"])
+        mt = node.get("missing_type", "None")
+        thr = float(node["threshold"])
+        ml = (1 if node.get("default_left", True) else 0) if mt == "NaN" else (1 if (0.0 <= thr) else 0)
+        nodes_raw[idx] = [int(node["split_feature"]), thr, ml, l_idx, r_idx, 0, 0.0]
+        return idx
+
+    for ti in dump["tree_info"]:
+        roots.append(add_node(ti["tree_structure"]))
+
+    arr = np.array(nodes_raw, dtype=np.float64)
+    return {
+        f"{prefix}_baseline": np.array([0.0], dtype=np.float64),
+        f"{prefix}_roots": np.array(roots, dtype=np.int32),
+        f"{prefix}_fidx": arr[:, 0].astype(np.int32),
+        f"{prefix}_thresh": arr[:, 1].astype(np.float64),
+        f"{prefix}_mleft": arr[:, 2].astype(np.uint8),
+        f"{prefix}_left": arr[:, 3].astype(np.int32),
+        f"{prefix}_right": arr[:, 4].astype(np.int32),
+        f"{prefix}_leaf": arr[:, 5].astype(np.uint8),
+        f"{prefix}_val": arr[:, 6].astype(np.float64),
+    }
 
 
 def _fit_robust_isotonic(dir_strength: np.ndarray, won: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -495,8 +598,9 @@ def build_phase_augmented_from_s5(
     bars_needed = dt // 5
     if bars_needed < 2:
         return None
+    phase_step = 10 if dt >= 60 else 5
     parts_x, parts_f, parts_ts = [], [], []
-    for phase in range(5, dt, 5):
+    for phase in range(phase_step, dt, phase_step):
         resampled = resample_s5_grid(s5_df, dt, phase=phase)
         if not resampled.empty:
             Xp, fp, tsp, _ = build_dataset_for_interval(
@@ -634,7 +738,16 @@ def train_interval(
         set(CORE_FEATURES)
         | {"usd_idx_1m", "usd_idx_5m", "resid_1m", "resid_5m", "usd_idx_5s", "usd_idx_15s", "usd_idx_30s", "resid_5s", "resid_15s", "resid_30s"}
         | set(STATE_FEATURES)
-        | (set() if tf == "s5" else {"micro_last_r", "micro_last2_r", "micro_first_half_r", "micro_second_half_r", "micro_late_share", "micro_last5_cpos", "micro_last5_wick"})
+        | set(HTF_FEATURES)
+        | (
+            set()
+            if tf == "s5"
+            else {
+                "micro_last_r", "micro_last2_r", "micro_first_half_r", "micro_second_half_r",
+                "micro_late_share", "micro_last5_cpos", "micro_last5_wick",
+                "micro_last_z", "micro_last2_z", "micro_sec_half_z",
+            }
+        )
     )
     active_lr_cols = [j for j in active_hgb_cols if ALL_FEATURES[j] in lr_eligible]
     lr_feature_names = [ALL_FEATURES[j] for j in active_lr_cols]
@@ -675,7 +788,9 @@ def train_interval(
         p2 = 1.0 - _predict_core_lr(lr_m, sc_m, meds_m, mirror_feature_matrix(xc_va, lr_feature_names))
         return 0.5 * (p1 + p2)
 
-    def _fit_sym_hgb(xh_tr: np.ndarray, y_tr: np.ndarray) -> Tuple[HistGradientBoostingClassifier, List[int], List[str]]:
+    def _fit_sym_tree(
+        xh_tr: np.ndarray, y_tr: np.ndarray, make_fn: Any
+    ) -> Tuple[Any, List[int], List[str]]:
         f_cols = [
             k for k in range(xh_tr.shape[1])
             if np.unique(xh_tr[~np.isnan(xh_tr[:, k]), k]).size >= 2
@@ -684,11 +799,13 @@ def train_interval(
         xs = xh_tr[:, f_cols]
         xs_fit = np.vstack([xs, mirror_feature_matrix(xs, f_names)])
         y_fit = np.concatenate([y_tr, 1 - y_tr])
-        m_f = _make_hgb(tf, seed=42)
+        m_f = make_fn(tf, seed=42)
         m_f.fit(xs_fit, y_fit)
         return m_f, f_cols, f_names
 
-    def _pred_sym_hgb(m_f: HistGradientBoostingClassifier, f_cols: List[int], f_names: List[str], xh_va: np.ndarray) -> np.ndarray:
+    def _pred_sym_tree(
+        m_f: Any, f_cols: List[int], f_names: List[str], xh_va: np.ndarray
+    ) -> np.ndarray:
         xs = xh_va[:, f_cols]
         p1 = m_f.predict_proba(xs)[:, 1]
         p2 = 1.0 - m_f.predict_proba(mirror_feature_matrix(xs, f_names))[:, 1]
@@ -701,7 +818,7 @@ def train_interval(
         (0.67, 0.83),
         (0.83, 1.00),
     ]
-    oof_p_hgb, oof_p_lr, oof_fwd, oof_assets = [], [], [], []
+    oof_p_hgb, oof_p_lgb, oof_p_lr, oof_fwd, oof_assets = [], [], [], [], []
     oof_indices: List[int] = []
 
     for lo_frac, hi_frac in fold_bounds:
@@ -716,30 +833,51 @@ def train_interval(
         xh_tr, xc_tr, fw_tr = _concat_train(tr_mask, t_cut, non_tie_only=True)
         y_tr = (fw_tr > 0).astype(np.int64)
         lr_f, sc_f, meds_f = _fit_sym_lr(xc_tr, y_tr)
-        m_hgb_f, f_cols_f, f_names_f = _fit_sym_hgb(xh_tr, y_tr)
+        m_hgb_f, f_cols_f, f_names_f = _fit_sym_tree(xh_tr, y_tr, _make_hgb)
         oof_p_lr.append(_pred_sym_lr(lr_f, sc_f, meds_f, X_core_all[va_slice]))
-        oof_p_hgb.append(_pred_sym_hgb(m_hgb_f, f_cols_f, f_names_f, X_hgb_all[va_slice]))
+        oof_p_hgb.append(_pred_sym_tree(m_hgb_f, f_cols_f, f_names_f, X_hgb_all[va_slice]))
+        if lgb is not None:
+            m_lgb_f, l_cols_f, l_names_f = _fit_sym_tree(xh_tr, y_tr, _make_lgb)
+            oof_p_lgb.append(_pred_sym_tree(m_lgb_f, l_cols_f, l_names_f, X_hgb_all[va_slice]))
         oof_fwd.append(fwd_all[va_slice])
         oof_assets.append(assets_all[va_slice])
         oof_indices.extend(va_slice.tolist())
 
     p_hgb_oof = np.concatenate(oof_p_hgb)
+    p_lgb_oof = np.concatenate(oof_p_lgb) if oof_p_lgb else None
     p_lr_oof = np.concatenate(oof_p_lr)
     fwd_oof = np.concatenate(oof_fwd)
     assets_oof = np.concatenate(oof_assets)
     nt_oof = fwd_oof != 0
     y_oof_nt = (fwd_oof[nt_oof] > 0).astype(np.int64)
 
-    best_w = 0.70
+    best_w_hgb, best_w_lgb, best_w_lr = 0.70, 0.0, 0.30
     best_ll = 999.0
-    for w_cand in (0.50, 0.65, 0.75, 0.85, 1.00):
-        p_cand = np.clip(w_cand * p_hgb_oof[nt_oof] + (1.0 - w_cand) * p_lr_oof[nt_oof], 1e-6, 1.0 - 1e-6)
-        ll = float(log_loss(y_oof_nt, p_cand))
-        if ll < best_ll:
-            best_ll = ll
-            best_w = w_cand
-
-    p_ens_oof = best_w * p_hgb_oof + (1.0 - best_w) * p_lr_oof
+    if p_lgb_oof is not None:
+        grid_steps = (0.0, 0.15, 0.25, 0.35, 0.50, 0.65, 0.75, 0.85, 1.0)
+        for wh in grid_steps:
+            for wl in grid_steps:
+                if wh + wl > 1.0001:
+                    continue
+                wlr = max(0.0, round(1.0 - wh - wl, 4))
+                p_cand = np.clip(
+                    wh * p_hgb_oof[nt_oof] + wl * p_lgb_oof[nt_oof] + wlr * p_lr_oof[nt_oof],
+                    1e-6,
+                    1.0 - 1e-6,
+                )
+                ll = float(log_loss(y_oof_nt, p_cand))
+                if ll < best_ll:
+                    best_ll = ll
+                    best_w_hgb, best_w_lgb, best_w_lr = float(wh), float(wl), float(wlr)
+        p_ens_oof = best_w_hgb * p_hgb_oof + best_w_lgb * p_lgb_oof + best_w_lr * p_lr_oof
+    else:
+        for w_cand in (0.50, 0.65, 0.75, 0.85, 1.00):
+            p_cand = np.clip(w_cand * p_hgb_oof[nt_oof] + (1.0 - w_cand) * p_lr_oof[nt_oof], 1e-6, 1.0 - 1e-6)
+            ll = float(log_loss(y_oof_nt, p_cand))
+            if ll < best_ll:
+                best_ll = ll
+                best_w_hgb, best_w_lgb, best_w_lr = float(w_cand), 0.0, round(1.0 - w_cand, 4)
+        p_ens_oof = best_w_hgb * p_hgb_oof + best_w_lr * p_lr_oof
     oof_auc = float(roc_auc_score(y_oof_nt, p_ens_oof[nt_oof]))
     oof_buy_pct = float(np.mean(p_ens_oof[nt_oof] >= 0.5)) * 100.0
     oof_dir_nt = np.maximum(p_ens_oof[nt_oof], 1.0 - p_ens_oof[nt_oof])
@@ -797,9 +935,18 @@ def train_interval(
         xh_ntr, xc_ntr, fw_ntr = _concat_train(nov_tr_mask, t_nov_cut, non_tie_only=True)
         y_ntr = (fw_ntr > 0).astype(np.int64)
         lr_n, sc_n, meds_n = _fit_sym_lr(xc_ntr, y_ntr)
-        m_hgb_n, f_cols_n, f_names_n = _fit_sym_hgb(xh_ntr, y_ntr)
-        p_hgb_nte = _pred_sym_hgb(m_hgb_n, f_cols_n, f_names_n, X_hgb_all[nov_te_mask])
-        p_nte = best_w * p_hgb_nte + (1.0 - best_w) * _pred_sym_lr(lr_n, sc_n, meds_n, X_core_all[nov_te_mask])
+        m_hgb_n, f_cols_n, f_names_n = _fit_sym_tree(xh_ntr, y_ntr, _make_hgb)
+        p_hgb_nte = _pred_sym_tree(m_hgb_n, f_cols_n, f_names_n, X_hgb_all[nov_te_mask])
+        if best_w_lgb > 0.0 and lgb is not None:
+            m_lgb_n, l_cols_n, l_names_n = _fit_sym_tree(xh_ntr, y_ntr, _make_lgb)
+            p_lgb_nte = _pred_sym_tree(m_lgb_n, l_cols_n, l_names_n, X_hgb_all[nov_te_mask])
+        else:
+            p_lgb_nte = p_hgb_nte
+        p_nte = (
+            best_w_hgb * p_hgb_nte
+            + best_w_lgb * p_lgb_nte
+            + best_w_lr * _pred_sym_lr(lr_n, sc_n, meds_n, X_core_all[nov_te_mask])
+        )
         f_nte = fwd_all[nov_te_mask]
         nt_n = f_nte != 0
         nov_auc = float(roc_auc_score((f_nte[nt_n] > 0).astype(np.int64), p_nte[nt_n]))
@@ -828,6 +975,10 @@ def train_interval(
     y_full_fit = np.concatenate([y_full_nt, 1 - y_full_nt])
     hgb_final = _make_hgb(tf, seed=42)
     hgb_final.fit(xh_full_fit, y_full_fit)
+    lgb_final = None
+    if best_w_lgb > 0.0 and lgb is not None:
+        lgb_final = _make_lgb(tf, seed=42)
+        lgb_final.fit(xh_full_fit, y_full_fit)
 
     # Out-of-sample Synthetic OTC + Rollover (21z-23z + Weekend) Calibrator
     otc_nt_mask = is_synthetic_otc_mask(ts_raw_full) & (fwd_raw_full != 0)
@@ -840,9 +991,10 @@ def train_interval(
         xc_otc = X_raw_full[otc_nt_mask][:, active_lr_cols]
         fw_otc = fwd_raw_full[otc_nt_mask]
         all_h_idx = list(range(len(active_hgb_cols)))
-        p_hgb_otc = _pred_sym_hgb(hgb_final, all_h_idx, hgb_feature_names, xh_otc)
+        p_hgb_otc = _pred_sym_tree(hgb_final, all_h_idx, hgb_feature_names, xh_otc)
+        p_lgb_otc = _pred_sym_tree(lgb_final, all_h_idx, hgb_feature_names, xh_otc) if lgb_final is not None else p_hgb_otc
         p_lr_otc = _pred_sym_lr(lr_final, sc_final, meds_final, xc_otc)
-        p_otc = best_w * p_hgb_otc + (1.0 - best_w) * p_lr_otc
+        p_otc = best_w_hgb * p_hgb_otc + best_w_lgb * p_lgb_otc + best_w_lr * p_lr_otc
         otc_auc = float(roc_auc_score((fw_otc > 0).astype(np.int64), p_otc))
         otc_str = np.maximum(p_otc, 1.0 - p_otc)
         otc_won = (((p_otc >= 0.5) & (fw_otc > 0)) | ((p_otc < 0.5) & (fw_otc < 0))).astype(np.float64)
@@ -869,6 +1021,8 @@ def train_interval(
     # Pack Pure-NumPy Arrays & Verify Exact Numeric Parity vs Sklearn (< 1e-8)
     npz_bundle: Dict[str, np.ndarray] = {}
     npz_bundle.update(pack_hgb_for_npz(hgb_final, f"{tf}_dir"))
+    if lgb_final is not None:
+        npz_bundle.update(pack_lgb_for_npz(lgb_final, f"{tf}_lgb"))
     npz_bundle.update(pack_hgb_for_npz(tie_hgb, f"{tf}_tie"))
     npz_bundle[f"{tf}_lr_meds"] = np.asarray(meds_final, dtype=np.float64)
     npz_bundle[f"{tf}_lr_mean"] = np.asarray(sc_final.mean_, dtype=np.float64)
@@ -888,12 +1042,19 @@ def train_interval(
     p_sk = hgb_final.predict_proba(sample_X)[:, 1]
     p_np = eval_hgb_flat_batch(npz_bundle, f"{tf}_dir", sample_X)
     max_parity_diff = float(np.max(np.abs(p_sk - p_np)))
+    if lgb_final is not None:
+        p_lg_sk = lgb_final.predict_proba(sample_X)[:, 1]
+        p_lg_np = eval_hgb_flat_batch(npz_bundle, f"{tf}_lgb", sample_X)
+        lgb_parity_diff = float(np.max(np.abs(p_lg_sk - p_lg_np)))
+        max_parity_diff = max(max_parity_diff, lgb_parity_diff)
     if max_parity_diff >= 1e-7:
         raise RuntimeError(f"[{tf}] Pure-NumPy export parity failed: diff={max_parity_diff:.3e}")
 
     meta_info: Dict[str, Any] = {
         "gate_pass": gate_pass,
-        "w_hgb": float(best_w),
+        "w_hgb": float(best_w_hgb),
+        "w_lgb": float(best_w_lgb),
+        "w_lr": float(best_w_lr),
         "n_train": int(len(y_full_nt)),
         "n_total_bars": int(len(ts_all)),
         "n_hgb_features": int(n_hgb),
@@ -964,7 +1125,8 @@ def main() -> None:
     parser.add_argument("--out-meta", default=DEFAULT_META_PATH)
     parser.add_argument("--archive-parquet", default=DEFAULT_ARCHIVE_PATH, help="Local s5 Parquet archive path")
     parser.add_argument("--no-archive", action="store_true", help="Skip merging local s5 Parquet archive")
-    parser.add_argument("--no-historical-1m", action="store_true", help="Skip historical_candles for 1min")
+    parser.add_argument("--no-historical-1m", action="store_true", help="Skip historical_candles for 1min (default)")
+    parser.add_argument("--include-historical-1m", action="store_true", help="Include legacy historical_candles for 1min")
     parser.add_argument(
         "--hist-since",
         default="2026-11-09T00:00:00Z",
@@ -1009,7 +1171,7 @@ def main() -> None:
             df_iv["ts"] = _parse_unix_s(df_iv["open_time"]) if not df_iv.empty else np.array([], dtype=np.int64)
             interval_dfs[tf] = df_iv
 
-        if "1min" in requested_intervals and not args.no_historical_1m:
+        if "1min" in requested_intervals and args.include_historical_1m and not args.no_historical_1m:
             if args.hist_since:
                 hc_raw = _query_df(
                     conn,
@@ -1085,6 +1247,7 @@ def main() -> None:
         "regime_features": REGIME_FEATURES,
         "basket_features": BASKET_FEATURES,
         "state_features": STATE_FEATURES,
+        "htf_features": HTF_FEATURES,
         "micro_features": MICRO_FEATURES,
         "all_features": ALL_FEATURES,
         "intervals": {},

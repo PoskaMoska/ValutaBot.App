@@ -195,16 +195,19 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
             else
             {
                 regime = "RANGING_CHANNEL";
-                hmaContrib = hmaSlope > 0 ? 0.20 : (hmaSlope < 0 ? -0.20 : 0.0);
-                velContrib = Math.Clamp(microVel / 25.0, -0.20, 0.20);
+                // Empirical 7d FX audit (n=21,574) showed short HMA slope (46.0% WR) and Velocity
+                // (45.8% WR) chase noise on sub-minute FX; RSI (53.5%) + ConnorsRSI (54.4%) provide
+                // +7.4% higher standalone WR (54.86%) in RANGING_CHANNEL.
+                hmaContrib = 0.0;
+                velContrib = 0.0;
 
                 if (rsi > 68.0) rsiContrib = -0.40;
                 else if (rsi < 32.0) rsiContrib = 0.40;
 
-                connorsContrib = -Math.Clamp(((connorsRsi - 50.0) / 50.0) * 0.15, -0.15, 0.15);
+                connorsContrib = -Math.Clamp(((connorsRsi - 50.0) / 50.0) * 0.25, -0.25, 0.25);
 
-                score = hmaContrib + velContrib + rsiContrib + connorsContrib;
-                confidence = 55.0 + (Math.Abs(rsi - 50.0) > 18.0 ? 8.0 : 0.0);
+                score = rsiContrib + connorsContrib;
+                confidence = 54.0 + Math.Min(Math.Abs(score) * 14.0, 10.0);
             }
         }
         else
@@ -277,7 +280,7 @@ public class TechnicalAnalysisEngine : ITechnicalAnalysisEngine
                 volStrength = cvdNorm * Math.Max(0.0, Math.Min(ratio - 0.8, 1.0));
 
                 double volBonus = Math.Abs(volStrength) * 10.0;
-                if (!isDeadMarket)
+                if (!isDeadMarket && !string.Equals(regime, "RANGING_CHANNEL", StringComparison.Ordinal))
                 {
                     confidence += Math.Min(volBonus, 10.0);
                     volContrib = Math.Clamp(volStrength * 0.15, -0.20, 0.20);

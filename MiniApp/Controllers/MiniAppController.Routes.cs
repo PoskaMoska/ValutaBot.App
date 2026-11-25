@@ -291,6 +291,10 @@ public static partial class MiniAppController
                     && result.lgbmDirection != "NEUTRAL"
                     && !string.Equals(result.direction, result.lgbmDirection, StringComparison.OrdinalIgnoreCase);
 
+                bool isMlFallback = !isNeutralSignal
+                    && (string.IsNullOrEmpty(result.lgbmDirection)
+                        || string.Equals(result.lgbmDirection, "NEUTRAL", StringComparison.OrdinalIgnoreCase));
+
                 // BO Kelly Criterion
                 double effectivePayout = 0.82;
                 if (payout.HasValue && double.IsFinite(payout.Value) && payout.Value > 0.0)
@@ -330,6 +334,8 @@ public static partial class MiniAppController
                     ui_flags = new
                     {
                         is_ml_overruled = isMlOverruled,
+                        is_ml_fallback = isMlFallback,
+                        ml_model_version = result.lgbmModelVersion ?? "",
                         warning_message = isMlOverruled ? "⚠️ Консенсус (TA+SMC) перевесил сигнал Нейросети" : ""
                     },
                     latency_ms         = (int)Math.Round(LatencyProbe.LastRttMs),

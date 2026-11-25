@@ -81,7 +81,8 @@ public class MarketAnalysisOrchestrator(
         DayLevelAnchors DayAnchors,
         DollarBasketMetrics DxyMetrics,
         double LiveSpreadBps,
-        object MacroPayload
+        object MacroPayload,
+        RealtimeTickCollector.SubsecondTickMetrics SubsecMetrics
     );
 
     private sealed record NeuralBrainOutcome(
@@ -493,6 +494,10 @@ public class MarketAnalysisOrchestrator(
         double liveDisplacementBps = lastClosedClose > 0
             ? (prep.CurrentLivePrice - lastClosedClose) / lastClosedClose * 10000.0
             : 0.0;
+        DateTime subsecRefUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+            : DateTime.UtcNow;
+        var subsecMetrics = RealtimeTickCollector.ComputeSubsecondTickMetrics(prep.CleanAsset, subsecRefUtc);
 
         var macroPayload = new {
             DayRangePositionPct = S(dayAnchors.DayRangePositionPct, 0.5),
@@ -515,13 +520,21 @@ public class MarketAnalysisOrchestrator(
             MinutesToNews = minutesToNews ?? -1,
             Adx = S(mainAdx, 20.0),
             Rsi = S(taDetail.RsiVal, 50.0),
-            HourUtc = DateTime.UtcNow.Hour,
-            DayOfWeek = (int)DateTime.UtcNow.DayOfWeek == 0 ? 7 : (int)DateTime.UtcNow.DayOfWeek,
+            HourUtc = subsecRefUtc.Hour,
+            DayOfWeek = (int)subsecRefUtc.DayOfWeek == 0 ? 7 : (int)subsecRefUtc.DayOfWeek,
             TickCountLastCandle = prep.ClosedCandles.Length > 0 ? S(prep.ClosedCandles[^1].Volume) : 0,
             CrowdSentiment = S(PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset), 50.0),
             Payout = S(PocketOptionWebSocketStream.GetAssetPayout(prep.CleanAsset), 82.0),
             LivePrice = S(prep.CurrentLivePrice),
             LiveDisplacementBps = S(liveDisplacementBps),
+            SubsecTicks1_5s = subsecMetrics.Ticks1_5s,
+            SubsecTicks5s = subsecMetrics.Ticks5s,
+            SubsecTicks15s = subsecMetrics.Ticks15s,
+            SubsecAccel1_5s = S(subsecMetrics.AccelRatio1_5s),
+            SubsecRet1_5sBps = S(subsecMetrics.Ret1_5sBps),
+            SubsecRet5sBps = S(subsecMetrics.Ret5sBps),
+            SubsecDirPurity5s = S(subsecMetrics.DirPurity5s),
+            SubsecLastTickAgeMs = S(subsecMetrics.LastTickAgeMs, -1.0),
             SavGolVelocityBps = S(state.VelocityBpsPerSec),
             SavGolAccelBps = S(state.AccelerationBpsPerSec2),
             KalmanState = S(state.KalmanFilteredState),
@@ -553,7 +566,8 @@ public class MarketAnalysisOrchestrator(
             dayAnchors,
             dxyMetrics,
             liveSpreadBps,
-            macroPayload
+            macroPayload,
+            subsecMetrics
         );
     }
 
@@ -854,13 +868,18 @@ public class MarketAnalysisOrchestrator(
         var noiseAudit = SubminuteNoiseGatekeeper.AuditCandleStream(prep.ClosedCandles, timeframe);
         traceLines.Add($"[6.8 Noise Gate]     {noiseAudit.RegimeDescription} (TR: {noiseAudit.LocalAtrBps:F2} bps, Порог: {noiseAudit.NoiseFloorBps:F1} bps, Z: {noiseAudit.ZScore:F2})");
         double liveCrowd = PocketOptionWebSocketStream.GetCrowdSentiment(prep.CleanAsset);
+        DateTime decisionUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
+            ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
+            : DateTime.UtcNow;
+        var microContext = new MatrixMicroContext(sensors.SubsecMetrics, sensors.PriceEntropy, decisionUtc);
         var consensus = await _cmEngine.EvaluateMatrixAsync(
             prep.CleanAsset, timeframe, prep.TfLower.StartsWith("s"), conflictPenalty, 
             taSignal, smcSignal, mlSignal, stateSignal, mtfResult, 
             TradeOutcomeTracker.GetConsecutiveLosses(prep.CleanAsset, timeframe), 
             _marketAnalyzer.CalculateVolatilityRatio(prep.MainPrices), 
             noiseAudit,
-            liveCrowd);
+            liveCrowd,
+            microContext);
         
         matrixSw.Stop();
         traceLines.Add($"[6. Риск-контроль]    Нейросеть и фильтры сведены (Фаза: {sensors.State.VelocityRegime ?? "UNKNOWN"}) -> {matrixSw.ElapsedMilliseconds}ms");
@@ -889,27 +908,33 @@ public class MarketAnalysisOrchestrator(
             // БИЗНЕС-ИНВАРИАНТ: Бот ВСЕГДА даёт торговый сигнал (BUY или PUT).
             // При NEUTRAL / HOLD опираемся на взвешенный консенсус TA + SMC + MTF + импульс серии свечей,
             // а не на случайный цвет одной последней свечи.
-            double fallbackScore = Math.Clamp(sensors.TaResult.score, -1.0, 1.0) * 0.50;
+            bool isSubFallback = prep.TfLower.StartsWith("s");
+            double taWeight = isSubFallback ? 0.70 : 0.50;
+            double smcWeight = isSubFallback ? 0.15 : 0.25;
+            double fallbackScore = Math.Clamp(sensors.TaResult.score, -1.0, 1.0) * taWeight;
 
             string bosDir = (sensors.SmcResult.BosDirection ?? "").ToUpperInvariant();
             if (sensors.SmcResult.HasBos)
             {
-                if (bosDir.Contains("BULL") || bosDir == "BUY") fallbackScore += 0.25;
-                else if (bosDir.Contains("BEAR") || bosDir == "PUT") fallbackScore -= 0.25;
+                if (bosDir.Contains("BULL") || bosDir == "BUY") fallbackScore += smcWeight;
+                else if (bosDir.Contains("BEAR") || bosDir == "PUT") fallbackScore -= smcWeight;
             }
 
             string mtfDir = (mtfResult.DominantDirection ?? "").ToUpperInvariant();
             if (mtfDir == "BUY") fallbackScore += 0.15;
             else if (mtfDir == "PUT") fallbackScore -= 0.15;
 
-            if (prep.ClosedCandles.Length >= 5 && prep.ClosedCandles[^5].Open > 0)
+            if (!isSubFallback)
             {
-                double impulse5Bps = (prep.ClosedCandles[^1].Close - prep.ClosedCandles[^5].Open) / prep.ClosedCandles[^5].Open * 10000.0;
-                fallbackScore += Math.Clamp(impulse5Bps / 15.0, -1.0, 1.0) * 0.15;
-            }
-            else if (Math.Abs(sensors.State.VelocityBpsPerSec) > 1e-6)
-            {
-                fallbackScore += Math.Clamp(sensors.State.VelocityBpsPerSec / 3.0, -1.0, 1.0) * 0.15;
+                if (prep.ClosedCandles.Length >= 5 && prep.ClosedCandles[^5].Open > 0)
+                {
+                    double impulse5Bps = (prep.ClosedCandles[^1].Close - prep.ClosedCandles[^5].Open) / prep.ClosedCandles[^5].Open * 10000.0;
+                    fallbackScore += Math.Clamp(impulse5Bps / 15.0, -1.0, 1.0) * 0.15;
+                }
+                else if (Math.Abs(sensors.State.VelocityBpsPerSec) > 1e-6)
+                {
+                    fallbackScore += Math.Clamp(sensors.State.VelocityBpsPerSec / 3.0, -1.0, 1.0) * 0.15;
+                }
             }
 
             string fallbackDir = "BUY";
@@ -1117,12 +1142,18 @@ public class MarketAnalysisOrchestrator(
         bool hasLiveNeuralSignal = !_settings.EnableMachineLearning || (ml.Prediction != null && ml.Direction is "BUY" or "PUT");
         bool isQuantSubminute = ml.Prediction?.ModelVersion?.StartsWith("neural_quant", StringComparison.OrdinalIgnoreCase) == true;
         DateTime effectiveUtc = PocketOptionWebSocketStream.GetEffectiveUtcNow();
+        int rawMlRounded = double.IsFinite(ml.Confidence) && ml.Confidence > 0.0
+            ? (int)Math.Clamp(Math.Round(ml.Confidence * 100.0), 50, isS5 ? (isQuantSubminute ? 75 : 65) : 92)
+            : cm.Consensus.Probability;
+        double effectiveMlConf = (isQuantSubminute && cm.Consensus.Probability != rawMlRounded)
+            ? cm.Consensus.Probability / 100.0
+            : ml.Confidence;
         var entryPolicy = EvaluateAdaptiveEntryPolicy(
             currentPayout,
             prep.TfLower,
             effectiveUtc,
             isQuantSubminute,
-            ml.Confidence,
+            effectiveMlConf,
             cm.Consensus.Probability,
             cm.EffectiveMarketRegime);
         double breakEvenWinRate = entryPolicy.BreakEvenWinRate;
