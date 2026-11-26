@@ -592,14 +592,15 @@ public class ConfluenceMatrixEngine(
         }
 
         // ══════════════════════════════════════════════════════════════════════════
-        // STAGE 1.5: SUBMINUTE MICRO-TIMING & DAYTIME DISPERSION CALIBRATION
+        // STAGE 1.5: UNIVERSAL MICRO-TIMING, TICK-STORM, BOS & MACRO DXY REASONING
         // ══════════════════════════════════════════════════════════════════════════
-        if (hasMlVerdict && isQuantSubminute && isSubMinute && microContext != null)
+        if (hasMlVerdict && isQuantSubminute && microContext != null)
         {
             var dtUtc = microContext.UtcNow ?? DateTime.UtcNow;
             var utc = dtUtc.Kind == DateTimeKind.Utc ? dtUtc : dtUtc.ToUniversalTime();
             bool isDaytimeFx = utc.Hour is >= 7 and < 20;
-            bool isDaytimeChop = isDaytimeFx
+            bool isDaytimeChop = isSubMinute
+                && isDaytimeFx
                 && double.IsFinite(microContext.PriceEntropy)
                 && microContext.PriceEntropy > 0.85
                 && taSignal.Adx >= 30.0;
@@ -612,7 +613,49 @@ public class ConfluenceMatrixEngine(
                 safetyNotes.Add($"⚠️ Дневной дисперсионный дрейф (Entropy={microContext.PriceEntropy:F2}, ADX={taSignal.Adx:F1}): уверенность ограничена {chopCap}%");
             }
 
-            if (microContext.Subsecond is { Ticks5s: >= 2 } ss && ss.LastTickAgeMs >= 0.0 && ss.LastTickAgeMs <= 2000.0)
+            bool isChoppyTickStorm = microContext.Subsecond is RealtimeTickCollector.SubsecondTickMetrics ssStorm
+                && ssStorm.Ticks5s >= 12
+                && ssStorm.LastTickAgeMs >= 0.0
+                && ssStorm.LastTickAgeMs <= 2000.0
+                && Math.Abs(ssStorm.DirPurity5s) < 0.45;
+            if (isChoppyTickStorm && microContext.Subsecond is RealtimeTickCollector.SubsecondTickMetrics stormInfo)
+            {
+                finalProbPct = Math.Min(finalProbPct, 56);
+                probCeiling = Math.Min(probCeiling, 56);
+                safetyNotes.Add($"⚠️ Шторм тиков без хода ({stormInfo.Ticks5s} тиков/5с, purity={Math.Abs(stormInfo.DirPurity5s):F2}): повышенный риск пилы");
+            }
+
+            bool isCounterBos = (finalDir == "BUY" && (smcSignal.BosDirection ?? "").Contains("BEARISH", StringComparison.OrdinalIgnoreCase))
+                || (finalDir == "PUT" && (smcSignal.BosDirection ?? "").Contains("BULLISH", StringComparison.OrdinalIgnoreCase));
+            if (isCounterBos)
+            {
+                finalProbPct = Math.Max(50, finalProbPct - 3);
+                safetyNotes.Add($"⚠️ Вход против пробоя структуры ({smcSignal.BosDirection}): -3% уверенности");
+            }
+
+            string symBase = (asset ?? "").Replace("_OTC", "", StringComparison.OrdinalIgnoreCase)
+                .Replace("_PO", "", StringComparison.OrdinalIgnoreCase)
+                .Replace("/", "", StringComparison.OrdinalIgnoreCase)
+                .ToUpperInvariant();
+            double usdSign = symBase.StartsWith("USD", StringComparison.Ordinal) ? 1.0
+                : (symBase.EndsWith("USD", StringComparison.Ordinal) ? -1.0 : 0.0);
+            if (usdSign != 0.0
+                && double.IsFinite(microContext.DxyMomentum1mBps)
+                && double.IsFinite(microContext.BasketSync5sScore)
+                && Math.Abs(microContext.DxyMomentum1mBps) >= 0.35
+                && microContext.BasketSync5sScore >= 0.55)
+            {
+                double pairDxyMove = microContext.DxyMomentum1mBps * usdSign;
+                bool isCounterDxy = (finalDir == "BUY" && pairDxyMove < -0.35)
+                    || (finalDir == "PUT" && pairDxyMove > 0.35);
+                if (isCounterDxy)
+                {
+                    finalProbPct = Math.Max(50, finalProbPct - 2);
+                    safetyNotes.Add($"⚠️ Контр-тренд корзины USD (DXY={microContext.DxyMomentum1mBps:F2} bps, sync={microContext.BasketSync5sScore:F2}): -2%");
+                }
+            }
+
+            if (isSubMinute && microContext.Subsecond is { Ticks5s: >= 2 } ss && ss.LastTickAgeMs >= 0.0 && ss.LastTickAgeMs <= 2000.0)
             {
                 double dirSign = finalDir == "BUY" ? 1.0 : -1.0;
                 double ret15Dir = ss.Ret1_5sBps * dirSign;
@@ -641,6 +684,8 @@ public class ConfluenceMatrixEngine(
                     safetyNotes.Add($"⚠️ Микро-чейз 5с (+{ret5Dir:F2} bps в сторону {finalDir}): цена уже сместилась до входа");
                 }
                 else if (!isDaytimeChop
+                    && !isChoppyTickStorm
+                    && !isCounterBos
                     && tfNorm is "s5" or "s10" or "s15"
                     && finalProbPct is >= 55 and < 63
                     && ss.Ticks1_5s >= 1
@@ -799,7 +844,7 @@ public class ConfluenceMatrixEngine(
         coPilot.AppendLine($"-> Итог: {finalDir} {finalProbPct}%");
 
         string consensusReasoning = coPilot.ToString();
-        if (!asset.StartsWith("CHAOS_"))
+        if (!(asset ?? "").StartsWith("CHAOS_"))
         {
             BotLogger.Info($"\n{consensusReasoning}");
         }

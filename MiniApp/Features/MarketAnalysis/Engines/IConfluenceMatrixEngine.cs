@@ -25,7 +25,9 @@ public record StateSignal(string Regime, double VelocityBpsPerSec, double Moment
 public sealed record MatrixMicroContext(
     RealtimeTickCollector.SubsecondTickMetrics? Subsecond = null,
     double PriceEntropy = 0.0,
-    DateTime? UtcNow = null);
+    DateTime? UtcNow = null,
+    double DxyMomentum1mBps = 0.0,
+    double BasketSync5sScore = 0.5);
 
 public interface IConfluenceMatrixEngine
 {

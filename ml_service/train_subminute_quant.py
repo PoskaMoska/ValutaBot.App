@@ -60,15 +60,30 @@ from models.subminute_quant_predictor import (
     MODEL_VERSION,
     REGIME_FEATURES,
     STATE_FEATURES,
+    STRUCT_FEATURES,
     canonical_asset_base,
     compute_features_batch,
     eval_hgb_flat_batch,
+    eval_resnn_prob_batch,
     is_synthetic_otc_mask,
     is_weekend_otc_mask,
     mirror_feature_matrix,
     pack_hgb_for_npz,
     usd_basket_sign,
 )
+
+try:
+    import torch
+    from models.res_quant_net import (
+        pack_resnn_for_npz,
+        predict_res_quant,
+        train_res_quant_model,
+    )
+
+    torch.set_num_threads(min(6, os.cpu_count() or 4))
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
 
 TRAIN_INTERVALS = ["s5", "s10", "s15", "s30", "1min"]
 
@@ -739,6 +754,7 @@ def train_interval(
         | {"usd_idx_1m", "usd_idx_5m", "resid_1m", "resid_5m", "usd_idx_5s", "usd_idx_15s", "usd_idx_30s", "resid_5s", "resid_15s", "resid_30s"}
         | set(STATE_FEATURES)
         | set(HTF_FEATURES)
+        | {"signed_tick_thrust", "wick_rej_at_edge", "htf_ch_288", "imp_eff_dir"}
         | (
             set()
             if tf == "s5"
@@ -756,16 +772,21 @@ def train_interval(
     X_hgb_all = X_all[:, active_hgb_cols]
     X_core_all = X_all[:, active_lr_cols]
     purge_sec = dt * 120
+    atr20_idx = hgb_feature_names.index("atr20")
 
     aux_hgb = aux_train[0][:, active_hgb_cols] if aux_train is not None else None
     aux_core = aux_train[0][:, active_lr_cols] if aux_train is not None else None
     aux_fwd = aux_train[1] if aux_train is not None else None
     aux_ts = aux_train[2] if aux_train is not None else None
 
-    def _concat_train(mask_main: np.ndarray, t_limit: Optional[int], non_tie_only: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _concat_train(
+        mask_main: np.ndarray, t_limit: Optional[int], non_tie_only: bool = True
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         xh = X_hgb_all[mask_main]
         xc = X_core_all[mask_main]
         fw = fwd_all[mask_main]
+        tm = ts_all[mask_main]
+        is_main = np.ones(len(fw), dtype=bool)
         if aux_hgb is not None and aux_core is not None and aux_fwd is not None and aux_ts is not None:
             am = np.ones(len(aux_ts), dtype=bool)
             if t_limit is not None:
@@ -776,7 +797,9 @@ def train_interval(
                 xh = np.vstack([xh, aux_hgb[am]])
                 xc = np.vstack([xc, aux_core[am]])
                 fw = np.concatenate([fw, aux_fwd[am]])
-        return xh, xc, fw
+                tm = np.concatenate([tm, aux_ts[am]])
+                is_main = np.concatenate([is_main, np.zeros(int(np.sum(am)), dtype=bool)])
+        return xh, xc, fw, tm, is_main
 
     def _fit_sym_lr(xc_tr: np.ndarray, y_tr: np.ndarray) -> Tuple[LogisticRegression, StandardScaler, np.ndarray]:
         xc_fit = np.vstack([xc_tr, mirror_feature_matrix(xc_tr, lr_feature_names)])
@@ -811,6 +834,77 @@ def train_interval(
         p2 = 1.0 - m_f.predict_proba(mirror_feature_matrix(xs, f_names))[:, 1]
         return 0.5 * (p1 + p2)
 
+    def _ret_atr_targets(xh_mat: np.ndarray, fw_vec: np.ndarray) -> np.ndarray:
+        atr_v = np.maximum(np.nan_to_num(xh_mat[:, atr20_idx], nan=1.0), 0.10)
+        return np.clip(fw_vec / atr_v, -4.0, 4.0)
+
+    def _fit_sym_resnn(
+        xh_tr: np.ndarray,
+        fw_tr: np.ndarray,
+        tm_tr: np.ndarray,
+        main_tr: np.ndarray,
+        fixed_epochs: Optional[int] = None,
+    ) -> Tuple[Any, np.ndarray, np.ndarray, int]:
+        y_tr_bin = (fw_tr > 0).astype(np.int64)
+        if fixed_epochs is not None:
+            x_mir = mirror_feature_matrix(xh_tr, hgb_feature_names)
+            r_tr = _ret_atr_targets(xh_tr, fw_tr)
+            return train_res_quant_model(
+                xh_tr,
+                x_mir,
+                y_tr_bin,
+                r_tr,
+                fixed_epochs=fixed_epochs,
+                max_epochs=24,
+                hidden=128,
+                dropout=0.25,
+                lr=8e-4,
+                weight_decay=1e-2,
+                seed=42,
+            )
+
+        main_ts = tm_tr[main_tr]
+        t_val_start = int(np.quantile(main_ts, 0.88))
+        t_fit_end = t_val_start - purge_sec
+        fit_m = tm_tr <= t_fit_end
+        es_m = main_tr & (tm_tr >= t_val_start)
+        if int(np.sum(fit_m)) < 2000 or int(np.sum(es_m)) < 300:
+            t_fit_end = int(np.quantile(tm_tr, 0.85))
+            fit_m = tm_tr <= t_fit_end
+            es_m = tm_tr > t_fit_end
+
+        x_f = xh_tr[fit_m]
+        x_f_mir = mirror_feature_matrix(x_f, hgb_feature_names)
+        y_f = y_tr_bin[fit_m]
+        r_f = _ret_atr_targets(x_f, fw_tr[fit_m])
+
+        x_e = xh_tr[es_m]
+        x_e_mir = mirror_feature_matrix(x_e, hgb_feature_names)
+        y_e = y_tr_bin[es_m]
+
+        return train_res_quant_model(
+            x_f,
+            x_f_mir,
+            y_f,
+            r_f,
+            X_es=x_e,
+            X_es_mir=x_e_mir,
+            y_es=y_e,
+            max_epochs=24,
+            hidden=128,
+            dropout=0.25,
+            lr=8e-4,
+            weight_decay=1e-2,
+            patience=5,
+            seed=42,
+        )
+
+    def _pred_sym_resnn(
+        nn_m: Any, nn_meds: np.ndarray, nn_scales: np.ndarray, xh_va: np.ndarray
+    ) -> np.ndarray:
+        xh_va_mir = mirror_feature_matrix(xh_va, hgb_feature_names)
+        return predict_res_quant(nn_m, nn_meds, nn_scales, xh_va, xh_va_mir)
+
     # 1) 3-Fold Chronological Expanding Walk-Forward CV for OOF & calibration
     n_total = len(ts_all)
     fold_bounds = [
@@ -818,8 +912,9 @@ def train_interval(
         (0.67, 0.83),
         (0.83, 1.00),
     ]
-    oof_p_hgb, oof_p_lgb, oof_p_lr, oof_fwd, oof_assets = [], [], [], [], []
+    oof_p_hgb, oof_p_lgb, oof_p_nn, oof_p_lr, oof_fwd, oof_assets = [], [], [], [], [], []
     oof_indices: List[int] = []
+    nn_best_epochs: List[int] = []
 
     for lo_frac, hi_frac in fold_bounds:
         va_start = int(n_total * lo_frac)
@@ -830,7 +925,7 @@ def train_interval(
         if np.sum(tr_mask) < 5000 or len(va_slice) < 500:
             continue
 
-        xh_tr, xc_tr, fw_tr = _concat_train(tr_mask, t_cut, non_tie_only=True)
+        xh_tr, xc_tr, fw_tr, tm_tr, main_tr = _concat_train(tr_mask, t_cut, non_tie_only=True)
         y_tr = (fw_tr > 0).astype(np.int64)
         lr_f, sc_f, meds_f = _fit_sym_lr(xc_tr, y_tr)
         m_hgb_f, f_cols_f, f_names_f = _fit_sym_tree(xh_tr, y_tr, _make_hgb)
@@ -839,45 +934,75 @@ def train_interval(
         if lgb is not None:
             m_lgb_f, l_cols_f, l_names_f = _fit_sym_tree(xh_tr, y_tr, _make_lgb)
             oof_p_lgb.append(_pred_sym_tree(m_lgb_f, l_cols_f, l_names_f, X_hgb_all[va_slice]))
+        if HAS_TORCH:
+            nn_f, nn_meds_f, nn_scales_f, ep_f = _fit_sym_resnn(xh_tr, fw_tr, tm_tr, main_tr)
+            nn_best_epochs.append(ep_f)
+            oof_p_nn.append(_pred_sym_resnn(nn_f, nn_meds_f, nn_scales_f, X_hgb_all[va_slice]))
         oof_fwd.append(fwd_all[va_slice])
         oof_assets.append(assets_all[va_slice])
         oof_indices.extend(va_slice.tolist())
 
     p_hgb_oof = np.concatenate(oof_p_hgb)
     p_lgb_oof = np.concatenate(oof_p_lgb) if oof_p_lgb else None
+    p_nn_oof = np.concatenate(oof_p_nn) if oof_p_nn else None
     p_lr_oof = np.concatenate(oof_p_lr)
     fwd_oof = np.concatenate(oof_fwd)
     assets_oof = np.concatenate(oof_assets)
     nt_oof = fwd_oof != 0
     y_oof_nt = (fwd_oof[nt_oof] > 0).astype(np.int64)
 
-    best_w_hgb, best_w_lgb, best_w_lr = 0.70, 0.0, 0.30
+    # 4-family simplex search (HGB, LightGBM, AntiSymResMLPNet, LR) minimizing OOF log_loss
+    best_w_hgb, best_w_lgb, best_w_nn, best_w_lr = 0.70, 0.0, 0.0, 0.30
     best_ll = 999.0
-    if p_lgb_oof is not None:
-        grid_steps = (0.0, 0.15, 0.25, 0.35, 0.50, 0.65, 0.75, 0.85, 1.0)
-        for wh in grid_steps:
-            for wl in grid_steps:
-                if wh + wl > 1.0001:
+    p_h_nt = p_hgb_oof[nt_oof]
+    p_l_nt = p_lgb_oof[nt_oof] if p_lgb_oof is not None else p_h_nt
+    p_n_nt = p_nn_oof[nt_oof] if p_nn_oof is not None else p_h_nt
+    p_r_nt = p_lr_oof[nt_oof]
+
+    coarse = [round(0.10 * k, 2) for k in range(11)]
+    lgb_opts = coarse if p_lgb_oof is not None else [0.0]
+    nn_opts = coarse if p_nn_oof is not None else [0.0]
+    top_candidates: List[Tuple[float, Tuple[float, float, float, float]]] = []
+    for wh in coarse:
+        for wl in lgb_opts:
+            if wh + wl > 1.0001:
+                continue
+            for wn in nn_opts:
+                if wh + wl + wn > 1.0001:
                     continue
-                wlr = max(0.0, round(1.0 - wh - wl, 4))
-                p_cand = np.clip(
-                    wh * p_hgb_oof[nt_oof] + wl * p_lgb_oof[nt_oof] + wlr * p_lr_oof[nt_oof],
-                    1e-6,
-                    1.0 - 1e-6,
-                )
+                wlr = max(0.0, round(1.0 - wh - wl - wn, 4))
+                p_cand = np.clip(wh * p_h_nt + wl * p_l_nt + wn * p_n_nt + wlr * p_r_nt, 1e-6, 1.0 - 1e-6)
                 ll = float(log_loss(y_oof_nt, p_cand))
-                if ll < best_ll:
-                    best_ll = ll
-                    best_w_hgb, best_w_lgb, best_w_lr = float(wh), float(wl), float(wlr)
-        p_ens_oof = best_w_hgb * p_hgb_oof + best_w_lgb * p_lgb_oof + best_w_lr * p_lr_oof
-    else:
-        for w_cand in (0.50, 0.65, 0.75, 0.85, 1.00):
-            p_cand = np.clip(w_cand * p_hgb_oof[nt_oof] + (1.0 - w_cand) * p_lr_oof[nt_oof], 1e-6, 1.0 - 1e-6)
-            ll = float(log_loss(y_oof_nt, p_cand))
-            if ll < best_ll:
-                best_ll = ll
-                best_w_hgb, best_w_lgb, best_w_lr = float(w_cand), 0.0, round(1.0 - w_cand, 4)
-        p_ens_oof = best_w_hgb * p_hgb_oof + best_w_lr * p_lr_oof
+                top_candidates.append((ll, (wh, wl, wn, wlr)))
+
+    top_candidates.sort(key=lambda t: t[0])
+    fine_seen = set()
+    for _, base_w in top_candidates[:4]:
+        for dh in (-0.05, 0.0, 0.05):
+            for dl in ((-0.05, 0.0, 0.05) if p_lgb_oof is not None else (0.0,)):
+                for dn in ((-0.05, 0.0, 0.05) if p_nn_oof is not None else (0.0,)):
+                    wh = round(base_w[0] + dh, 4)
+                    wl = round(base_w[1] + dl, 4)
+                    wn = round(base_w[2] + dn, 4)
+                    wlr = round(1.0 - wh - wl - wn, 4)
+                    if wh < 0.0 or wl < 0.0 or wn < 0.0 or wlr < 0.0:
+                        continue
+                    key = (wh, wl, wn, wlr)
+                    if key in fine_seen:
+                        continue
+                    fine_seen.add(key)
+                    p_cand = np.clip(wh * p_h_nt + wl * p_l_nt + wn * p_n_nt + wlr * p_r_nt, 1e-6, 1.0 - 1e-6)
+                    ll = float(log_loss(y_oof_nt, p_cand))
+                    if ll < best_ll:
+                        best_ll = ll
+                        best_w_hgb, best_w_lgb, best_w_nn, best_w_lr = wh, wl, wn, wlr
+
+    p_ens_oof = (
+        best_w_hgb * p_hgb_oof
+        + best_w_lgb * (p_lgb_oof if p_lgb_oof is not None else p_hgb_oof)
+        + best_w_nn * (p_nn_oof if p_nn_oof is not None else p_hgb_oof)
+        + best_w_lr * p_lr_oof
+    )
     oof_auc = float(roc_auc_score(y_oof_nt, p_ens_oof[nt_oof]))
     oof_buy_pct = float(np.mean(p_ens_oof[nt_oof] >= 0.5)) * 100.0
     oof_dir_nt = np.maximum(p_ens_oof[nt_oof], 1.0 - p_ens_oof[nt_oof])
@@ -932,7 +1057,7 @@ def train_interval(
     nov_te_mask = ts_all >= cutoff_nov13
     nov_info: Dict[str, Any] = {}
     if np.sum(nov_tr_mask) >= 5000 and np.sum(nov_te_mask) >= 500:
-        xh_ntr, xc_ntr, fw_ntr = _concat_train(nov_tr_mask, t_nov_cut, non_tie_only=True)
+        xh_ntr, xc_ntr, fw_ntr, tm_ntr, main_ntr = _concat_train(nov_tr_mask, t_nov_cut, non_tie_only=True)
         y_ntr = (fw_ntr > 0).astype(np.int64)
         lr_n, sc_n, meds_n = _fit_sym_lr(xc_ntr, y_ntr)
         m_hgb_n, f_cols_n, f_names_n = _fit_sym_tree(xh_ntr, y_ntr, _make_hgb)
@@ -942,9 +1067,15 @@ def train_interval(
             p_lgb_nte = _pred_sym_tree(m_lgb_n, l_cols_n, l_names_n, X_hgb_all[nov_te_mask])
         else:
             p_lgb_nte = p_hgb_nte
+        if best_w_nn > 0.0 and HAS_TORCH:
+            nn_n, nn_meds_n, nn_scales_n, _ = _fit_sym_resnn(xh_ntr, fw_ntr, tm_ntr, main_ntr)
+            p_nn_nte = _pred_sym_resnn(nn_n, nn_meds_n, nn_scales_n, X_hgb_all[nov_te_mask])
+        else:
+            p_nn_nte = p_hgb_nte
         p_nte = (
             best_w_hgb * p_hgb_nte
             + best_w_lgb * p_lgb_nte
+            + best_w_nn * p_nn_nte
             + best_w_lr * _pred_sym_lr(lr_n, sc_n, meds_n, X_core_all[nov_te_mask])
         )
         f_nte = fwd_all[nov_te_mask]
@@ -967,7 +1098,7 @@ def train_interval(
 
     # 3) Final Refit on Full Clean-FX History with Exact Mirror Augmentation
     full_nt_mask = fwd_all != 0
-    xh_full, xc_full, fw_full = _concat_train(full_nt_mask, None, non_tie_only=True)
+    xh_full, xc_full, fw_full, tm_full, main_full = _concat_train(full_nt_mask, None, non_tie_only=True)
     y_full_nt = (fw_full > 0).astype(np.int64)
     lr_final, sc_final, meds_final = _fit_sym_lr(xc_full, y_full_nt)
 
@@ -979,6 +1110,14 @@ def train_interval(
     if best_w_lgb > 0.0 and lgb is not None:
         lgb_final = _make_lgb(tf, seed=42)
         lgb_final.fit(xh_full_fit, y_full_fit)
+    nn_final = None
+    nn_meds_final = nn_scales_final = None
+    best_ep_final = 0
+    if best_w_nn > 0.0 and HAS_TORCH:
+        best_ep_final = max(4, int(round(float(np.median(nn_best_epochs))))) if nn_best_epochs else 10
+        nn_final, nn_meds_final, nn_scales_final, best_ep_final = _fit_sym_resnn(
+            xh_full, fw_full, tm_full, main_full, fixed_epochs=best_ep_final
+        )
 
     # Out-of-sample Synthetic OTC + Rollover (21z-23z + Weekend) Calibrator
     otc_nt_mask = is_synthetic_otc_mask(ts_raw_full) & (fwd_raw_full != 0)
@@ -993,8 +1132,9 @@ def train_interval(
         all_h_idx = list(range(len(active_hgb_cols)))
         p_hgb_otc = _pred_sym_tree(hgb_final, all_h_idx, hgb_feature_names, xh_otc)
         p_lgb_otc = _pred_sym_tree(lgb_final, all_h_idx, hgb_feature_names, xh_otc) if lgb_final is not None else p_hgb_otc
+        p_nn_otc = _pred_sym_resnn(nn_final, nn_meds_final, nn_scales_final, xh_otc) if nn_final is not None else p_hgb_otc
         p_lr_otc = _pred_sym_lr(lr_final, sc_final, meds_final, xc_otc)
-        p_otc = best_w_hgb * p_hgb_otc + best_w_lgb * p_lgb_otc + best_w_lr * p_lr_otc
+        p_otc = best_w_hgb * p_hgb_otc + best_w_lgb * p_lgb_otc + best_w_nn * p_nn_otc + best_w_lr * p_lr_otc
         otc_auc = float(roc_auc_score((fw_otc > 0).astype(np.int64), p_otc))
         otc_str = np.maximum(p_otc, 1.0 - p_otc)
         otc_won = (((p_otc >= 0.5) & (fw_otc > 0)) | ((p_otc < 0.5) & (fw_otc < 0))).astype(np.float64)
@@ -1004,7 +1144,7 @@ def train_interval(
 
     # Companion Tie-Hazard Classifier on ALL Clean-FX bars (symmetric mirror)
     all_main_mask = np.ones(len(ts_all), dtype=bool)
-    xh_tie_all, _, fw_tie_all = _concat_train(all_main_mask, None, non_tie_only=False)
+    xh_tie_all, _, fw_tie_all, _, _ = _concat_train(all_main_mask, None, non_tie_only=False)
     y_tie_all = (fw_tie_all == 0).astype(np.int64)
     xh_tie_fit = np.vstack([xh_tie_all, mirror_feature_matrix(xh_tie_all, hgb_feature_names)])
     y_tie_fit = np.concatenate([y_tie_all, y_tie_all])
@@ -1018,11 +1158,13 @@ def train_interval(
     )
     tie_hgb.fit(xh_tie_fit, y_tie_fit)
 
-    # Pack Pure-NumPy Arrays & Verify Exact Numeric Parity vs Sklearn (< 1e-8)
+    # Pack Pure-NumPy Arrays & Verify Exact Numeric Parity (< 1e-7 GBDT, < 1e-5 ResNN)
     npz_bundle: Dict[str, np.ndarray] = {}
     npz_bundle.update(pack_hgb_for_npz(hgb_final, f"{tf}_dir"))
     if lgb_final is not None:
         npz_bundle.update(pack_lgb_for_npz(lgb_final, f"{tf}_lgb"))
+    if nn_final is not None and nn_meds_final is not None and nn_scales_final is not None:
+        npz_bundle.update(pack_resnn_for_npz(nn_final, nn_meds_final, nn_scales_final, f"{tf}_nn"))
     npz_bundle.update(pack_hgb_for_npz(tie_hgb, f"{tf}_tie"))
     npz_bundle[f"{tf}_lr_meds"] = np.asarray(meds_final, dtype=np.float64)
     npz_bundle[f"{tf}_lr_mean"] = np.asarray(sc_final.mean_, dtype=np.float64)
@@ -1048,13 +1190,23 @@ def train_interval(
         lgb_parity_diff = float(np.max(np.abs(p_lg_sk - p_lg_np)))
         max_parity_diff = max(max_parity_diff, lgb_parity_diff)
     if max_parity_diff >= 1e-7:
-        raise RuntimeError(f"[{tf}] Pure-NumPy export parity failed: diff={max_parity_diff:.3e}")
+        raise RuntimeError(f"[{tf}] Pure-NumPy tree export parity failed: diff={max_parity_diff:.3e}")
+    if nn_final is not None and nn_meds_final is not None and nn_scales_final is not None:
+        sample_X_mir = mirror_feature_matrix(sample_X, hgb_feature_names)
+        p_nn_pt = _pred_sym_resnn(nn_final, nn_meds_final, nn_scales_final, sample_X)
+        p_nn_np = eval_resnn_prob_batch(npz_bundle, f"{tf}_nn", sample_X, sample_X_mir)
+        nn_parity_diff = float(np.max(np.abs(p_nn_pt - p_nn_np)))
+        if nn_parity_diff >= 1e-5:
+            raise RuntimeError(f"[{tf}] Pure-NumPy ResNN export parity failed: diff={nn_parity_diff:.3e}")
+        max_parity_diff = max(max_parity_diff, nn_parity_diff)
 
     meta_info: Dict[str, Any] = {
         "gate_pass": gate_pass,
         "w_hgb": float(best_w_hgb),
         "w_lgb": float(best_w_lgb),
+        "w_nn": float(best_w_nn),
         "w_lr": float(best_w_lr),
+        "nn_epochs": int(best_ep_final) if nn_final is not None else 0,
         "n_train": int(len(y_full_nt)),
         "n_total_bars": int(len(ts_all)),
         "n_hgb_features": int(n_hgb),
@@ -1248,6 +1400,7 @@ def main() -> None:
         "basket_features": BASKET_FEATURES,
         "state_features": STATE_FEATURES,
         "htf_features": HTF_FEATURES,
+        "struct_features": STRUCT_FEATURES,
         "micro_features": MICRO_FEATURES,
         "all_features": ALL_FEATURES,
         "intervals": {},
@@ -1272,8 +1425,9 @@ def main() -> None:
         bundle, info = train_interval(tf, X_all, fwd_all, ts_all, assets_all, oc_df, cutoff_nov13, aux_train=aux_tf)
         all_arrays.update(bundle)
         all_meta["intervals"][tf] = info
+        w_str = f"w=({info['w_hgb']:.2f}/{info['w_lgb']:.2f}/{info['w_nn']:.2f}/{info['w_lr']:.2f})"
         print(
-            f"[{tf.upper():>4}] n={info['n_train']:,} | bars={info['n_total_bars']:,} | OOF_AUC={info['oof_auc']:.4f} | "
+            f"[{tf.upper():>4}] n={info['n_train']:,} | bars={info['n_total_bars']:,} | {w_str} | OOF_AUC={info['oof_auc']:.4f} | "
             f"OOF_top20_WR={info['oof_top20_wr_nt']:.2f}% | top10={info['oof_top10_wr_nt']:.2f}% | "
             f"max_cal={info['max_cal']*100:.2f}% | Nov13_AUC={info.get('nov13_auc', 0):.4f} | "
             f"gate={info['gate_pass']} (diff={info['parity_max_diff']:.1e})",

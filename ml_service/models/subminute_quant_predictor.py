@@ -184,6 +184,17 @@ HTF_FEATURES: List[str] = [
     "m15_slope_z",
 ]
 
+STRUCT_FEATURES: List[str] = [
+    "tick_churn",
+    "tick_eff",
+    "signed_tick_thrust",
+    "wick_rej_at_edge",
+    "htf_ch_288",
+    "ext_vs_htf",
+    "imp_eff_dir",
+    "dxy_sync_move",
+]
+
 MICRO_FEATURES: List[str] = [
     "micro_last_r",
     "micro_last2_r",
@@ -200,7 +211,13 @@ MICRO_FEATURES: List[str] = [
 ]
 
 ALL_FEATURES: List[str] = (
-    CORE_FEATURES + REGIME_FEATURES + BASKET_FEATURES + STATE_FEATURES + HTF_FEATURES + MICRO_FEATURES
+    CORE_FEATURES
+    + REGIME_FEATURES
+    + BASKET_FEATURES
+    + STATE_FEATURES
+    + HTF_FEATURES
+    + STRUCT_FEATURES
+    + MICRO_FEATURES
 )
 
 _MIRROR_FLIP_SIGN = {
@@ -213,6 +230,7 @@ _MIRROR_FLIP_SIGN = {
     "usd_idx_5s", "usd_idx_15s", "usd_idx_30s", "resid_5s", "resid_15s", "resid_30s",
     "sg_vel_z", "sg_acc_z", "kal_dev_z",
     "z_s60", "z_s120", "dist_ema120", "m5_slope_z", "m15_slope_z",
+    "signed_tick_thrust", "wick_rej_at_edge", "imp_eff_dir",
     "micro_last_r", "micro_last2_r", "micro_first_half_r", "micro_second_half_r", "micro_late_share",
     "micro_last5_cpos", "micro_last5_wick",
     "micro_last_z", "micro_last2_z", "micro_sec_half_z",
@@ -220,7 +238,7 @@ _MIRROR_FLIP_SIGN = {
 _MIRROR_ONE_MINUS = {
     "close_pos", "prev_close_pos", "m5_close_pos", "m15_close_pos", "donchian_pos20",
     "up_frac10", "up_frac20",
-    "ch60", "ch120",
+    "ch60", "ch120", "htf_ch_288",
 }
 _MIRROR_HUNDRED_MINUS = {"rsi7", "rsi14"}
 _MIRROR_SWAP = [("uwick_ratio", "lwick_ratio")]
@@ -744,6 +762,22 @@ def compute_features_batch(
     micro_last2_z = micro_last2_r / eps_atr20
     micro_sec_half_z = micro_second_half_r / eps_atr20
 
+    # Universal regime / structural awareness features (pair-agnostic & exact mirror-consistent)
+    wick_asym = (lwick - uwick) / eps_rng
+    sum_r4 = _rolling_sum(ret, 4)
+    rng_sum4 = _rolling_sum(rng, 4)
+    tick_churn = np.minimum(
+        np.where(body > 0.02, rng / np.maximum(body, 0.02), np.where(rng > 0.02, 6.0, 1.0)),
+        6.0,
+    )
+    tick_eff = np.clip(np.abs(sum_r4) / np.maximum(rng_sum4, 0.05), 0.0, 1.0)
+    signed_tick_thrust = (body_signed / eps_rng) * (rng / eps_atr20)
+    wick_rej_at_edge = wick_asym * (np.abs(donchian_pos20 - 0.5) * 2.0)
+    htf_ch_288 = _rolling_channel_pos(h, l, c, 288)
+    ext_vs_htf = np.where(np.isfinite(z_s60), np.clip(bb_z20 * np.tanh(z_s60), -5.0, 5.0), np.nan)
+    imp_eff_dir = (sum_r4 / eps_atr20) * er20
+    dxy_sync_move = np.where(np.isfinite(usd_idx_1m), np.tanh(usd_idx_1m * (ret / eps_atr20) * 0.25), np.nan)
+
     cols = [
         ret,
         body_signed,
@@ -830,6 +864,14 @@ def compute_features_batch(
         er60,
         m5_slope_z,
         m15_slope_z,
+        tick_churn,
+        tick_eff,
+        signed_tick_thrust,
+        wick_rej_at_edge,
+        htf_ch_288,
+        ext_vs_htf,
+        imp_eff_dir,
+        dxy_sync_move,
         micro_last_r,
         micro_last2_r,
         micro_first_half_r,
@@ -1054,6 +1096,60 @@ def _eval_lr(arrays: Dict[str, np.ndarray], prefix: str, X_core: np.ndarray) -> 
     return _sigmoid_clip(z)
 
 
+def _sigmoid60(z: np.ndarray | float) -> np.ndarray | float:
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -60.0, 60.0)))
+
+
+def _layer_norm(x: np.ndarray, w: np.ndarray, b: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+    mean = np.mean(x, axis=-1, keepdims=True)
+    var = np.mean((x - mean) ** 2, axis=-1, keepdims=True)
+    return ((x - mean) / np.sqrt(var + eps)) * w + b
+
+
+def _silu(x: np.ndarray) -> np.ndarray:
+    return x * _sigmoid60(x)
+
+
+def eval_resnn_raw_logit(arrays: Dict[str, np.ndarray], prefix: str, x: np.ndarray) -> np.ndarray | float:
+    """Evaluates raw directional logit of a single stream (`(D,)` or `(N, D)`) in pure NumPy."""
+    meds = arrays[f"{prefix}_meds"]
+    scale = arrays[f"{prefix}_scale"]
+    fin = np.isfinite(x)
+    x_imp = np.where(fin, x, meds)
+    x_norm = np.clip((x_imp - meds) / np.maximum(scale, 1e-6), -6.0, 6.0)
+    z_in = np.concatenate([x_norm, fin.astype(np.float64)], axis=-1)
+
+    h = z_in @ arrays[f"{prefix}_in_w"].T + arrays[f"{prefix}_in_b"]
+    h = _silu(_layer_norm(h, arrays[f"{prefix}_ln0_w"], arrays[f"{prefix}_ln0_b"]))
+    for blk in ("1", "2"):
+        hn = _layer_norm(h, arrays[f"{prefix}_n{blk}_w"], arrays[f"{prefix}_n{blk}_b"])
+        ab = hn @ arrays[f"{prefix}_g{blk}_w"].T + arrays[f"{prefix}_g{blk}_b"]
+        half = ab.shape[-1] // 2
+        act = ab[..., :half] * _sigmoid60(ab[..., half:])
+        h = h + (act @ arrays[f"{prefix}_o{blk}_w"].T + arrays[f"{prefix}_o{blk}_b"])
+
+    logit = h @ arrays[f"{prefix}_dir_w"] + arrays[f"{prefix}_dir_b"][0]
+    return float(logit) if np.ndim(x) == 1 else logit
+
+
+def eval_resnn_prob_single(
+    arrays: Dict[str, np.ndarray], prefix: str, x: np.ndarray, x_mir: np.ndarray
+) -> float:
+    """Evaluates strictly antisymmetric probability P(BUY) for a single feature vector in pure NumPy."""
+    lp = float(eval_resnn_raw_logit(arrays, prefix, x))
+    ln = float(eval_resnn_raw_logit(arrays, prefix, x_mir))
+    return float(_sigmoid_clip(0.5 * (lp - ln)))
+
+
+def eval_resnn_prob_batch(
+    arrays: Dict[str, np.ndarray], prefix: str, X: np.ndarray, X_mir: np.ndarray
+) -> np.ndarray:
+    """Vectorized strictly antisymmetric ResNN probability evaluation for `(N, D)` matrices."""
+    lp = eval_resnn_raw_logit(arrays, prefix, X)
+    ln = eval_resnn_raw_logit(arrays, prefix, X_mir)
+    return _sigmoid_clip(0.5 * (lp - ln))
+
+
 class SubminuteQuantPredictor:
     """Thread-safe singleton predictor for s5, s10, s15, s30, 1m PocketOption/Forex signals."""
 
@@ -1172,14 +1268,23 @@ class SubminuteQuantPredictor:
             p_lgb = p_hgb
             w_lgb = 0.0
 
-        w_lr = float(iv_meta.get("w_lr", max(0.0, 1.0 - w_hgb - w_lgb)))
-        w_sum = w_hgb + w_lgb + w_lr
+        w_nn = float(iv_meta.get("w_nn", 0.0))
+        has_nn = w_nn > 0.0 and f"{canon}_nn_in_w" in self.arrays
+        if has_nn:
+            p_nn = eval_resnn_prob_single(self.arrays, f"{canon}_nn", x_hgb, x_hgb_mir)
+        else:
+            p_nn = 0.5
+            w_nn = 0.0
+
+        w_lr = float(iv_meta.get("w_lr", max(0.0, 1.0 - w_hgb - w_lgb - w_nn)))
+        w_sum = w_hgb + w_lgb + w_nn + w_lr
         if w_sum > 0.0:
             w_hgb /= w_sum
             w_lgb /= w_sum
+            w_nn /= w_sum
             w_lr /= w_sum
         else:
-            w_hgb, w_lgb, w_lr = 1.0, 0.0, 0.0
+            w_hgb, w_lgb, w_nn, w_lr = 1.0, 0.0, 0.0, 0.0
 
         if w_lr > 0.0:
             p_lr = 0.5 * (
@@ -1189,7 +1294,7 @@ class SubminuteQuantPredictor:
         else:
             p_lr = 0.5
 
-        p_raw_up = w_hgb * p_hgb + w_lgb * p_lgb + w_lr * p_lr
+        p_raw_up = w_hgb * p_hgb + w_lgb * p_lgb + w_nn * p_nn + w_lr * p_lr
 
         # Tie probability hazard check (symmetric across mirror)
         p_tie = 0.0
@@ -1365,6 +1470,7 @@ class SubminuteQuantPredictor:
             "rollover_otc": rollover_otc,
             "jump_guarded": jump_guarded,
             "basket_active": basket_active,
+            "nn_active": has_nn,
             "calibrator": calibrator_scope,
             "raw_uncapped_prob": round(float(raw_uncapped_prob), 4),
             "top_features": top_features,

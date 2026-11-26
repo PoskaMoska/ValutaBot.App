@@ -20,12 +20,15 @@ from models.subminute_quant_predictor import (
     MICRO_FEATURES,
     MODEL_VERSION,
     STATE_FEATURES,
+    STRUCT_FEATURES,
     SubminuteQuantPredictor,
     canonical_asset_base,
     compute_features_batch,
     compute_features_latest,
     eval_hgb_flat_batch,
     eval_hgb_flat_single,
+    eval_resnn_prob_batch,
+    eval_resnn_prob_single,
     mirror_feature_matrix,
     normalize_interval,
     pack_hgb_for_npz,
@@ -492,9 +495,142 @@ def test_lightgbm_flat_npz_parity_and_ensemble_symmetry():
         }
     }
 
-    c_up = _synthetic_candles(n=100, dt=5)
+    c_up = _synthetic_candles(n=100, dt=5, step_noise=1e-6)
     c_dn = [{"openTime": c["openTime"], "open": 2.2 - c["open"], "high": 2.2 - c["low"], "low": 2.2 - c["high"], "close": 2.2 - c["close"], "volume": c["volume"]} for c in c_up]
     r_up = pred.predict("EURUSD_PO", "s5", c_up)
     r_dn = pred.predict("EURUSD_PO", "s5", c_dn)
     assert r_up is not None and r_dn is not None
+    assert abs((1.0 - r_up[4]) - r_dn[4]) < 1e-4
+
+
+def test_struct_features_schema_and_exact_mirror_symmetry():
+    assert len(STRUCT_FEATURES) == 8
+    assert len(ALL_FEATURES) == 105
+    assert ALL_FEATURES[-len(MICRO_FEATURES):] == MICRO_FEATURES
+    assert ALL_FEATURES[-len(MICRO_FEATURES) - len(STRUCT_FEATURES):-len(MICRO_FEATURES)] == STRUCT_FEATURES
+
+    c = _synthetic_candles(n=100, dt=15, base_ts=1794500000)
+    micro_s5 = _synthetic_candles(n=120, dt=5, base_ts=c[-30]["openTime"])
+    feat = compute_features_latest(
+        c, "s15", micro_candles=micro_s5, symbol="EURUSD",
+        macro_context={
+            "DxyMomentum1mBps": 2.4,
+            "DxyMomentum5mBps": 4.1,
+            "BasketSyncScore": 0.83,
+        },
+    )
+    assert feat is not None
+    for sf in STRUCT_FEATURES:
+        assert np.isfinite(feat[ALL_FEATURES.index(sf)]), f"{sf} must be finite with macro_context"
+
+    feat_no_macro = compute_features_latest(c, "s15", micro_candles=micro_s5, symbol="USDCHF")
+    assert feat_no_macro is not None
+    assert np.isnan(feat_no_macro[ALL_FEATURES.index("dxy_sync_move")])
+
+    mir = mirror_feature_matrix(feat, ALL_FEATURES)
+    for fn in ("tick_churn", "tick_eff", "ext_vs_htf", "dxy_sync_move"):
+        idx = ALL_FEATURES.index(fn)
+        assert mir[idx] == pytest.approx(feat[idx], abs=1e-12)
+    for fn in ("signed_tick_thrust", "wick_rej_at_edge", "imp_eff_dir"):
+        idx = ALL_FEATURES.index(fn)
+        assert mir[idx] == pytest.approx(-feat[idx], abs=1e-12)
+    idx_ch = ALL_FEATURES.index("htf_ch_288")
+    assert mir[idx_ch] == pytest.approx(1.0 - feat[idx_ch], abs=1e-12)
+
+
+def test_resnn_pure_numpy_parity_antisymmetry_and_no_torch_runtime(monkeypatch):
+    pytest.importorskip("torch")
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from models.res_quant_net import pack_resnn_for_npz, predict_res_quant, train_res_quant_model
+    from models.subminute_quant_predictor import CORE_FEATURES
+
+    rng = np.random.default_rng(77)
+    hgb_idx = [i for i, f in enumerate(ALL_FEATURES) if not f.startswith("micro_")]
+    hgb_names = [ALL_FEATURES[i] for i in hgb_idx]
+    n_hgb = len(hgb_idx)
+
+    X = rng.normal(size=(420, n_hgb))
+    X[:80, 2] = np.nan
+    X[:300, 10] = np.nan
+    X_nn = X.copy()
+    X_nn[:, 10] = np.nan  # Also verify ResNN handles 100%-NaN columns cleanly
+    y = ((X[:, 0] + 0.6 * np.nan_to_num(X[:, 2]) - 0.3 * X[:, 1]) > 0).astype(np.int64)
+    ret_atr = np.clip((X[:, 0] + 0.4 * np.nan_to_num(X[:, 2])) * 0.8, -4.0, 4.0)
+    X_mir = mirror_feature_matrix(X_nn, hgb_names)
+
+    model, meds, scales, ep = train_res_quant_model(
+        X_nn, X_mir, y, ret_atr, fixed_epochs=3, hidden=64, dropout=0.1, seed=7
+    )
+    assert ep == 3
+
+    packed_nn = pack_resnn_for_npz(model, meds, scales, "s5_nn")
+    X_eval = X[:90].copy()
+    X_eval[:25, 0] = np.nan  # Unseen NaN pattern
+    X_eval_mir = mirror_feature_matrix(X_eval, hgb_names)
+
+    p_torch = predict_res_quant(model, meds, scales, X_eval, X_eval_mir)
+    p_np_batch = eval_resnn_prob_batch(packed_nn, "s5_nn", X_eval, X_eval_mir)
+    p_np_single = np.array([
+        eval_resnn_prob_single(packed_nn, "s5_nn", X_eval[i], X_eval_mir[i])
+        for i in range(len(X_eval))
+    ])
+    p_np_rev = eval_resnn_prob_batch(packed_nn, "s5_nn", X_eval_mir, X_eval)
+
+    np.testing.assert_allclose(p_np_batch, p_torch, rtol=0.0, atol=1e-5)
+    np.testing.assert_allclose(p_np_single, p_torch, rtol=0.0, atol=1e-5)
+    np.testing.assert_allclose(p_np_batch + p_np_rev, 1.0, rtol=0.0, atol=1e-12)
+
+    # Full 4-family predictor inference without torch imported at runtime
+    m_hgb = HistGradientBoostingClassifier(max_iter=15, max_depth=3, random_state=7).fit(X, y)
+    n_core = len(CORE_FEATURES)
+    X_lr = np.nan_to_num(X[:, :n_core], 0.0)
+    sc = StandardScaler().fit(X_lr)
+    lr = LogisticRegression(random_state=7).fit(sc.transform(X_lr), y)
+
+    bundle = {}
+    bundle.update(pack_hgb_for_npz(m_hgb, "s5_dir"))
+    bundle.update(pack_hgb_for_npz(m_hgb, "s5_tie"))
+    bundle.update(packed_nn)
+    bundle["s5_lr_meds"] = np.zeros(n_core, dtype=np.float64)
+    bundle["s5_lr_mean"] = sc.mean_.astype(np.float64)
+    bundle["s5_lr_scale"] = sc.scale_.astype(np.float64)
+    bundle["s5_lr_coef"] = lr.coef_[0].astype(np.float64)
+    bundle["s5_lr_intercept"] = np.array([float(lr.intercept_[0])], dtype=np.float64)
+    bundle["s5_iso_x"] = np.array([0.50, 0.70, 1.0], dtype=np.float64)
+    bundle["s5_iso_y"] = np.array([0.50, 0.65, 0.65], dtype=np.float64)
+
+    pred = SubminuteQuantPredictor.__new__(SubminuteQuantPredictor)
+    pred.arrays = bundle
+    pred.loaded_intervals = {"s5"}
+    pred.gated_intervals = set()
+    pred.meta = {
+        "intervals": {
+            "s5": {
+                "gate_pass": True,
+                "n_hgb_features": n_hgb,
+                "hgb_feature_indices": hgb_idx,
+                "n_core_features": n_core,
+                "lr_feature_indices": list(range(n_core)),
+                "w_hgb": 0.45,
+                "w_lgb": 0.0,
+                "w_nn": 0.40,
+                "w_lr": 0.15,
+                "tie_dampen_threshold": 0.99,
+            }
+        }
+    }
+
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "lightgbm", None)
+    c_up = _synthetic_candles(n=100, dt=5, step_noise=1e-6)
+    c_dn = [
+        {"openTime": c["openTime"], "open": 2.2 - c["open"], "high": 2.2 - c["low"], "low": 2.2 - c["high"], "close": 2.2 - c["close"], "volume": c["volume"]}
+        for c in c_up
+    ]
+    r_up = pred.predict("EURUSD_PO", "s5", c_up)
+    r_dn = pred.predict("EURUSD_PO", "s5", c_dn)
+    assert r_up is not None and r_dn is not None
+    assert r_up[5]["nn_active"] is True
     assert abs((1.0 - r_up[4]) - r_dn[4]) < 1e-4

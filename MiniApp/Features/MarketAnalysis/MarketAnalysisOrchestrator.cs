@@ -871,7 +871,12 @@ public class MarketAnalysisOrchestrator(
         DateTime decisionUtc = (PriceFeed.UsePocketOption && PocketOptionWebSocketStream.LastBrokerTickUtc != DateTime.MinValue)
             ? PocketOptionWebSocketStream.GetBrokerTimeUtc()
             : DateTime.UtcNow;
-        var microContext = new MatrixMicroContext(sensors.SubsecMetrics, sensors.PriceEntropy, decisionUtc);
+        var microContext = new MatrixMicroContext(
+            sensors.SubsecMetrics,
+            sensors.PriceEntropy,
+            decisionUtc,
+            sensors.DxyMetrics.DxyMomentum1mBps,
+            sensors.DxyMetrics.BasketSync5sScore);
         var consensus = await _cmEngine.EvaluateMatrixAsync(
             prep.CleanAsset, timeframe, prep.TfLower.StartsWith("s"), conflictPenalty, 
             taSignal, smcSignal, mlSignal, stateSignal, mtfResult, 

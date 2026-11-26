@@ -480,5 +480,63 @@ namespace ValutaBot.Tests.Engines
             Assert.True(dayDecision.Probability <= 54, $"Expected daytime chop cap <= 54%, got {dayDecision.Probability}%");
             Assert.Equal(64, nightDecision.Probability);
         }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_ChoppyTickStorm_CapsOverconfidentEntryWhileCalmFlowPreservesIt()
+        {
+            var taSignal = new TaSignal(0.2, 55.0, 50.0, 155.0, 0.0, 0.01, 20.0);
+            var smcSignal = new SmcSignal("NONE", "NONE", "NONE", "NONE", "None");
+            var stateSignal = new StateSignal("STABLE", 0.0, 0.0);
+            var mtfResult = new ConfluenceMatrixResult(0.67, false, 7, "MTF", "MTF", new Dictionary<string, string>(), "BUY");
+            var ml = new MlSignal("BUY", 0.64, 0.60, "neural_quant_v8");
+
+            var stormSubsec = new RealtimeTickCollector.SubsecondTickMetrics(
+                Ticks1_5s: 5, Ticks5s: 15, Ticks15s: 32,
+                AccelRatio1_5s: 1.1, Ret1_5sBps: -0.05, Ret5sBps: 0.02, DirPurity5s: 0.22, LastTickAgeMs: 120.0);
+            var calmSubsec = new RealtimeTickCollector.SubsecondTickMetrics(
+                Ticks1_5s: 2, Ticks5s: 6, Ticks15s: 15,
+                AccelRatio1_5s: 1.0, Ret1_5sBps: -0.05, Ret5sBps: -0.02, DirPurity5s: -0.30, LastTickAgeMs: 120.0);
+
+            var stormCtx = new MatrixMicroContext(stormSubsec, PriceEntropy: 0.60, UtcNow: new DateTime(2026, 11, 26, 10, 0, 0, DateTimeKind.Utc));
+            var calmCtx = new MatrixMicroContext(calmSubsec, PriceEntropy: 0.60, UtcNow: new DateTime(2026, 11, 26, 10, 0, 0, DateTimeKind.Utc));
+
+            var stormDecision = await _engine.EvaluateMatrixAsync(
+                "USDJPY", "s5", true, 1.0, taSignal, smcSignal, ml, stateSignal, mtfResult, 0, 1.0, null, 50.0, stormCtx);
+            var calmDecision = await _engine.EvaluateMatrixAsync(
+                "USDJPY", "s5", true, 1.0, taSignal, smcSignal, ml, stateSignal, mtfResult, 0, 1.0, null, 50.0, calmCtx);
+
+            Assert.True(stormDecision.Probability <= 56, $"Expected choppy storm cap <= 56%, got {stormDecision.Probability}%");
+            Assert.Contains("Шторм тиков", stormDecision.CombinedReasoningText);
+            Assert.Equal(64, calmDecision.Probability);
+        }
+
+        [Fact]
+        public async Task EvaluateMatrixAsync_CounterBosAndCoherentDxy_DampensConflictingEntryAcrossBothDirectAndInverseUsdPairs()
+        {
+            var taSignal = new TaSignal(0.1, 55.0, 52.0, 1.1, 0.0, 0.0001, 20.0);
+            var stateSignal = new StateSignal("STABLE", 0.0, 0.0);
+            var mtfResult = new ConfluenceMatrixResult(0.50, false, 5, "MTF", "MTF", new Dictionary<string, string>(), "NEUTRAL");
+            var mlBuy = new MlSignal("BUY", 0.63, 0.60, "neural_quant_v8");
+
+            // EURUSD BUY against BEARISH_BOS (-3%) AND falling EUR/rising USD DXY (-0.60 -> pairDxy = +0.60 or +0.60 * -1 = -0.60 -> counter BUY -2%)
+            var conflictCtx = new MatrixMicroContext(
+                Subsecond: null,
+                PriceEntropy: 0.60,
+                UtcNow: new DateTime(2026, 11, 26, 10, 0, 0, DateTimeKind.Utc),
+                DxyMomentum1mBps: 0.60,
+                BasketSync5sScore: 0.80);
+            var bearBos = new SmcSignal("BEARISH_BOS", "NONE", "NONE", "NONE", "Bearish BOS");
+
+            var conflictEur = await _engine.EvaluateMatrixAsync(
+                "EURUSD", "s15", true, 1.0, taSignal, bearBos, mlBuy, stateSignal, mtfResult, 0, 1.0, null, 50.0, conflictCtx);
+            // USDJPY BUY with positive DXY (+0.60 -> +1.0 * +0.60 = +0.60) and no BOS conflict preserves full conviction
+            var cleanJpy = await _engine.EvaluateMatrixAsync(
+                "USDJPY", "s15", true, 1.0, taSignal, new SmcSignal("NONE", "NONE", "NONE", "NONE", ""), mlBuy, stateSignal, mtfResult, 0, 1.0, null, 50.0, conflictCtx);
+
+            Assert.Equal(58, conflictEur.Probability);
+            Assert.Contains("пробоя структуры", conflictEur.CombinedReasoningText);
+            Assert.Contains("корзины USD", conflictEur.CombinedReasoningText);
+            Assert.Equal(63, cleanJpy.Probability);
+        }
     }
 }
